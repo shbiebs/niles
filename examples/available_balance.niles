@@ -1,0 +1,88 @@
+// The read-model explosion, in miniature: several views over one ledger, each with its
+// own contract. See thesis 6.5, 3.19, and Appendix B.20.
+
+schema retail_bank {
+    currency usd { scale: 2 }
+    currency jpy { scale: 0 }     // no minor unit — a Money type fixed at scale 2 is wrong
+    currency kwd { scale: 3 }
+
+    table accounts {
+        id: Id<Account> primary key,
+        owner: Text @confidential(e2ee),
+        product: Enum<Product>,
+        desk: Text,
+        legal_entity: Text,
+        region: Text,
+    }
+
+    ledger postings {
+        txn: TxnId, acct: Id<Account>, cur: Currency, amt: Money,
+        value_date: Date, idem: IdemKey window 30.days,
+        conserve per (txn, cur);
+        retain forever;
+        lineage full;
+    }
+
+    ledger holds {
+        id: HoldId, acct: Id<Account>, cur: Currency, amount: Money,
+        expires: Instant, idem: IdemKey window 7.days,
+        retain forever;
+    }
+
+    // The regulator's "ledger balance": settled transactions only.
+    view ledger_balance = postings
+        .group_by(|p| (p.acct, p.cur))
+        .sum(|p| p.amt)
+        serve { consistency: read_your_writes, materialize: auto, retain: evictable };
+
+    // The regulator's "available balance": posted minus unresolved holds. The
+    // authorization path, so it runs at the top rung and reserves atomically.
+    view available_balance = ledger_balance
+        .minus(holds.unresolved().group_by(|h| (h.acct, h.cur)).sum(|h| h.amount))
+        serve { consistency: ledger_consistent, materialize: demand, lineage: key };
+
+    // Balance as of any historical date, on either time axis.
+    view balance_as_of = postings
+        .value_date_between(@1970-01-01, ?asked_date)
+        .group_by(|p| (p.acct, p.cur))
+        .sum(|p| p.amt)
+        serve { consistency: snapshot, materialize: demand, retain: evictable };
+
+    // Risk aggregation across the dimensions supervisory principles enumerate. The set of
+    // groupings is open-ended, which is why this view is demand-materialized.
+    view exposure = postings
+        .join(accounts, |p, a| p.acct == a.id)
+        .group_by(|p, a| (a.product, p.cur, a.desk, a.legal_entity, a.region))
+        .sum(|p, _| p.amt)
+        serve { consistency: bounded(4.epochs, 10.s), materialize: auto, retain: evictable };
+
+    // Month-to-date statement: a window integral over valid time; classic cold tail.
+    view statement_mtd = postings
+        .value_date_between(month_start(), today())
+        .group_by(|p| p.acct)
+        serve { consistency: bounded(10.epochs, 30.s), materialize: demand, retain: evictable };
+
+    // Real-time features: hard freshness bound, tolerant of a little staleness.
+    view velocity_1h = postings
+        .window(sliding(1.hour))
+        .group_by(|p| p.acct)
+        .count()
+        serve { consistency: bounded(1.epochs, 1.s), materialize: full, retain: pinned };
+}
+
+fn authorize(card: Id<Account>, amt: Money<usd>, auth: Option<Auth<overdraw>>)
+    -> Result<Hold<usd>, TxnError>
+{
+    txn idem"auth-{card}-{nonce()}" {
+        // Typed at l5 by the view's own contract: no way to accidentally authorize
+        // against a stale balance, because under-consistent composition is a type error.
+        let avail = available_balance.get((card, usd))?;
+        hold(card, amt, expires: 7.days, auth)
+    }
+}
+
+fn capture(h: Hold<usd>, amt: Money<usd>) -> Result<TxnId, TxnError> {
+    // Partial capture: the remainder is released by resolving the hold. Resolution is an
+    // append, never an update — so the ledger has no update path at all.
+    txn idem"cap-{h.id}" { resolve h post amt }
+}

@@ -1,0 +1,16 @@
+=======================================================================
+ Kaskata research prototype — experiment suite
+ Seeds: [1, 7, 42, 100, 2024]
+ All primary metrics are counted work units (machine-independent).
+=======================================================================
+
+[E9] History-independence, refined
+
+  Refined test: key space grows with history, so per-key updates stay fixed
+     writes    accounts   rows read/reconstruction (median)   per-key updates (median)
+       5000         500                              210.4                      210.4
+      20000        2000                              499.3                      499.3
+      80000        8000                             1245.9                     1245.9
+     320000       32000                             3303.7                     3303.7
+
+All CSV artifacts written to results/.

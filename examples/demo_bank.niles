@@ -1,0 +1,121 @@
+// The worked program of thesis Appendix B.20.
+//
+// Everything in this file is accepted by the stage-0 compiler in `crates/niles-lang`:
+// `nilesc check examples/demo_bank.niles` reports no errors, and `nilesc explain` prints
+// the IR circuit each view lowers to. It is kept compiling by `tests/examples.rs`, so the
+// thesis's worked example cannot drift away from the language it describes.
+
+schema demo_bank {
+    currency usd { scale: 2 }
+    currency eur { scale: 2 }
+    currency jpy { scale: 0 }
+
+    table accounts {
+        id: Id<Account> primary key,
+        owner: Text @confidential(e2ee),
+        opened_at: Instant,
+    }
+
+    // The authoritative base. Immutable, fully retained, epoch-ordered; `update` and
+    // `delete` have no meaning here, and the conservation rule is checked at every seal.
+    ledger postings {
+        txn: TxnId,
+        acct: Id<Account>,
+        cur: Currency,
+        amt: Money,
+        value_date: Date,
+        idem: IdemKey window 30.days,
+        conserve per (txn, cur);
+        retain forever;
+        bitemporal;
+    }
+
+    ledger holds {
+        id: HoldId,
+        acct: Id<Account>,
+        cur: Currency,
+        amount: Money,
+        expires: Instant,
+        idem: IdemKey window 7.days,
+        retain forever;
+    }
+
+    // Anchor indices are mandatory on ledger keys: reconstruction must reach a key's rows
+    // without scanning the ledger, and the checkpoint interval is what bounds the fold.
+    index by_acct on postings (acct, cur) anchor;
+    index by_hold_acct on holds (acct, cur) anchor;
+
+    // Rung 2 is enough for a balance a customer reads back after their own payment.
+    view ledger_balance = postings
+        .group_by(|p| (p.acct, p.cur))
+        .sum(|p| p.amt)
+        serve { consistency: read_your_writes, materialize: auto, retain: evictable };
+
+    // The authorization path. Rung 5, because a decision to move money must see every
+    // committed write that precedes it in real time; `demand` because the access is skewed
+    // and the optimizer is not permitted to trade the rung for memory.
+    view available_balance = ledger_balance
+        .join(holds.where(|h| h.unresolved), |b, h| b.acct == h.acct and b.cur == h.cur)
+        .group_by(|r| (r.acct, r.cur))
+        .sum(|r| r.amt)
+        serve { consistency: ledger_consistent, materialize: demand, lineage: key };
+
+    // A statement view: bounded staleness is correct here and cheaper by two rungs.
+    view statement_mtd = postings
+        .where(|p| p.value_date >= month_start())
+        .group_by(|p| p.acct)
+        .sum(|p| p.amt)
+        serve { consistency: bounded(epochs: 10, millis: 30000), materialize: demand,
+                retain: evictable, budget: 50000 };
+}
+
+// A transfer. The effect row is part of the signature: a caller can see, from the type
+// alone, that this function appends to the ledger and debits in USD.
+fn pay_rent(tenant: Id<Account>, landlord: Id<Account>) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    let rent = 850.00 usd;
+    txn idem("rent-2026-08", window: 30.days) {
+        let d = debit(tenant, rent)?;
+        let c = credit(landlord, rent);
+        post(d, c)
+    }
+}
+
+// A hold and its resolution. The hold is linear: the type system rejects a program that
+// resolves it twice, or that lets it fall out of scope unresolved.
+fn card_authorization(acct: Id<Account>, amount: Money<usd>) -> Result<TxnId, TxnError>
+    ! { append, hold<usd> }
+{
+    let h = hold(acct, amount, expires: 7.days)?;
+    resolve h post 18.50 usd
+}
+
+// Atomic cross-currency movement: two conserved legs sealed in one epoch. There is no
+// single currency in which this transaction sums to zero, which is exactly why it needs a
+// form of its own rather than a pair of transfers.
+fn settle_fx(a: Id<Account>, b: Id<Account>, r: Rate) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<eur> }
+{
+    txn idem("fx-991") {
+        fx {
+            leg usd_side: post(debit(a, 1000.00 usd)?, credit(b, 1000.00 usd)),
+            leg eur_side: post(debit(b, 920.00 eur)?, credit(a, 920.00 eur)),
+            rate: r,
+        }
+    }
+}
+
+// The SQL surface lowers to the same IR as the pipeline surface above.
+view sql_balances = sql {
+    select acct, cur, sum(amt) as balance
+    from postings
+    group by acct, cur
+} serve { consistency: snapshot, materialize: auto };
+
+fn main() -> Result<(), TxnError> ! { append, read@ledger_consistent } {
+    let _t = pay_rent(acct(1001), acct(2002))?;
+    let b = available_balance.get((acct(1001), usd))?;
+    explain b;
+    Ok(())
+}

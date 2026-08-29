@@ -1,0 +1,62 @@
+=======================================================================
+ Kaskata research prototype — experiment suite
+ Seeds: [1, 7, 42, 100, 2024]
+ All primary metrics are counted work units (machine-independent).
+=======================================================================
+
+[E4] Phase diagram
+
+  Cost components at budget=5% (median over seeds)
+     s     resident-entry-epochs P/F        rows-read P/F           deltas P/F
+    0.5        1484276 / 17559969         36690 / 10025          593 / 4040    
+    0.7        1483534 / 15200887         36335 / 8838          1335 / 4237    
+    0.9        1479730 / 11560348         26767 / 6813          2701 / 4613    
+    1.1        1467457 / 7281624          12987 / 4376          4213 / 5091    
+    1.3        1430876 / 3885194           4480 / 2325          5265 / 5531    
+
+  Phase diagram — memory price = 0 per resident entry-epoch
+   budget\s      0.5     0.7     0.9     1.1     1.3     (cell = median cost_partial / cost_full; < 1.00 favours partial)
+     0.01      3.11    5.33    7.47    6.36    3.67
+     0.02      2.97    4.05    4.49    3.38    1.96
+     0.05      2.65    2.88    2.57    1.81    1.25
+     0.10      2.32    2.26    1.83    1.33    1.06
+     0.25      1.80    1.56    1.25    1.04    1.00
+     0.50      1.30    1.14    1.02    1.00    1.00
+
+  Phase diagram — memory price = 0.0005 per resident entry-epoch
+   budget\s      0.5     0.7     0.9     1.1     1.3     (cell = median cost_partial / cost_full; < 1.00 favours partial)
+     0.01      1.91    3.37    4.97    4.61    2.95
+     0.02      1.83    2.57    2.97    2.45    1.59
+     0.05      1.66    1.86    1.74    1.36    1.07
+     0.10      1.50    1.50    1.29    1.06    0.98
+     0.25      1.26    1.15    1.02    0.98    1.00
+     0.50      1.08    1.02    1.00    1.00    1.00
+
+  Phase diagram — memory price = 0.002 per resident entry-epoch
+   budget\s      0.5     0.7     0.9     1.1     1.3     (cell = median cost_partial / cost_full; < 1.00 favours partial)
+     0.01      0.90    1.61    2.49    2.54    1.86
+     0.02      0.87    1.24    1.49    1.36    1.05
+     0.05      0.82    0.93    0.93    0.83    0.81
+     0.10      0.79    0.81    0.76    0.75    0.86
+     0.25      0.80    0.79    0.80    0.91    1.00
+     0.50      0.90    0.91    0.97    1.00    1.00
+
+  Phase diagram — memory price = 0.01 per resident entry-epoch
+   budget\s      0.5     0.7     0.9     1.1     1.3     (cell = median cost_partial / cost_full; < 1.00 favours partial)
+     0.01      0.25    0.44    0.69    0.77    0.67
+     0.02      0.25    0.36    0.44    0.45    0.45
+     0.05      0.27    0.32    0.35    0.38    0.51
+     0.10      0.33    0.36    0.39    0.50    0.74
+     0.25      0.51    0.55    0.64    0.85    1.00
+     0.50      0.78    0.84    0.96    1.00    1.00
+
+  Phase diagram — memory price = 0.05 per resident entry-epoch
+   budget\s      0.5     0.7     0.9     1.1     1.3     (cell = median cost_partial / cost_full; < 1.00 favours partial)
+     0.01      0.07    0.11    0.17    0.20    0.21
+     0.02      0.08    0.11    0.14    0.16    0.22
+     0.05      0.12    0.14    0.17    0.24    0.40
+     0.10      0.20    0.23    0.28    0.41    0.69
+     0.25      0.42    0.48    0.60    0.83    1.00
+     0.50      0.75    0.82    0.95    1.00    1.00
+
+All CSV artifacts written to results/.

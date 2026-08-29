@@ -1,0 +1,60 @@
+# 11. Discussion
+
+## 11.1 When Is Niles Not the Answer
+
+A theory is trusted in proportion to the honesty of its boundary claims. This design is the wrong choice in at least seven situations, and the phase diagram makes the first of them quantitative.
+
+**Beyond the frontier.** Flat access distributions combined with strict-serializability demands everywhere. Theorem 4.2 says partiality buys nothing there, and a conventional fully materialized engine with a simpler operational story wins. This is not a hypothetical corner: the CacheLib measurements report production workloads at α ≈ 0.55–0.7, and a bank whose derived-read access resembles those rather than Twitter's caches should expect to sit near or beyond the frontier for its strict views.
+
+**Where history is a liability.** Domains with legal erasure obligations over primary facts fight a never-partial base. Crypto-shredding is the only offered mitigation, and the most authoritative regulatory treatment of it says it moves "closer to the effects of data erasure" — deliberately declining to say it satisfies the right. Where a regulator rejects that, so must this design. The honest position is that immutability and erasure are in genuine tension and this architecture chooses immutability.
+
+**Scan-dominant analytics.** Ad hoc, scan-heavy analysis over cold history is served better by a columnar warehouse. Nilestream's cold tier can feed one, and its REVs can be column-shaped, but pretending to be a warehouse would betray the design centre.
+
+**Ultra-low-latency writes.** The epoch quantum places a floor on commit visibility latency. Tick-level trading systems will refuse it, and should.
+
+**Adversarial or multi-operator trust.** The hash chain provides evidence to a party who retained a digest and checks it. Where participants do not trust the operator, the correct answer is a Byzantine-tolerant design, which this thesis scopes out.
+
+**Small or invariant-free applications.** Where there is no money, no audit obligation and no read-model explosion, the payoff from invariant typing is small and the cost of a new language is not. SQL on a conventional engine remains the rational default, and the SQL surface here softens but does not eliminate the adoption cost.
+
+**High-contention thresholds at extreme scale.** Proposition 3.2 is a constraint, not a design flaw to be engineered away: authorization against a floor cannot be made coordination-free. Where the authorization rate on a single account exceeds what a coordinated path can serve even with splitting, the answer is a business-level change — pre-funded sub-accounts, netting windows — not a systems trick, and the thesis says so rather than implying otherwise.
+
+## 11.2 Risks and Mitigations
+
+**Theory-model gap.** The proofs idealize the engine. Mitigated by the differential oracle, fault campaigns, and the assumption ledger of Section 3.15; residual risk acknowledged, with mechanization named as the remedy this thesis does not deliver.
+
+**Single-project engineering scale.** A from-scratch DBMS, language and compiler is a very large surface. Mitigated by the spine discipline, by kill-criteria phasing that halts cheaply if premises fail, by aggressive reuse at commodity boundaries, and by scoping the self-hosted back-end as a bounded artifact with a published gap rather than an attempt to compete with a mature optimizer. The most likely failure mode of this project is not a wrong theorem but an unfinished instrument, and the phase structure exists to make that failure informative rather than total.
+
+**Benchmark realism.** Synthetic workloads with published assumptions and swept parameters; industrial-trace partnership named as the remedy in Chapter 12. This is the threat a committee should press hardest, and the pre-registration mechanism is the only real defence.
+
+**Premise risk on skew.** The literature disagrees about how skewed production access is, and the flat end of that range is unfavourable. Treated as a first-class design input: the optimizer exists precisely because the right materialization decision cannot be assumed, and S1's protocol reports the regimes separately rather than averaging them.
+
+**Cryptographic and standards agility.** Commitment schemes, hash functions and currency data all age. Mitigated by algorithm identifiers in segment headers, rotation as an audited ledger event, and per-currency scale carried in the type rather than assumed.
+
+**Seductive generality.** The temptation to grow Niles into an application language. Mitigated by holding the scope tiers of Section 6.12 as normative and by treating any proposal to add ambient I/O, wall-clock reads or unguarded recursion as a change to the thesis's claims rather than a feature.
+
+**Optimizer opacity.** An adaptive component that changes behaviour under load is operationally frightening if it cannot be interrogated. Mitigated by Theorem 4.5(a) — mode changes cannot change answers — and by logging every transition with the estimates that caused it.
+
+## 11.3 What Would Change My Mind — and What Already Did
+
+Stated explicitly, because a thesis that cannot name its own refutation is not falsifiable in practice however carefully it words its hypotheses. This section is now in two halves, because three of these conditions have been tested and two of them fired.
+
+**Already changed (measured, Chapter 9).**
+
+* *"Partiality's advantage grows with skew."* **Refuted.** Full materialization's own footprint shrinks with skew faster than partial's does, so the memory ratio moves against partiality as skew rises (measured 12:1 at *s* = 0.5 → 2.7:1 at *s* = 1.3). The claim is replaced by a memory-price condition with an interior optimum (§9.3.4, Appendix J.9).
+* *"Per-key anchor indices make reconstruction cost history-independent."* **Refuted twice** — once with a fixed key space and once with the key space grown in proportion — and then **restored** by a mechanism the design did not have: per-key checkpointing, which held cost flat at ≈ 8.5 base rows across a 64× increase in history (§9.4.1). This produced SC7 and is the clearest case in the thesis of an experiment changing the theory.
+* *"The prototype can speak to hot-account contention."* **Refuted as a matter of instrument**: single-threaded execution cannot exhibit contention, so the flat hot-share result is a non-result and is reported as one (§9.4.4).
+
+**Still standing, with the result that would overturn each.**
+
+* A conservation violation traceable to the *model* rather than to an implementation defect would falsify SC1 and halt the programme (K2). Five seeds × 10,000 transfers under continuous eviction have not produced one (§9.2.1); that is corroboration, not proof, and a single counterexample would still end it.
+* A measured crossover far outside Theorem 4.2's band, in either direction, would mean the cost model omits a first-order term. The prototype located a crossover between memory prices 0.0005 and 0.002 in counted-work units (§9.3.3); a durable, concurrent implementation landing somewhere else would be informative.
+* A fixed policy beating the adaptive optimizer across the workload suite would reduce SC5 to a planning-time heuristic. The measured margin of cost-aware eviction over LRU is real but uneven — 31% on reconstruction work, 4% on aggregate delay (§9.4.2) — so this one is closer to the edge than the others.
+* A banking product from Section 6.22 that cannot be expressed without a kernel change would falsify the "banking as a library" claim and, with it, part of the generality thesis.
+* A demonstration that the SQL-fragment translation is not semantics-preserving on some construct would require narrowing the fragment publicly rather than quietly.
+* Strict serializability failing under an Elle-style cycle check would matter *even if the conservation suite still passed*, because a published analysis shows exactly that combination is possible (§9.2.2).
+
+## 11.4 Project Identity
+
+What this project is: **a theory thesis with a systems instrument.** The ordering matters operationally, and it has already decided several design questions — anchors are mandatory even where they cost; the IR verifier stays in the trusted base so the compiler need not; determinism gates are non-negotiable; the optimizer is forbidden from being a correctness dependency; and the reference oracle was built first, because a definition of correctness that cannot be executed is a definition nobody checks.
+
+What it is not: a product, a blockchain, a fork of an existing partial-state system, or an SQL dialect. Its success criterion is the one stated in Chapter 1: the six results standing, their predictions met or their misses understood, and the instrument reproducible by strangers.

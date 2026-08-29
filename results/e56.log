@@ -1,0 +1,30 @@
+=======================================================================
+ Kaskata research prototype — experiment suite
+ Seeds: [1, 7, 42, 100, 2024]
+ All primary metrics are counted work units (machine-independent).
+=======================================================================
+
+[E5] History-independence
+
+  History-independence: base rows read per reconstruction, workload shape fixed
+     ledger epochs   indexed (median)   unindexed scan (median)
+              5000              124.5                  14000.0
+             20000              499.3                  44000.0
+             80000             2009.8                 164000.0
+            320000             8008.9                 644000.0
+
+[E6] Eviction policies under reconstruction latency
+
+  Eviction policy comparison (skew s=0.9, budget=5% of key space)
+     service_time  policy        misses(median)  rows_touched(median)  aggregate_delay(median)
+              0.0  random                 21170                 92144                        0
+              0.0  lru                    19583                 41002                        0
+              0.0  cost_aware             18050                 28123                        0
+              1.0  random                 21188                 93255                   211880
+              1.0  lru                    19583                 41002                   195830
+              1.0  cost_aware             18749                 33108                   187490
+              4.0  random                 21200                 91953                  3137600
+              4.0  lru                    19583                 41002                  2898284
+              4.0  cost_aware             18784                 34260                  2780032
+
+All CSV artifacts written to results/.

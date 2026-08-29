@@ -1,0 +1,16 @@
+=======================================================================
+ Kaskata research prototype — experiment suite
+ Seeds: [1, 7, 42, 100, 2024]
+ All primary metrics are counted work units (machine-independent).
+=======================================================================
+
+[E10] Checkpointed reconstruction
+
+  Reconstruction cost with per-key checkpoints (skew s=0.9, 2000 accounts)
+     writes   no checkpoint         C=256          C=64          C=16   (median base rows read per reconstruction)
+       5000           124.5          45.9          19.9           6.8
+      20000           499.3          78.4          26.1           8.3
+      80000          2009.8         102.1          30.8           8.0
+     320000          8008.9         123.2          32.0           8.5
+
+All CSV artifacts written to results/.

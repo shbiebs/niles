@@ -1,0 +1,357 @@
+# 9. Evaluation: Design, Measured Results, and What Remains Unmeasured
+
+This chapter has two halves, and the boundary between them is stated before anything else so that no reader mistakes one for the other.
+
+**§9.1–§9.4 report measurements that were actually taken.** They come from a research prototype (Appendix K) that implements the mechanisms this thesis is about — epoch-ordered commit under a per-currency zero-sum rule, hash chaining, per-key anchor indices, partial materialization over the absence lattice, anchored upqueries, eviction policies, and per-key checkpoints. Every number in these sections was produced by the run that reports it, on the platform of §9.1.2, and every artifact is in `results/` with the code that generated it.
+
+**§9.5–§9.12 are the evaluation design for the parts not yet built.** They state protocols, baselines and pre-registered predictions with their theoretical sources. Every cell there is marked *to be measured*, and no number in this thesis is invented to fill one.
+
+Three of the measured results **contradict hypotheses this thesis previously asserted**. They are reported as contradictions, in the sections where the hypotheses were stated, because a design document that only reports confirmations is not evidence of anything.
+
+## 9.1 What Was Measured, and On What
+
+### 9.1.1 Scope of the prototype, stated as a limitation first
+
+The prototype is a single-node, in-memory, single-threaded Rust program of roughly 900 lines. It has **no durability** (no `fsync`, no write-ahead log), **no concurrency control** beyond being single-threaded, **no consensus**, **no query planner**, **no SQL surface**, and only two view shapes. It is not Nilestream; it is the smallest artifact that makes Nilestream's *mechanisms* measurable.
+
+What follows from that scope is a discipline about what can be claimed. The prototype can support claims about **counted work** — base rows read, deltas applied, resident entries held over time, upqueries issued — because those are properties of the algorithms and the workload and are reproducible on any machine. It cannot support claims about throughput relative to a production DBMS, and none are made here. In particular, this chapter does **not** fill the comparison cells against TigerBeetle-class ledgers, distributed strictly-serializable SQL, or incremental-view engines: those remain *to be measured* in §9.5, and a prototype without durability or concurrency cannot honestly stand in for them.
+
+This is the choice the systems-benchmarking literature calls for. Reporting a microbenchmark as if it characterized a system is a named benchmarking error, as is comparing a system only against itself; the design below answers both by keeping the unit machine-independent and by always comparing against a full-materialization baseline run on the identical workload and seed, plus — for eviction — against the randomized policy that the original partial-state work actually used.
+
+### 9.1.2 Platform
+
+| | |
+|---|---|
+| CPU | Intel Xeon @ 2.80 GHz, 2 vCPU (shared virtual machine) |
+| Memory | 7 GiB |
+| Kernel | Linux 6.18.44 x86-64 |
+| Toolchain | rustc 1.95.0, release profile (optimized) |
+| Storage | virtual disk; **not exercised** — the prototype is in-memory |
+
+This is a modest, shared, virtualized environment. It is adequate for counted-work measurements, which do not depend on it, and it is *not* adequate for absolute-throughput claims, which is one more reason none are made. Wall-clock appears exactly once, in §9.4.4, with that caveat repeated.
+
+### 9.1.3 Protocol
+
+Five seeds throughout (1, 7, 42, 100, 2024), fixed in advance. Medians are reported with the observed range; no result rests on a single run. The pseudo-random generator is a stated linear congruential generator rather than a library default, so a seed is a reproducibility guarantee rather than a hope. Every experiment writes a CSV artifact; the tables below are transcriptions of those artifacts.
+
+**Notation.** The skew parameter is the **Zipf rank exponent *s***, where the probability of the rank-*r* key is proportional to *r*⁻ˢ, so higher *s* means more skew. It is not the Pareto shape parameter, for which higher means a *thinner* tail and *less* skew. The two are routinely conflated in this literature, and a phase diagram whose axis can be read backwards is worse than no phase diagram; earlier drafts of this thesis used a bare "α" and were ambiguous in exactly this way.
+
+## 9.2 Correctness Results (Measured)
+
+### 9.2.1 Reconstruction equivalence, conservation, and the absence discipline
+
+The core correctness experiment runs 10,000 balanced transfers over a closed book of 40 accounts with a deliberately punishing memory budget of 8 resident entries, so that eviction and reconstruction are exercised continuously rather than incidentally. Interleaved with the transfers are reads (each of which may trigger an upquery), forced evictions, and idempotent replays of previously used keys. After every read the value served by the partial view is compared against an independent fold of the ledger at the same anchor.
+
+| Seed | Transfers | Upqueries | Evictions | View-vs-oracle divergences | Conservation | Chain | Rebuild mismatches | Miss ≠ 0 | Idempotent rejects |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | 10,000 | 2,763 | 2,746 | **0** | OK | OK | **0** | OK | 103 |
+| 7 | 10,000 | 2,720 | 2,703 | **0** | OK | OK | **0** | OK | 103 |
+| 42 | 10,000 | 2,692 | 2,675 | **0** | OK | OK | **0** | OK | 103 |
+| 100 | 10,000 | 2,705 | 2,688 | **0** | OK | OK | **0** | OK | 103 |
+| 2024 | 10,000 | 2,705 | 2,688 | **0** | OK | OK | **0** | OK | 103 |
+
+*Table 9.1 — Correctness under adversarial interleaving of commit, read, evict, upquery and replay. Every check passed on every seed.*
+
+Each column corresponds to a named guarantee. **Divergences = 0** is the executable form of the reconstruction theorem (SC1): across roughly 13,600 reconstructions, no reconstructed value ever differed from the independent fold at the same anchor. **Conservation = OK** is the per-currency system total remaining exactly zero at the end of every run, which is the conservation corollary under continuous eviction and refill. **Rebuild mismatches = 0** is the reconstruction-equivalence property of F4: the entire derived layer was wiped and rebuilt from the retained base alone, and all 40 balances matched their pre-wipe values exactly. **Miss ≠ 0 = OK** is the absence-lattice discipline: after a total wipe, reading a funded account returned its correct non-zero balance *via reconstruction*, not a silent zero from an empty slot. **Idempotent rejects = 103** confirms that every replayed key was refused rather than double-posted.
+
+Separately, mutating a single committed posting broke chain verification, as required: tamper-evidence is detection relative to a retained digest, and the digest detected it.
+
+### 9.2.2 What this does and does not establish
+
+It establishes that the guarantees are mutually consistent and executable, and that the mechanisms implement them under adversarial schedules. It does **not** establish strict serializability, and the distinction is not pedantic: a published Jepsen analysis of a production distributed SQL system found that its bank tests "passed consistently" while a *causal reverse* anomaly demonstrated the system was serializable but **not** strictly serializable. A conservation-of-money suite is therefore strictly weaker than the top rung of the consistency ladder, and this thesis must not present one as evidence for the other.
+
+The methodological consequence, adopted in §9.6, is that the correctness programme needs a second instrument: black-box anomaly inference over recorded histories in the style of Elle, which infers an Adya-style dependency graph and detects cycles, and is *sound* — an anomaly it reports is present in every interpretation of the observation. There is a pleasing structural fit here. Elle's power depends on *traceability*: a data model from which the complete version history can be recovered by reading, for which append-only list structures are the canonical example. An append-only, hash-chained ledger is precisely such a model. **The architecture this thesis proposes is unusually amenable to black-box verification, and that is an argument for it that neither the earlier draft nor the prior literature makes.**
+
+### 9.2.3 Stream–relation duality (measured)
+
+The duality of F2 was checked executably as well as proved. For each of five seeds, a 200-epoch changelog of signed Z-set deltas over 50 keys was generated; the state sequence was obtained by integration, then differentiated back to a changelog, then re-integrated, and the two state sequences were compared as canonical Z-sets — equal supports, equal weights — at *every* epoch.
+
+**1,000 epoch-by-epoch comparisons; 0 mismatches.**
+
+The deltas include negative weights, so the check covers retraction and not merely accumulation. This is corroboration of a theorem, not a substitute for it: the proof is in §3.8, and the operator identities it rests on are machine-checked in the DBSP development.
+
+## 9.3 The Phase Diagram (Measured) — and the Hypothesis It Refutes
+
+### 9.3.1 The cost model, and why it is swept rather than fixed
+
+Comparing materialization strategies requires pricing three different things: memory held over time, maintenance work, and reconstruction work. The prototype counts each directly:
+
+* **resident-entry-epochs** — the integral of residency over time, not peak residency, because charging peak for the whole run would overstate the cost of a strategy whose footprint grows gradually, which is exactly what full materialization does;
+* **deltas applied** — per-key maintenance actually performed;
+* **base rows read** — reconstruction work actually performed.
+
+Total cost is a weighted sum. Maintenance and reconstruction are fixed at 1 unit each, and **the memory price is swept**, expressed in units of "one base-row read, per resident entry, per epoch." Sweeping it rather than fixing it is the difference between a result and an artifact: at a memory price of zero the answer is trivially "materialize everything," and any single chosen weight would smuggle the conclusion into the premise. A reader can locate their own hardware on this axis by asking what one resident entry-epoch costs them relative to one base-row read.
+
+An earlier version of this experiment charged peak residency times total epochs. That made the memory term dominate everything, and produced a "phase diagram" in which partial materialization won in every cell. It was discarded as an artifact of the weighting, and the correction is recorded here because the failure mode — a cost model that encodes its own conclusion — is easy to commit and hard to spot in a table of ratios.
+
+### 9.3.2 Cost components
+
+Workload: 10,000 accounts, 30,000 operations, 90% reads, budget = 5% of the key space, LRU eviction; medians over five seeds.
+
+| Zipf *s* | Resident-entry-epochs (partial / full) | Base rows read (partial / full) | Deltas applied (partial / full) |
+|---|---|---|---|
+| 0.5 | 1,484,276 / 17,559,969 | 36,690 / 10,025 | 593 / 4,040 |
+| 0.7 | 1,483,534 / 15,200,887 | 36,335 / 8,838 | 1,335 / 4,237 |
+| 0.9 | 1,479,730 / 11,560,348 | 26,767 / 6,813 | 2,701 / 4,613 |
+| 1.1 | 1,467,457 / 7,281,624 | 12,987 / 4,376 | 4,213 / 5,091 |
+| 1.3 | 1,430,876 / 3,885,194 | 4,480 / 2,325 | 5,265 / 5,531 |
+
+*Table 9.2 — The three cost components, measured. Partial materialization always holds less state and applies fewer deltas; it always reads more base rows.*
+
+### 9.3.3 The measured phase diagram
+
+Each cell is the median over five seeds of cost(partial) / cost(full) on identical workloads. Values below 1.00 favour partial materialization.
+
+**Memory price = 0** (memory free)
+
+| budget \ *s* | 0.5 | 0.7 | 0.9 | 1.1 | 1.3 |
+|---|---|---|---|---|---|
+| 1% | 3.11 | 5.33 | 7.47 | 6.36 | 3.67 |
+| 2% | 2.97 | 4.05 | 4.49 | 3.38 | 1.96 |
+| 5% | 2.65 | 2.88 | 2.57 | 1.81 | 1.25 |
+| 10% | 2.32 | 2.26 | 1.83 | 1.33 | 1.06 |
+| 25% | 1.80 | 1.56 | 1.25 | 1.04 | 1.00 |
+| 50% | 1.30 | 1.14 | 1.02 | 1.00 | 1.00 |
+
+**Memory price = 0.002**
+
+| budget \ *s* | 0.5 | 0.7 | 0.9 | 1.1 | 1.3 |
+|---|---|---|---|---|---|
+| 1% | **0.90** | 1.61 | 2.49 | 2.54 | 1.86 |
+| 2% | **0.87** | 1.24 | 1.49 | 1.36 | 1.05 |
+| 5% | **0.82** | **0.93** | **0.93** | **0.83** | **0.81** |
+| 10% | **0.79** | **0.81** | **0.76** | **0.75** | **0.86** |
+| 25% | **0.80** | **0.79** | **0.80** | **0.91** | 1.00 |
+| 50% | **0.90** | **0.91** | **0.97** | 1.00 | 1.00 |
+
+**Memory price = 0.01**
+
+| budget \ *s* | 0.5 | 0.7 | 0.9 | 1.1 | 1.3 |
+|---|---|---|---|---|---|
+| 1% | **0.25** | **0.44** | **0.69** | **0.77** | **0.67** |
+| 2% | **0.25** | **0.36** | **0.44** | **0.45** | **0.45** |
+| 5% | **0.27** | **0.32** | **0.35** | **0.38** | **0.51** |
+| 10% | **0.33** | **0.36** | **0.39** | **0.50** | **0.74** |
+| 25% | **0.51** | **0.55** | **0.64** | **0.85** | 1.00 |
+| 50% | **0.78** | **0.84** | **0.96** | 1.00 | 1.00 |
+
+*Table 9.3 — The measured phase diagram at three memory prices. Full tables, including prices 0.0005 and 0.05, are in `results/e4.log`.*
+
+### 9.3.4 Three findings, one of which refutes a stated hypothesis
+
+**Finding 1 — There is a real boundary, and it is set by the memory price, not by skew.** At memory price 0, partial materialization loses in every cell, by up to 7.5×. At 0.01 it wins in every cell but the saturated ones. The crossover sits between roughly 0.0005 and 0.002 in these units. That is the frontier the thesis predicts, located empirically for the first time.
+
+**Finding 2 — The optimal budget is interior, not extremal.** At memory price 0.002 and *s* = 0.5 the ratio runs 0.90 (50% budget) → 0.80 (25%) → **0.79 (10%)** → 0.82 (5%) → 0.87 (2%) → 0.90 (1%). Too large a budget wastes memory; too small a budget thrashes, and reconstruction cost explodes faster than memory savings accrue. The existence of an interior optimum is what makes an adaptive materialization optimizer a necessity rather than an ornament — a fixed policy at either extreme is measurably wrong.
+
+**Finding 3 — the refutation.** Hypothesis H0/S1, as stated in Chapter 1 of the previous draft, held that *"partiality pays on skew"* and that the advantage *grows* with skew. **The measurements contradict this.** Table 9.2 shows why: as *s* rises, full materialization touches fewer distinct keys, so its own footprint shrinks — resident-entry-epochs for full fall from 17.6 M at *s* = 0.5 to 3.9 M at *s* = 1.3, while partial's stay near 1.45 M. The *ratio* therefore gets **worse** for partial as skew increases, from 12:1 down to 2.7:1 (Table 9.2), and the corresponding memory-ratio measurement in §9.3.5 shows the same monotone deterioration. Skew simultaneously reduces partial's reconstruction penalty (36,690 → 4,480 rows read), so the two effects oppose one another and the net result depends on the memory price — which is precisely why the diagram must be swept over price rather than plotted at one.
+
+The corrected hypothesis, which the data support, is: **partial materialization pays when memory is expensive relative to reconstruction, at an interior budget, and skew determines the *shape* of the trade rather than its direction.** Chapter 1's H0 is restated accordingly, and the earlier phrasing is retained in Appendix J with the reason it was wrong, because a hypothesis quietly edited after the fact is not a hypothesis.
+
+### 9.3.5 Resident state across skew
+
+Independently measured, with a 10% budget over 20,000 accounts and 60,000 operations:
+
+| Zipf *s* | resident(partial) / resident(full), median [range] | Hit rate |
+|---|---|---|
+| 0.5 | 0.116 [0.116, 0.116] | 0.179 |
+| 0.7 | 0.130 [0.130, 0.131] | 0.332 |
+| 0.9 | 0.167 [0.167, 0.167] | 0.567 |
+| 1.0 | 0.206 [0.203, 0.207] | 0.690 |
+| 1.1 | 0.268 [0.264, 0.269] | 0.795 |
+| 1.3 | 0.533 [0.525, 0.540] | 0.922 |
+
+*Table 9.4 — Memory advantage and hit rate move in opposite directions as skew rises.*
+
+The seed-to-seed range is negligible, so the trend is not noise. The two columns moving in opposite directions is the whole story of this chapter in miniature: the thing skew helps (hit rate, hence reconstruction cost) and the thing skew hurts (relative memory advantage) are different things, and a design decision needs both.
+
+## 9.4 Cost, Policy, and Mechanism Results (Measured)
+
+### 9.4.1 Is the cost of a read history-shaped or workload-shaped? — a falsification, a refinement, and a fix
+
+This is the thesis's cost-law claim (SC3/H2): *the marginal price is workload-shaped, not history-shaped*. It was tested in three stages, and the first two refuted it.
+
+**Stage 1 (E5) — fixed key space.** With 2,000 accounts held fixed and total writes swept, base rows read per reconstruction were:
+
+| Writes | Ledger epochs | Indexed reconstruction | Unindexed scan |
+|---|---|---|---|
+| 5,000 | 5,004 | 124.5 | 14,000 |
+| 20,000 | 20,004 | 499.3 | 44,000 |
+| 80,000 | 80,004 | 2,009.8 | 164,000 |
+| 320,000 | 320,004 | 8,008.9 | 644,000 |
+
+*Table 9.5 — Reconstruction cost grows linearly with history when the key space is fixed. The anchor index gives an 80–112× reduction over a full scan, but does not change the growth.*
+
+Cost grew 64× as history grew 64×. **The claim is false in this form.** The anchor index — the structure the earlier draft credited with making cost history-independent — buys two orders of magnitude in constant factor and *nothing* in asymptotics.
+
+**Stage 2 (E9) — key space grown in proportion.** The obvious defence is that a real institution opens accounts as it grows, so per-key update counts stay bounded. Tested by growing accounts with writes at a fixed ratio:
+
+| Writes | Accounts | Rows read per reconstruction | Per-key updates |
+|---|---|---|---|
+| 5,000 | 500 | 210.4 | 210.4 |
+| 20,000 | 2,000 | 499.3 | 499.3 |
+| 80,000 | 8,000 | 1,245.9 | 1,245.9 |
+| 320,000 | 32,000 | 3,303.7 | 3,303.7 |
+
+*Table 9.6 — The defence fails. Cost still grows ~16× as history grows 64×.*
+
+The reason is instructive and is a property of skew itself: under a Zipf distribution the *hottest* keys retain a roughly constant share of traffic, so their absolute update count grows with total traffic no matter how many new cold keys are added. Reconstruction reads are drawn from the same distribution, so they preferentially hit exactly those keys. Growing the key space dilutes the tail, not the head.
+
+**Stage 3 (E10) — the fix, and its confirmation.** The mechanism the design was missing is a **per-key checkpoint**: every *C* postings on a key, record (epoch, running balance), so a reconstruction folds only the suffix since the newest checkpoint at or before the anchor. A checkpoint is derived state — recomputable from the base — so it costs nothing in immutability, retention or auditability.
+
+| Writes | No checkpoint | C = 256 | C = 64 | C = 16 |
+|---|---|---|---|---|
+| 5,000 | 124.5 | 45.9 | 19.9 | 6.8 |
+| 20,000 | 499.3 | 78.4 | 26.1 | 8.3 |
+| 80,000 | 2,009.8 | 102.1 | 30.8 | 8.0 |
+| 320,000 | 8,008.9 | 123.2 | 32.0 | **8.5** |
+
+*Table 9.7 — Per-key checkpoints restore bounded reconstruction cost. At C = 16, cost is flat across a 64× increase in history and sits at ≈ C/2 + 1, exactly as theory predicts.*
+
+At C = 16 the cost rises from 6.8 to 8.5 — a factor of 1.25 — while history grows 64×. The predicted value is the mean distance back to the previous checkpoint plus one checkpoint read, i.e. C/2 + 1 = 9, and the measurement lands just under it. At C = 64 the cost is 32.0 against a predicted 33. **The cost law holds, but only with checkpointing, and its constant is C/2 + 1 — a number the designer chooses.**
+
+This is the most consequential empirical result in the thesis, because it converts an asserted asymptotic property into a *design obligation*. It also explains, retrospectively, why production ledgers maintain running balances rather than folding from the journal on demand, and why one purpose-built ledger offers a per-account flag to retain balance history at all: they are paying for the same bound by a different name. The formal statement is added to Chapter 3 as the **Bounded Reconstruction Theorem** and to Chapter 4 as contribution **SC7**, and the honest reading of the earlier draft is that it claimed the conclusion without the mechanism that makes it true.
+
+### 9.4.2 Eviction policy under reconstruction latency
+
+Three policies compared on identical workloads (10,000 accounts, *s* = 0.9, budget 5%, 40,000 operations), including the randomized policy that the original partial-state system used, so the comparison has a real baseline and not merely the system against itself. `service_time` is the modelled reconstruction service time; the aggregate-delay column charges each reconstruction for the requests that queue behind it.
+
+| service_time | Policy | Misses | Base rows read | Aggregate delay |
+|---|---|---|---|---|
+| 0 | random | 21,170 | 92,144 | — |
+| 0 | LRU | 19,583 | 41,002 | — |
+| 0 | cost-aware | **18,050** | **28,123** | — |
+| 1 | random | 21,188 | 93,255 | 211,880 |
+| 1 | LRU | 19,583 | 41,002 | 195,830 |
+| 1 | cost-aware | 18,749 | 33,108 | **187,490** |
+| 4 | random | 21,200 | 91,953 | 3,137,600 |
+| 4 | LRU | 19,583 | 41,002 | 2,898,284 |
+| 4 | cost-aware | 18,784 | 34,260 | **2,780,032** |
+
+*Table 9.8 — Medians over five seeds.*
+
+Three observations, including one that qualifies the thesis's own claim. First, the gap between randomized eviction and LRU is large — 2.2× in base rows read — which is a measured argument that replacing randomized eviction is worth doing at all. Second, the cost-aware policy improves on LRU substantially on reconstruction work (**31% fewer base rows** at service_time 0) and on misses. Third, and against expectation, its advantage on *aggregate delay* is modest: 4.1% better than LRU at service_time 4. The delayed-hit weighting changes which entries it keeps, and that trade costs it some of its base-row advantage (28,123 → 34,260). The honest conclusion is that cost-awareness is clearly worth it for reconstruction work and only marginally so for latency in this configuration, and the thesis should not claim more.
+
+### 9.4.3 What each consistency rung costs
+
+Identical workload; the rung sets both the anchor a read demands and how far maintenance may be batched.
+
+| Rung | Misses | Base rows read | Deltas applied | Apply invocations | Hit rate |
+|---|---|---|---|---|---|
+| bounded (k = 64) | 19,714 | 40,084 | **55** | **61** | 0.455 |
+| bounded (k = 8) | 19,670 | 40,803 | 408 | 446 | 0.456 |
+| strict (k = 0) | 19,658 | 40,869 | **3,621** | **4,017** | 0.456 |
+
+*Table 9.9 — The rung's price lands on maintenance, not on reads. Medians over five seeds.*
+
+The read-side columns are indistinguishable across rungs — misses vary by 0.3%, hit rate by 0.001. The maintenance columns differ by **66×** between the loosest and strictest rung, and scale as roughly 1/k in the staleness allowance.
+
+This refines the cost law usefully. The tax for demanding freshness is not paid on the read path at all; it is paid on how often the derived layer must be dragged to the head of the log. That is a more actionable statement than "strict serializability is expensive", because it tells an operator exactly which resource to provision — and it means a view that tolerates staleness is cheap in a way that a hit-rate measurement would never reveal.
+
+The first attempt at this experiment measured only misses and hit rate and found no difference at all between rungs. That null was reported, investigated, and traced to instrumenting the wrong path; the corrected instrumentation is what Table 9.9 shows. It is recorded here because the sequence — null, diagnosis, re-instrumentation — is the part of an evaluation that is usually invisible and is often where the actual finding is.
+
+### 9.4.4 Write path: what the mechanisms cost (wall-clock, heavily caveated)
+
+The only wall-clock measurement in this chapter. **In-memory, single-threaded, no durability, no consensus.** It measures what the commit rule and the hash chain cost, and nothing else. It is not a throughput claim and cannot be compared with any published database figure, all of which include durability.
+
+| Configuration | Hot-account share | Postings/sec (median) |
+|---|---|---|
+| chained | 0.0 | 1,526,384 |
+| chained | 0.5 | 1,739,657 |
+| chained | 0.9 | 1,686,866 |
+| unchained | 0.0 | 2,243,577 |
+| unchained | 0.5 | 2,107,468 |
+| unchained | 0.9 | 2,222,726 |
+
+*Table 9.10 — Mechanism cost only. Hash chaining costs roughly 30% of admission throughput on this platform.*
+
+Two readings. The useful one: **hash chaining costs about 30%** of the in-memory admission path — a real number for a real mechanism, and one an implementer can weigh. The important one: **hot-account share has no effect, and that is a limitation of the instrument, not a finding about the design.** Contention is a concurrency phenomenon and this prototype is single-threaded, so the flat column measures the absence of an experiment rather than the absence of a problem. The contention question is genuinely open here and is answered in the literature rather than by this prototype: two independent production write-ups report that the shared settlement account is a structural hot key in double-entry systems, one reporting a per-account ceiling of 3–4 update operations per second raised to about 30 by 250 ms batching windows, the other routing hot-account entries to an asynchronous path with a 60-second bound rather than sharding the account. Those are the numbers a reader should weigh; §9.9 states the concurrency experiment that would let this thesis contribute its own.
+
+## 9.5 Evaluation Design for the Unmeasured Parts
+
+Everything below is protocol and prediction. No cell is filled.
+
+### 9.5.1 Baselines and the question each answers
+
+| Baseline | Question it answers | Status |
+|---|---|---|
+| PostgreSQL / MySQL with trigger-maintained balances | Does the aligned design beat the industry-default shape? | *to be measured* |
+| Total-materialization IVM engine (Materialize/Feldera class) | Isolates **partiality** as the single variable | *to be measured* |
+| Nilestream with anchoring disabled | Prices this thesis's own machinery | *to be measured* |
+| Purpose-built ledger | Is the write path competitive as a write path? | *to be measured* |
+| Full materialization on identical workload | Read-side comparison | **measured, §9.3** |
+| Randomized eviction | Is replacing it worth it? | **measured, §9.4.2** |
+
+Two rules are fixed in advance. Vendor performance claims without published methodology, hardware and workload definition are excluded as baselines — including a widely-cited 150,080-transactions-per-second core-banking figure that discloses neither transaction definition, isolation level, nor durability setting. And any TPC-derived workload run here is unaudited by definition, so it will be reported as "TPC-C-derived" and never as a `tpmC` result, in line with the TPC's own comparability rules.
+
+### 9.5.2 Predicted directions, with sources
+
+* Ledger write path with durability: throughput within a small constant factor of a purpose-built baseline. *Source:* the write path performs the same work plus hash chaining, whose cost is now measured at ≈30% (§9.4.4). *Refuted by:* a gap larger than one order of magnitude.
+* Reconstruction latency under load stays inside an authorization budget in the winning region of the phase diagram. *Source:* Table 9.7's bounded per-reconstruction work under checkpointing.
+* Bounded-staleness views cost ~1/k in maintenance. *Source:* Table 9.9, to be confirmed with concurrency and real coordination.
+
+## 9.6 Correctness Evaluation Beyond Conservation
+
+The conservation suite (§9.2) is necessary and insufficient (§9.2.2). The full programme adds: black-box anomaly inference over recorded histories, checking for the Adya phenomena G0, G1a/b/c, G-single and G2 including real-time and per-process edges; adversarial fault campaigns (crash at each protocol step class, eviction storms, duplicate and reordered delivery, recovery mid-upquery); and a mutant corpus of programs that must be *rejected* at compile time. Acceptance is zero surviving violations, with any violation diagnosed as either an implementation defect or a model gap and reported as such.
+
+A model-checking strand is included with a stated precedent and a stated limit. Formal specification of a consistency ladder has found real defects in a shipped system: a TLA+ specification of a commercial database's five advertised consistency levels revealed that two of them were indistinguishable to a client performing individual reads and writes, and that under strongly-consistent writes the bounded-staleness rung was subject to no bound at all. That is a directly analogous precedent and a cautionary one: **a ladder can be advertised with five rungs and have four.** The limit is equally clear from the same literature: model checking establishes design-level safety, not that the implementation refines the design.
+
+## 9.7 Generality and SQL Coverage — a Claim That Had to Be Restructured
+
+The previous draft proposed to establish SQL-completeness partly by "passing an industry SQL-conformance suite." **That argument is not available, and the reason is a finding of this revision.**
+
+The only officially-blessed SQL conformance suite ever produced targets SQL-92, was frozen in December 1996, and the validation programme that certified against it was terminated on 1 July 1997. NIST's own user guide states that it "would be incorrect for implementations to claim conformance … simply by virtue of correct performance of these tests." The widely-used modern alternative is a *differential* tester, comparing engines against one another rather than against the standard, and explicitly excludes transactional behaviour and concurrency from its scope. No authoritative, current, complete SQL:2016/2023 conformance corpus exists, and the standard's licensing obstructs building an open one.
+
+The claim is therefore restructured into three parts, of which the primary one is a proof obligation rather than a test:
+
+1. **Translation completeness (primary, a theorem).** A total, semantics-preserving compilation of a *stated* SQL fragment into the typed IR, proved by structural induction and gated by golden-file α-equivalence tests. This is stronger than any conformance run, because it quantifies over all programs in the fragment rather than over a corpus.
+2. **Feature coverage (corroboration).** A per-feature evidence table against the normatively enumerated mandatory feature list in the standard's own Annex F.
+3. **Differential equivalence (corroboration).** Agreement with established engines on a published corpus, reported as interoperability evidence and not as conformance.
+
+Anything outside the stated fragment fails loudly with a named error rather than being approximated — the operational counterpart of fragment honesty.
+
+## 9.8 Threats to Validity
+
+**Construct.** The prototype implements the thesis's mechanisms but is not the system; its view shapes are simple, and a join-heavy view family could behave differently. The workload is synthetic; real banking traces are unobtainable for legal reasons. The skew premise is contested in the literature — production measurements range from *s* ≈ 0.55 to ≈ 2.5 across different systems — which is why §9.3 sweeps it rather than assuming it.
+
+**Internal.** Counted-work units eliminate machine variance for the primary results but not modelling error in the cost weights; the sweep addresses this and the raw components are published so a reader can re-price everything. The cost-aware policy's parameters were developed on the same workload family they were evaluated on, which risks over-fitting; a held-out workload is required before claiming generality for it. The delayed-hit model is an analytic charge, not a measured queue, and is labelled as such.
+
+**External.** One platform, one prototype, single-threaded, in-memory. The write-path numbers do not generalize past the mechanism they measure. The contention result is a non-result (§9.4.4).
+
+**Theory-fidelity.** The prototype is not a proof; where it corroborates a theorem (§9.2.1, §9.2.3) it corroborates the theorem's *statement*, not its proof. Where it refutes a claim (§9.3.4, §9.4.1) the refutation is about the claim as operationalized, and §9.4.1 shows how much depends on that operationalization.
+
+**Attribution.** Every literature figure in this thesis carries its original context. The partial-state memory figures from prior work describe one application at one scale under one latency target; the cache-skew figures describe those systems' workloads, not banking; the production ledger throughput figures describe those platforms' configurations. None is evidence about Nilestream.
+
+## 9.9 Experiments the Prototype Cannot Run
+
+Stated explicitly, because the gaps are as informative as the results.
+
+* **Contention.** Needs concurrency, a real commit protocol and a lock or OCC discipline. The literature's quantitative anchor for what to expect is a measured ≈6.6× throughput collapse in an in-memory OLTP system as Zipf θ rises from 0.4 to 0.99 on a write-heavy workload — alongside the striking converse that on a read-heavy workload the same skew *increases* throughput through cache locality. That read/write asymmetry is precisely the shape this thesis's phase diagram should exhibit under concurrency, and testing it is the single highest-value next experiment.
+* **Durability.** Needs a real write-ahead path. The honest framing is already fixed by §11.1: a single node with fsync-before-ack has RPO = 0 against process and OS crash and unbounded RPO against loss of the node or site.
+* **Distribution.** Needs the cross-shard protocol of §8.6.
+* **Language claims.** Need the compiler.
+
+## 9.10 Immutability and Memory Safety
+
+Unchanged in design from §5.8: type-level enforcement (no mutable reference to sealed data exists in the surface), exhaustive-interleaving model checking of the two mutable structures, sanitizer runs, and crash-recovery drills verifying frontier reconstruction. The prototype contributes one relevant data point: it contains **no `unsafe` blocks**, and sealed epochs are reached only through shared references, so its portion of the claim is discharged by the compiler. Acceptance for the full system remains zero races at all three layers.
+
+## 9.11 Language Scope
+
+Constructive tests, unchanged: the banking portfolio implemented in the domain library with the kernel change log audited; a non-financial conserved-quantity domain; representative workloads per class; and the negative corpus of programs that must be rejected. *To be measured.*
+
+## 9.12 Results Analysis by Conjecture
+
+| Claim | Status after this chapter |
+|---|---|
+| SC1 reconstruction equivalence | **Corroborated** — 0 divergences, 0 rebuild mismatches, 5 seeds (§9.2.1) |
+| Conservation under eviction/refill | **Corroborated** — per-currency total exactly 0, 5 seeds (§9.2.1) |
+| F2 stream–relation duality | **Corroborated** — 1,000 epochs, 0 mismatches (§9.2.3) |
+| Absence discipline (miss ≠ 0) | **Corroborated** (§9.2.1) |
+| SC2 frontier exists | **Corroborated and located** — crossover between memory prices 0.0005 and 0.002 (§9.3.3) |
+| H0/S1 "partiality pays on skew" | **Refuted as stated**; restated as a memory-price condition with an interior optimum (§9.3.4) |
+| SC3 cost is workload- not history-shaped | **Refuted as stated; restored under checkpointing** with constant C/2 + 1 (§9.4.1) |
+| Consistency rung cost | **Measured** — falls on maintenance (~1/k), not reads (§9.4.3) |
+| Cost-aware eviction beats LRU | **Partly corroborated** — 31% on reconstruction work, 4% on aggregate delay (§9.4.2) |
+| Hot-account contention | **Not measured**; instrument cannot (§9.4.4, §9.9) |
+| Strict serializability | **Not tested**; conservation is strictly weaker (§9.2.2) |
+| SQL-completeness by conformance suite | **Withdrawn**; no such suite exists (§9.7) |
+| Everything in §9.5 | *to be measured* |

@@ -1,0 +1,622 @@
+(* ===================================================================================
+   The Niles Grammar — normative machine-readable form
+   ===================================================================================
+
+   This file is the normative grammar referenced by thesis Appendix B.15. The skeleton
+   printed in the thesis is this file's table of contents, not a separate artifact.
+
+   NOTATION (ISO/IEC 14977 EBNF, with the usual conveniences)
+     A ::= B          definition
+     "x"              terminal, written in the concrete syntax
+     <x>              lexical terminal produced by the lexer, not by this grammar
+     A | B            alternation
+     [ A ]            optional
+     { A }            zero or more
+     ( A )            grouping
+     (* .. *)         comment
+
+   THREE STANDING RULES, each of which is a design decision rather than notation.
+
+   (1) THE PARSE IS EPOCH-FREE. No production in this file consults a catalog. A name is
+       a name; whether it denotes a ledger, a view or a column is decided in `resolve`,
+       against a schema read AT AN EPOCH. PostgreSQL separates raw parsing from analysis
+       because catalog lookups need a transaction; Niles has the stronger version of the
+       same constraint, because a name only resolves relative to a visibility frontier.
+
+   (2) KEYWORDS ARE CLASSIFIED, NOT LISTED. Wherever this grammar writes <ident>, the
+       parser accepts an identifier OR any keyword whose registry category is `unreserved`
+       or `col-name`. The classification lives in `src/keywords.rs`; `tests/grammar_drift.rs`
+       checks that every terminal named here exists in that registry and vice versa. The
+       reserved set is therefore derived, not declared, and stays small: 37 of 173 words.
+
+   (3) MEMBER POSITION IS UNRESERVED ENTIRELY. After `.` or `|>`, and as a struct-literal
+       field name, ANY keyword is legal, because those positions have exactly one reading.
+       This is what lets `p.where(..)`, `p.order`, `p.select` and `p.check` all work.
+
+   COUNTING. Two figures, because "how big is a grammar" has no single answer and an
+   uncounted one is folklore. This file defines 205 named rules; expanded to one
+   production per alternative (the BNF-normal reading), that is 496 productions. Both
+   numbers are computed by `tests/grammar_drift.rs` from this file and asserted, so
+   neither can drift from what is written here. Comparable published figures for SQL are
+   not available: PostgreSQL's `gram.y` is 21,016 lines, but no authoritative production
+   count for the SQL-92 or SQL:2016 BNF could be verified, and this thesis declines to
+   cite one it has not counted.
+   =================================================================================== *)
+
+
+(* ================================ 1. LEXICAL ================================ *)
+
+<ident>            = (* letter or "_", then letters, digits, "_" ; or "r#" prefix *) ;
+<int>              = (* decimal digits with optional "_" separators *) ;
+<float>            = (* <int> "." digits *) ;
+<string>           = (* '"' chars '"' with \n \t \r \0 \\ \" escapes *) ;
+<bytes>            = (* 'b' <string> *) ;
+<money>            = (* decimal, optional single space, three lowercase letters:
+                        10.00 usd | 100 jpy | 1_250.750 bhd. The literal's own scale is
+                        the digit count after the point, and is checked against the
+                        currency's declared scale rather than assumed. *) ;
+<epoch_lit>        = (* "#" digits — disambiguated from "#[" by one char of lookahead *) ;
+<instant>          = (* "@" iso8601 — system-time axis *) ;
+<valid_instant>    = (* "v@" iso8601 — valid-time axis *) ;
+<duration>         = (* <int> "." time_unit *) ;
+time_unit          ::= "millis" | "ms" | "seconds" | "secs" | "s" | "minutes" | "mins"
+                     | "hours" | "hrs" | "days" | "epochs" ;
+<bool>             = "true" | "false" ;
+
+trivia             ::= whitespace | line_comment | block_comment | doc_comment ;
+line_comment       ::= ( "//" | "--" ) { any_char_but_newline } ;
+block_comment      ::= "/*" { block_comment | any_char } "*/" ;   (* nests *)
+doc_comment        ::= "///" { any_char_but_newline } ;
+
+(* ================================ 2. PROGRAM ================================ *)
+
+program            ::= { item } EOF ;
+
+item               ::= attrs [ "pub" ] [ "create" ] item_kind ;
+
+item_kind          ::= schema_decl
+                     | fn_decl
+                     | struct_decl
+                     | enum_decl
+                     | trait_decl
+                     | impl_decl
+                     | mod_decl
+                     | use_decl
+                     | const_decl
+                     | type_alias
+                     | capability_decl
+                     | view_decl ;
+
+mod_decl           ::= "mod" <ident> "{" { item } "}" ;
+use_decl           ::= "use" path ";" ;
+const_decl         ::= ( "const" | "static" ) <ident> ":" type "=" expr ";" ;
+type_alias         ::= "type" <ident> "=" type ";" ;
+capability_decl    ::= "capability" <ident> ":" type ";" ;
+
+attrs              ::= { attr } ;
+attr               ::= hash_attr | at_attr ;
+hash_attr          ::= "#[" <ident> [ "(" attr_args ")" ] "]" ;
+at_attr            ::= "@" <ident> [ "(" attr_args ")" ] ;
+attr_args          ::= attr_arg { "," attr_arg } [ "," ] ;
+attr_arg           ::= <ident> [ ( "=" | ":" ) expr ] ;
+
+(* ================================ 3. SCHEMA ================================ *)
+
+schema_decl        ::= "schema" <ident> "{" { schema_item } "}" ;
+
+schema_item        ::= attrs [ "pub" ] [ "create" ] schema_item_kind ;
+schema_item_kind   ::= currency_decl
+                     | table_decl
+                     | base_decl
+                     | ledger_decl
+                     | view_decl
+                     | index_decl
+                     | alter_decl
+                     | drop_decl ;
+
+currency_decl      ::= "currency" <ident> [ "{" currency_prop { "," currency_prop } "}" ] [ ";" ] ;
+currency_prop      ::= "scale" ":" <int> ;
+                       (* the minor-unit exponent, 0..=6. Never defaulted to 2 silently:
+                          JPY is 0 and BHD is 3, and a wrong scale is a money bug. *)
+
+table_decl         ::= "table" <ident> rel_body ;
+                       (* mutable: `update` and `delete` are legal, history is not kept *)
+base_decl          ::= "base" <ident> rel_body ;
+                       (* immutable, fully retained, epoch-ordered *)
+ledger_decl        ::= "ledger" <ident> rel_body ;
+                       (* a base plus a conservation rule and money columns *)
+
+rel_body           ::= "{" { rel_member } "}" { trailing_rule } ;
+rel_member         ::= ( field_decl | rel_rule ) [ "," ] ;
+trailing_rule      ::= retain_clause | bitemporal_clause | ";" ;
+
+field_decl         ::= attrs <ident> ":" type { column_constraint } ;
+column_constraint  ::= "primary" "key"
+                     | "unique"
+                     | "default" expr
+                     | "check" "(" expr ")"
+                     | "window" expr
+                     | attr ;
+
+rel_rule           ::= conserve_clause
+                     | retain_clause
+                     | bitemporal_clause
+                     | foreign_key_clause
+                     | primary_key_clause ;
+
+conserve_clause    ::= "conserve" "per" "(" <ident> { "," <ident> } ")" ";" ;
+                       (* the double-entry invariant. The named columns are the grouping
+                          over which every currency's amounts must sum to zero. *)
+retain_clause      ::= "retain" retention_mode ";" ;
+retention_mode     ::= "evictable" | "pinned" | "forever" ;
+bitemporal_clause  ::= "bitemporal" ";" ;
+foreign_key_clause ::= "foreign" "key" name_list "references" <ident> name_list ";" ;
+primary_key_clause ::= "primary" "key" name_list ";" ;
+name_list          ::= "(" <ident> { "," <ident> } ")" ;
+
+index_decl         ::= "index" <ident> "on" <ident> name_list [ "anchor" ] ";" ;
+
+alter_decl         ::= "alter" "table" <ident> alter_action ";" ;
+alter_action       ::= "add" [ "column" ] field_decl
+                     | "drop" [ "column" ] <ident>
+                     | "add" primary_key_clause
+                     | "add" foreign_key_clause ;
+                       (* legal against a `table` only. A `base` or `ledger` admits no
+                          `alter` that would change the meaning of a sealed row; schema
+                          evolution over a base is a migration, recorded in the ledger. *)
+drop_decl          ::= "drop" ( "view" | "index" | "table" ) <ident> ";" ;
+                       (* removes a declaration, never history *)
+                       (* `anchor` marks an anchor index: mandatory on ledger keys,
+                          because reconstruction must reach a key's rows without
+                          scanning the ledger. *)
+
+(* ================================ 4. VIEWS AND CONTRACTS ================================ *)
+
+view_decl          ::= "view" <ident> "=" expr [ serve_contract ] ";" ;
+                       (* the REV of the theory, as a declaration *)
+
+serve_contract     ::= "serve" "{" [ contract_entry { "," contract_entry } [ "," ] ] "}" ;
+contract_entry     ::= contract_key ":" contract_value ;
+contract_key       ::= "consistency" | "materialize" | "retain" | "lineage"
+                     | "budget" | "freshness" | "anchor" | <ident> ;
+
+contract_value     ::= consistency_value
+                     | materialize_value
+                     | retention_mode
+                     | lineage_value
+                     | <int>
+                     | <duration>
+                     | contract_call
+                     | <ident> ;
+
+contract_call      ::= <ident> "(" [ contract_arg { "," contract_arg } ] ")" ;
+contract_arg       ::= [ <ident> ":" ] contract_value ;
+
+consistency_value  ::= "bounded" [ "(" bounded_arg { "," bounded_arg } ")" ]
+                     | "monotonic"
+                     | "read_your_writes"
+                     | "snapshot"
+                     | "serializable"
+                     | "ledger_consistent" ;
+bounded_arg        ::= ( "epochs" | "millis" ) ":" <int> | <duration> ;
+
+materialize_value  ::= "absent" | "demand" | "full" | "spilled" | "tiered" | "auto" ;
+lineage_value      ::= "off" | "key" | "full" ;
+
+(* ================================ 5. FUNCTIONS AND ITEMS ================================ *)
+
+fn_decl            ::= "fn" <ident> [ generics ] "(" [ params ] ")"
+                       [ "->" type ] [ effect_row ] ( block | ";" ) ;
+params             ::= param { "," param } [ "," ] ;
+param              ::= self_param | pattern ":" type ;
+self_param         ::= [ "&" [ "mut" ] ] "self" ;
+
+generics           ::= "<" <ident> { "," <ident> } ">" ;
+
+effect_row         ::= "!" "{" [ effect { "," effect } [ "," ] ] "}" ;
+effect             ::= <ident> [ "@" rung_name ] [ "<" <ident> { "," <ident> } ">" ] ;
+rung_name          ::= "bounded" | "monotonic" | "read_your_writes"
+                     | "snapshot" | "serializable" | "ledger_consistent" ;
+                       (* an effect row is part of the type: `fn f() -> T ! { append,
+                          read@snapshot, debit<usd> }`. Rows are open by default, so a
+                          function may be used where more effects are permitted. *)
+
+struct_decl        ::= "struct" <ident> [ generics ] "{" [ field_decl { "," field_decl } [ "," ] ] "}" ;
+enum_decl          ::= "enum" <ident> [ generics ] "{" [ variant { "," variant } [ "," ] ] "}" ;
+variant            ::= <ident> [ "(" type { "," type } ")" ] ;
+trait_decl         ::= "trait" <ident> [ generics ] "{" { attrs fn_decl } "}" ;
+impl_decl          ::= "impl" [ generics ] type [ "for" type ] "{" { attrs [ "pub" ] fn_decl } "}" ;
+
+(* ================================ 6. TYPES ================================ *)
+
+type               ::= ref_type
+                     | tuple_type
+                     | slice_type
+                     | array_type
+                     | fn_type
+                     | dyn_type
+                     | unit_type
+                     | infer_type
+                     | path_type ;
+
+ref_type           ::= "&" [ "mut" ] type ;
+tuple_type         ::= "(" [ type { "," type } [ "," ] ] ")" ;
+slice_type         ::= "[" type "]" ;
+array_type         ::= "[" type ";" expr "]" ;
+fn_type            ::= "fn" "(" [ type { "," type } ] ")" [ "->" type ] [ effect_row ] ;
+dyn_type           ::= "dyn" path ;
+unit_type          ::= "(" ")" ;
+infer_type         ::= "_" ;
+path_type          ::= path [ "<" type { "," type } ">" ] ;
+
+(* The primitive and domain types below are library names, not grammar terminals; they
+   are listed so the reference is complete and `tests/grammar_drift.rs` can check that
+   the standard library defines each one. *)
+primitive_type     ::= "bool" | "i8" | "i16" | "i32" | "i64" | "i128"
+                     | "u8" | "u16" | "u32" | "u64" | "u128"
+                     | "f32" | "f64" | "Text" | "Bytes" | "Json" ;
+domain_type        ::= "Money" "<" <ident> ">"
+                     | "Currency"
+                     | "Id" "<" type ">"
+                     | "Epoch" | "Instant" | "Date" | "Duration"
+                     | "Interval" "<" <ident> ">"
+                     | "Signal" "<" type ">"
+                     | "Bitemporal" "<" type ">"
+                     | "Posting" | "Debit" "<" <ident> ">" | "Credit" "<" <ident> ">"
+                     | "Hold" "<" <ident> ">"
+                     | "Auth" "<" effect ">"
+                     | "Anchored" "<" type ">"
+                     | "IdemKey"
+                     | "Lineage" "<" type ">" ;
+
+(* ================================ 7. PATTERNS ================================ *)
+
+pattern            ::= wild_pat
+                     | bind_pat
+                     | tuple_pat
+                     | tuple_struct_pat
+                     | struct_pat
+                     | lit_pat
+                     | path_pat ;
+
+wild_pat           ::= "_" ;
+bind_pat           ::= [ "mut" | "ref" ] <ident> ;
+tuple_pat          ::= "(" [ pattern { "," pattern } [ "," ] ] ")" ;
+tuple_struct_pat   ::= path "(" [ pattern { "," pattern } ] ")" ;
+struct_pat         ::= path "{" [ field_pat { "," field_pat } ] [ ".." ] "}" ;
+field_pat          ::= <ident> [ ":" pattern ] ;
+lit_pat            ::= <int> | <string> | <bool> | <money> | <epoch_lit> ;
+path_pat           ::= path ;
+
+path               ::= path_root { "::" <ident> } ;
+path_root          ::= <ident> | "self" | "Self" | "crate" | "super" ;
+                       (* `Self` is the implementing type; `self` the receiver. They are
+                          distinct words, so keyword lookup is case-sensitive for these
+                          two and case-insensitive for every other word — SQL habit
+                          everywhere except where Rust's meaning depends on the case. *)
+
+(* ================================ 8. STATEMENTS ================================ *)
+
+block              ::= "{" { stmt } [ expr ] "}" ;
+                       (* a trailing expression without `;` is the block's value *)
+
+stmt               ::= let_stmt
+                     | item
+                     | dml_stmt
+                     | expr_stmt
+                     | ";" ;
+
+let_stmt           ::= "let" pattern [ ":" type ] [ "=" expr ] ";" ;
+expr_stmt          ::= expr [ ";" ] ;
+
+dml_stmt           ::= insert_stmt | update_stmt | delete_stmt
+                     | begin_stmt | commit_stmt | rollback_stmt
+                     | grant_stmt | revoke_stmt
+                     | backfill_stmt | emit_stmt ;
+
+insert_stmt        ::= "insert" "into" <ident> [ name_list ] "values" value_rows ";" ;
+value_rows         ::= value_row { "," value_row } ;
+value_row          ::= "(" [ expr { "," expr } ] ")" ;
+update_stmt        ::= "update" <ident> "set" assignment { "," assignment }
+                       [ "where" expr ] ";" ;
+assignment         ::= <ident> "=" expr ;
+delete_stmt        ::= "delete" "from" <ident> [ "where" expr ] ";" ;
+                       (* `update` and `delete` are legal on a `table` only. Against a
+                          `base` or `ledger` they are a static error, not a runtime one. *)
+
+begin_stmt         ::= "begin" ";" ;
+commit_stmt        ::= "commit" ";" ;
+rollback_stmt      ::= "rollback" ";" ;
+                       (* table transactions. A sealed ledger epoch has no rollback. *)
+
+grant_stmt         ::= "grant" effect "on" <ident> "to" <ident> ";" ;
+revoke_stmt        ::= "revoke" effect "on" <ident> "from" <ident> ";" ;
+backfill_stmt      ::= "backfill" <ident> [ "upto" expr ] ";" ;
+emit_stmt          ::= "emit" <ident> [ "to" ] <ident> ";" ;
+
+(* ================================ 9. EXPRESSIONS ================================ *)
+
+(* Precedence, loosest first. The parser implements this as a Pratt loop; the layering
+   is written out here because a normative grammar must state precedence, not imply it. *)
+
+expr               ::= assign_expr ;
+assign_expr        ::= or_expr [ "=" assign_expr ] ;
+or_expr            ::= and_expr { ( "||" | "or" ) and_expr } ;
+and_expr           ::= cmp_expr { ( "&&" | "and" ) cmp_expr } ;
+cmp_expr           ::= bitor_expr { cmp_op bitor_expr } ;
+cmp_op             ::= "==" | "!=" | "<" | "<=" | ">" | ">="
+                     | "is" | "is" "not" | "in" | "not" "in" | "like" | "between" ;
+bitor_expr         ::= bitxor_expr { "|" bitxor_expr } ;
+bitxor_expr        ::= bitand_expr { "^" bitand_expr } ;
+bitand_expr        ::= add_expr { "&" add_expr } ;
+add_expr           ::= mul_expr { ( "+" | "-" ) mul_expr } ;
+mul_expr           ::= unary_expr { ( "*" | "/" | "%" ) unary_expr } ;
+unary_expr         ::= ( "-" | "!" | "not" | "*" | "&" [ "mut" ] ) unary_expr
+                     | postfix_expr ;
+
+postfix_expr       ::= primary_expr { postfix_op } ;
+postfix_op         ::= field_access
+                     | stage_call
+                     | pipe_stage
+                     | call_args
+                     | index_op
+                     | try_op
+                     | cast_op ;
+
+field_access       ::= "." member_name ;
+stage_call         ::= "." member_name call_args [ guard_clause ] ;
+pipe_stage         ::= "|>" member_name call_args ;
+index_op           ::= "[" expr "]" ;
+try_op             ::= "?" ;
+cast_op            ::= "as" type ;
+
+member_name        ::= <ident> | any_keyword | <int> ;
+                       (* rule (3): after `.` or `|>` every keyword is legal *)
+
+call_args          ::= "(" [ call_arg { "," call_arg } [ "," ] ] ")" ;
+call_arg           ::= [ <ident> ":" ] expr ;
+                       (* named arguments, because a five-argument `hold` whose third
+                          argument is a duration is unreadable positionally *)
+
+guard_clause       ::= "guard" "measure" "(" expr ")" ;
+                       (* attaches only to `.fixpoint(..)`; an unguarded fixpoint has no
+                          spelling in the language, which is how guarded recursion is
+                          enforced syntactically rather than by a later check *)
+
+primary_expr       ::= literal_expr
+                     | path_expr
+                     | struct_lit
+                     | tuple_expr
+                     | array_expr
+                     | paren_expr
+                     | block
+                     | closure_expr
+                     | if_expr
+                     | case_expr
+                     | match_expr
+                     | while_expr
+                     | loop_expr
+                     | for_expr
+                     | return_expr
+                     | break_expr
+                     | continue_expr
+                     | txn_expr
+                     | hold_expr
+                     | resolve_expr
+                     | fx_expr
+                     | authorize_expr
+                     | declassify_expr
+                     | explain_expr
+                     | reproduce_expr
+                     | impact_expr
+                     | sql_expr
+                     | select_stmt
+                     | null_expr
+                     | cast_expr
+                     | exists_expr
+                     | any_expr ;
+
+null_expr          ::= "null" ;
+                       (* SQL's null. Distinct from `Option::None`, and distinct again
+                          from an evicted `Hole`: absence-of-value, absence-of-choice and
+                          absence-of-residency are three different things, and the
+                          absence lattice depends on not conflating them. *)
+cast_expr          ::= "cast" "(" expr "as" type ")" ;
+                       (* the SQL spelling of `expr as type`. Neither form crosses a
+                          currency: there is no cast from `Money<usd>` to `Money<eur>`,
+                          only an `fx` form that records a rate. *)
+exists_expr        ::= "exists" "(" expr ")" ;
+any_expr           ::= "any" "(" expr ")" ;
+
+literal_expr       ::= <int> | <float> | <bool> | <string> | <bytes>
+                     | <money> | <epoch_lit> | <instant> | <valid_instant> | <duration>
+                     | unit_lit ;
+unit_lit           ::= "(" ")" ;
+path_expr          ::= path ;
+struct_lit         ::= path "{" [ struct_lit_field { "," struct_lit_field } [ "," ] ] "}" ;
+struct_lit_field   ::= member_name [ ":" expr ] ;
+tuple_expr         ::= "(" expr "," [ expr { "," expr } ] ")" ;
+array_expr         ::= "[" [ expr { "," expr } [ "," ] ] "]" ;
+paren_expr         ::= "(" expr ")" ;
+
+closure_expr       ::= [ "move" ] ( "||" | "|" [ closure_param { "," closure_param } ] "|" ) expr ;
+closure_param      ::= pattern [ ":" type ] ;
+
+if_expr            ::= "if" expr_no_struct block [ "else" ( if_expr | block ) ] ;
+case_expr          ::= "case" { "when" expr "then" expr } [ "else" expr ] "end" ;
+                       (* SQL's conditional. Not exhaustive-checked: it ranges over
+                          predicates, not constructors. `match` is the exhaustive form. *)
+match_expr         ::= "match" expr_no_struct "{" { match_arm } "}" ;
+match_arm          ::= pattern [ ( "when" | "if" ) expr ] "=>" expr [ "," ] ;
+while_expr         ::= "while" expr_no_struct block ;
+loop_expr          ::= "loop" block ;
+for_expr           ::= "for" pattern "in" expr_no_struct block ;
+return_expr        ::= "return" [ expr ] ;
+break_expr         ::= "break" ;
+continue_expr      ::= "continue" ;
+
+expr_no_struct     ::= (* `expr`, with `struct_lit` suppressed, so that the `{` after the
+                          head of `if`/`while`/`match`/`for` opens the body *) ;
+
+(* ================================ 10. THE NOVEL FORMS ================================ *)
+
+txn_expr           ::= "txn" [ idem_spec ] block ;
+                       (* the unit the conservation rule is checked over, and the unit an
+                          epoch seals. A `txn` that does not conserve does not commit. *)
+idem_spec          ::= "idem" "(" expr [ "," "window" ":" expr ] ")" ;
+
+hold_expr          ::= "hold" "(" call_arg { "," call_arg } [ "," expires_arg ] ")" ;
+                       (* reserve funds as a ledger fact; the result is linear *)
+
+resolve_expr       ::= "resolve" unary_expr resolve_outcome ;
+resolve_outcome    ::= "post" expr | "void" | "expire" ;
+                       (* exactly one outcome consumes the hold, exactly once *)
+
+fx_expr            ::= "fx" "{" fx_member { "," fx_member } [ "," ] "}" ;
+fx_member          ::= "leg" <ident> ":" expr | "rate" ":" expr ;
+                       (* two conserved legs sealed in one epoch. There is no single
+                          currency in which a cross-currency transaction sums to zero,
+                          which is why this needs a form rather than two transfers. *)
+
+authorize_expr     ::= "authorize" "(" call_arg { "," call_arg } ")" ;
+                       (* the only construct permitted to approach a balance floor;
+                          takes an `Auth<E>` capability, which cannot be forged *)
+declassify_expr    ::= "declassify" "(" call_arg { "," call_arg } ")" ;
+                       (* the single audited construct that lowers confidentiality *)
+
+explain_expr       ::= "explain" [ "of" ] expr ;
+reproduce_expr     ::= "reproduce" expr [ ( "as_of" | "@" ) expr ] ;
+impact_expr        ::= "impact" [ "of" ] expr ;
+
+(* ---- temporal and ledger-fact forms ---- *)
+
+epoch_expr         ::= "epoch" "(" expr ")" | <epoch_lit> ;
+                       (* the unit of visibility, versioning and hashing *)
+temporal_column    ::= "recorded_at" | "valid_at" | "value_date" ;
+                       (* `recorded_at` is the system axis: when the fact was recorded,
+                          never rewritten. `valid_at` is the world axis: when it was true.
+                          `value_date` is the banking date that places a posting on the
+                          valid axis, and is a column, not a synonym for either. *)
+posting_expr       ::= "posting" "(" call_arg { "," call_arg } ")" ;
+                       (* one signed movement: the linear unit a ledger row is built
+                          from. `debit` and `credit` are library constructors over it. *)
+signal_expr        ::= "signal" "(" expr ")" ;
+                       (* an epoch-indexed value: balance as a function of time, rather
+                          than a number that happens to be current *)
+expires_arg        ::= "expires" ":" expr ;
+                       (* the window on a hold; a hold without one cannot expire, and an
+                          unexpirable hold is a permanent encumbrance *)
+
+(* ================================ 11. THE SQL SURFACE ================================ *)
+
+(* Same IR, different syntax. The SQL surface exists so that adoption can be incremental
+   and so that the generality claim is checkable on a stated fragment rather than
+   asserted. Written order is preserved in the tree so a diagnostic can point at the
+   clause the user typed. *)
+
+sql_expr           ::= "sql" "{" select_stmt "}" ;
+
+select_stmt        ::= [ with_clause ] select_core { set_op select_core } ;
+with_clause        ::= "with" [ "recursive" ] cte { "," cte } ;
+cte                ::= <ident> "as" "(" select_stmt ")" ;
+select_core        ::= "select" [ "distinct" ] projection_list
+                       [ from_clause ] [ where_clause ] [ group_clause ] [ having_clause ]
+                       [ order_clause ] [ limit_clause ] [ offset_clause ] ;
+set_op             ::= "union" [ "all" ] | "except" | "intersect" ;
+
+projection_list    ::= projection { "," projection } ;
+projection         ::= "*" | expr [ [ "as" ] <ident> ] ;
+                       (* the bare-label form is legal only where the following word's
+                          registry `label` field is `bare`; `as` is required otherwise *)
+
+from_clause        ::= "from" table_ref { "," table_ref } ;
+table_ref          ::= table_primary { join_clause } ;
+table_primary      ::= <ident> [ [ "as" ] <ident> ]
+                     | "(" select_stmt ")" [ [ "as" ] <ident> ] ;
+join_clause        ::= join_kind [ "join" ] table_ref [ "on" expr | "using" name_list ] ;
+join_kind          ::= "join" | "inner" | "left" [ "outer" ] | "right" [ "outer" ]
+                     | "full" [ "outer" ] | "cross" | "natural" ;
+
+where_clause       ::= "where" expr ;
+group_clause       ::= "group" "by" expr { "," expr } ;
+having_clause      ::= "having" expr ;
+order_clause       ::= "order" "by" order_item { "," order_item } ;
+order_item         ::= expr [ "asc" | "desc" ] ;
+limit_clause       ::= "limit" expr ;
+offset_clause      ::= "offset" expr ;
+
+(* ================================ 12. PIPELINE STAGES ================================ *)
+
+(* The stage vocabulary. These are not grammar terminals — they are `member_name`s
+   recognised by `StageKind::from_name` — but they are normative, because the set of
+   stages is the set of operators the IR must implement, and `tests/grammar_drift.rs`
+   checks this list against `StageKind::all_names()`. *)
+
+stage_name         ::= relational_stage | aggregate_stage | temporal_stage | access_stage ;
+
+relational_stage   ::= "where" | "filter" | "map" | "select"
+                     | "group_by" | "having"
+                     | "join" | "left_join" | "right_join" | "full_outer_join" | "cross_join"
+                     | "union" | "union_all" | "except" | "intersect"
+                     | "distinct" | "distinct_by"
+                     | "order_by" | "limit" | "offset"
+                     | "fixpoint" ;
+aggregate_stage    ::= "sum" | "count" | "min" | "max" | "avg" | "fold" ;
+temporal_stage     ::= "as_of" | "valid_at" ;
+access_stage       ::= "get" | "range" ;
+
+(* `order_by`, `limit` and `offset` are NOT incrementally maintainable over a Z-set
+   without retaining the whole input. A view ending in one of them therefore cannot be
+   served at rung 5 under demand materialization, and the planner rejects the
+   combination rather than silently promoting the view to `full`. The surface syntax
+   must not hide this, which is why the stage list distinguishes them. *)
+
+(* ================================ 13. UDF TIER ================================ *)
+
+udf_decl           ::= "#[" "udf" "(" udf_prop { "," udf_prop } ")" "]" fn_decl ;
+udf_prop           ::= "fuel" "=" <int> | "deterministic" | "pure" ;
+                       (* a UDF is fuel-metered and compiled to WASM. No ambient I/O, no
+                          wall clock, no unguarded recursion: a UDF that could diverge
+                          could stall an epoch, and an epoch that stalls stalls the
+                          visibility timeline for every reader. *)
+
+(* ================================ 14. CONFIDENTIALITY ================================ *)
+
+confidential_attr  ::= "@" "confidential" "(" conf_level ")" ;
+conf_level         ::= "e2ee" | "committed" ;
+                       (* `e2ee`: opaque to the engine, which may not compute on it.
+                          `committed`: readable only inside the enclave holding the key.
+                          A column at either level may leave only through `declassify`,
+                          which is audited and requires a capability. *)
+
+(* ================================ 15. WELL-FORMEDNESS (not syntax) ================================ *)
+
+(* The following are stated here for completeness and are checked in `resolve`,
+   `typecheck`, `currency_rows` and `effects`, not by this grammar. A grammar that tried
+   to encode them would be neither readable nor decidable.
+
+   W1  A `base` or `ledger` must declare `retain forever`.
+   W2  A `ledger` must declare exactly one `conserve per (..)` rule.
+   W3  Every column named in a `conserve per (..)` rule must exist in the relation.
+   W4  `update` and `delete` are legal against a `table` only.
+   W5  Every `Money<C>` column requires a `currency C { scale: n }` declaration in scope.
+   W6  A money literal's own scale must equal its currency's declared scale.
+   W7  No operator joins two distinct currencies except inside an `fx` form.
+   W8  A `Debit`, `Credit` or `Hold` value is linear: consumed exactly once, never dropped.
+   W9  A view served at `ledger_consistent` may not be materialized `spilled`.
+   W10 A view with `retain: pinned` may not be materialized `absent`.
+   W11 A view ending in a non-incremental stage may not be `demand` at rung 4 or 5.
+   W12 A ledger key referenced by a view must have an `anchor` index.
+   W13 Every `fixpoint` must carry a `guard measure(..)` whose measure is well-founded.
+   W14 A function's inferred effect row must be a subset of its declared row.
+   W15 An effect requiring authority must be reachable only from an `Auth<E>` in scope.
+   W16 `authorize` is the only construct that may reduce a balance below zero.
+   W17 A `@confidential` column may not appear in a predicate, a key or an aggregate.
+   W18 `declassify` requires a capability and emits an audit event.
+   W19 An `idem` key must declare a window; a window without a key is a static error.
+   W20 A currency's scale is fixed at declaration and may not be altered by migration. *)
+
+(* ===================================================================================
+   END. Terminal set and production count are checked by tests/grammar_drift.rs against
+   src/keywords.rs and src/ast.rs. This file is normative; the thesis skeleton is not.
+   =================================================================================== *)

@@ -1,0 +1,102 @@
+# Appendix E. The Niles Self-Hosting Compiler
+
+## E.1 Self-Hosting Strategy: The Three-Stage Bootstrap
+
+Stage 0: a compiler written in the host language, compiling the full Niles language (slowly, with unoptimized output). Stage 1: the Niles-written compiler sources, compiled by stage 0. Stage 2: stage 1 recompiling the same sources. Stage 3: an optional further self-build used as a consistency check.
+
+Self-hosting is not vanity. It is the strongest available test of the language's expressiveness claim — a compiler is a large, pointer-heavy, performance-sensitive program with none of the shape of a banking workload — and it keeps the language's ergonomics answerable to authors who must live inside it. Section E.19 states precisely what the boundary is and why it holds.
+
+## E.2 The Target Model as Data
+
+All target knowledge lives in declarative records: word width, endianness, alignment rules, calling convention (parameter and return registers, caller/callee-saved sets, stack alignment), relocation kinds, object-format parameters, and platform shims. Back-end code is generic over the record, and encoder tables (E.15) are generated from it. Adding the WSL profile required a record and linker flags, and no compiler-code change — which is the intended proof of the design.
+
+## E.3 The Host Shim
+
+The self-hosted compiler runs on a deliberately tiny host shim: read file, write file, arguments, exit code, and (for the wasm-hosted optimizer) a fuelled execution loop. Everything else — including memory management through the language's own arena model — is Niles. The shim is small enough to audit by reading, which is what keeps the bootstrap's trusted base honest.
+
+## E.4 Front-End in Niles
+
+A hand-written lexer covering the literal forms of Appendix B.2 (money with per-currency scale checking, temporal and value-date literals, epochs, idempotency keys) and a recursive-descent parser with Pratt expression parsing, producing the AST datatypes stage 0 defines through a shared serialized form. Error recovery synchronizes at item and statement boundaries; every diagnostic carries a span, a stable code, and a fix hint where computable.
+
+## E.5 Type-Checking and IR Lowering in Niles
+
+The self-hosted checker re-implements: inference with local annotations; coherent trait resolution; the linearity checker for posting halves and holds; the effect-row checker; the currency-row solver; and confidentiality flow checking against static labels. Lowering produces the IR of Appendix D with provenance-derived upquery paths.
+
+**Differential gate.** The stage-0 and stage-1 checkers must accept and reject an identical corpus with identical diagnostic *codes* (wording may differ). This is the check that catches the most dangerous class of bootstrap bug: a self-hosted checker that is subtly more permissive than the one that compiled it.
+
+## E.6 Middle-End: Planner and Optimizer
+
+The middle end holds the query planner — circuit construction, join ordering by cost model, delta-form selection, upquery-path derivation, and initial materialization-mode defaults handed to the runtime optimizer — and a scalar optimizer over an SSA form for imperative and UDF code. Planner decisions are recorded so that plans are explainable.
+
+## E.7 The Aggressive Optimizer, Wasm-Hosted
+
+The higher optimization level is itself a Niles program compiled to wasm32 and executed through the same sandboxed runtime UDFs use. Two reasons, and both are more than aesthetic: it dogfoods the UDF tier at the largest scale available, and it makes optimizer passes safely pluggable, since a buggy pass can exhaust fuel or trap but cannot corrupt the compiler. Its ambition is bounded and stated: reach respectable native performance on the compiler's own workloads, not re-create a mature optimizing back-end.
+
+## E.8 Pass Pipeline
+
+- **O0:** lower plus naive register allocation.
+- **O1:** SSA construction, constant folding and propagation, dead-code elimination, control-flow simplification, size-bounded inlining, scalar replacement.
+- **O2 (wasm-hosted):** global value numbering and common-subexpression elimination, loop-invariant code motion (E.10), bounded peephole superoptimization (E.11), bounded unrolling, tail-call formation, block layout by branch-frequency estimates.
+
+## E.9 Optimizer Driver
+
+The driver loads content-addressed pass modules, runs them over serialized SSA with per-pass fuel accounting, and emits pass reports consumed by the explain tooling. Passes are pure functions from SSA to SSA, and the determinism gate hashes the SSA after every pass on every target.
+
+## E.10 Representative Pass: Loop-Invariant Code Motion
+
+Standard LICM — dominator tree and loop forest, invariance by reaching definitions, hoisting to a preheader with speculation forbidden — with one domain-specific twist: **anchor reads and effectful calls are never hoisted across an epoch-boundary intrinsic**, and the legality predicate consults the effect rows to decide. It is a small but satisfying demonstration that the effect system pays for itself inside the compiler, not only in user code.
+
+## E.11 Representative Pass: Bounded Peephole Superoptimization
+
+Over windows of a few instructions in hot blocks: enumerate replacement candidates from an algebraic identity table and a target cost table; verify semantic equality by exhaustive checking over small bit widths and bounded solving for full widths; replace only when strictly cheaper. Verified rewrites are cached content-addressed, so the expensive search amortizes across builds rather than being repeated.
+
+## E.12 O2 Adds No Native Surface
+
+An invariant, enforced mechanically: enabling the higher optimization level changes *performance only*. The wasm-hosted optimizer's output passes the same verifiers as unoptimized output; no pass may introduce operations outside the verified instruction set; and the determinism gate runs the conservation suite at every level demanding identical answer bytes. Optimization is therefore outside the trusted base — a property worth more than any speedup it delivers.
+
+## E.13 Optimization Levels and the Remaining Gap
+
+The measured gap between the self-hosted back-end and the established optional back-end is published per release rather than hidden. The honesty rule: numbers in Chapter 9 come from the self-hosted back-end; the gap is tracked as an engineering metric, not presented as a scientific result.
+
+## E.14 Code Generation: Instruction Selection and Register Allocation
+
+Selection is tree-pattern matching over SSA with target tables from E.2, using maximal munch with explicit tie-break order. Register allocation is linear scan over live intervals with interval splitting and spill-cost heuristics weighted by loop depth, with callee-saved registers allocated last to minimize prologue cost — the classical algorithm, chosen because it is simple enough to be self-hosted and verified rather than because it is the best available.
+
+## E.15 Machine-Code Encoding and Object Assembly
+
+Encoders are table-generated from the target model: fixed-width encodings for the RISC target, and the modifier/prefix machinery for the CISC target. Object writers emit the three platform formats with relocations, symbol tables, unwind skeletons, and minimal line tables for debugging. An exhaustive encoder test compares output against a reference disassembler corpus per release.
+
+## E.16 Static Linking and the WSL Profile
+
+The self-hosted linker performs static linking: symbol resolution across objects and the compiled standard library, relocation application, section layout, and entry-point synthesis calling the host shim's runtime initialization. The WSL profile is the Linux target with fully static linking and path-normalization shims, chosen so that a Windows/WSL user gets one binary with no distribution friction. It exists as a target record plus a linker profile, exercising E.2's claim that targets are data.
+
+## E.17 Optional Host-Side Paths
+
+Two escape hatches, both outside the bootstrap: an established optimizing back-end for release builds and for the gap measurement of E.13, and system dynamic linking where platform integration demands it. Neither participates in stage identity or the determinism gates, and both re-verify against the conservation suite when used.
+
+## E.18 Building and Self-Verifying the Bootstrap
+
+The bootstrap target runs stage 0 (pinned host toolchain) → stage 1 → stage 2 → stage 3, with gates:
+
+- **G-a** stage 2 and stage 3 are bit-identical per target.
+- **G-b** the cross-compilation square: building target B's compiler on A and natively on B yields identical binaries.
+- **G-c** the compiled compiler passes the full language corpus with diagnostic-code equality against stage 0.
+- **G-d** the conservation suite produces identical output hashes at every optimization level.
+
+## E.19 What the Gates Actually Prove — and What They Do Not
+
+This section exists because the natural claim here is wrong, and stating it wrongly would be a real vulnerability.
+
+**What a bit-identical stage-2/stage-3 build proves.** That the compiler is a **fixed point**: compiling the compiler with itself reproduces itself. This detects *accidental* non-determinism — hash-map iteration order, timestamps, path leakage, address-layout-dependent code generation — and some classes of miscompilation. That is genuinely valuable, and it is why the gate exists. It is also, precisely, what the mature language toolchains claim for the analogous check: their own documentation presents the extra stage as a sanity check to detect breakage, explicitly optional, and does not claim it establishes trustworthiness.
+
+**What it does not prove.** It does not detect a trusting-trust attack. A self-reproducing trojan is a fixed point *by construction* — that is the entire mechanism Thompson described — so a bit-identical self-build is exactly what a successful attack looks like [Thompson, CACM 1984]. Self-consistency and trustworthiness are different properties, and only reasoning that introduces *diversity* addresses the second.
+
+**What would.** Diverse double-compiling: compile the compiler's source with a second, independently sourced trusted compiler, then recompile the source with that result; bit-for-bit identical output implies source and executable correspond, and an attacker must then have subverted *every* compiler used [Wheeler, ACSAC 2005]. Its stated requirement is that the parent compiler be deterministic when compiling the compiler under test — which is to say that **reproducibility is a precondition for the real defence, not a substitute for it**. Reproducible builds are defined by exactly that property: given the same source, environment and instructions, any party can recreate bit-identical artifacts.
+
+**The honest position.** The gates of E.18 deliver reproducibility and self-consistency, which are prerequisites and are worth having. Executing a genuine diverse double-compilation of the Niles bootstrap is future work (Chapter 12), and the thesis claims no trusting-trust guarantee until it is done.
+
+## E.20 Thesis Consistency: What Is in Niles and Why the Boundary Holds
+
+After bootstrap, written in Niles: the front end, the checker, the planner, the middle end, the higher optimizer (as wasm), the back-ends, and the linker — that is, the compiler. Still in the host language: the engine (ledger, core runtime, server) and the host shim.
+
+The boundary is principled rather than accidental. The engine is the *object* the theory speaks about, and it must stay inside the audited memory-model claims of Sections 3.17 and 5.8, where an ownership-typed host language with a machine-checked soundness result is the instrument of that audit. The compiler is a *user* of the language, and is precisely where self-hosting has scientific value as expressiveness evidence. Migrating engine components into Niles is future work gated on the language growing a systems-programming tier — a gate Section 6.12 keeps deliberately closed, because opening it would enlarge the trusted base the soundness theorem depends on.

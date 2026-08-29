@@ -1,0 +1,9 @@
+[package]
+name = "bank-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+conservation-suite = { path = "../conservation-suite" }

@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/nilestream-ledger",
+    "crates/nilestream-core",
+    "crates/nilestream-storage",
+    "crates/nilestream-server",
+    "crates/niles-ir",
+    "crates/niles-lang",
+    "crates/niles-stdlib",
+    "crates/conservation-suite",
+    "crates/bank-bench",
+    "crates/nilestream-optimizer",
+    "crates/nilestream-lineage",
+    "crates/proto-engine",
+    "crates/experiments",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+authors = ["Sergio"]

@@ -1,0 +1,10 @@
+[package]
+name = "conservation-suite"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+nilestream-ledger = { path = "../nilestream-ledger" }
+# blake3 = "1"   # Phase 0: real hash swap (ADR 0002)

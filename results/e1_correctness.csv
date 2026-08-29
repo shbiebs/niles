@@ -1,0 +1,6 @@
+seed,transfers,upqueries,evictions,view_oracle_divergences,conservation_ok,chain_ok,rebuild_mismatches,miss_not_zero_ok,idempotent_rejects
+1,10000,2763,2746,0,true,true,0,true,103
+7,10000,2720,2703,0,true,true,0,true,103
+42,10000,2692,2675,0,true,true,0,true,103
+100,10000,2705,2688,0,true,true,0,true,103
+2024,10000,2705,2688,0,true,true,0,true,103

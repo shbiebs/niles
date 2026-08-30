@@ -1,0 +1,200 @@
+// std::bank — the banking domain layer, written in Niles.
+//
+// This file is the load-bearing claim of Section 6.11 made concrete: **banking is a
+// library over a fully general relational core, not a special case in the kernel.**
+// Nothing below reaches into the engine. Every construct it uses — `ledger`, `conserve`,
+// `hold`, `resolve`, `fx`, effect rows, `Money<C>` — is available to any Niles program,
+// and the domain content is entirely in how they are combined.
+//
+// If any product in Section 6.22 turned out to need a kernel change to express, the
+// "banking as a library" claim would be false and Section 11.3 says so. This file is where
+// that claim is exercised.
+
+schema std_bank {
+    // Currencies carry their minor-unit scale in the type. Three are declared here to
+    // exercise the three scales ISO 4217 actually uses: 0, 2 and 3. A system that
+    // hard-coded 2 would be wrong about JPY by a factor of one hundred, silently.
+    currency usd { scale: 2 }
+    currency eur { scale: 2 }
+    currency gbp { scale: 2 }
+    currency jpy { scale: 0 }
+    currency bhd { scale: 3 }
+
+    table accounts {
+        id: Id<Account> primary key,
+        product: Text,
+        owner: Text @confidential(e2ee),
+        opened_at: Instant,
+        closed_at: Instant,
+    }
+
+    // The authoritative base. Every movement of value in the system is a row here, and
+    // there is no other way for value to move: no update path, no delete path, no
+    // out-of-band adjustment. That is what "the base is never partial" means to a program.
+    ledger postings {
+        txn: TxnId,
+        acct: Id<Account>,
+        cur: Currency,
+        amt: Money,
+        // Two time axes. `value_date` is the banking date that places a posting on the
+        // world's calendar; the epoch places it on the system's. They differ routinely —
+        // a payment recorded on Friday with Monday's value date — and a ledger that
+        // conflated them could not answer "what did we believe on Friday" at all.
+        value_date: Date,
+        idem: IdemKey window 30.days,
+        conserve per (txn, cur);
+        retain forever;
+        bitemporal;
+    }
+
+    // Reservations. A `base`, not a `ledger`: a hold is a one-sided encumbrance and does
+    // not conserve, so declaring it a ledger would promise a double-entry invariant that
+    // no hold satisfies. It is still immutable and fully retained.
+    base holds {
+        id: HoldId,
+        acct: Id<Account>,
+        cur: Currency,
+        amount: Money,
+        expires: Instant,
+        idem: IdemKey window 7.days,
+        retain forever;
+    }
+
+    // Resolution by append. A hold is never updated in place; its outcome is a new fact.
+    // This is what keeps the base free of any update path at all, which is the same choice
+    // the strictest production ledgers make.
+    base hold_resolutions {
+        hold: HoldId,
+        outcome: Text,
+        captured: Money,
+        retain forever;
+    }
+
+    // Anchor indices on the ledger keys. Mandatory: reconstruction must reach a key's rows
+    // without scanning history, and the measured difference is two orders of magnitude in
+    // constant factor.
+    index ix_postings_acct on postings (acct, cur) anchor;
+    index ix_holds_acct on holds (acct, cur) anchor;
+
+    // --- the three balances every core banking system has, and their different rungs ---
+
+    // What the ledger says. Rung 2 is right for a balance a customer reads back after
+    // their own payment: they must see their own writes, and nothing stronger is needed.
+    view ledger_balance = postings
+        .group_by(|p| (p.acct, p.cur))
+        .sum(|p| p.amt)
+        serve { consistency: read_your_writes, materialize: auto, retain: evictable };
+
+    // What may be spent. Rung 5, and the contract is not negotiable: a decision to move
+    // money must see every committed write that precedes it in real time. Deriving this
+    // from `ledger_balance` would be a rung-monotonicity violation, because the staleness
+    // would enter one hop upstream — so it derives from the base.
+    view available_balance = postings
+        .group_by(|p| (p.acct, p.cur))
+        .sum(|p| p.amt)
+        serve { consistency: ledger_consistent, materialize: demand, lineage: key };
+
+    // What is encumbered. Same rung as availability, because it is an input to it.
+    view held_amount = holds
+        .group_by(|h| (h.acct, h.cur))
+        .sum(|h| h.amount)
+        serve { consistency: ledger_consistent, materialize: demand, lineage: key };
+
+    // Positions rolled up by product. Bounded staleness is correct here and two rungs
+    // cheaper: a product-level position feeds a report, not an authorization.
+    view position_by_product = postings
+        .group_by(|p| p.cur)
+        .sum(|p| p.amt)
+        serve { consistency: bounded(epochs: 10, millis: 30000),
+                materialize: demand, retain: evictable, budget: 100000 };
+}
+
+// --- the operations, with their effects in their types ---
+
+// A transfer. A reader can see from the signature alone that this appends to the ledger
+// and moves USD, which is the point of putting the effect row in the type.
+fn transfer(from: Id<Account>, to: Id<Account>, amount: Money<usd>)
+    -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("transfer") {
+        let d = debit(from, amount)?;
+        let c = credit(to, amount);
+        post(d, c)
+    }
+}
+
+// An overdraft. The only construct that may take a balance below zero, and it requires an
+// unforgeable capability to do it. The capability does not make the floor
+// coordination-free — Proposition 3.2 shows that is impossible — it makes the fact that
+// coordination is required visible in the type.
+fn transfer_with_overdraft(
+    from: Id<Account>,
+    to: Id<Account>,
+    amount: Money<usd>,
+    auth: Auth<authorize<usd>>,
+) -> Result<TxnId, TxnError>
+    ! { append, authorize<usd>, debit<usd>, credit<usd> }
+{
+    authorize(from, amount);
+    txn idem("od-transfer") {
+        let d = debit(from, amount)?;
+        let c = credit(to, amount);
+        post(d, c)
+    }
+}
+
+// A card authorization and its capture. The hold is linear: the type system rejects a
+// program that resolves it twice, or that lets it fall out of scope unresolved. Both
+// failures are silent money bugs at runtime and compile errors here.
+fn authorize_card(acct: Id<Account>, amount: Money<usd>)
+    -> Result<TxnId, TxnError>
+    ! { append, hold<usd> }
+{
+    let h = hold(acct, amount, expires: 7.days)?;
+    resolve h post 18.50 usd
+}
+
+fn void_authorization(acct: Id<Account>, amount: Money<usd>)
+    -> Result<TxnId, TxnError>
+    ! { append, hold<usd> }
+{
+    let h = hold(acct, amount, expires: 7.days)?;
+    resolve h void
+}
+
+// Cross-currency settlement. Two conserved legs sealed in one epoch, with the rate
+// recorded alongside them. There is no single currency in which this sums to zero, which
+// is why it needs a form of its own rather than a pair of transfers — and why a
+// "conversion" that debits one currency and credits another has no well-typed spelling.
+fn settle_fx(
+    a: Id<Account>,
+    b: Id<Account>,
+    sold: Money<usd>,
+    bought: Money<eur>,
+    r: Rate,
+) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd>, debit<eur>, credit<eur> }
+{
+    txn idem("fx") {
+        fx {
+            leg sell: post(debit(a, sold)?, credit(b, sold)),
+            leg buy: post(debit(b, bought)?, credit(a, bought)),
+            rate: r,
+        }
+    }
+}
+
+// A zero-scale currency, to exercise the scale check. `100 jpy` is a hundred yen; writing
+// `100.50 jpy` is a compile error naming both the literal's scale and the declared one,
+// rather than a silent rounding that surfaces in a reconciliation six months later.
+fn transfer_yen(from: Id<Account>, to: Id<Account>, amount: Money<jpy>)
+    -> Result<TxnId, TxnError>
+    ! { append, debit<jpy>, credit<jpy> }
+{
+    txn idem("jpy-transfer") {
+        let d = debit(from, amount)?;
+        let c = credit(to, amount);
+        post(d, c)
+    }
+}

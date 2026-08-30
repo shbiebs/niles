@@ -683,7 +683,12 @@ impl<'a> Parser<'a> {
             if self.burn() {
                 break;
             }
-            let key = self.ident("a contract key");
+            // Contract keys and values are in a position where any word is unambiguous:
+            // a `serve { .. }` block has exactly one reading, so reserving a word buys
+            // nothing here. Without this, `lineage: full` did not parse, because `full` is
+            // reserved for `full outer join` — a restriction with no grammatical
+            // justification in this position.
+            let key = self.member_name("a contract key");
             self.expect(Tok::Colon, "in a serve contract");
             let value = self.contract_value();
             entries.push((key, value));
@@ -703,13 +708,13 @@ impl<'a> Parser<'a> {
                 ContractValue::Duration { value, unit, span: s }
             }
             Tok::Ident | Tok::Kw(_) => {
-                let name = self.ident("a contract value");
+                let name = self.member_name("a contract value");
                 if self.at(&Tok::LParen) {
                     let start = self.bump();
                     let mut args = Vec::new();
                     while !self.at(&Tok::RParen) && !self.at_eof() {
                         let label = if matches!(self.nth(1), Tok::Colon) {
-                            let n = self.ident("a contract argument name");
+                            let n = self.member_name("a contract argument name");
                             self.bump();
                             Some(n)
                         } else {

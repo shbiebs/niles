@@ -7,7 +7,7 @@
 
 This is the normative per-keyword reference of thesis Appendix B.19. It is **generated** from the compiler's keyword registry, not maintained alongside it: a keyword cannot exist in the lexer without an entry here, and an entry here cannot describe a keyword the lexer does not have.
 
-**174 keywords**: 95 unreserved, 66 reserved (including reserved-for-future), 13 in the remaining two classes.
+**174 keywords**: 95 unreserved, 59 reserved (including reserved-for-future), 20 in the remaining two classes.
 
 ## How to read the tables
 
@@ -58,14 +58,14 @@ Taken from SQL, with SQL's meaning wherever the meaning survives. Where it does 
 | `distinct` | reserved | requires `as` | 2026 | Deduplicate. On a Z-set this is the canonicalising `distinct` operator. | `postings.distinct_by(\|r\| r.acct)` |
 | `drop` | unreserved | bare | 2026 | Remove a declared object. Never removes ledger history. | `drop view stale_v;` |
 | `else` | reserved | requires `as` | 2026 | Alternative branch of `case` or `if`. | `case when p then a else b end` |
-| `end` | reserved | requires `as` | 2026 | Closes a `case` expression. | `case when p then a else b end` |
+| `end` | non-reserved (cannot be function or type name) | requires `as` | 2026 | Closes a `case` expression. Position-determined, so `end` remains usable as a column name. | `case when p then a else b end` |
 | `except` | reserved | requires `as` | 2026 | Set difference. | `a.except(b)` |
 | `exists` | non-reserved (cannot be function or type name) | bare | 2026 | Non-emptiness test over a subquery. | `where(\|r\| exists(holds.for_acct(r.acct)))` |
 | `foreign` | unreserved | bare | 2026 | Introduces a foreign key constraint. | `foreign key (acct) references accounts (id)` |
-| `from` | reserved | requires `as` | 2026 | Source relation, in the SQL surface and in `delete`. | `sql { select id from accounts }` |
+| `from` | non-reserved (cannot be function or type name) | requires `as` | 2026 | Source relation, in the SQL surface and in `delete`. Clause-position only, so it remains usable as a variable or column name. | `sql { select id from accounts }` |
 | `full` | reserved (can be function or type name) | requires `as` | 2026 | Full outer join; also the `full` materialization mode and `lineage: full`. | `a.full_outer_join(b, \|x, y\| x.k == y.k)` |
 | `grant` | unreserved | bare | 2026 | Confer a capability. Niles grants an `Auth<E>`, not an ambient role. | `grant debit<usd> on postings to teller;` |
-| `group` | reserved | requires `as` | 2026 | Introduces grouping; the pipeline spelling is `group_by`. | `group_by(\|r\| (r.acct, r.cur))` |
+| `group` | non-reserved (cannot be function or type name) | requires `as` | 2026 | Introduces grouping; the pipeline spelling is `group_by`. Clause-position only. | `group_by(\|r\| (r.acct, r.cur))` |
 | `having` | reserved | requires `as` | 2026 | Filter applied after grouping, over group aggregates. | `group_by(\|r\| r.acct).having(\|g\| g.sum > 0.00 usd)` |
 | `in` | reserved | requires `as` | 2026 | Membership test, and the binder in `for x in xs`. | `where(\|r\| r.cur in [usd, eur])` |
 | `index` | unreserved | bare | 2026 | Declare an anchor index. Anchor indices are mandatory on ledger keys. | `index by_acct on postings (acct) anchor;` |
@@ -78,14 +78,14 @@ Taken from SQL, with SQL's meaning wherever the meaning survives. Where it does 
 | `key` | unreserved | bare | 2026 | Part of `primary key` / `foreign key`; also `lineage: key`. | `table t { id: i64 primary key }` |
 | `left` | reserved (can be function or type name) | requires `as` | 2026 | Left outer join. | `a.left_join(b, \|x, y\| x.k == y.k)` |
 | `like` | non-reserved (cannot be function or type name) | bare | 2026 | Pattern match on `Text`. | `where(\|r\| r.name like "ac%")` |
-| `limit` | reserved | requires `as` | 2026 | Bound the result cardinality. | `order_by(\|r\| desc(r.amt)).limit(10)` |
+| `limit` | non-reserved (cannot be function or type name) | requires `as` | 2026 | Bound the result cardinality. Clause-position only, so `limit` remains usable as a column name. | `order_by(\|r\| desc(r.amt)).limit(10)` |
 | `natural` | reserved (can be function or type name) | requires `as` | 2026 | Join on all like-named columns. Discouraged: it is schema-fragile. | `a.natural_join(b)` |
 | `not` | reserved | requires `as` | 2026 | Boolean negation. | `where(\|r\| not r.closed)` |
 | `null` | reserved | requires `as` | 2026 | The SQL null. Distinct from `Option::None` and from an evicted `Hole`. | `where(\|r\| r.closed_at is null)` |
-| `offset` | reserved | requires `as` | 2026 | Skip a prefix of the result. | `order_by(\|r\| r.id).offset(20).limit(10)` |
+| `offset` | non-reserved (cannot be function or type name) | requires `as` | 2026 | Skip a prefix of the result. Clause-position only. | `order_by(\|r\| r.id).offset(20).limit(10)` |
 | `on` | reserved | requires `as` | 2026 | Join predicate, or the object of a `grant`. | `a.join(b, \|x, y\| x.k == y.k)` |
 | `or` | reserved | requires `as` | 2026 | Short-circuiting boolean disjunction. | `where(\|r\| r.a or r.b)` |
-| `order` | reserved | requires `as` | 2026 | Introduces ordering; the pipeline spelling is `order_by`. | `order_by(\|r\| asc(r.id))` |
+| `order` | non-reserved (cannot be function or type name) | requires `as` | 2026 | Introduces ordering; the pipeline spelling is `order_by`. Clause-position only. | `order_by(\|r\| asc(r.id))` |
 | `outer` | reserved (can be function or type name) | requires `as` | 2026 | Marks a join as outer. | `a.full_outer_join(b, \|x, y\| x.k == y.k)` |
 | `primary` | unreserved | bare | 2026 | Introduces the primary key. | `table t { id: i64 primary key }` |
 | `recursive` | unreserved | bare | 2026 | Marks a CTE as recursive. Niles requires a `guard measure(..)` on the recursion regardless. | `sql { with recursive r as (select 1) select * from r }` |
@@ -101,7 +101,7 @@ Taken from SQL, with SQL's meaning wherever the meaning survives. Where it does 
 | `unique` | unreserved | bare | 2026 | Uniqueness constraint. | `table t { k: Text unique }` |
 | `update` | unreserved | bare | 2026 | Modify rows. Legal on `table` only; a `ledger` has no update. | `update accounts set tier = 2 where id == 1;` |
 | `using` | reserved (can be function or type name) | requires `as` | 2026 | Join on named common columns. | `a.join_using(b, ["acct"])` |
-| `values` | reserved | requires `as` | 2026 | Literal row constructor. | `insert into accounts values (1, "ada");` |
+| `values` | non-reserved (cannot be function or type name) | requires `as` | 2026 | Literal row constructor, in `insert`. Clause-position only. | `insert into accounts values (1, "ada");` |
 | `view` | unreserved | bare | 2026 | A derived relation with a serve contract. The REV of the theory. | `view v = postings.group_by(\|p\| p.acct) serve { consistency: snapshot };` |
 | `when` | reserved | requires `as` | 2026 | Guard of a `case` arm, or of a `match` arm. | `case when p then a else b end` |
 | `where` | reserved | requires `as` | 2026 | Filter stage, and Rust's bound clause. The positions are disjoint. | `postings.where(\|p\| p.amt > 0.00 usd)` |
@@ -233,10 +233,10 @@ Reserved with no meaning assigned in this edition. Using one is a hard error tha
 
 ## The normative reserved list (Appendix B.16)
 
-75 words. All require `r#` to be used as identifiers.
+68 words. All require `r#` to be used as identifiers.
 
 ```
-Self actor all and as async await break by case const continue crate cross distinct dyn else end enum except false fn for from full group having if impl in inner intersect is join left let limit loop macro match mod move mut natural not null offset on or order outer pub ref return right select self static stream struct super then trait true type union unsafe use using values when where while with yield
+Self actor all and as async await break by case const continue crate cross distinct dyn else enum except false fn for full having if impl in inner intersect is join left let loop macro match mod move mut natural not null on or outer pub ref return right select self static stream struct super then trait true type union unsafe use using when where while with yield
 ```
 
 ## Words that are *not* reserved, and why that matters

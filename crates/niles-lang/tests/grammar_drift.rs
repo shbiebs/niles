@@ -172,7 +172,7 @@ fn the_reserved_set_stays_small() {
 
     // The figures the thesis quotes. Computed here, never typed into the prose by hand.
     assert_eq!(total, 174, "keyword count changed; regenerate docs/keywords.md and update B.3");
-    assert_eq!(reserved, 66, "reserved count changed; update Appendix B.16");
+    assert_eq!(reserved, 59, "reserved count changed; update Appendix B.16");
     let unreserved = KEYWORDS.iter().filter(|k| k.category == Category::Unreserved).count();
     assert_eq!(unreserved, 95, "unreserved count changed; update Appendix B.16");
 }

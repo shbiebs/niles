@@ -1,0 +1,106 @@
+// Nilestream's own telemetry, written in Niles and served by Nilestream.
+//
+// This is the first genuine step of the self-hosting programme in Appendix E, and it is
+// deliberately the *read* side rather than the compiler. The engine emits its own events
+// into a base; the views over them are Niles source, compiled by `niles-lang`, lowered to
+// the same IR as any user query, and executed by the same REV runtime. There is no
+// separate metrics path, no privileged query language, and no hand-written aggregation.
+//
+// Why this is the right first bootstrap step, and not a stunt:
+//
+//   1. It is a real workload with an awkward shape — high-cardinality keys, a heavily
+//      skewed read distribution, and views at three different rungs — so it exercises the
+//      partial-state machinery rather than demonstrating it on a toy.
+//   2. It is the smallest piece of Nilestream whose failure is survivable. If the compiler
+//      mis-lowers a telemetry view, the operator sees wrong numbers; if it mis-lowered the
+//      write path, the ledger would be wrong. Self-hosting should begin where the blast
+//      radius is smallest, which is exactly the argument for stage-0/stage-1 separation.
+//   3. It forces the language to be adequate for something other than banking, which is
+//      the generality claim of Section 4.7 exercised rather than asserted.
+//
+// What it is not: the compiler, the planner, the write path or the storage engine, none of
+// which is written in Niles and none of which could be until the bootstrap of Appendix E
+// reaches stage 1. Appendix E.0 states that boundary; this file is inside it.
+
+schema nilestream_telemetry {
+    currency ops { scale: 0 }
+
+    // Every event the engine emits, as an immutable base. Not a `ledger`: telemetry does
+    // not conserve, and declaring it one would promise a double-entry invariant that no
+    // counter satisfies. It is still append-only and fully retained, because a metric you
+    // can rewrite is not evidence about what the system did.
+    base engine_events {
+        seq: u64 primary key,
+        view_name: Text,
+        node: u64,
+        kind: Text,
+        // Counted work, in the units Chapter 9 reports. Carried as `Money<ops>` at scale 0
+        // so that the type system's conservation and scale machinery applies to it — a
+        // counter that can be added to a currency by accident is a counter that will be.
+        work: Money,
+        at_epoch: Epoch,
+        retain forever;
+    }
+
+    // Reconstruction events, kept separate because their key is the *view's* key rather
+    // than the view itself, and mixing the two would make neither aggregatable.
+    base upquery_events {
+        seq: u64 primary key,
+        view_name: Text,
+        node: u64,
+        base_rows: Money,
+        at_epoch: Epoch,
+        retain forever;
+    }
+
+    index ix_events_view on engine_events (view_name, kind) anchor;
+    // The audit view groups by epoch, so that key needs its own anchor index. The compiler
+    // warned (NL0223) when it was missing, citing the measured 80-112x constant factor an
+    // anchor index buys on reconstruction — which is the warning doing its job on a file
+    // written after the warning existed.
+    index ix_events_epoch on engine_events (at_epoch) anchor;
+    index ix_upqueries_view on upquery_events (view_name, node) anchor;
+
+    // --- three views, three rungs, for three different readers ---
+
+    // An operator watching a dashboard. Bounded staleness is not a compromise here, it is
+    // the correct contract: a human reading a chart cannot perceive ten epochs of lag, and
+    // paying for strictness they cannot use is the waste the ladder exists to prevent.
+    view work_by_view = engine_events
+        .group_by(|e| (e.view_name, e.kind))
+        .sum(|e| e.work)
+        serve { consistency: bounded(epochs: 10, millis: 5000),
+                materialize: demand, retain: evictable, budget: 4096 };
+
+    // The optimizer reading its own reconstruction costs to decide what to evict. This is
+    // the engine consuming a Niles view about itself in order to make a runtime decision,
+    // which is the sharpest form of self-hosting available before stage 1.
+    //
+    // Rung 3 rather than 5: the decision is a cost estimate, and Theorem 4.5(a) guarantees
+    // that a mode change cannot change an answer, so a stale estimate costs compute and
+    // never correctness. That guarantee is precisely what licenses the cheaper rung, and
+    // without it this view would have to be served at rung 5 at real expense.
+    view reconstruction_cost = upquery_events
+        .group_by(|u| (u.view_name, u.node))
+        .sum(|u| u.base_rows)
+        serve { consistency: snapshot, materialize: demand,
+                retain: evictable, lineage: key, budget: 8192 };
+
+    // The audit view. Rung 5 and `lineage: full`, because an auditor asking "what did this
+    // system do at epoch 4,200" must get an answer that reflects every committed event
+    // preceding the question, with its derivation attached. This is the one telemetry view
+    // whose contract is not an economy.
+    view audit_trail = engine_events
+        .group_by(|e| e.at_epoch)
+        .count(|e| e.seq)
+        serve { consistency: ledger_consistent, materialize: demand,
+                retain: pinned, lineage: full };
+
+    // The same question in the SQL surface, to keep the equivalence honest on a file that
+    // is not a test. Both spellings lower to the same circuit.
+    view work_by_view_sql = sql {
+        select view_name, kind, sum(work) as total
+        from engine_events
+        group by view_name, kind
+    } serve { consistency: bounded(epochs: 10, millis: 5000), materialize: demand };
+}

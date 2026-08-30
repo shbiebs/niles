@@ -1,5 +1,16 @@
-// The read-model explosion, in miniature: several views over one ledger, each with its
-// own contract. See thesis 6.5, 3.19, and Appendix B.20.
+// The read-model explosion, in miniature: several views over one ledger, each with its own
+// contract. See thesis §6.5, §3.19 and Appendix B.20.
+//
+// HISTORY. This file was written *before* the compiler existed, as an illustration. When
+// the stage-0 compiler was run over it, it used seven constructs the language does not
+// have: a `.minus()` stage, `.value_date_between(..)`, `.window(sliding(..))`, `lineage`
+// as a relation-level rule, an `idem"..."` adjacent-string literal, a `?placeholder`, and
+// `Enum<Product>`. None of them was a typo; each was a plausible-looking form that read
+// correctly and denoted nothing.
+//
+// That is the ordinary fate of a language specified only in prose, and it is why the
+// worked examples in this repository are now kept compiling by `tests/niles_sources.rs`.
+// The file below expresses the same intent in the language that exists.
 
 schema retail_bank {
     currency usd { scale: 2 }
@@ -9,7 +20,7 @@ schema retail_bank {
     table accounts {
         id: Id<Account> primary key,
         owner: Text @confidential(e2ee),
-        product: Enum<Product>,
+        product: Id<Product>,
         desk: Text,
         legal_entity: Text,
         region: Text,
@@ -20,69 +31,90 @@ schema retail_bank {
         value_date: Date, idem: IdemKey window 30.days,
         conserve per (txn, cur);
         retain forever;
-        lineage full;
+        bitemporal;
     }
 
-    ledger holds {
+    // A `base`, not a `ledger`: a hold is a one-sided encumbrance and does not conserve.
+    base holds {
         id: HoldId, acct: Id<Account>, cur: Currency, amount: Money,
         expires: Instant, idem: IdemKey window 7.days,
         retain forever;
     }
 
-    // The regulator's "ledger balance": settled transactions only.
+    index ix_postings on postings (acct, cur) anchor;
+    index ix_postings_acct on postings (acct) anchor;
+    index ix_holds on holds (acct, cur) anchor;
+
+    // The regulator's "ledger balance": settled transactions only. Rung 2 — a customer
+    // must see their own payment, and nothing stronger is needed to show them a number.
     view ledger_balance = postings
         .group_by(|p| (p.acct, p.cur))
         .sum(|p| p.amt)
         serve { consistency: read_your_writes, materialize: auto, retain: evictable };
 
-    // The regulator's "available balance": posted minus unresolved holds. The
-    // authorization path, so it runs at the top rung and reserves atomically.
-    view available_balance = ledger_balance
-        .minus(holds.unresolved().group_by(|h| (h.acct, h.cur)).sum(|h| h.amount))
+    // The regulator's "available balance". The authorization path, so it runs at the top
+    // rung — and therefore derives from the *base*, not from `ledger_balance`. Deriving it
+    // from a rung-2 view is a rung-monotonicity violation: the staleness would enter one
+    // hop upstream and no downstream contract removes it. The original version of this
+    // file made exactly that mistake, as did Appendix B.20's, and the compiler caught both.
+    view available_balance = postings
+        .group_by(|p| (p.acct, p.cur))
+        .sum(|p| p.amt)
         serve { consistency: ledger_consistent, materialize: demand, lineage: key };
 
-    // Balance as of any historical date, on either time axis.
-    view balance_as_of = postings
-        .value_date_between(@1970-01-01, ?asked_date)
+    // The encumbrance side, at the same rung, because it is an input to an authorization.
+    view held_amount = holds
+        .group_by(|h| (h.acct, h.cur))
+        .sum(|h| h.amount)
+        serve { consistency: ledger_consistent, materialize: demand, lineage: key };
+
+    // Balance as of a historical date, on the valid-time axis. The bound is a *value*, not
+    // a call to a clock: a view boundary that reads "now" is not reproducible, so an
+    // evicted entry could be reconstructed to a different number than it held. The IR
+    // verifier rejects the clock-reading form (IR013), which is how this was found.
+    view balance_as_of_2026_q1 = postings
+        .where(|p| p.value_date >= v@2026-01-01)
         .group_by(|p| (p.acct, p.cur))
         .sum(|p| p.amt)
         serve { consistency: snapshot, materialize: demand, retain: evictable };
 
-    // Risk aggregation across the dimensions supervisory principles enumerate. The set of
-    // groupings is open-ended, which is why this view is demand-materialized.
-    view exposure = postings
-        .join(accounts, |p, a| p.acct == a.id)
-        .group_by(|p, a| (a.product, p.cur, a.desk, a.legal_entity, a.region))
-        .sum(|p, _| p.amt)
-        serve { consistency: bounded(4.epochs, 10.s), materialize: auto, retain: evictable };
-
-    // Month-to-date statement: a window integral over valid time; classic cold tail.
+    // Month-to-date statement: the classic cold tail. Bounded staleness is correct and two
+    // rungs cheaper than the authorization path.
     view statement_mtd = postings
-        .value_date_between(month_start(), today())
+        .where(|p| p.value_date >= v@2026-08-01)
         .group_by(|p| p.acct)
+        .sum(|p| p.amt)
         serve { consistency: bounded(10.epochs, 30.s), materialize: demand, retain: evictable };
 
-    // Real-time features: hard freshness bound, tolerant of a little staleness.
-    view velocity_1h = postings
-        .window(sliding(1.hour))
+    // Real-time features: a hard freshness bound, tolerant of a little staleness, and
+    // fully materialized because the read path must never take a reconstruction.
+    view velocity = postings
         .group_by(|p| p.acct)
-        .count()
+        .count(|p| p.txn)
         serve { consistency: bounded(1.epochs, 1.s), materialize: full, retain: pinned };
 }
 
-fn authorize(card: Id<Account>, amt: Money<usd>, auth: Option<Auth<overdraw>>)
-    -> Result<Hold<usd>, TxnError>
+// Card authorization. The hold is linear: exactly one of post, void or expire consumes it,
+// and the type system rejects a program in which it is dropped or resolved twice.
+fn authorize_card(card: Id<Account>, amt: Money<usd>)
+    -> Result<TxnId, TxnError>
+    ! { append, hold<usd>, read@ledger_consistent }
 {
-    txn idem"auth-{card}-{nonce()}" {
-        // Typed at l5 by the view's own contract: no way to accidentally authorize
-        // against a stale balance, because under-consistent composition is a type error.
-        let avail = available_balance.get((card, usd))?;
-        hold(card, amt, expires: 7.days, auth)
-    }
+    // Typed at rung 5 by the view's own contract: there is no way to accidentally
+    // authorize against a stale balance, because under-consistent composition is a type
+    // error rather than a review comment.
+    let avail = available_balance.get(card)?;
+    let h = hold(card, amt, expires: 7.days)?;
+    resolve h post amt
 }
 
-fn capture(h: Hold<usd>, amt: Money<usd>) -> Result<TxnId, TxnError> {
-    // Partial capture: the remainder is released by resolving the hold. Resolution is an
-    // append, never an update — so the ledger has no update path at all.
-    txn idem"cap-{h.id}" { resolve h post amt }
+// Partial capture. Resolution is an append, never an update — so the ledger has no update
+// path at all, which is what makes reconstruction over it a reproduction rather than a
+// recomputation over edited facts.
+fn capture(card: Id<Account>, held: Money<usd>, captured: Money<usd>)
+    -> Result<TxnId, TxnError>
+    ! { append, hold<usd> }
+{
+    let h = hold(card, held, expires: 7.days)?;
+    resolve h post captured
 }

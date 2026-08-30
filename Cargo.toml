@@ -15,6 +15,7 @@ members = [
     "crates/proto-engine",
     "crates/experiments",
     "crates/nilesc",
+    "crates/nilestream",
 ]
 
 [workspace.package]

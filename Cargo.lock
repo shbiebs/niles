@@ -48,6 +48,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "nilestream"
+version = "0.1.0"
+dependencies = [
+ "niles-ir",
+ "niles-lang",
+ "nilestream-core",
+ "proto-engine",
+]
+
+[[package]]
 name = "nilestream-core"
 version = "0.1.0"
 dependencies = [
@@ -86,6 +96,13 @@ name = "nilestream-storage"
 version = "0.1.0"
 dependencies = [
  "nilestream-ledger",
+]
+
+[[package]]
+name = "probe"
+version = "0.1.0"
+dependencies = [
+ "proto-engine",
 ]
 
 [[package]]

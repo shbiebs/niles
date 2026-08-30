@@ -333,13 +333,39 @@ integration of mechanisms that are individually available elsewhere — not as a
 capabilities no existing system could reach. Chapter 11's risk register gains this as a
 named risk, and Chapter 12 records rebalancing the document's emphasis as outstanding work.
 
-## 6.11 Memory Model, Allocation, Immutability, and Memory Safety
+## 6.11 Join Ordering Under Partial State
+
+Join ordering is the oldest solved problem in query optimisation and it is not the problem this system has. Selinger's dynamic program, and its modern form as Moerkotte and Neumann's `DPccp`, minimises one quantity: the number of intermediate tuples a plan produces. That is the right objective for a batch engine, where a join is a *transient* — it consumes its inputs, emits its output and holds nothing afterwards.
+
+In a dataflow engine a join is not transient. It is a standing operator with two indexes, and those indexes are resident for as long as the view exists. The number that matters is therefore not how many tuples pass through but how many are still in memory when nothing is passing through at all, and a plan that produces fewer intermediate tuples while keeping a larger index is worse. Partial state adds a third quantity neither of the first two captures: when a REV evicts a key and later reads it, reconstruction walks *up* the operator graph to the nearest reconstructible ancestor, and the shape of the join tree is the shape of that walk. A deep left-deep tree makes reconstruction deep; a bushy tree makes it shallow but multiplies the internal indexes. The objective is thus three-term:
+
+$$\mathrm{cost}(P) \;=\; w_{\text{flow}} \sum_{v \in P} |v| \;+\; w_{\text{state}} \sum_{v \in P} \mathrm{resident}(v) \;+\; w_{\text{recon}} \cdot \Pr[\text{miss}] \cdot \mathbb{E}[\text{upquery work}]$$
+
+The three weights are not universal constants; they are read off the view's serve contract. A view at `ledger_consistent` under a tight freshness bound pays for state to avoid reconstruction latency; a cold analytical view at `bounded` pays for reconstruction to avoid state. That is Contribution 3's claim — *the price is workload-shaped, not history-shaped* — appearing as a planner input rather than as a theorem, and it is why the phase diagram of §9.13 has regions at all: were one plan optimal everywhere in the weight space, there would be nothing to characterise.
+
+**Reconstructibility is a constraint, not a cost, and this has no analogue in a classical optimiser.** Some orderings are not expensive but *illegal*, because they place a non-reconstructible operator on the upquery path of a partial node — a source that is a mutable table rather than an immutable base, or a windowing node whose input has been discarded. Reconstruction from a frozen prefix is what makes anchored upqueries sound (Theorem 4.1); an operator that cannot be replayed breaks the chain. Such candidates are pruned *before* costing, so a bad cardinality estimate can make a plan slow but cannot make it wrong. The same discipline governs the materialization optimizer, for the same reason: the optimizer is forbidden from being a correctness dependency.
+
+The implementation (`nilestream-optimizer::join_order`, 16 tests) runs `DPccp` for at most twelve relations and a greedy minimum-selectivity fallback above that, recording in the plan *which* ran, so that a measured regression can be attributed. Cardinality estimation uses the standard containment and independence assumptions and is wrong in the standard ways — correlated banking columns such as `account` and `currency` violate independence systematically — and a missing statistic falls back visibly rather than to a selectivity of one, because a cross product that looks free is how an estimator error hides. Cross products are enumerated only when the query graph is genuinely disconnected: a cross product in a standing dataflow operator is a resident quadratic index, which is a different order of mistake from a transient one.
+
+## 6.12 Transport Security, and Where Cryptography Stops Being This Thesis's Problem
+
+Two negotiation protocols are implemented, together with the policy layer that decides whether a cleartext connection may proceed. The cryptography is **not** implemented and is delegated behind a provider trait.
+
+That division is a design position rather than an omission, and the thesis states it as one. Writing a TLS stack is the canonical example of work that must not be done from scratch: the failure mode is silent, the attacker is adaptive, and the defects that matter — padding oracles, timing leaks in MAC verification, state-machine confusion permitting a handshake step to be skipped — are precisely the ones a functional test suite passes. A thesis whose contribution is the static checkability of financial invariants has nothing to gain and a great deal of credibility to lose by shipping its own record layer.
+
+The commitment that *is* load-bearing is what happens when the provider is absent. The obvious behaviour — accept cleartext, log a warning — is how a database comes to serve a ledger over a plaintext socket because a certificate expired overnight and something helpfully degraded. Here a `Require` policy with no provider **fails at startup**, before the listener binds, and refuses every connection independently at connection time in case the provider stops working later. This is the absence-lattice principle applied to a socket: an absence is reported honestly rather than papered over.
+
+**The two protocols are not equally well designed, and the asymmetry belongs in the text rather than in a footnote.** PostgreSQL's client sends an eight-byte `SSLRequest` *before* the startup packet and the server answers with a single byte; nothing has been exchanged, so a refusal leaks nothing, and the user name and database travel inside the tunnel. MySQL's server sends its greeting in cleartext first, and the client signals upgrade by setting a capability flag in a *truncated* handshake response. Two consequences follow. The banner and auth-plugin name are on the wire in the clear regardless — nothing a server can do; it is in the protocol. And the upgrade is **client-asserted**, so a server that merely honours the flag lets any client opt out of encryption by not setting it. Enforcement must be a server-side check after reading the truncated response, and this is a real historical vulnerability class rather than a hypothetical.
+
+One further honesty obligation is discharged in the types. `libpq` has six `sslmode` values and only two of them authenticate the server: `require` encrypts to a peer it has not identified, which defeats passive interception and nothing else. The implementation carries a predicate recording which modes actually authenticate, and the audit line reads *"encrypted, server identity unverified by the client"* rather than "TLS enabled" — deliberately awkward, because it is the true statement and the comfortable phrasing is not.
+
+## 6.13 Memory Model, Allocation, Immutability, and Memory Safety
 
 The runtime's memory model mirrors the formal one. Sealed data is immutable: epoch segments are frozen buffers, and resident view entries are immutable values *replaced* rather than mutated on anchor advance, with structural sharing. Allocation is arena-per-epoch on the write path — an epoch's allocations free as a unit after sealing and migration — and slab-based for resident maps under the optimizer's budget.
 
 Ownership types are the enforcement mechanism: no mutable reference to sealed data exists in the type surface, so the two mutable structures (admission queue, resident maps) are the entire audited concurrency surface. At the Niles level, `ledger` values are immutable by type, bindings are immutable by default with explicit opt-in, and user functions receive borrowed immutable views. Memory safety for user code comes from the sandbox of the UDF tier, not from trusting user code.
 
-## 6.12 Language Scope
+## 6.14 Language Scope
 
 Niles is a data language with an imperative sublanguage, not a systems language. Three tiers:
 
@@ -349,7 +375,7 @@ Niles is a data language with an imperative sublanguage, not a systems language.
 
 Explicitly out of scope: raw pointers, unrestricted I/O in query context, ambient wall-clock reads, and unbounded recursion in views. Application code, servers and user interfaces are out of scope by design; Niles connects to host languages through the wire protocols and embedded APIs. Section 11.2 lists "seductive generality" — the temptation to grow Niles into an application language — as a named risk, and these tiers as the mitigation.
 
-## 6.13 The Computation Tier and the Determinism Obligation
+## 6.15 The Computation Tier and the Determinism Obligation
 
 The computation tier executes IR circuits: a scheduler assigns operator work per sealed epoch, hot circuits run fused and compiled, cold circuits interpret, and upqueries execute the same circuits in pull mode along provenance-derived paths. The compilation model follows the data-centric, push-based approach in which operator boundaries disappear in generated code and tuples stay in registers between pipeline breakers [Neumann, PVLDB 2011].
 
@@ -357,13 +383,13 @@ The computation tier executes IR circuits: a scheduler assigns operator work per
 
 Achieving it requires closing sources of non-determinism explicitly, and one of them is a correction to naive assumptions about the UDF sandbox. WebAssembly is *not* fully deterministic: its specification names three sources of implementation-dependent behaviour — NaN payloads (canonical NaNs carry a non-deterministic sign bit, and non-canonical inputs yield non-deterministic outputs), resource exhaustion (engines may fail to grow linear memory), and host functions [Haas et al., PLDI '17]. A UDF that produces a NaN, or that exhausts memory at a device-dependent point, would break reconstruction-equivalence over a hash-chained base. The obligation is therefore stated as three concrete mitigations rather than as an assumption: ban NaN-producing floating-point operations in UDFs or canonicalize at the kernel boundary; make resource exhaustion a *deterministic* abort at a fixed fuel bound rather than a device-dependent one; and permit no host functions outside a deterministic allowlist. Within the engine itself, determinism is enforced by canonical ordering before emission, integer-exact money, and prohibition of hash-order iteration.
 
-## 6.14 The Kernel Boundary
+## 6.16 The Kernel Boundary
 
 The trusted kernel is small: admission, validation and sealing; hash chaining; storage; frontier bookkeeping; and the IR executor's core operators. Outside it: UDFs (sandboxed, resource-metered, with no ambient authority — capabilities are passed explicitly, following the capability-based model of the Wasm system interface); surface compilers, whose output is re-checked by the IR verifier, so the kernel trusts the *verifier* rather than the compiler; the materialization optimizer, whose decisions are semantics-preserving by Theorem 4.5(a) and therefore cannot be a correctness dependency; and wire adapters, which translate and never touch state directly.
 
 The soundness theorem's trusted computing base is thus the kernel plus the IR verifier — stated explicitly so that the S4 campaign attacks the right boundary, and so that adding a domain library or an optimizer heuristic provably does not enlarge it.
 
-## 6.15 Lineage and Traceability
+## 6.17 Lineage and Traceability
 
 Full traceability of operations, changes and states is a system requirement (Section 1.3(4)) and is implemented as an ordinary consequence of the algebra rather than as a logging subsystem.
 
@@ -371,25 +397,25 @@ Three modes are declarable per view: `off` (anchors only — every answer still 
 
 Three operational capabilities follow. **Explain**: for any served answer, return the base rows and the derivation that produced it. **Reproduce**: recompute any published (answer, epoch) from the prefix and compare byte-for-byte — the mechanical form of an audit. **Impact**: given a base row, identify the derived entries whose provenance includes it, which is what makes correction workflows (a reversing entry) analyzable rather than hopeful. Costs are measured under S9, with the published ~30% figure for interactive dataflow lineage as the order-of-magnitude reference point rather than a target.
 
-## 6.16 Checkpoints as a Declared View Property
+## 6.18 Checkpoints as a Declared View Property
 
 Theorem 3.7 makes the per-key checkpoint interval C the constant in the reconstruction bound, and §9.4.1 measures it: at C = 16 reconstruction cost was flat at ≈ 8.5 base rows across a 64× increase in history, against a predicted C/2 + 1 = 9. C is therefore a *contract term*, declared per view alongside consistency and materialization mode, and not a hidden engine default — because choosing it is choosing a point on the reconstruction-cost/checkpoint-storage trade, and the theory prices that choice.
 
 Checkpoints are derived state: each is recomputable from the base, so they are evictable and rebuildable and stand outside the retention guarantee, exactly as views do. This is the base/derived split of F4 applied one level down, to the reconstruction path itself.
 
-## 6.17 The Materialization Optimizer in the Runtime
+## 6.19 The Materialization Optimizer in the Runtime
 
 Contribution 5's algorithm lives here. Per view and key range, the optimizer maintains estimates of arrival rate, reuse distance, reconstruction cost, reconstruction *latency* and update rate; computes the rent-or-buy break-even for mode selection and a cost-and-size-aware credit for eviction; weights both by the contract multiplier Φ(ℓ) and by the delayed-hit factor; and moves ranges between modes on a hysteresis schedule.
 
 Three properties make this safe to run continuously. It cannot change what an answer *is* (Theorem 4.5(a)). It cannot violate a contract, because contract satisfaction is a constraint of the assignment problem rather than an objective term. And it is *observable*: every mode transition is logged with the estimates that caused it, so a surprising decision is diagnosable rather than mysterious. Appendix I gives the algorithm, the estimators, and the offline dynamic program used to compute the optimum against which S7 measures it.
 
-## 6.18 End-to-End Encryption: Threat Model and Requirements
+## 6.20 End-to-End Encryption: Threat Model and Requirements
 
 **Requirement.** Fields marked confidential must be protected such that a compromised operator — an honest-but-curious server, stolen media, subpoenaed backups — cannot read them, while the base's ordering, hashing and conservation guarantees still hold.
 
 **Threat model.** The adversary controls storage and can read server memory, except for designated key-holding clients or hardware modules; the adversary cannot break standard cryptography. Availability attacks and traffic analysis are out of scope, and leakage is bounded rather than eliminated (Section 6.19).
 
-## 6.19 E2EE Versus Computation Over Data
+## 6.21 E2EE Versus Computation Over Data
 
 The honest tension is that a server cannot compute over what it cannot read. Fully homomorphic encryption is rejected for the serving path on cost. The design instead *partitions fields by computability need*, and forces the partition to be declared:
 
@@ -399,7 +425,7 @@ The honest tension is that a server cannot compute over what it cannot read. Ful
 
 Confidentiality is a static type annotation checked like everything else: end-to-end-encrypted fields cannot appear in server-side predicates, joins or aggregates (a compile error names the leak); committed fields admit only the operations their scheme supports; and declassification requires an explicit capability that appears in the audit trail. The discipline is information-flow typing narrowed to the two lattice points the system actually offers — and narrowed deliberately: labels are **static**, because non-interference results for dynamic labels remain an open problem in that literature, and a guarantee this thesis cannot prove is one it does not claim.
 
-## 6.20 Defence in Depth, Leakage, Limits, and Correctness Obligations
+## 6.22 Defence in Depth, Leakage, Limits, and Correctness Obligations
 
 **Layers.** Transport encryption; storage encryption at rest with per-tenant keys; field-level encryption per Section 6.18 with client- or module-held keys; hash-chain integrity computed over ciphertext so tamper-evidence survives confidentiality; key rotation recorded *in the ledger itself*, so rotation is an audited event; and capability-scoped decryption in clients.
 
@@ -409,11 +435,11 @@ Confidentiality is a static type annotation checked like everything else: end-to
 
 **Crypto-shredding, stated accurately.** Where erasure obligations conflict with retention, destroying a key renders the retained ciphertext unreadable. The most authoritative published treatment of this technique in a regulatory context states that it can "make the data practically inaccessible, and therefore move closer to the effects of data erasure" — and deliberately stops short of saying it satisfies the erasure right [CNIL, 2018]. This thesis preserves that hedge, and Section 11.1 accordingly lists legal erasure over base facts among the cases where this architecture is the wrong choice.
 
-## 6.21 A Phased Build-and-Evaluation Guide
+## 6.23 A Phased Build-and-Evaluation Guide
 
 Each subsystem carries its falsifier from birth: the ledger ships with the floor benchmark before any read model exists; the IR ships with golden-equivalence tests before optimization; partial state ships with the conservation suite wired in; the optimizer ships with the offline dynamic program that grades it; wire protocols ship with the compatibility corpus. *No subsystem without its falsifier* is the methodology of Chapter 5 made concrete, and the ordering follows Chapter 8.
 
-## 6.22 Product Coverage
+## 6.24 Product Coverage
 
 The banking layer's target portfolio, all expressible as `std::bank` and `std::temporal` constructs over the general core:
 
@@ -426,7 +452,7 @@ The banking layer's target portfolio, all expressible as `std::bank` and `std::t
 
 Each is a worked example in the artifact; none requires a kernel change, which is the running scope test of Section 9.11.
 
-## 6.23 Syntax Lineage and the SQL-First, Rust-Fallback Rule
+## 6.25 Syntax Lineage and the SQL-First, Rust-Fallback Rule
 
 **The normative rule** for every surface decision: (1) if SQL already expresses the construct, use SQL's keywords and shape — the sole permitted deviation being pipelined clause *order*, which reads in evaluation order while reusing every SQL keyword verbatim; (2) otherwise, if Rust has an equivalent, use Rust's spelling exactly; (3) otherwise, and only then, invent — and inventions introduce new keywords, types and literals rather than overloading inherited ones.
 
@@ -438,7 +464,7 @@ This ordering is the reverse of the one an earlier draft adopted, and the reason
 
 The rule is testable: any construct violating the precedence order is a specification bug, and Appendix B applies it item by item.
 
-## 6.24 Build Stack and Compilation Targets
+## 6.26 Build Stack and Compilation Targets
 
 **The four-technology stack:** Rust (engine, kernel, stage-0 compiler host); the Niles IR (the semantic centre); WebAssembly (the UDF ABI and the self-hosted optimizer's own execution target); and an optional established back-end for release-grade native code generation, against which the self-hosted back-end's remaining gap is measured and published rather than hidden.
 

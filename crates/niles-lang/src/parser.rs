@@ -27,7 +27,7 @@
 use crate::ast::*;
 use crate::diagnostics::{Applicability, Diagnostic, Diagnostics};
 use crate::keywords::{self, Kw};
-use crate::lexer::{lex, Span, TimeUnit, Tok, Token};
+use crate::lexer::{lex, Span, Tok, Token};
 
 pub struct Parser<'a> {
     toks: Vec<Token>,

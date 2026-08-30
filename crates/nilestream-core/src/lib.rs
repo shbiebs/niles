@@ -20,6 +20,7 @@
 
 pub mod absence;
 pub mod anchor_index;
+pub mod distributed;
 pub mod eviction;
 pub mod ladder;
 pub mod rev;

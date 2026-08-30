@@ -29,7 +29,7 @@
 //! unproven.
 
 use crate::circuit::{Circuit, NodeId};
-use crate::operator::{ColIdx, Op, Scalar};
+use crate::operator::{ColIdx, Op};
 use std::collections::BTreeSet;
 
 /// One hop of a reconstruction.

@@ -25,6 +25,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "niles-interp"
+version = "0.1.0"
+dependencies = [
+ "niles-lang",
+]
+
+[[package]]
 name = "niles-ir"
 version = "0.1.0"
 

@@ -328,7 +328,7 @@ This contribution exists because an experiment refuted a claim the thesis had as
 
 **Why this is a contribution and not an implementation note.** Three reasons.
 
-*It changes the status of SC3.* The cost law is no longer an emergent property of the data structure but a **design obligation** with a stated constant. C is a term in the theory: it appears in the bound, it is declarable per view (§6.16), and choosing it is a decision the theory prices rather than a knob an operator guesses.
+*It changes the status of SC3.* The cost law is no longer an emergent property of the data structure but a **design obligation** with a stated constant. C is a term in the theory: it appears in the bound, it is declarable per view (§6.18), and choosing it is a decision the theory prices rather than a knob an operator guesses.
 
 *It explains prior art that was otherwise unexplained.* Production ledgers maintain running balances rather than folding journals on demand, and at least one purpose-built ledger offers a per-account flag to retain balance history at each transfer. Those are the same bound bought under a different name. The thesis previously treated such materialized balances as an optimization that its own design made unnecessary; the measurement shows they are the mechanism that makes the design's cost claim true.
 

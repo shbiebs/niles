@@ -17,6 +17,7 @@ members = [
     "crates/nilesc",
     "crates/nilestream",
     "crates/nilestream-consensus",
+    "crates/niles-interp",
 ]
 
 [workspace.package]

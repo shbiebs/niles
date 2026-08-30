@@ -17,8 +17,10 @@
 //! whole thesis argues against.
 
 pub mod audit;
+pub mod extended;
 pub mod mysql_wire;
 pub mod native_proto;
 pub mod observability;
 pub mod pg_wire;
 pub mod session;
+pub mod tls;

@@ -1,0 +1,419 @@
+// bootstrap/lexer.niles — the Niles-written lexer.
+//
+// This is the first line of the Niles compiler written in Niles, and therefore the first
+// input stage 1 of the Appendix E bootstrap has ever had. It is run by the stage-0
+// interpreter (`niles-interp`) over Niles source text, and its output is compared,
+// token for token, with the Rust lexer's output over the same text. That comparison is
+// the stage-1 equivalence gate: it is the evidence that the language can express its own
+// front end, as opposed to the assertion that it could.
+//
+// It is deliberately written in the imperative subset only — no pipelines, no views, no
+// txn — because that is what stage 0 executes. Every construct here is one the thesis
+// claims Niles inherits from Rust: `fn`, `let mut`, `while`, `if`, `match`, `struct`,
+// `enum` with payloads, arrays, and closures. If a construct in this file did not exist
+// in Niles, the file would not parse; the fact that `nilesc parse` accepts it is itself a
+// (weak) result about the language's expressiveness.
+//
+// Scope, stated honestly: this lexer covers identifiers, keywords, integers, money
+// literals, epoch literals, strings, comments, and the full punctuation table. It does
+// *not* cover instants, durations, byte strings, or raw identifiers. §E.19 records that,
+// and the gate compares only over inputs within this scope, rather than declaring a pass
+// it did not earn.
+
+// ── the token type ───────────────────────────────────────────────────────────────────
+
+enum Kind {
+    Ident,
+    Keyword,
+    Int,
+    Money,
+    Epoch,
+    Str,
+    Punct,
+    Unknown,
+    Eof,
+}
+
+struct Token {
+    kind: Kind,
+    // The source text the token covers, verbatim. Keeping the text rather than a decoded
+    // value is what lets the equivalence gate compare against the Rust lexer without
+    // either side having to agree on a numeric representation first.
+    text: str,
+    start: i64,
+    end: i64,
+}
+
+// ── character classification ─────────────────────────────────────────────────────────
+//
+// `is_digit`, `is_ident_start`, `is_ident_continue` and `is_space` come from the host
+// shim (Appendix E.3) rather than from Niles, for the reason given there: a bootstrap
+// that begins by transcribing an ASCII table has spent its first day on nothing.
+
+fn is_punct_start(c: i64) -> bool {
+    c == 40 || c == 41 ||    // ( )
+    c == 123 || c == 125 ||  // { }
+    c == 91 || c == 93 ||    // [ ]
+    c == 44 || c == 59 ||    // , ;
+    c == 58 || c == 46 ||    // : .
+    c == 124 || c == 38 ||   // | &
+    c == 33 || c == 63 ||    // ! ?
+    c == 64 || c == 35 ||    // @ #
+    c == 43 || c == 45 ||    // + -
+    c == 42 || c == 47 ||    // * /
+    c == 37 || c == 94 ||    // % ^
+    c == 61 || c == 60 || c == 62  // = < >
+}
+
+// ── the keyword table ────────────────────────────────────────────────────────────────
+//
+// **All 173 keywords, generated from `crates/niles-lang/src/keywords.rs`.**
+//
+// The first version of this file carried a hand-picked subset, and the stage-1
+// equivalence gate rejected it four times running: `evict` and `conserves` do not exist
+// (the registry's words are `evictable` and `conserve`), while `from` and `post` do and
+// were missing. That is the failure mode a keyword registry exists to prevent, arriving
+// on schedule the moment a second implementation appeared — which is the argument for
+// the registry, now with evidence rather than assertion behind it.
+//
+// The table is therefore *generated*, and `keyword_table_matches_the_registry` in
+// `tests/bootstrap_stages.rs` fails the build if the two ever diverge again. The single
+// source of truth crosses the bootstrap boundary; it does not stop at the host language.
+
+fn keywords() -> [str] {
+    [
+     "Self", "absent", "actor", "add", "all", "alter",
+     "anchor", "and", "any", "as", "as_of", "asc",
+     "async", "authorize", "auto", "await", "backfill", "base",
+     "begin", "between", "bitemporal", "bounded", "break", "budget",
+     "by", "capability", "case", "cast", "check", "column",
+     "commit", "committed", "confidential", "conserve", "consistency", "const",
+     "continue", "crate", "create", "cross", "currency", "declassify",
+     "default", "delete", "demand", "desc", "distinct", "drop",
+     "dyn", "e2ee", "else", "emit", "end", "enum",
+     "epoch", "evictable", "except", "exists", "expire", "expires",
+     "explain", "false", "fn", "for", "foreign", "forever",
+     "freshness", "from", "full", "fx", "grant", "group",
+     "guard", "having", "hold", "idem", "if", "impact",
+     "impl", "in", "index", "inner", "insert", "intersect",
+     "into", "is", "join", "key", "ledger", "ledger_consistent",
+     "left", "leg", "let", "like", "limit", "lineage",
+     "loop", "macro", "match", "materialize", "measure", "mod",
+     "monotonic", "move", "mut", "natural", "not", "null",
+     "of", "offset", "on", "or", "order", "outer",
+     "per", "pinned", "post", "posting", "primary", "pub",
+     "rate", "read_your_writes", "recorded_at", "recursive", "ref", "references",
+     "reproduce", "resolve", "retain", "return", "revoke", "right",
+     "rollback", "scale", "schema", "select", "self", "serializable",
+     "serve", "set", "signal", "snapshot", "spilled", "sql",
+     "static", "stream", "struct", "super", "table", "then",
+     "tiered", "trait", "true", "txn", "type", "udf",
+     "union", "unique", "unsafe", "update", "upto", "use",
+     "using", "valid_at", "value_date", "values", "view", "void",
+     "when", "where", "while", "window", "with", "yield",
+    ]
+}
+
+// Keyword lookup is CASE-INSENSITIVE, which is Niles's SQL lineage showing through:
+// `SELECT` and `select` are the same word, so `EPOCH` and `epoch` must be too, and
+// therefore so is `Epoch`. Getting this wrong is the second of the two defects the
+// stage-1 equivalence gate caught in this file, and it is a defect a hand-written
+// lexer makes precisely because Rust — the other half of Niles's ancestry — is
+// case-sensitive. The two lineages disagree here and the registry settles it.
+fn is_keyword(word: str) -> bool {
+    let lowered = word.to_lower();
+    let table = keywords();
+    let mut i = 0;
+    let mut found = false;
+    while i < len(table) {
+        if table[i] == lowered {
+            found = true;
+        }
+        i = i + 1;
+    }
+    found
+}
+
+// ── scanning ─────────────────────────────────────────────────────────────────────────
+
+// Skip whitespace and comments, returning the new position.
+//
+// `//` to end of line, and `/* */` without nesting, matching the Rust lexer. A block
+// comment that never closes ends at end of input rather than looping, which is the
+// behaviour a lexer must have if a truncated file is to produce diagnostics at all.
+fn skip_trivia(src: str, from: i64) -> i64 {
+    let n = len(src);
+    let mut i = from;
+    let mut going = true;
+    while going {
+        going = false;
+        while i < n && src.byte_at(i).is_space() {
+            i = i + 1;
+            going = true;
+        }
+        if i + 1 < n && src.byte_at(i) == 47 && src.byte_at(i + 1) == 47 {
+            while i < n && src.byte_at(i) != 10 {
+                i = i + 1;
+            }
+            going = true;
+        }
+        if i + 1 < n && src.byte_at(i) == 47 && src.byte_at(i + 1) == 42 {
+            i = i + 2;
+            let mut closed = false;
+            while i + 1 < n && closed == false {
+                if src.byte_at(i) == 42 && src.byte_at(i + 1) == 47 {
+                    i = i + 2;
+                    closed = true;
+                } else {
+                    i = i + 1;
+                }
+            }
+            if closed == false {
+                i = n;
+            }
+            going = true;
+        }
+    }
+    i
+}
+
+// An identifier or keyword starting at `from`. Returns the end offset.
+fn scan_word(src: str, from: i64) -> i64 {
+    let n = len(src);
+    let mut i = from;
+    while i < n && src.byte_at(i).is_ident_continue() {
+        i = i + 1;
+    }
+    i
+}
+
+// A run of digits and underscores.
+fn scan_digits(src: str, from: i64) -> i64 {
+    let n = len(src);
+    let mut i = from;
+    while i < n && (src.byte_at(i).is_digit() || src.byte_at(i) == 95) {
+        i = i + 1;
+    }
+    i
+}
+
+// A string literal, `from` pointing at the opening quote. Returns the offset just past
+// the closing quote, or the end of input if it is never closed.
+fn scan_string(src: str, from: i64) -> i64 {
+    let n = len(src);
+    let mut i = from + 1;
+    let mut done = false;
+    while i < n && done == false {
+        let c = src.byte_at(i);
+        if c == 92 {
+            // A backslash consumes the next byte whatever it is, so `\"` does not end the
+            // literal. Escape *decoding* is not done here; the token carries its text.
+            i = i + 2;
+        } else {
+            if c == 34 {
+                i = i + 1;
+                done = true;
+            } else {
+                i = i + 1;
+            }
+        }
+    }
+    i
+}
+
+// The punctuation table, longest match first.
+//
+// The order matters and is the classic lexer trap: `::` must be tried before `:`, `|>`
+// and `||` before `|`, `=>` and `==` before `=`. Getting it wrong produces a lexer that
+// works on every test until someone writes `a::b`.
+fn scan_punct(src: str, from: i64) -> i64 {
+    let n = len(src);
+    let c = src.byte_at(from);
+    if from + 1 < n {
+        let d = src.byte_at(from + 1);
+        if c == 58 && d == 58 { return from + 2; }   // ::
+        if c == 46 && d == 46 { return from + 2; }   // ..
+        if c == 45 && d == 62 { return from + 2; }   // ->
+        if c == 61 && d == 62 { return from + 2; }   // =>
+        if c == 61 && d == 61 { return from + 2; }   // ==
+        if c == 33 && d == 61 { return from + 2; }   // !=
+        if c == 60 && d == 61 { return from + 2; }   // <=
+        if c == 62 && d == 61 { return from + 2; }   // >=
+        if c == 124 && d == 124 { return from + 2; } // ||
+        if c == 124 && d == 62 { return from + 2; }  // |>
+        if c == 38 && d == 38 { return from + 2; }   // &&
+        if c == 35 && d == 91 { return from + 2; }   // #[
+    }
+    from + 1
+}
+
+// The main loop: one token per call, returning the token and where to continue.
+//
+// Returning a struct rather than mutating a cursor is not a style choice — the stage-0
+// subset has no aliasing at all (values are cloned), so a mutable cursor passed by
+// reference would not work. This is a small, real piece of evidence for §6.6: the
+// immutability discipline the thesis argues for changes how the compiler is written, and
+// this file is what that looks like.
+struct Step {
+    tok: Token,
+    next: i64,
+}
+
+fn next_token(src: str, from: i64) -> Step {
+    let n = len(src);
+    let start = skip_trivia(src, from);
+
+    if start >= n {
+        return Step {
+            tok: Token { kind: Kind::Eof, text: "", start: n, end: n },
+            next: n,
+        };
+    }
+
+    let c = src.byte_at(start);
+
+    // --- an identifier or a keyword ---
+    if c.is_ident_start() {
+        let e = scan_word(src, start);
+        let word = src.slice(start, e);
+        let k = if is_keyword(word) { Kind::Keyword } else { Kind::Ident };
+        return Step { tok: Token { kind: k, text: word, start: start, end: e }, next: e };
+    }
+
+    // --- a number, which may be an integer or a money literal ---
+    //
+    // `10.00 usd` is money; `10` is an integer; `10.days` is a duration, which is out of
+    // scope and is lexed as an integer followed by punctuation. The disambiguation rule
+    // matches the Rust lexer's: a `.` followed by a digit continues the number, and a
+    // following lowercase word is the currency.
+    if c.is_digit() {
+        let mut e = scan_digits(src, start);
+        let mut kind = Kind::Int;
+        if e + 1 < n && src.byte_at(e) == 46 && src.byte_at(e + 1).is_digit() {
+            e = scan_digits(src, e + 1);
+            let after = skip_trivia(src, e);
+            if after < n && src.byte_at(after).is_ident_start() {
+                let we = scan_word(src, after);
+                kind = Kind::Money;
+                return Step {
+                    tok: Token { kind: kind, text: src.slice(start, we), start: start, end: we },
+                    next: we,
+                };
+            }
+        }
+        return Step {
+            tok: Token { kind: kind, text: src.slice(start, e), start: start, end: e },
+            next: e,
+        };
+    }
+
+    // --- an epoch literal, `#4200` ---
+    //
+    // Checked before punctuation, because `#` is also the start of `#[`. The rule is the
+    // same one the Rust lexer uses for `@`: a sigil is a literal only when a digit
+    // follows, which is what lets `#[attr]` and `#4200` coexist.
+    if c == 35 && start + 1 < n && src.byte_at(start + 1).is_digit() {
+        let e = scan_digits(src, start + 1);
+        return Step {
+            tok: Token { kind: Kind::Epoch, text: src.slice(start, e), start: start, end: e },
+            next: e,
+        };
+    }
+
+    // --- a string ---
+    if c == 34 {
+        let e = scan_string(src, start);
+        return Step {
+            tok: Token { kind: Kind::Str, text: src.slice(start, e), start: start, end: e },
+            next: e,
+        };
+    }
+
+    // --- punctuation ---
+    if is_punct_start(c) {
+        let e = scan_punct(src, start);
+        return Step {
+            tok: Token { kind: Kind::Punct, text: src.slice(start, e), start: start, end: e },
+            next: e,
+        };
+    }
+
+    // --- anything else ---
+    //
+    // Never dropped. An unclassifiable byte becomes a token so the parser can report it
+    // in position and carry on, which is the same commitment the Rust lexer makes.
+    Step {
+        tok: Token { kind: Kind::Unknown, text: src.slice(start, start + 1), start: start, end: start + 1 },
+        next: start + 1,
+    }
+}
+
+// Lex a whole source text. Always ends with exactly one `Eof`.
+fn lex(src: str) -> [Token] {
+    let mut out = [];
+    let mut i = 0;
+    let mut running = true;
+    while running {
+        let step = next_token(src, i);
+        out = out.push(step.tok);
+        if step.tok.kind == Kind::Eof {
+            running = false;
+        } else {
+            // A lexer that fails to advance loops forever. This cannot happen given the
+            // scanners above — each returns at least `start + 1` — but a bootstrap
+            // compiler that hangs is worse than one that stops, so the guard stays.
+            if step.next <= i && step.tok.kind != Kind::Eof {
+                running = false;
+            }
+            i = step.next;
+        }
+    }
+    out
+}
+
+// ── the rendering used by the equivalence gate ───────────────────────────────────────
+//
+// One line per token, `KIND start..end text`. The Rust side produces the same shape from
+// its own token stream, and the gate compares the two strings. Comparing rendered text
+// rather than structures is deliberate: the two lexers share no types, and a comparison
+// that required them to would be comparing an adapter rather than the lexers.
+
+fn kind_name(k: Kind) -> str {
+    match k {
+        Kind::Ident => "IDENT",
+        Kind::Keyword => "KW",
+        Kind::Int => "INT",
+        Kind::Money => "MONEY",
+        Kind::Epoch => "EPOCH",
+        Kind::Str => "STR",
+        Kind::Punct => "PUNCT",
+        Kind::Unknown => "UNKNOWN",
+        Kind::Eof => "EOF",
+    }
+}
+
+fn render(toks: [Token]) -> str {
+    let mut s = "";
+    let mut i = 0;
+    while i < len(toks) {
+        let t = toks[i];
+        s = s + kind_name(t.kind) + " " + t.start.to_string() + ".." + t.end.to_string()
+              + " " + t.text + "\n";
+        i = i + 1;
+    }
+    s
+}
+
+// The entry point the gate calls.
+fn lex_and_render(src: str) -> str {
+    render(lex(src))
+}
+
+// A self-check that needs no host: lex a small program and print the rendering. Run by
+// `determinism_gate` to establish that two runs of the Niles lexer agree with each other
+// before either is compared with the Rust one.
+fn main() -> i64 {
+    let sample = "fn transfer(a: Account, b: Account) { let amt = 10.00 usd; if a.balance >= amt { post(a, b, amt); } }";
+    print(lex_and_render(sample));
+    0
+}

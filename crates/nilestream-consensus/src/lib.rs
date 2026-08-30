@@ -46,6 +46,7 @@
 //! Not built: membership changes, log compaction with snapshots, pre-vote, leadership
 //! transfer, and the cross-shard commit protocol of §8.6. Each is named in [`NOT_BUILT`].
 
+pub mod cross_shard;
 pub mod sim;
 
 use nilestream_ledger::chain::Hasher256;

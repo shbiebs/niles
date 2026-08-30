@@ -59,6 +59,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "nilestream-consensus"
+version = "0.1.0"
+dependencies = [
+ "nilestream-ledger",
+]
+
+[[package]]
 name = "nilestream-core"
 version = "0.1.0"
 dependencies = [

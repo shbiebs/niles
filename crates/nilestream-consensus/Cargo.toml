@@ -1,0 +1,9 @@
+[package]
+name = "nilestream-consensus"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+nilestream-ledger = { path = "../nilestream-ledger" }

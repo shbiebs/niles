@@ -362,3 +362,51 @@ cross-shard commit, the extended query protocol, TLS, the MySQL wire protocol, c
 join ordering, and the self-hosted bootstrap of Appendix E stages 1–3. The executable IR
 fragment remains narrower than the IR the compiler emits, and the runtime rejects what it
 cannot run rather than mis-executing it.
+
+## Session 8 — the distributed path, the wire surfaces, and the bootstrap
+
+**Built.** `nilestream-core::distributed` (sharded read path, 10 tests);
+`nilestream-consensus::cross_shard` (2PC with a ledger-group coordinator, 12);
+`nilestream-server::extended` (epoch-keyed plan cache, 11); `::mysql_wire` (11);
+`::tls` (negotiation and policy, cryptography delegated, 17);
+`nilestream-optimizer::join_order` (`DPccp` + a three-term cost model, 16);
+`niles-interp` (stage-0 execution, 28) and `bootstrap/lexer.niles` with 14 gates.
+418 workspace tests, 0 failures, 2 benign warnings.
+
+**Three design results worth keeping separate from their code.**
+
+1. *2PC's blocking objection dissolves when the coordinator is a ledger group.* The
+   decision is persisted through quorum before it is sent; a successor reads it rather
+   than re-deciding. The implementation refuses to send a decision that is not durable.
+2. *A cross-shard upquery needs no coordination at all*, because it reads a frozen prefix.
+   The read cannot be made stale, and its result caches forever with no invalidation
+   protocol. This is Thm 4.1's anchoring paying a distributed dividend.
+3. *Join ordering in a partial-state engine is not the classical problem.* A join is a
+   standing operator with two resident indexes, and reconstruction walks the tree, so the
+   objective has three terms rather than one — and reconstructibility is a **legality**
+   constraint pruned before costing, so a bad estimate can make a plan slow but not wrong.
+
+**The bootstrap unblocked itself by re-reading its own requirement.** Appendix E.0 said
+stage 1 had no input because stage 0 could not compile the whole language. But a bootstrap
+needs stage 0 to *evaluate* Niles, not to emit machine code; "stage-0 compiler" had been
+read as "native compiler". A tree-walking interpreter plus a Niles-written lexer produced
+four working gates the same day.
+
+**The gate found four defects on its first run**, which is the evidence that it has
+discriminating power: two keyword-table drifts (`evict`/`conserves` do not exist;
+`from`/`post` were missing), a case-sensitivity error (Niles inherits case-insensitive
+keywords from SQL while Rust is case-sensitive — the two lineages disagree and only the
+registry settles it), and a flaw in the gate itself, which excluded every input the
+reference lexer errored on and thereby silently dropped the two hardest cases. The
+keyword table is now **generated** from `keywords.rs`, with a test that fails on
+divergence: the single source of truth crosses the bootstrap boundary.
+
+**Two claims retracted, both consequential, neither fixable by a test.**
+
+* *"Noria cannot be used in production for core banking."* The motivating attempt never
+  built, started or connected to Noria; zero SQL ran against it. Every failure in that
+  4,565-line transcript is a build or packaging failure. §1.1.1 and §11.5.5 now say so,
+  and the Noria limits the thesis relies on are cited from its authors' own papers.
+* *"REVs need a new engine."* Already refuted by E14 and now restated in §11.5.2 with the
+  enabling/cumulative/editorial grading applied throughout: Niles's *analysis* is
+  enabling, its *surface syntax* is editorial, and Nilestream is an instrument.

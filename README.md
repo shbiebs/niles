@@ -56,9 +56,13 @@ measured result is closed end to end, and `cargo test --workspace` runs **201 te
 | **Materialization planner** (`nilestream-optimizer::offline`) | **Built**, 18 tests |
 | **PostgreSQL wire protocol** + `nilestreamd` (`nilestream-server`) | **Built**, 21 tests |
 | **Replicated ledger groups** (`nilestream-consensus`) | **Built**, 9 tests, deterministic sim |
-| Extended query protocol, TLS, MySQL wire | **Not built**; each refusal names its reason |
-| Distributed read path, cross-shard commit, membership change | **Not built** |
-| Self-hosted compiler (Appendix E stages 1–3) | **Not built**; Appendix E.0 says so |
+| Cost-based join ordering | **Built** — `DPccp` to 12 relations; a three-term cost model (flow + resident state + reconstruction depth) with reconstructibility pruned as a *legality* constraint before costing |
+| Extended query protocol | **Built** — parse/bind/describe/execute with an epoch-keyed plan cache; binary format still refused by name |
+| MySQL wire | **Built** — packet framing, lenenc, handshake, `OK`/`ERR`, column defs, text rows. Money is `NEWDECIMAL`, never `DOUBLE` |
+| TLS | **Negotiation and policy built; cryptography delegated.** Both state machines, the four-way policy, `libpq`'s six `sslmode` values. A `Require` policy with no provider **fails at startup rather than serving cleartext**. No record layer is written here, on purpose |
+| Distributed read path, cross-shard commit | **Built as protocols, tested in simulation, never run over a network.** The coordinator is a ledger group, so 2PC's blocking objection dissolves; a cross-shard upquery needs no coordination, because a frozen prefix cannot change |
+| Bootstrap (Appendix E) | **Stage 0 execution and the first four gates built.** A tree-walking interpreter for the imperative subset, a lexer *written in Niles*, and gates for run / equivalence vs the reference lexer / self-application / fixpoint. A parser and type-checker in Niles are **unwritten** |
+| Membership change, log compaction, binary format, SCRAM | **Not built**; each refusal names its reason |
 
 **Measurements were taken, and three of them refuted claims the thesis had made.** Chapter 9
 §§9.1–9.4 report real results from the prototype in machine-independent counted-work units
@@ -68,7 +72,8 @@ cannot do (durability, concurrency, distribution, the compiler); no number there
 Reproduce everything:
 
 ```sh
-cargo test --workspace                      # 264 tests
+cargo test --workspace                      # 418 tests
+cargo test -p niles-interp                  # the Appendix E bootstrap gates
 
 # the compiler, on the thesis's own worked example
 cargo run -p nilesc -- check   examples/demo_bank.niles
@@ -122,7 +127,9 @@ Headline measured findings:
 | `crates/nilestream-optimizer` | Adaptive materialization: modes, estimators, eviction |
 | `crates/nilestream-lineage` | Provenance: explain, reproduce, impact |
 | `crates/nilestream-storage` | Tiering, durability, migration boundary |
-| `crates/nilestream-server` | Daemon, native + MySQL/PostgreSQL wire protocols |
+| `crates/nilestream-server` | Daemon; PostgreSQL wire v3 (simple + extended), MySQL wire, TLS negotiation |
+| `crates/niles-interp` | Stage-0 execution: a tree-walking interpreter for Niles's imperative subset |
+| `bootstrap/lexer.niles` | A lexer written in Niles — stage 1's first input |
 | `crates/niles-ir` | Typed IR: circuits, contracts, verifier |
 | `crates/niles-lang` | Stage-0 Niles compiler + SQL surface |
 | `crates/niles-stdlib` | `std::bank`, `std::temporal`, money, builtins |

@@ -208,7 +208,6 @@ pub fn verify(c: &Circuit) -> VerifyReport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::circuit::internal_contract;
     use crate::operator::{Agg, Scalar};
     use crate::{Lineage, ServeContract};
 

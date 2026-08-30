@@ -16,6 +16,8 @@
 mod pg_wire;
 #[path = "session.rs"]
 mod session;
+#[path = "tls.rs"]
+mod tls;
 
 use pg_wire::{Backend, Frontend};
 use session::{MemoryEngine, Serving, Session};
@@ -116,12 +118,32 @@ fn serve(stream: TcpStream, schema: String, engine: Arc<Mutex<MemoryEngine>>) ->
     let mut w = stream.try_clone()?;
     let mut r = BufReader::new(stream);
 
-    // The startup exchange. `SSLRequest` is answered with a single `N` — a refusal, not
-    // silence — because a client that gets no answer hangs.
+    // The startup exchange, routed through the TLS policy of §6.12 rather than through a
+    // hardcoded refusal. This build ships no TLS provider — the cryptography is delegated,
+    // see `tls.rs` — so the policy here is `Disabled` and the negotiation answers `N`,
+    // which is the protocol-correct refusal: it lets the client's own `sslmode` decide,
+    // where an `ErrorResponse` would break a `prefer` client that would have connected.
+    //
+    // The point of going through the policy rather than around it is that changing this
+    // one line to `Policy::Require` with a provider is the whole of what enabling TLS
+    // costs, and that a `Require` policy with no provider refuses the connection here
+    // instead of silently serving it in the clear.
+    let tls_config = tls::TlsConfig::insecure();
     let mut startup = pg_wire::read_startup(&mut r)?;
     if startup == Frontend::SslRequest {
-        w.write_all_bytes(b"N")?;
+        match tls::PgNegotiation::new(&tls_config).decide(true) {
+            tls::PgStep::Cleartext(reply) | tls::PgStep::Upgrade(reply) => {
+                w.write_all_bytes(&[reply.byte()])?;
+            }
+            tls::PgStep::Refuse(why) => {
+                eprintln!("nilestreamd: {peer} refused: {}", why.message());
+                return Ok(());
+            }
+        }
         startup = pg_wire::read_startup(&mut r)?;
+    } else if let tls::PgStep::Refuse(why) = tls::PgNegotiation::new(&tls_config).decide(false) {
+        eprintln!("nilestreamd: {peer} refused: {}", why.message());
+        return Ok(());
     }
     let Frontend::Startup { params, .. } = startup else {
         return Ok(());
@@ -152,6 +174,15 @@ fn serve(stream: TcpStream, schema: String, engine: Arc<Mutex<MemoryEngine>>) ->
     }
     eprintln!("nilestreamd: {peer} disconnected after {} queries", session.queries_served);
     Ok(())
+}
+
+/// The mutual-TLS refusal is constructed only on a path this build does not take (no
+/// provider ships, so `RequireClientCert` never passes preflight). Naming it here keeps
+/// the variant live and documents that the gap is a missing provider rather than a
+/// missing policy.
+#[allow(dead_code)]
+fn _assert_mutual_tls_refusal_exists() -> tls::Refusal {
+    tls::Refusal::ClientCertificateMissing
 }
 
 /// A tiny helper so the `SSLRequest` refusal reads clearly at the call site.

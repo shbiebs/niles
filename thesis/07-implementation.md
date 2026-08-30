@@ -44,7 +44,7 @@ The server assembles the spine into a deployable daemon: connection handling, au
 
 ## 7.4 What Exists Today
 
-Every row marked **built** is compiled and tested by `cargo test --workspace`, which currently runs **201 tests**. Every figure in this table is produced by the build rather than typed by hand.
+Every row marked **built** is compiled and tested by `cargo test --workspace`, which currently runs **264 tests**. Every figure in this table is produced by the build rather than typed by hand.
 
 | Component | Status |
 |---|---|
@@ -67,18 +67,21 @@ Every row marked **built** is compiled and tested by `cargo test --workspace`, w
 | Research prototype and experiment harness | **Built and run** — E1–E10 in `results/`; E11–E13 through the compiled path |
 | Optimizer cost rules, IR contract types | **Built and tested** |
 | Hash chaining | Built with a **placeholder hasher** (ADR 0002) — the API is drop-in for a cryptographic one |
-| Query planner beyond lowering | Partial: lowering fixes the circuit; no cost-based join ordering |
-| Wire protocols, server daemon | Specified in §7.3; **not built** |
-| Distributed execution, consensus, cross-shard commit | Specified in §8.5–8.6; **not built** |
+| **Materialization planner** (`nilestream-optimizer::offline`) | **Built** — filters by contract, then prices; every plan explains itself and names what it ruled out |
+| **PostgreSQL wire protocol** (`nilestream-server`) | **Built** — v3 startup and simple query, over a real socket; `nilestreamd` answers `psql` |
+| **Replicated ledger groups** (`nilestream-consensus`) | **Built** — elections, hash-linked replication, quorum commit, deterministic simulator |
+| Query planner beyond mode selection | Partial: lowering fixes the circuit; no cost-based join ordering |
+| Extended query protocol, TLS, MySQL wire | Specified in §7.3; **not built**, and each refusal names its reason |
+| Cross-shard commit, membership change, log compaction | Specified in §8.6; **not built** |
 | Self-hosted compiler (Appendix E, stages 1–3) | Specified; **not built**, and Appendix E.0 says so |
 
 ## 7.5 What Is Deliberately Not Built, and What That Costs the Claims
 
 Four gaps, each with the claim it withholds.
 
-**No distribution and no consensus.** Everything measured is single-node. The cross-shard commit protocol of §8.6 is a design; nothing in this thesis measures it. This withholds every claim about scale-out, and it is why Theorem 4.2's frontier is located here in counted work rather than in nodes.
+**Consensus is built; distributed *execution* is not, and the two are different gaps.** `nilestream-consensus` implements a replicated ledger group — elections with the up-to-date restriction, hash-linked log replication, quorum commit — and checks election safety, log matching, state-machine safety and chain integrity after every message delivery in a deterministic simulator, across 25 seeds at 20% loss and 30% reordering. What that buys is agreement on the *epoch order* across nodes. What it does not buy is a distributed *read* path: views are not sharded, upqueries do not cross nodes, and the cross-shard commit protocol of §8.6 — what a transaction spanning two ledger groups actually needs — is unbuilt. Every performance figure in Chapter 9 is single-node, and Theorem 4.2's frontier is therefore located in counted work rather than in nodes.
 
-**No wire protocol.** MySQL and PostgreSQL compatibility is the adoption argument of §6.9, and it is unbuilt. This costs the thesis nothing *theoretical* — the IR is the contract, not the protocol — but it means the incremental-adoption story is an argument rather than a demonstration.
+**One wire protocol is built, and it is a surface rather than a semantics.** `nilestreamd` speaks PostgreSQL wire protocol v3's simple query path: `psql` connects, and a query is parsed as Niles's SQL surface, lowered to the same IR, verified by the same verifier, and served from the same REV runtime. There is deliberately **no compatibility layer with its own execution path**, because two ways to compute an answer is two answers that can disagree — the seam this thesis argues against everywhere else. The extended query protocol is refused with its open design question named: a prepared statement must be cached against the epoch it was planned at, since a plan valid at one visibility frontier need not be valid at another, and that question is unanswered. TLS, real authentication, the binary format and the MySQL protocol are unbuilt. The transcript is in `results/wire-protocol-session.md`.
 
 **The executable IR fragment is narrower than the emitted IR.** The compiler lowers and the verifier accepts joins, fixpoints, set operations and ordering stages; the runtime executes source → optional filter/map → one keyed aggregate. The runtime **rejects** anything else rather than mis-executing it, which is the right failure, but it means the measurements are about the balance-shaped view and not about arbitrary queries. Chapter 9 says so at every table.
 

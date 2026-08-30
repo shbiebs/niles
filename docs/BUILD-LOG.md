@@ -274,3 +274,91 @@ tense. §6.10.1 re-assesses the language-creation gate against the built compile
 Still unbuilt, and stated as such: distribution, consensus, wire protocols, a cost-based
 planner, and the self-hosted bootstrap. The executable IR fragment is narrower than the IR
 the compiler emits, and the runtime rejects what it cannot run rather than mis-executing it.
+
+---
+
+## Stage 11 — the planner (`nilestream-optimizer::offline`, 18 tests)
+
+Contribution 5's calculus, as a decision the engine takes. It sits between the compiler
+(which fixes *what* a view computes and *what it promises*) and the runtime (which keeps
+some of it resident).
+
+The design is one ordering: **filter by contract, then price.** Infeasible modes are
+removed before any cost is computed, never after. Pricing first and filtering after would
+be the same code with the same output in the common case and a contract violation in the
+uncommon one — the shape of bug that survives testing. That ordering is what makes a bad
+estimate cost compute rather than breach a rung.
+
+Wired into `nilesc plan`, which prints the decision *and* what it ruled out and why.
+§11.2 lists optimizer opacity as a named risk: an adaptive component that changes behaviour
+under load and cannot be interrogated is one an operator will not trust at the moment it
+matters most.
+
+## Stage 12 — the wire protocol (`nilestream-server`, 21 tests)
+
+PostgreSQL wire protocol v3, simple query path, over a real socket. `nilestreamd` answers
+`psql`. The transcript is in `results/wire-protocol-session.md`.
+
+The commitment: **a wire protocol is a surface, not a semantics.** A client's SQL is parsed
+as Niles's SQL surface, lowered to the same IR, verified by the same verifier, served from
+the same runtime. No compatibility layer with its own execution path — two ways to compute
+an answer is two answers that can disagree, which is the seam this thesis argues against
+everywhere else, and building one here would have been incoherent.
+
+Three decisions the transcript shows:
+
+* **The anchor is a column on every row.** Not a footnote. "The same question, asked twice,
+  answered consistently" is checkable only if the client can see which moment each answer
+  belongs to.
+* **A missing key is NULL, not zero.** The absence lattice reaches the client intact. There
+  are three absences here — SQL null, the empty string, and an evicted hole — and the codec
+  keeps all three apart.
+* **Money is `numeric`, never `float8`.** Exactness that survived the type system has to
+  survive the last hop, or the whole apparatus of per-currency scales ends at the socket.
+
+Everything unimplemented is refused by name with its reason. The extended query protocol's
+refusal states the open design question: a prepared statement must be cached against the
+epoch it was planned at, because a plan valid at one visibility frontier need not be valid
+at another. Shipping a version that ignored that would be worse than not shipping one.
+
+## Stage 13 — consensus (`nilestream-consensus`, 9 tests)
+
+**The ledger is a log**, so the Raft mapping is an identity rather than an analogy: epoch =
+entry, sealer = leader, visibility frontier = commit index. Distributing the single-node
+write path changes who decides the order, and what "durable enough to publish" means — one
+disk becomes a quorum — and nothing else. That is the retrospective argument for having
+built §7.1's write path the way it is.
+
+**What the hash chain adds over Raft.** Raft's log matching property is maintained by
+protocol: a follower accepts an `AppendEntries` if the previous index and term match. It is
+sound, and it rests entirely on nodes reporting their own state honestly — a node that lied
+about its previous term, through a bug or a corrupted disk, would be believed. Here the
+previous entry is identified by its **hash**, and the follower recomputes the link before
+accepting. A forged entry is rejected even from a current leader.
+
+This is not Byzantine tolerance: a lying leader can still refuse to make progress, and
+§11.1 scopes Byzantine settings out. It converts a class of *silent divergence* into a
+detected one, and it costs nothing, because the chain is computed anyway for audit.
+
+**Every test is deterministic** — seeded PRNG, logical clock, no sleeps. A consensus test
+that sleeps and hopes is worse than no consensus test: it trains its reader to re-run it.
+25 seeds at 20% message loss and 30% reordering, with election safety, log matching, state
+machine safety and chain integrity asserted after **every single message delivery**, not at
+the end. An invariant checked only at the end tells you a system was broken without telling
+you when.
+
+Unbuilt and named as data in `NOT_BUILT`, so the list cannot quietly shrink in the prose
+while the code stays the same: membership changes, log compaction, pre-vote, leadership
+transfer, and the cross-shard commit protocol of §8.6.
+
+## Final position
+
+264 tests. The three Turn-5 contradictions are closed by building the artifacts. The loop
+runs from Niles source text to a measured result, and two of Chapter 9's headline findings
+reproduce through it rather than around it.
+
+Still unbuilt, and stated in §7.5 with the claim each withholds: a distributed read path,
+cross-shard commit, the extended query protocol, TLS, the MySQL wire protocol, cost-based
+join ordering, and the self-hosted bootstrap of Appendix E stages 1–3. The executable IR
+fragment remains narrower than the IR the compiler emits, and the runtime rejects what it
+cannot run rather than mis-executing it.

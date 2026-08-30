@@ -53,8 +53,11 @@ measured result is closed end to end, and `cargo test --workspace` runs **201 te
 | Optimizer cost rules (Appendix I), IR contract types | **Built**, 14 tests |
 | Research prototype + experiment harness (E1–E10) | **Built and run**; `results/` |
 | Hash chaining | Built with a **placeholder hasher** (ADR 0002); API is drop-in |
-| Query planner beyond lowering, wire protocols, server daemon | **Not built** |
-| Distributed execution, consensus, cross-shard commit | **Not built** |
+| **Materialization planner** (`nilestream-optimizer::offline`) | **Built**, 18 tests |
+| **PostgreSQL wire protocol** + `nilestreamd` (`nilestream-server`) | **Built**, 21 tests |
+| **Replicated ledger groups** (`nilestream-consensus`) | **Built**, 9 tests, deterministic sim |
+| Extended query protocol, TLS, MySQL wire | **Not built**; each refusal names its reason |
+| Distributed read path, cross-shard commit, membership change | **Not built** |
 | Self-hosted compiler (Appendix E stages 1–3) | **Not built**; Appendix E.0 says so |
 
 **Measurements were taken, and three of them refuted claims the thesis had made.** Chapter 9
@@ -65,7 +68,7 @@ cannot do (durability, concurrency, distribution, the compiler); no number there
 Reproduce everything:
 
 ```sh
-cargo test --workspace                      # 201 tests
+cargo test --workspace                      # 264 tests
 
 # the compiler, on the thesis's own worked example
 cargo run -p nilesc -- check   examples/demo_bank.niles
@@ -80,6 +83,10 @@ cargo build --release -p nilestream
 
 # durability and group commit
 ./target/release/durability-bench
+
+# the daemon: point psql at it
+cargo run -p nilestream-server --bin nilestreamd -- --port 5433
+#   psql -h 127.0.0.1 -p 5433 -U anyone bank
 
 # the original hand-written harness
 cargo build --release -p experiments

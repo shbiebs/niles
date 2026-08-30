@@ -99,13 +99,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "probe"
-version = "0.1.0"
-dependencies = [
- "proto-engine",
-]
-
-[[package]]
 name = "proto-engine"
 version = "0.1.0"
 dependencies = [

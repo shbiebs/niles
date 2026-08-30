@@ -355,3 +355,84 @@ Constructive tests, unchanged: the banking portfolio implemented in the domain l
 | Strict serializability | **Not tested**; conservation is strictly weaker (§9.2.2) |
 | SQL-completeness by conformance suite | **Withdrawn**; no such suite exists (§9.7) |
 | Everything in §9.5 | *to be measured* |
+
+## 9.13 Results Through the Compiled Path
+
+Everything in §§9.1–9.4 was measured with `proto-engine`, a hand-written harness with no compiler in it. That was the honest thing to build first — a measurement is worth more than a compiler that produces no measurements — but it left the strongest available check on those findings unused. The language, the type system, the IR and the verifier were all specified and none of them was in the measurement path.
+
+They are now. `crates/nilestream` compiles a Niles program with `niles-lang`, verifies the resulting circuit with `niles-ir::verify`, installs it on the `nilestream-core` REV runtime, and runs a workload against a hash-chained, epoch-ordered ledger. Nothing between those stages is hand-built. Two of the headline findings were re-measured along that path, and a third — durability — was measured for the first time, on a write path that has an `fsync` in it.
+
+This is a different kind of confirmation from re-running the same harness with a different seed. It shares the workload generator and the ledger with §§9.1–9.4, but the view definition, the key derivation, the materialization decision, the anchor discipline and the eviction budget all now come from a compiled artifact rather than from hand-written Rust. A finding that survived that translation is a finding about the mechanism rather than about one implementation of it.
+
+### 9.13.1 SC7 through the compiler (E11)
+
+Dense keys, so each key accumulates real history: 200 accounts, Zipf *s* = 1.1, 4,000 reads, budget 20 entries. The figure is base rows read per upquery.
+
+| Epochs | *C* = 0 (no checkpoints) | *C* = 16 | *C* = 64 |
+|---:|---:|---:|---:|
+| 5,000 | 58.5 | **6.9** | 19.1 |
+| 20,000 | 234.0 | **8.3** | 28.6 |
+| 80,000 | 931.5 | **8.4** | 31.7 |
+| **growth over a 16× history increase** | **15.9×** | **1.22×** | 1.66× |
+
+Without checkpoints the fold is history-length: cost grows 15.9× as history grows 16×, which is the linear behaviour §9.4.1 reported and which refuted the anchor-index claim. With *C* = 16 it is flat at 8.4 against the Theorem 3.7 bound of *C*/2 + 1 = 9. With *C* = 64 it is bounded and still climbing toward its own predicted 33, which it has not reached by 80,000 epochs.
+
+The hand-written harness measured 6.8 → 8.3 → 8.0 → 8.5 for *C* = 16. The compiled path measures 6.9 → 8.3 → 8.4. **SC7 is confirmed through the compiler, not merely around it.**
+
+### 9.13.2 The phase diagram through the compiler (E12)
+
+20,000 epochs, 20,000 reads, 20,000 accounts, Zipf *s* = 1.1. Budget swept against the price of memory; cost is `resident_entry_epochs × price + deltas_applied + base_rows_read`, in counted-work units.
+
+| Budget | 0.0001 | 0.0005 | 0.002 | 0.01 | 0.05 |
+|---:|---:|---:|---:|---:|---:|
+| 250 | 75,541 | 77,517 | 84,926 | **124,443** | **322,027** |
+| 500 | 51,746 | 55,636 | **70,223** | 148,021 | 537,007 |
+| 1,000 | 40,818 | **48,308** | 76,399 | 226,214 | 975,292 |
+| 2,000 | **38,619** | 52,145 | 102,871 | 373,406 | 1,726,084 |
+| 4,000 | 39,435 | 58,648 | 130,698 | 514,960 | 2,436,271 |
+| 8,000 | 39,439 | 58,663 | 130,752 | 515,226 | 2,437,599 |
+| full | 39,439 | 58,663 | 130,752 | 515,226 | 2,437,599 |
+
+Three things are visible, and the third is the one that matters.
+
+First, **the optimum is strictly interior wherever it is not at the swept boundary**: at price 0.0001 the best budget is 2,000, not 250 and not full. That is the corrected claim §9.3.4 arrived at after the first phase diagram turned out to be an artifact of charging peak residency rather than the residency integral.
+
+Second, **the boundary sits between 0.0005 and 0.002**, which is the band the hand-written harness located.
+
+Third, **full materialization is never uniquely optimal at any price tested**, and is indistinguishable from a budget of 8,000 — because at 8,000 the budget stops binding. That is the shape the theory predicts: above the working-set size, partiality is not a different strategy, it is the same strategy with the constraint slack.
+
+### 9.13.3 The cost of durability, measured for the first time (E13)
+
+§9.5 marked durability *to be measured*, because the research prototype has no `fsync` and no thread. The write path now has both. `SyncPolicy::Always` is the ledger-grade setting; `Never` is not a configuration anyone should run a ledger under and exists here to make the price of the guarantee visible by removing it. 2,000 transactions per thread, 32-byte payloads. Wall-clock and therefore machine-dependent; the ratios are the transferable part.
+
+| Threads | Always (tx/s) | Never (tx/s) | Cost of durability | Txns per fsync (Always) |
+|---:|---:|---:|---:|---:|
+| 1 | 4,450 | 25,457 | 5.72× | 1.0 |
+| 2 | 5,197 | 47,110 | 9.06× | 1.0 |
+| 4 | 11,225 | 80,415 | 7.16× | 2.4 |
+| 8 | 20,104 | 96,913 | 4.82× | 4.6 |
+| 16 | 30,440 | 144,558 | 4.75× | 8.8 |
+
+**The cost of durability falls as concurrency rises.** That is the result. A single-sealer design looks like a bottleneck and is routinely rejected as one, but an `fsync` costs the same whether it commits one transaction or five hundred, so the sealer drains what is waiting, seals it as one epoch, and syncs once. Transactions per fsync rises 1.0 → 8.8 across 1–16 threads, and the durability penalty falls from 5.7× to 4.8×. Throughput under **full durability** scales 4,450 → 30,440 tx/s, a 6.8× improvement from a 16× increase in concurrency.
+
+The honest reading is narrow. This says a single sealer with group commit is a batching opportunity rather than a hard ceiling *at this scale, on this machine, with this payload*. It says nothing about a distributed commit, nothing about contention on a hot account (the sealer serialises everything, so there is no contention to observe), and nothing about how either figure compares to a production database. Those cells remain *to be measured*.
+
+### 9.13.4 What building the compiler found in the thesis
+
+Running the checker over this thesis's own worked program — the one printed in Appendix B.20 — produced four errors. Each is reported here because each is a case of the instrument catching something the argument had missed, which is the only reason to build an instrument.
+
+**One.** `holds` was declared a `ledger`. A ledger must carry a conservation rule, and a hold does not conserve: it is a one-sided encumbrance, not a double-entry movement. Declaring it a ledger promised a double-entry invariant that no hold satisfies. It is a `base` — immutable and fully retained, but not conserved. The distinction had been made correctly in Chapter 3 and lost in the example.
+
+**Two, and this is the important one.** `available_balance` was defined over `ledger_balance` and served at `ledger_consistent`, while `ledger_balance` is served at `read_your_writes`. The effect calculus rejected it under rung monotonicity. The reasoning is the one §4.6 gives: an availability decision built on a read-your-writes balance is at most read-your-writes fresh however strict the downstream contract claims to be, because the staleness entered one hop upstream and no annotation downstream removes it. **This is precisely the failure supervisory guidance describes** — two derived views of one ledger disagreeing at the moment a decision is made — and it was present in this thesis's own worked example, written by the author of the calculus, until the calculus was run over it. It is the single strongest piece of evidence in this thesis that the check is worth having.
+
+**Three.** `settle_fx` declared `! { append, debit<usd>, credit<eur> }`, as though a conversion debited one currency and credited the other. It cannot: that conserves neither currency. An `fx` form is two conserved legs and therefore debits *and* credits in both. The declaration described a transaction that could not exist.
+
+**Four.** The IR verifier rejected `statement_mtd`, whose predicate was `p.value_date >= month_start()`. `month_start()` reads the wall clock, so it is not reproducible, so a reconstruction of an evicted entry could disagree with the value it replaced. This is not a lint. It would make the reconstruction-equivalence theorem **false** for that view rather than merely unproven: a balance recomputed after an eviction could legitimately differ from the one evicted, and no audit could distinguish that from a defect. A view boundary must be a value, not a moment.
+
+Three further defects were found in the engine by its own tests, and are recorded because each would have been a money bug in production rather than a crash.
+
+* **Two copies of one idempotency key arriving in the same commit batch both committed.** The check consulted committed history but not the batch being assembled, and a client retrying quickly — or a client and a proxy retrying together — lands both copies in one drain. The failure mode is not an error; it is a duplicated payment. Caught by a test that submits the same key from two threads.
+* **A duplicate was accounted for after its reply was sent**, so a caller could observe an outcome before the state that produced it was visible. The same ordering rule as durable-before-visible, one level up. It made the idempotency test fail about one run in three, which is exactly the frequency at which a race gets dismissed as flakiness.
+* **`SyncPolicy::Always` synced twice per epoch** — once in `append`, once in the sealer. The benchmark surfaced it as 0.5 transactions per fsync, a figure with no sensible interpretation, which was the clue. Removing the second sync raised single-threaded throughput from 3,003 to 4,450 tx/s.
+
+Finally, one defect in the instrument itself, recorded under the same discipline as the phase-diagram artifact of §9.3.1. The end-to-end runner initially advanced the runtime with its loop counter rather than with the epoch the ledger actually sealed, and the ledger numbers epochs from zero. **The failure mode was not a wrong answer; it was a silent null.** Every maintenance counter read zero, the reconstruction figures looked entirely plausible, and the run would have been reported as evidence that maintenance costs nothing. The runner now refuses to return a result from a run in which no delta was observed at all, on the principle that a null which looks like a measurement is worse than an error.

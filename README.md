@@ -21,18 +21,41 @@ references, one Markdown file per chapter (also delivered as `thesis/Niles-Thesi
 
 ## Status — read this first
 
-This is a **theory and design** project with a scaffold implementation **and a working research prototype that produced real measurements** (thesis Chapter 9, Appendix K).
+This is a **theory project with a working instrument**. The loop from Niles source text to a
+measured result is closed end to end, and `cargo test --workspace` runs **201 tests**.
+
+```
+  Niles source text
+       │  niles-lang     lex, parse, resolve, typecheck (currency rows, effects, linearity)
+       ▼
+  typed IR circuit       niles-ir: keys, anchors, contracts, provenance
+       │  niles-ir::verify        the trusted verifier; a bad circuit stops here
+       ▼
+  REV runtime            nilestream-core: absence lattice, anchored upqueries, eviction
+       │  over a durable, hash-chained, epoch-ordered ledger
+       ▼
+  counted work           base rows read, deltas applied, resident entry-epochs
+```
 
 | Component | Status |
 |---|---|
-| Reference oracle (Appendix F) — the program that *defines* correctness | **Implemented, 17 tests passing** |
-| Optimizer cost rules (Appendix I) — break-even, delayed hits, eviction credit | **Implemented, 10 tests passing** |
-| IR contract types — consistency ladder, modes, feasibility filter | **Implemented, 4 tests passing** |
-| Hash chaining | Implemented with a **placeholder hasher** (see ADR 0002) |
-| Ledger write path, Nilestream-Core, compiler, server | Specified in the thesis; stub crates |
-| **Research prototype** (`proto-engine`) — ledger, anchor indices, checkpoints, partial views, upqueries, eviction policies | **Built and measured** |
-| **Experiment harness** (`experiments`) — 10 experiments, CSV artifacts | **Built and run**; results in `results/` |
-| Full benchmarks vs. other database systems | Specified in Chapter 9.5; **not run** (prototype has no durability or concurrency) |
+| **Keyword registry** — 174 keywords, four axes, single source of truth | **Built**, 6 tests |
+| **Normative grammar** — 205 rules, 496 productions, drift-tested against the compiler | **Built**, 7 tests |
+| **Generated keyword reference** (`docs/keywords.md`) | **Built**, blessing-tested |
+| **Stage-0 compiler** — lexer, parser, resolver, typechecker, lowering | **Built**, 48 + 21 tests |
+| **Currency-row solver** — conservation and currency safety, statically | **Built**, 11 tests |
+| **Consistency-effect calculus** — rung monotonicity, capabilities, linearity | **Built**, 12 tests |
+| **Typed IR + verifier + upquery paths** (`niles-ir`) | **Built**, 39 tests |
+| **REV runtime** (`nilestream-core`) — absence lattice, anchored upqueries | **Built**, 21 tests |
+| **Durable, concurrent write path** (`nilestream-ledger`) — WAL, recovery, sequencer | **Built**, 21 tests |
+| **End-to-end runner** (`nilestream`) — source → IR → engine → numbers | **Built**, measured |
+| Reference oracle (Appendix F) — the program that *defines* correctness | **Built**, 17 tests |
+| Optimizer cost rules (Appendix I), IR contract types | **Built**, 14 tests |
+| Research prototype + experiment harness (E1–E10) | **Built and run**; `results/` |
+| Hash chaining | Built with a **placeholder hasher** (ADR 0002); API is drop-in |
+| Query planner beyond lowering, wire protocols, server daemon | **Not built** |
+| Distributed execution, consensus, cross-shard commit | **Not built** |
+| Self-hosted compiler (Appendix E stages 1–3) | **Not built**; Appendix E.0 says so |
 
 **Measurements were taken, and three of them refuted claims the thesis had made.** Chapter 9
 §§9.1–9.4 report real results from the prototype in machine-independent counted-work units
@@ -42,8 +65,25 @@ cannot do (durability, concurrency, distribution, the compiler); no number there
 Reproduce everything:
 
 ```sh
+cargo test --workspace                      # 201 tests
+
+# the compiler, on the thesis's own worked example
+cargo run -p nilesc -- check   examples/demo_bank.niles
+cargo run -p nilesc -- effects examples/demo_bank.niles
+cargo run -p nilesc -- explain examples/demo_bank.niles
+cargo run -p nilesc -- verify  examples/demo_bank.niles
+
+# the closed loop: compile, verify, install, run, measure
+cargo build --release -p nilestream
+./target/release/nilestream run   examples/demo_bank.niles ledger_balance --checkpoint 16
+./target/release/nilestream sweep examples/demo_bank.niles ledger_balance
+
+# durability and group commit
+./target/release/durability-bench
+
+# the original hand-written harness
 cargo build --release -p experiments
-./target/release/experiments all      # ~10 min; artifacts land in results/
+./target/release/experiments all             # ~10 min; artifacts land in results/
 ```
 
 Headline measured findings:
@@ -59,6 +99,11 @@ Headline measured findings:
   history increase, against a predicted C/2+1 = 9. This produced contribution SC7.
 * **A consistency rung's cost falls on maintenance, not reads** — 66× between the loosest
   and strictest rung, scaling ≈1/k, with read-side metrics indistinguishable.
+* **The cost of durability falls as concurrency rises** — 5.7× at one thread, 4.8× at
+  sixteen, as group commit amortises the fsync (transactions per fsync 1.0 → 8.8).
+* **The compiler found four defects in the thesis's own worked program**, including a
+  rung-monotonicity violation that is exactly the failure Chapter 1 motivates the thesis
+  with. See §9.13.4 — it is the strongest evidence here that the checks are load-bearing.
 
 ## Layout
 

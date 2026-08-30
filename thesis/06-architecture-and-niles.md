@@ -106,6 +106,34 @@ Creating a language is expensive, and the thesis states the gate it had to pass.
 
 **G3.** Theorem 4.4 quantifies over well-typed programs. The type system is the theorem's premise, not its packaging.
 
+### 6.10.1 The Gate, Re-Assessed Against a Built Compiler
+
+The three conditions above were argued before any of the language existed. A gate assessed only in prose is a gate the author sets the height of, so this section re-assesses each one against the stage-0 compiler in `crates/niles-lang`, and records where the evidence is weaker than the argument.
+
+**G1 — could this be a library?** The argument was that a host language's trait system can *approximate* linear posting halves and currency rows but cannot enforce them ergonomically. The compiler makes the comparison concrete, and the honest answer is split.
+
+The parts that a library **could** carry, in Rust specifically: currency-parameterised money types, an affine approximation of linearity through move semantics and a `#[must_use]` drop guard, and a per-currency scale in a const generic. A determined library author gets most of the way there.
+
+The parts a library **cannot** carry, and this is where the gate holds:
+
+* **Rung monotonicity.** The judgement that rejected `available_balance` (§9.13.4) is a property of a *view definition's whole dependency graph*, not of any value in it. There is no type a library can attach to a value that says "the freshest guarantee obtainable from every transitive input of the expression this value came from". It needs the compiler to have the view graph, which means it needs views to be a language construct.
+* **The `undecided` verdict.** The currency-row solver distinguishes "provably conserving", "provably not", and "the checker cannot see the amount". The third is what makes the first two trustworthy, and it requires whole-program symbolic accounting across a `txn` boundary. A trait bound has no way to be *partially* satisfied and report the residue.
+* **The two-span diagnostic.** Every interesting error in §9.13.4 points at two places: the money that was created and the rule that forbids it; the view's promise and the read that breaks it. In a library encoding these surface as trait-solver artifacts naming synthetic types, which is precisely the ergonomic failure the original argument predicted, and which the built diagnostics avoid.
+
+**G1 holds, but on narrower ground than originally claimed.** The load-bearing part is not money typing — a library can nearly do that — it is the *whole-program, graph-level* judgements: rung monotonicity, conservation across a transaction, and reconstructibility. Those need a compiler that owns the view graph.
+
+**G2 — could this be SQL?** The concession stands and is now sharper. The Begoli *et al.* position — that streaming needs only time-varying relations, event-time semantics and a small materialization vocabulary added to standard SQL — is right about *query semantics*, and Niles's query core is deliberately isomorphic to it. Building the SQL surface in `sql_surface.rs` and testing that both surfaces lower to the same circuit (§9.13, `the_two_surfaces_lower_to_the_same_circuit`) is that concession made mechanical rather than rhetorical: for the stated fragment, the SQL spelling and the pipeline spelling are the same program.
+
+What no SQL extension reaches is the four judgements the compiler actually performs. `conserve per (txn, cur)` is not a constraint on a row, it is a typing rule over a transaction. `! { append, debit<usd> }` is not a comment, it is a subsumption check. Linearity for holds is not a trigger, it is a use-count. Rung monotonicity is not a hint, it is a graph property. Adding any one of them to SQL changes what a well-formed program *is*, and at that point one has a new language and should say so.
+
+**The formulation the built artifact supports:** SQL can be extended to say what to compute over streams. It cannot be extended to *refuse programs that would lose money*, because refusing is a type-system act and SQL has no type system in the sense required.
+
+**G3 — is the type system load-bearing for the science?** This is the condition with the strongest new evidence and it is not the evidence expected. Theorem 4.4 quantifies over well-typed programs, so the type system is formally the theorem's premise; that was always true and was always a slightly circular defence. What the built compiler adds is empirical: **the type system caught four defects in this thesis's own worked program**, one of which — the rung-monotonicity violation in `available_balance` — is the exact failure mode Chapter 1 motivates the whole thesis with, written into the example by the person who formulated the rule.
+
+That is a fact about the instrument's value that no amount of prose could have established, and it cuts both ways. It is strong evidence that the checks are load-bearing. It is also evidence that the *author* of a consistency calculus will violate it in an eighty-line example, which is the strongest argument available that a bank's engineers will violate it in a hundred-thousand-line codebase, and that a compiler rather than a review process is what should catch them.
+
+**Verdict.** All three conditions pass, with G1 narrowed and G3 strengthened. The narrowing matters and is stated because a gate that always passes is not a gate: the honest position is that a substantial part of what Niles offers — money types, scale safety, an affine approximation of linearity — *could* be a Rust library, and that the case for a language rests specifically on the whole-program graph judgements and on the diagnostic quality that follows from owning the syntax.
+
 **Why not fork an existing compiler.** A fork inherits the full maintenance surface of a general-purpose toolchain while fighting it on linearity-versus-affinity and on effects, and the declarative query core is un-Rust-like at the surface in any case. Niles instead *borrows Rust's syntax shape* — familiarity without the fork — with a fresh, small, self-hosting implementation (Appendix E).
 
 **Precedent for the decision.** In 2024 ISO published GQL as a standalone database language rather than as another SQL part, developed by the same working group that maintains SQL, while *also* standardizing SQL/PGQ as a read-only embedded sublanguage over the same graph patterns. The standards community thus treats "embedded sublanguage" and "standalone language" as genuinely different artifacts and has recently chosen the latter when the model differs enough. That is not proof that Niles is justified, but it is evidence that the question this gate asks is the right one.

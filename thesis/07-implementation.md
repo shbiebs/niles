@@ -1,6 +1,10 @@
 # 7. Implementation Design and Current Status
 
-This chapter records what is specified, what is built, and what is not. **Status, stated once and plainly: the artifact accompanying this thesis is a workspace scaffold with the executable reference oracle (Appendix F) implemented and passing its tests. The engine, compiler and server described below are designs with stub crates, not measured systems.** Everything in this chapter is therefore written as an implementation *plan* with its design decisions and their justifications; nothing here reports a measurement, and no claim of completed performance work is made anywhere in this thesis.
+This chapter records what is specified, what is built, and what is not. That boundary moved substantially during the work, and this chapter is where the current position is stated once and plainly, so that no reader has to infer it from an appendix's tense.
+
+**Status.** The artifact accompanying this thesis contains a **working stage-0 compiler** for a large subset of Niles, a **typed IR with a verifier**, a **REV runtime** that executes compiled circuits, a **durable, concurrent ledger write path**, and a **research prototype** with an experiment harness. The loop from Niles source text to a measured result is closed end to end and is reproducible by a stranger with `cargo`. What remains unbuilt is stated in §7.5 with equal precision: there is no distributed execution, no consensus, no wire protocol, no self-hosted back end, and the executable IR fragment is narrower than the IR the compiler emits.
+
+Everything described below that is *not* marked as built is written as an implementation plan with its design decisions and their justifications. No claim of completed performance work is made anywhere in this thesis beyond the measurements Chapter 9 reports and labels.
 
 ## 7.1 Nilestream-Core and the Ledger
 
@@ -40,11 +44,44 @@ The server assembles the spine into a deployable daemon: connection handling, au
 
 ## 7.4 What Exists Today
 
+Every row marked **built** is compiled and tested by `cargo test --workspace`, which currently runs **201 tests**. Every figure in this table is produced by the build rather than typed by hand.
+
 | Component | Status |
 |---|---|
-| Reference oracle (Appendix F) | **Implemented and tested** — balance folding, bitemporal queries, per-currency conservation, idempotency rejection, FX-atomicity, chain verification, tamper detection |
-| Workspace, crate structure, IR type skeletons, contract types | Scaffolded, compiles |
-| Ledger write path, Nilestream-Core, compiler, server | Specified in this thesis and Appendices B–E; stub crates only |
-| Benchmark harness, phase-diagram experiments | Specified in Chapter 9 and Appendix G; not run |
+| **Keyword registry** (`niles-lang::keywords`) | **Built** — 174 keywords on four axes; the single source of truth from which the lexer, the reserved list and Appendix B.19 are all generated |
+| **Normative grammar** (`grammar/niles.ebnf`) | **Built** — 205 rules, 496 productions, with a drift test checking it against the registry and the compiler in both directions |
+| **Generated keyword reference** (`docs/keywords.md`) | **Built** — regenerated from the registry, with a blessing test that fails if the two disagree |
+| **Lexer** | **Built** — two-layer, lossless, covering money with per-currency scale, both temporal axes, epochs and durations |
+| **Parser** | **Built** — hand-written recursive descent with Pratt expressions; resilient, and total on arbitrary input |
+| **Resolver and catalog** | **Built** — epoch-anchored; discharges the declaration-level well-formedness rules W1–W3, W5, W9–W12, W19 |
+| **Currency-row solver** | **Built** — conservation and currency safety decided statically, with an honest *undecided* verdict where an amount is opaque |
+| **Consistency-effect calculus** | **Built** — effect rows, rung monotonicity, capability requirements, linearity for holds and posting halves |
+| **Lowering to the typed IR** | **Built** — the pipeline surface and the SQL surface lower to the same circuit, under test |
+| **Typed IR, verifier, upquery-path derivation** (`niles-ir`) | **Built** — the operator set, the accessed-field discipline, and a verifier in the trusted base |
+| **`nilesc` driver** | **Built** — `check`, `parse`, `explain`, `verify`, `upquery`, `effects` |
+| **REV runtime** (`nilestream-core`) | **Built** — the absence lattice, anchored upqueries, eviction, counted work; executes the key-aggregate fragment |
+| **Durable write path** (`nilestream-ledger`) | **Built** — CRC-checked, hash-chained, length-prefixed segments; crash recovery that truncates at the first bad record; tamper and splice detection |
+| **Concurrent sequencer** | **Built** — single sealer with group commit; publishes the frontier only after fsync; idempotency across and within a batch |
+| **End-to-end runner** (`nilestream`) | **Built** — compiles a `.niles` file, verifies the circuit, installs it, runs a workload, reports counted work |
+| Reference oracle (Appendix F) | **Built and tested** — 17 tests: balance folding, bitemporal queries, per-currency conservation, idempotency, FX atomicity, chain verification, tamper detection |
+| Research prototype and experiment harness | **Built and run** — E1–E10 in `results/`; E11–E13 through the compiled path |
+| Optimizer cost rules, IR contract types | **Built and tested** |
+| Hash chaining | Built with a **placeholder hasher** (ADR 0002) — the API is drop-in for a cryptographic one |
+| Query planner beyond lowering | Partial: lowering fixes the circuit; no cost-based join ordering |
+| Wire protocols, server daemon | Specified in §7.3; **not built** |
+| Distributed execution, consensus, cross-shard commit | Specified in §8.5–8.6; **not built** |
+| Self-hosted compiler (Appendix E, stages 1–3) | Specified; **not built**, and Appendix E.0 says so |
+
+## 7.5 What Is Deliberately Not Built, and What That Costs the Claims
+
+Four gaps, each with the claim it withholds.
+
+**No distribution and no consensus.** Everything measured is single-node. The cross-shard commit protocol of §8.6 is a design; nothing in this thesis measures it. This withholds every claim about scale-out, and it is why Theorem 4.2's frontier is located here in counted work rather than in nodes.
+
+**No wire protocol.** MySQL and PostgreSQL compatibility is the adoption argument of §6.9, and it is unbuilt. This costs the thesis nothing *theoretical* — the IR is the contract, not the protocol — but it means the incremental-adoption story is an argument rather than a demonstration.
+
+**The executable IR fragment is narrower than the emitted IR.** The compiler lowers and the verifier accepts joins, fixpoints, set operations and ordering stages; the runtime executes source → optional filter/map → one keyed aggregate. The runtime **rejects** anything else rather than mis-executing it, which is the right failure, but it means the measurements are about the balance-shaped view and not about arbitrary queries. Chapter 9 says so at every table.
+
+**No self-hosting.** Appendix E's three-stage bootstrap needs a stage-0 compiler that accepts the *whole* language; the one that exists accepts a large proper subset, with no trait solver, no monomorphisation and no native code generation. Stage 1 therefore has no input, and no line of the Niles-written compiler has been written. The expressiveness claim that self-hosting would test is consequently untested.
 
 The phased program of Chapter 8 states, for each subsequent phase, the kill criteria that would end it.

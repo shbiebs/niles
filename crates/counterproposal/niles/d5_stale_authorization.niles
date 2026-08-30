@@ -1,0 +1,13 @@
+schema bank {
+    currency usd { scale: 2 }
+    currency eur { scale: 2 }
+    currency jpy { scale: 0 }
+    table accounts { id: Id<A> primary key, owner: Text @confidential(e2ee) }
+    ledger postings { txn: TxnId, acct: Id<A>, cur: Currency, amt: Money,
+        idem: IdemKey window 1.days, conserve per (txn, cur); retain forever; }
+    index ix on postings (acct, cur) anchor;
+    view cheap = postings.group_by(|p| p.acct).sum(|p| p.amt)
+        serve { consistency: bounded(epochs: 8), materialize: auto };
+    view available = cheap.group_by(|r| r.acct).sum(|r| r.sum)
+        serve { consistency: ledger_consistent, materialize: demand };
+}

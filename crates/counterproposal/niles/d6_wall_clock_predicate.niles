@@ -1,0 +1,11 @@
+schema bank {
+    currency usd { scale: 2 }
+    currency eur { scale: 2 }
+    currency jpy { scale: 0 }
+    table accounts { id: Id<A> primary key, owner: Text @confidential(e2ee) }
+    ledger postings { txn: TxnId, acct: Id<A>, cur: Currency, amt: Money,
+        idem: IdemKey window 1.days, conserve per (txn, cur); retain forever; }
+    index ix on postings (acct, cur) anchor;
+    view statement = postings.where(|p| p.amt > month_start()).group_by(|p| p.acct).sum(|p| p.amt)
+        serve { consistency: snapshot, materialize: demand };
+}

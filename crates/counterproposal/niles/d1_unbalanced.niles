@@ -1,0 +1,12 @@
+schema bank {
+    currency usd { scale: 2 }
+    currency eur { scale: 2 }
+    currency jpy { scale: 0 }
+    table accounts { id: Id<A> primary key, owner: Text @confidential(e2ee) }
+    ledger postings { txn: TxnId, acct: Id<A>, cur: Currency, amt: Money,
+        idem: IdemKey window 1.days, conserve per (txn, cur); retain forever; }
+    index ix on postings (acct, cur) anchor;
+}
+fn f(a: Id<A>, b: Id<A>) -> Result<(), E> ! { append, debit<usd>, credit<usd> } {
+    txn idem("k") { let d = debit(a, 100.00 usd)?; let c = credit(b, 60.00 usd); post(d, c) }
+}

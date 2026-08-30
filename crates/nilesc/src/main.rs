@@ -10,6 +10,7 @@
 //! nilesc upquery FILE V   the reconstruction path for view V, and whether it is anchored
 //! nilesc verify  FILE     run the IR verifier over the lowered circuit
 //! nilesc effects FILE     the inferred effect row of every function
+//! nilesc plan    FILE     the materialization plan the optimizer would choose
 //! ```
 //!
 //! Exit code 0 iff no errors. Warnings do not fail the build; that is what makes the
@@ -85,7 +86,7 @@ fn main() -> ExitCode {
                 }
             }
         }
-        "explain" | "verify" | "upquery" => {
+        "explain" | "verify" | "upquery" | "plan" => {
             let (lowered, ldiags) = lower::lower_program(&prog, &cat);
             if !ldiags.items.is_empty() {
                 eprint!("{}", ldiags.render(&src, path));
@@ -94,6 +95,26 @@ fn main() -> ExitCode {
                 "explain" => {
                     println!("circuit ({} nodes):", lowered.circuit.nodes.len());
                     print!("{}", lowered.circuit.explain());
+                }
+                "plan" => {
+                    // The observed load a running engine would supply. Offline, these are
+                    // stated defaults rather than measurements, and the output says so —
+                    // a plan presented as if it were measured would be the worst of both.
+                    let obs = nilestream_optimizer::offline::Observed {
+                        read_rate: 100.0,
+                        write_rate: 50.0,
+                        working_set: 10_000.0,
+                        reconstruction_rows: 9.0,
+                        residency_price: 0.002,
+                    };
+                    println!("plan (offline: load figures are defaults, not measurements)\n");
+                    for p in nilestream_optimizer::offline::plan(&lowered.circuit, obs) {
+                        println!("  {}", p.explanation);
+                        for (m, why) in &p.excluded {
+                            println!("      ruled out {m:?}: {why}");
+                        }
+                        println!();
+                    }
                 }
                 "verify" => {
                     let r = verify::verify(&lowered.circuit);

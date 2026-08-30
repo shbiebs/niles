@@ -12,3 +12,4 @@ path = "src/main.rs"
 [dependencies]
 niles-lang = { path = "../niles-lang" }
 niles-ir = { path = "../niles-ir" }
+nilestream-optimizer = { path = "../nilestream-optimizer" }

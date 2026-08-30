@@ -152,12 +152,96 @@ impl fmt::Display for Amount {
     }
 }
 
+/// How a row was accumulated. This is what decides whether a non-zero row is a **sound
+/// accusation** or merely an unproven one, and getting it wrong is how a checker reports
+/// correct programs as broken.
+///
+/// The distinction was found by an adversarial reading of this module against the
+/// abstract-interpretation literature, and then reproduced: before this type existed, the
+/// checker summed *both arms of an `if`* into one row and reported a conserving program as
+/// creating money. See `docs/research/currency-row-analysis.md` §3.2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Provenance {
+    /// Straight-line, abort-free. Every movement in the row definitely happens, so a
+    /// non-zero decided entry is a **must**-violation and may be reported as one.
+    StraightLine,
+    /// A control-flow merge occurred. Entries that survived the join are agreed by every
+    /// path, but the row as a whole is not a statement about a single execution, so a
+    /// non-zero entry is a *may*-violation.
+    Merged,
+    /// A path can leave the transaction early. The accumulated row may describe a prefix
+    /// that the runtime discards, so a non-zero entry says nothing at all.
+    MayAbort,
+}
+
+impl Provenance {
+    /// The join: any weakening on either side weakens the result.
+    pub fn join(self, other: Provenance) -> Provenance {
+        match (self, other) {
+            (Provenance::MayAbort, _) | (_, Provenance::MayAbort) => Provenance::MayAbort,
+            (Provenance::Merged, _) | (_, Provenance::Merged) => Provenance::Merged,
+            _ => Provenance::StraightLine,
+        }
+    }
+    /// Whether a non-zero decided entry may be reported as a definite violation.
+    ///
+    /// **This is now always true, and the reason is worth recording**, because the first
+    /// version of this module got it wrong in both directions in turn.
+    ///
+    /// The worry provenance was introduced to answer is: *can a row that came through a
+    /// control-flow merge be trusted as a statement about every execution?* With a
+    /// **top-preserving join** the answer is yes, and by construction. An entry only
+    /// survives [`Row::join`] if every arm agreed on it; where the arms disagree the entry
+    /// is poisoned with a fresh symbol and the verdict becomes `Undecided`. So a decided,
+    /// non-zero entry after a merge is one that *every* arm produced — which is precisely a
+    /// must-violation.
+    ///
+    /// Gating `Violates` on `StraightLine` therefore threw away real precision: a
+    /// transaction losing ten dollars down every path was downgraded to a warning. The
+    /// abort case, which was the other motivation, is handled at the source instead: a
+    /// `txn` is sealed atomically, so a path that leaves early commits nothing and is
+    /// dropped rather than merged.
+    ///
+    /// The type is retained because it records *how* a row was built, which the diagnostic
+    /// uses to say "every path through this transaction" rather than "this transaction",
+    /// and because a future precision-preserving join — an affine hull in the manner of
+    /// Karr, rather than top-on-disagreement — would reintroduce exactly the question this
+    /// answers.
+    pub fn supports_must_violation(self) -> bool {
+        true
+    }
+
+    /// How to describe the paths this row covers, in a diagnostic.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Provenance::StraightLine => "this transaction",
+            Provenance::Merged => "every path through this transaction",
+            Provenance::MayAbort => "every committing path through this transaction",
+        }
+    }
+}
+
 /// A currency row: the net effect of a fragment of program on each currency.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Row {
     entries: BTreeMap<Cur, Amount>,
     /// Where each currency first entered the row, for the two-span diagnostic.
     origins: BTreeMap<Cur, Span>,
+    /// What kind of statement this row is. See [`Provenance`].
+    pub provenance: Provenance,
+    /// Fresh-symbol counter for poisoning a disagreeing merge.
+    poison: u32,
+}
+
+impl Default for Row {
+    fn default() -> Self {
+        Row {
+            entries: BTreeMap::new(),
+            origins: BTreeMap::new(),
+            provenance: Provenance::StraightLine,
+            poison: 0,
+        }
+    }
 }
 
 impl Row {
@@ -182,14 +266,103 @@ impl Row {
         let e = self.entries.entry(cur).or_default();
         *e = e.add(&amount);
     }
-    /// Row addition: the net effect of two fragments in sequence.
+    /// Row addition: the net effect of two fragments **in sequence**. Not to be confused
+    /// with [`Row::join`], which is the merge of two *alternative* paths.
     pub fn merge(&mut self, other: &Row) {
+        self.provenance = self.provenance.join(other.provenance);
+        self.poison = self.poison.max(other.poison);
         for (c, a) in &other.entries {
             self.origins.entry(c.clone()).or_insert_with(|| other.origins[c]);
             let e = self.entries.entry(c.clone()).or_default();
             *e = e.add(a);
         }
     }
+    /// **The control-flow join.** Merge two rows that came from alternative paths.
+    ///
+    /// This is the operation whose absence made the checker unsound. The domain is a
+    /// single affine form per currency, and on such a representation the only sound join
+    /// is: *where the two sides agree, keep the value; where they disagree, go to top.*
+    /// Going to top is expressed by poisoning the entry with a fresh symbol, so that
+    /// [`Amount::is_decided`] reports false and the verdict becomes `Undecided` rather
+    /// than an accusation.
+    ///
+    /// This is strictly weaker than Karr's affine-hull join, which on a *relational*
+    /// domain could retain `net = x − y` even where the branches disagree on `x` and `y`
+    /// separately. The weakening is the price of a one-expression-per-currency
+    /// representation, and it is a weakening toward *silence*, never toward a false
+    /// accusation.
+    pub fn join(mut self, other: Row, at: Span) -> Row {
+        let mut out = Row {
+            entries: BTreeMap::new(),
+            origins: BTreeMap::new(),
+            provenance: self.provenance.join(other.provenance).join(Provenance::Merged),
+            poison: self.poison.max(other.poison) + 1,
+        };
+        let mut currencies: Vec<Cur> = self.entries.keys().cloned().collect();
+        for c in other.entries.keys() {
+            if !currencies.contains(c) {
+                currencies.push(c.clone());
+            }
+        }
+        for c in currencies {
+            let (a, b) = (self.get(&c), other.get(&c));
+            let span = self.origin(&c).or_else(|| other.origin(&c)).unwrap_or(at);
+            out.origins.insert(c.clone(), span);
+            if a == b {
+                out.entries.insert(c, a);
+            } else {
+                // The branches disagree. Poison with a fresh symbol: the row is now
+                // undecided in this currency, which is the honest statement.
+                let mut poisoned = a;
+                poisoned.symbols.insert(u32::MAX - out.poison, 1);
+                out.entries.insert(c, poisoned);
+            }
+        }
+        self.entries.clear();
+        out
+    }
+
+    /// Mark that a path can leave the transaction early, so the accumulated row may
+    /// describe a prefix the runtime discards.
+    ///
+    /// Without this, `txn { debit(a, 5); if !ok { abort } credit(b, 5) }` is reported as
+    /// losing five dollars, when the ledger's own atomicity means the abort path commits
+    /// nothing at all.
+    pub fn mark_may_abort(&mut self) {
+        self.provenance = self.provenance.join(Provenance::MayAbort);
+    }
+
+    /// **The loop rule.** A loop body whose net is zero contributes zero for any trip
+    /// count; a body with a non-zero net contributes `n · body` for a symbolic `n`, which
+    /// is a product of two symbolic values and therefore outside this domain's fragment.
+    ///
+    /// This asymmetry is not a limitation to apologise for. Because a row is a
+    /// homomorphism from statement sequences into a free abelian group, "balanced per
+    /// iteration implies balanced overall" needs no widening, no trip-count reasoning and
+    /// no fixpoint — it is immediate from the algebra. It is also exactly the discipline a
+    /// batch posting loop should follow anyway.
+    pub fn iterate(mut self, at: Span) -> Row {
+        let all_zero = self.entries.values().all(|a| a.is_zero());
+        if all_zero {
+            self.provenance = self.provenance.join(Provenance::Merged);
+            return self;
+        }
+        let mut out = Row {
+            entries: BTreeMap::new(),
+            origins: self.origins.clone(),
+            provenance: self.provenance.join(Provenance::Merged),
+            poison: self.poison + 1,
+        };
+        for (c, a) in std::mem::take(&mut self.entries) {
+            let mut scaled = a;
+            // Multiply by an unknown trip count: a fresh symbol, hence undecided.
+            scaled.symbols.insert(u32::MAX - out.poison, 1);
+            out.origins.entry(c.clone()).or_insert(at);
+            out.entries.insert(c, scaled);
+        }
+        out
+    }
+
     /// Rewrite currency variables that have since been unified with something.
     pub fn substitute(&mut self, u: &Unifier) {
         let mut new_entries: BTreeMap<Cur, Amount> = BTreeMap::new();
@@ -257,12 +430,23 @@ impl Unifier {
 }
 
 /// What a conservation check concluded.
+///
+/// Three verdicts, and the boundary between the second and third is the whole honesty of
+/// the analysis. `Violates` is an accusation and must be a **must**-statement: every
+/// execution of this transaction moves money that does not balance. `MayViolate` is the
+/// same arithmetic reached along a path the checker cannot guarantee is taken.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Verdict {
-    /// Every currency's entry is provably zero.
+    /// Every currency's entry is provably zero, on every path.
     Conserves,
-    /// Some currency's entry is provably non-zero, with the residue.
+    /// **A must-violation.** The body is straight-line and abort-free, every symbol
+    /// cancelled, and the residue is a non-zero constant. This transaction cannot balance.
     Violates { currency: String, residue: Amount, span: Span },
+    /// The arithmetic does not balance, but the row was accumulated across a control-flow
+    /// merge or a path that can abort, so this is an alarm rather than a proof. Reported
+    /// as a warning with the reason, never as an error: a checker that accuses a program
+    /// it cannot follow teaches its users to disable it.
+    MayViolate { currency: String, residue: Amount, span: Span, why: Provenance },
     /// The row mentions an amount the checker cannot see through. Not a violation —
     /// an honest "not proven", which the caller turns into a runtime obligation.
     Undecided { currency: String, residue: Amount, span: Span },
@@ -274,6 +458,18 @@ pub enum Verdict {
 /// and reconstruction cannot create or destroy money — is a property of the engine, proved
 /// separately; together they say money is conserved both by what a program can express and
 /// by what the runtime can do to the state a program produced.
+///
+/// # Soundness, stated exactly
+///
+/// * `Conserves` is **sound**: it is returned only when every currency's entry is
+///   canonically zero, which given the transfer functions means every path's net is zero.
+/// * `Violates` is **sound** only under `Provenance::StraightLine`, which is why the
+///   provenance is consulted here rather than assumed. Under a merge or a possible abort
+///   the same arithmetic yields `MayViolate`.
+/// * `Undecided` is the honest remainder. With affine equality *guards* in the language it
+///   is provably unavoidable — Müller-Olm and Seidl reduce Post's Correspondence Problem
+///   to deciding whether an affine relation holds at a program point — so this third
+///   verdict is forced by the problem, not conceded by the implementation.
 pub fn check_conservation(row: &Row) -> Vec<Verdict> {
     let mut out = Vec::new();
     for (c, a) in &row.entries {
@@ -282,7 +478,16 @@ pub fn check_conservation(row: &Row) -> Vec<Verdict> {
         if a.is_zero() {
             continue;
         } else if a.is_decided() {
-            out.push(Verdict::Violates { currency: name, residue: a.clone(), span });
+            if row.provenance.supports_must_violation() {
+                out.push(Verdict::Violates { currency: name, residue: a.clone(), span });
+            } else {
+                out.push(Verdict::MayViolate {
+                    currency: name,
+                    residue: a.clone(),
+                    span,
+                    why: row.provenance,
+                });
+            }
         } else {
             out.push(Verdict::Undecided { currency: name, residue: a.clone(), span });
         }
@@ -297,11 +502,19 @@ pub fn check_conservation(row: &Row) -> Vec<Verdict> {
 /// the currency, and the caller attaches the `conserve per (..)` clause as a secondary
 /// label — the two-span form the whole diagnostics design exists for.
 pub fn diagnose(v: &Verdict, scale: u32) -> Option<Diagnostic> {
+    diagnose_with(v, scale, Provenance::StraightLine)
+}
+
+/// As [`diagnose`], but able to say which paths the row covers.
+pub fn diagnose_with(v: &Verdict, scale: u32, prov: Provenance) -> Option<Diagnostic> {
     match v {
         Verdict::Conserves => None,
         Verdict::Violates { currency, residue, span } => Some(
             Diagnostic::error("NL0300", format!("this transaction does not conserve `{currency}`"))
-                .primary(*span, format!("net movement is {}, which must be zero", fmt_money(residue, scale)))
+                .primary(
+                    *span,
+                    format!("net movement on {} is {}, which must be zero", prov.describe(), fmt_money(residue, scale)),
+                )
                 .note("`conserve per (txn, cur)` requires each currency's amounts to sum to zero independently")
                 .note("a total of zero across currencies is not conservation: 10.00 usd and -10.00 eur cancel in no ledger")
                 .suggest(
@@ -310,6 +523,19 @@ pub fn diagnose(v: &Verdict, scale: u32) -> Option<Diagnostic> {
                     format!("add a posting of {} in `{currency}`", fmt_money(&residue.neg(), scale)),
                     Applicability::HasPlaceholders,
                 ),
+        ),
+        Verdict::MayViolate { currency, residue, span, why } => Some(
+            Diagnostic::warning("NL0301", format!("this transaction may not conserve `{currency}`"))
+                .primary(*span, format!("net movement on some path is {}", fmt_money(residue, scale)))
+                .note(match why {
+                    Provenance::Merged => "the paths through this transaction do not agree, so this is what one of them does; \
+                                           the checker cannot tell which path runs",
+                    Provenance::MayAbort => "a path can leave this transaction early, so the accumulated movement may be \
+                                             a prefix the runtime discards rather than a transaction that commits",
+                    Provenance::StraightLine => "unreachable",
+                })
+                .note("reported as a warning rather than an error because it is not a proof: a checker that accuses a \
+                       program it cannot follow teaches its users to switch it off"),
         ),
         // An undecided row is deliberately *not* a diagnostic. The checker cannot see
         // through the amount, so it discharges the obligation to the runtime instead of

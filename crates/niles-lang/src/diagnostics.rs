@@ -5,11 +5,43 @@
 //! *machine-applicable* suggestions, and `--explain` prints a long-form explanation keyed
 //! by the code. Niles copies that shape, for a reason specific to this thesis: the
 //! interesting errors here are not syntax errors but conservation, currency, linearity,
-//! effect and contract errors, and each of those needs to point at two places at once —
-//! the money that was created and the rule that forbids it, the hold and its second
-//! resolution, the view's declared rung and the effect that exceeds it.
+//! effect and contract errors.
 //!
-//! A one-span error cannot say that.
+//! # Why more than one span, and how strong that claim actually is
+//!
+//! The theoretical case is the strong one, and it comes from type-error *slicing*. Haack
+//! and Wells's position is that the location of a type error is not a point but "a set of
+//! program points (a slice) all of which are necessary for the type error", and that
+//! algorithms which "identify one node of the program tree which participates in the type
+//! error … will often be the wrong node to blame". Zhang and Myers and Chen and Erwig
+//! reach the same conclusion from different directions, the latter noting that committing
+//! to a single location fails "because in some cases the program text does not contain
+//! enough information to confidently make the right decision".
+//!
+//! That argument transfers here exactly. A conservation violation is constituted by the
+//! postings that fail to net *and* the rule that says they must; a double resolution by
+//! the binding *and* both consumptions. Reporting one of those is reporting an arbitrary
+//! member of a set, and the choice is a heuristic rather than a fact about the program.
+//!
+//! **What there is no evidence for** is that a *second span* is the right vehicle. No
+//! controlled study compares multi-span against single-span diagnostics, for any error
+//! class, in any language. The empirical support is indirect: Barik et al. found developers
+//! prefer messages with proper argument structure (claim, grounds, warrant) — but only
+//! when neither message offers a resolution. And the most-admired compiler diagnostics in
+//! the field, Elm's, are largely *single*-region with the counterparty in prose. The
+//! honest claim is convergence on dual *reference* — rustc's `required by this bound in
+//! …`, GCC's labelled ranges, the Language Server Protocol's `relatedInformation` — with
+//! span-versus-note-versus-prose an open rendering question.
+//!
+//! Two design rules follow, and both are concessions:
+//!
+//! 1. **The primary span must stand alone.** rustc's own guidance is that a primary label
+//!    should make sense "if it were the only thing being displayed". If a Niles diagnostic
+//!    is unintelligible without its second span, the primary label is underspecified.
+//! 2. **A fix outranks a warrant.** See [`Diagnostic::warrant`].
+//!
+//! The full evidence review, including the case against this design, is in
+//! `docs/research/diagnostics-evidence.md`.
 
 use crate::lexer::Span;
 use std::fmt::Write as _;
@@ -63,6 +95,8 @@ pub enum Applicability {
 
 #[derive(Debug, Clone)]
 pub struct Diagnostic {
+    /// Warrants suppressed in favour of a machine-applicable fix. See [`Diagnostic::warrant`].
+    elided_warrants: usize,
     pub severity: Severity,
     /// A stable code, `NLnnnn`. Stability is the point: a code is what a user searches for
     /// and what `nilesc --explain` looks up, so codes are never reused for a new meaning.
@@ -76,6 +110,7 @@ pub struct Diagnostic {
 impl Diagnostic {
     pub fn error(code: &'static str, msg: impl Into<String>) -> Self {
         Diagnostic {
+            elided_warrants: 0,
             severity: Severity::Error,
             code,
             msg: msg.into(),
@@ -114,6 +149,47 @@ impl Diagnostic {
         });
         self
     }
+    /// Attach a **warrant**: the rule that makes this a violation, at the place it was
+    /// declared.
+    ///
+    /// Deliberately not the same call as [`Diagnostic::secondary`], because it carries a
+    /// design rule the evidence supports and a plain secondary span does not.
+    ///
+    /// Barik, Ford, Murphy-Hill and Parnin modelled an error message as a Toulmin
+    /// argument — claim, grounds, warrant, backing — and found, with 68 professional
+    /// developers, that developers prefer proper argument structure *when neither message
+    /// offers a resolution*, **but will accept a deficient structure if it provides a
+    /// resolution**. That second clause is a constraint on this design, not a footnote:
+    /// where a machine-applicable fix exists, the fix is what the developer wants, and a
+    /// second span pointing at a rule declaration three files away is cost without benefit.
+    ///
+    /// So the warrant is *conditional*. It is attached when the diagnostic has no
+    /// machine-applicable suggestion, and elided when it has one — while the rule's
+    /// identity stays in the message text either way, so nothing is lost, only relocated.
+    ///
+    /// See `docs/research/diagnostics-evidence.md` §4 for the case against, which is
+    /// stronger than it first appears and which this method concedes rather than argues
+    /// with.
+    pub fn warrant(mut self, span: Span, rule: impl Into<String>) -> Self {
+        let has_fix = self
+            .suggestions
+            .iter()
+            .any(|s| s.applicability == Applicability::MachineApplicable);
+        if !has_fix {
+            self.labels.push(Label { span, msg: rule.into(), primary: false });
+        } else {
+            self.elided_warrants += 1;
+        }
+        self
+    }
+
+    /// How many warrants were suppressed because a machine-applicable fix was available.
+    /// Exposed so a test can check the rule is actually being applied rather than
+    /// accidentally never triggering.
+    pub fn elided_warrants(&self) -> usize {
+        self.elided_warrants
+    }
+
     pub fn span(&self) -> Span {
         self.labels
             .iter()
@@ -245,6 +321,51 @@ mod tests {
         assert_eq!(closest("wher", cands.into_iter()), Some("where"));
         assert_eq!(closest("grup_by", cands.into_iter()), Some("group_by"));
         assert_eq!(closest("quantum", cands.into_iter()), None);
+    }
+
+    #[test]
+    fn a_fix_outranks_a_warrant() {
+        // Barik et al.'s second clause, as a rule the code obeys: given a machine-applicable
+        // resolution, the developer wants the resolution, and a second span pointing at a
+        // rule declaration in another file is cost without benefit.
+        let with_fix = Diagnostic::error("NL0300", "does not conserve `usd`")
+            .primary(Span::new(10, 20), "net movement is 5.00 usd")
+            .suggest(Span::new(10, 20), "post(balancing)", "add the balancing posting", Applicability::MachineApplicable)
+            .warrant(Span::new(0, 5), "`conserve per (txn, cur)` declared here");
+        assert_eq!(with_fix.labels.len(), 1, "the warrant must yield to the fix");
+        assert_eq!(with_fix.elided_warrants(), 1, "and the elision must be observable, not silent");
+
+        let without_fix = Diagnostic::error("NL0300", "does not conserve `usd`")
+            .primary(Span::new(10, 20), "net movement is 5.00 usd")
+            .warrant(Span::new(0, 5), "`conserve per (txn, cur)` declared here");
+        assert_eq!(without_fix.labels.len(), 2, "with no fix, the warrant is what the reader has");
+    }
+
+    #[test]
+    fn a_placeholder_suggestion_does_not_displace_the_warrant() {
+        // Only a *machine-applicable* fix outranks the rule. A suggestion the developer
+        // must fill in themselves is not a resolution in Barik's sense.
+        let d = Diagnostic::error("NL0300", "does not conserve `usd`")
+            .primary(Span::new(10, 20), "net movement is 5.00 usd")
+            .suggest(Span::new(10, 20), "post(<account>, 5.00 usd)", "add a balancing posting", Applicability::HasPlaceholders)
+            .warrant(Span::new(0, 5), "`conserve per (txn, cur)` declared here");
+        assert_eq!(d.labels.len(), 2);
+        assert_eq!(d.elided_warrants(), 0);
+    }
+
+    #[test]
+    fn the_primary_label_stands_alone() {
+        // rustc's doctrine, as a property of ours: the primary label must make sense as
+        // the only thing displayed, because in an IDE it often is.
+        let d = Diagnostic::error("NL0300", "this transaction does not conserve `usd`")
+            .primary(Span::new(10, 20), "net movement on every path through this transaction is -40.00, which must be zero")
+            .warrant(Span::new(0, 5), "`conserve per (txn, cur)` declared here");
+        let primary = d.labels.iter().find(|l| l.primary).unwrap();
+        assert!(
+            primary.msg.len() > 40 && primary.msg.contains("-40.00"),
+            "a primary label that needs the second span to be understood is underspecified: {}",
+            primary.msg
+        );
     }
 
     #[test]

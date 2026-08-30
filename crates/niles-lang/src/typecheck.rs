@@ -100,6 +100,67 @@ impl Scope {
     fn child_conserving(&self) -> Scope {
         Scope { conserving: true, bindings: self.bindings.clone(), ..Default::default() }
     }
+
+    /// A scope for one arm of a branch.
+    ///
+    /// It inherits the bindings and the linear values in flight — a hold bound before an
+    /// `if` may legitimately be resolved inside one arm — but starts with an **empty row**,
+    /// because the arms' effects on the ledger are alternatives, not a sequence. Summing
+    /// them was the bug: `if p { credit(a, 10) } else { credit(b, 10) }` accumulated
+    /// twenty dollars of credit against ten of debit and reported a conserving program as
+    /// creating money.
+    fn branch(&self) -> Scope {
+        Scope {
+            row: CurRow::default(),
+            effects: EffRow::new(),
+            linear: self.linear.clone(),
+            conserving: self.conserving,
+            bindings: self.bindings.clone(),
+        }
+    }
+}
+
+/// Merge the arms of a branch back into the parent scope.
+///
+/// Three things merge, each with its own rule.
+///
+/// * **The row** joins pointwise: agreed entries survive, disagreements go to top.
+/// * **Effects** union, because an effect on any path is an effect the function has.
+/// * **Linear uses** take the *maximum across arms*, not the sum. A hold resolved once in
+///   each arm of an `if` is resolved once, not twice — summing them was the second half of
+///   the same bug, and it reported a correct program as consuming a hold twice.
+///
+/// Linear values *declared inside* an arm never reach here: they are checked at the end of
+/// that arm, because a hold created in one branch must be resolved in that branch.
+fn merge_branches(parent: &mut Scope, arms: Vec<Scope>, at: Span) -> Vec<Diagnostic> {
+    let mut diags = Vec::new();
+    if arms.is_empty() {
+        return diags;
+    }
+    let base_len = parent.linear.len();
+    let mut merged_row: Option<CurRow> = None;
+    for mut arm in arms {
+        // Anything the arm declared itself must be consumed within the arm.
+        let arm_local: Vec<LinearValue> = arm.linear.split_off(base_len.min(arm.linear.len()));
+        diags.extend(effects::check_linearity(&arm_local));
+
+        parent.effects.union(&arm.effects);
+        // Per inherited value, take the maximum use count any arm reached.
+        for (i, v) in arm.linear.iter().enumerate() {
+            if i < parent.linear.len() && v.uses.len() > parent.linear[i].uses.len() {
+                parent.linear[i].uses = v.uses.clone();
+            }
+        }
+        merged_row = Some(match merged_row {
+            None => arm.row,
+            Some(acc) => acc.join(arm.row, at),
+        });
+    }
+    if let Some(r) = merged_row {
+        parent.row.merge(&r);
+        // The join itself is what weakens the provenance; `merge` carries it up.
+    }
+    diags
 }
 
 impl<'a> Cx<'a> {
@@ -505,53 +566,120 @@ impl<'a> Cx<'a> {
                 self.block(b, sc);
                 Shape::Opaque
             }
-            Expr::If { cond, then, els, .. } => {
+            Expr::If { cond, then, els, span } => {
                 self.expr(cond, sc);
-                self.block(then, sc);
-                if let Some(e) = els {
-                    self.expr(e, sc);
-                }
-                Shape::Opaque
-            }
-            Expr::Case { arms, els, .. } => {
-                for (c, v) in arms {
-                    self.expr(c, sc);
-                    self.expr(v, sc);
-                }
-                if let Some(e) = els {
-                    self.expr(e, sc);
-                }
-                Shape::Opaque
-            }
-            Expr::Match { scrutinee, arms, .. } => {
-                self.expr(scrutinee, sc);
-                for a in arms {
-                    if let Some(g) = &a.guard {
-                        self.expr(g, sc);
+                let mut arms = Vec::new();
+                let mut a = sc.branch();
+                self.block(then, &mut a);
+                arms.push(a);
+                match els {
+                    Some(e) => {
+                        let mut b = sc.branch();
+                        self.expr(e, &mut b);
+                        arms.push(b);
                     }
-                    self.expr(&a.body, sc);
+                    // A missing `else` is an arm that does nothing: the empty row. Omitting
+                    // it would let a one-armed `if` look unconditional.
+                    None => arms.push(sc.branch()),
+                }
+                for d in merge_branches(sc, arms, *span) {
+                    self.d.push(d);
                 }
                 Shape::Opaque
             }
-            Expr::While { cond, body, .. } => {
+            Expr::Case { arms, els, span } => {
+                let mut branches = Vec::new();
+                for (c, v) in arms {
+                    // The guard is evaluated on the way in, so its effects are
+                    // unconditional; only the arm's value is alternative.
+                    self.expr(c, sc);
+                    let mut b = sc.branch();
+                    self.expr(v, &mut b);
+                    branches.push(b);
+                }
+                match els {
+                    Some(e) => {
+                        let mut b = sc.branch();
+                        self.expr(e, &mut b);
+                        branches.push(b);
+                    }
+                    // `case` without `else` can fall through producing nothing, which is
+                    // an arm like any other.
+                    None => branches.push(sc.branch()),
+                }
+                for d in merge_branches(sc, branches, *span) {
+                    self.d.push(d);
+                }
+                Shape::Opaque
+            }
+            Expr::Match { scrutinee, arms, span } => {
+                self.expr(scrutinee, sc);
+                let mut branches = Vec::new();
+                for a in arms {
+                    let mut b = sc.branch();
+                    if let Some(g) = &a.guard {
+                        self.expr(g, &mut b);
+                    }
+                    self.expr(&a.body, &mut b);
+                    branches.push(b);
+                }
+                for d in merge_branches(sc, branches, *span) {
+                    self.d.push(d);
+                }
+                Shape::Opaque
+            }
+            // --- loops: the loop rule ---
+            //
+            // A row is a homomorphism from statement sequences into a free abelian group,
+            // so "balanced per iteration implies balanced overall" is immediate from the
+            // algebra: no widening, no trip-count reasoning, no fixpoint. A body that nets
+            // non-zero contributes `n · body` for an unknown `n`, which is a product of two
+            // symbolic values and therefore outside this domain — so it becomes undecided.
+            //
+            // That asymmetry is not a limitation to apologise for. It is exactly the
+            // discipline a batch-posting loop should follow: balance each iteration.
+            Expr::While { cond, body, span } => {
                 self.expr(cond, sc);
-                self.block(body, sc);
+                let mut b = sc.branch();
+                self.block(body, &mut b);
+                self.close_loop(sc, b, *span);
                 Shape::Opaque
             }
-            Expr::Loop { body, .. } => {
-                self.block(body, sc);
+            Expr::Loop { body, span } => {
+                let mut b = sc.branch();
+                self.block(body, &mut b);
+                self.close_loop(sc, b, *span);
                 Shape::Opaque
             }
-            Expr::For { iter, body, .. } => {
+            Expr::For { iter, body, span, .. } => {
                 self.expr(iter, sc);
-                self.block(body, sc);
+                let mut b = sc.branch();
+                self.block(body, &mut b);
+                self.close_loop(sc, b, *span);
                 Shape::Opaque
             }
             Expr::Closure { body, .. } => {
                 self.expr(body, sc);
                 Shape::Opaque
             }
-            Expr::Try { expr, .. } | Expr::Cast { expr, .. } => self.expr(expr, sc),
+            // `e?` is an early exit from the transaction. **It does not weaken the
+            // analysis**, and the reason is a guarantee the runtime provides rather than
+            // anything the checker can see.
+            //
+            // A `txn` is sealed atomically: a path that leaves it early commits *nothing*.
+            // So an abort path is not a path with a different net — it is not a path that
+            // reaches the ledger at all, and the correct transfer function maps it to
+            // bottom rather than to the row accumulated so far. Only the paths that reach
+            // the seal are paths whose conservation is a question.
+            //
+            // The first version of this rule marked every `?` as weakening the verdict from
+            // a proof to an alarm, and the effect was immediate: `txn { let d = debit(a,
+            // 100 usd)?; let c = credit(b, 60 usd); post(d, c) }` — an unambiguous
+            // forty-dollar hole — was downgraded to a warning. Atomicity is what makes the
+            // stronger reading sound, which is a case of a runtime guarantee buying static
+            // precision rather than the other way round.
+            Expr::Try { expr, .. } => self.expr(expr, sc),
+            Expr::Cast { expr, .. } => self.expr(expr, sc),
             Expr::Field { base, .. } | Expr::Index { base, .. } => {
                 self.expr(base, sc);
                 Shape::Opaque
@@ -573,7 +701,15 @@ impl<'a> Cx<'a> {
                 self.expr(value, sc);
                 Shape::Opaque
             }
-            Expr::Return { value: Some(v), .. } => self.expr(v, sc),
+            // Same reasoning as `?`: a `return` out of a transaction abandons it, and an
+            // abandoned transaction commits nothing.
+            Expr::Return { value, .. } => match value {
+                Some(v) => self.expr(v, sc),
+                None => Shape::Opaque,
+            },
+            // `break` and `continue` leave a *loop*, not the transaction. The loop rule
+            // handles what that does to the row; the transaction still commits.
+            Expr::Break(_) | Expr::Continue(_) => Shape::Opaque,
             Expr::Explain { target, span } | Expr::Impact { target, span } => {
                 self.expr(target, sc);
                 sc.effects.add(Effect::Read(Rung::Snapshot), *span);
@@ -730,6 +866,32 @@ impl<'a> Cx<'a> {
         }
     }
 
+    /// Close a loop body back into its enclosing scope, applying the loop rule.
+    fn close_loop(&mut self, sc: &mut Scope, mut body: Scope, at: Span) {
+        let base_len = sc.linear.len();
+        let body_local: Vec<LinearValue> = body.linear.split_off(base_len.min(body.linear.len()));
+        // A linear value created inside a loop body must be consumed inside it; a hold
+        // that escapes an iteration would be resolved a number of times the checker cannot
+        // count, which is the same problem in the linear discipline as `n · m` is in the
+        // arithmetic one.
+        for d in effects::check_linearity(&body_local) {
+            self.d.push(d);
+        }
+        sc.effects.union(&body.effects);
+        // A linear value consumed *inside* a loop is consumed an unknown number of times.
+        for (i, v) in body.linear.iter().enumerate() {
+            if i < sc.linear.len() && v.uses.len() > sc.linear[i].uses.len() {
+                let extra: Vec<Span> = v.uses[sc.linear[i].uses.len()..].to_vec();
+                // Record it twice: once is the use, and the duplicate is what makes an
+                // unbounded number of uses show up as the error it is.
+                sc.linear[i].uses.extend(extra.iter().copied());
+                sc.linear[i].uses.extend(extra);
+            }
+        }
+        let iterated = body.row.iterate(at);
+        sc.row.merge(&iterated);
+    }
+
     fn consume_linear(&mut self, e: &Expr, sc: &mut Scope, at: Span) {
         if let Expr::Path(p) = e {
             let n = &p.last().text;
@@ -745,22 +907,33 @@ impl<'a> Cx<'a> {
         if row.is_empty() {
             return;
         }
+        let prov = row.provenance;
         for v in rows::check_conservation(row) {
             match &v {
                 Verdict::Conserves => self.report.conservation_proved += 1,
                 Verdict::Undecided { .. } => self.report.runtime_obligations += 1,
+                Verdict::MayViolate { currency, .. } => {
+                    self.report.runtime_obligations += 1;
+                    let scale = self.cat.currencies.get(currency).map(|c| c.scale).unwrap_or(2);
+                    if let Some(d) = rows::diagnose(&v, scale) {
+                        self.d.push(d);
+                    }
+                }
                 Verdict::Violates { currency, .. } => {
                     let scale = self.cat.currencies.get(currency).map(|c| c.scale).unwrap_or(2);
-                    if let Some(mut d) = rows::diagnose(&v, scale) {
+                    if let Some(mut d) = rows::diagnose_with(&v, scale, prov) {
                         if let Some(name) = leg {
                             d = d.secondary(span, format!("in leg `{name}` of this `fx` form"));
                             d = d.note("each leg of an `fx` form conserves independently; a rate relates them, it does not balance them");
                         }
                         // Point at the ledger's own rule — the other half of the two-span
                         // form these diagnostics exist for.
+                        // The warrant, attached conditionally: it yields to a
+                        // machine-applicable fix, because a resolution is what the reader
+                        // wants and a rule declaration three files away is not.
                         if let Some(rel) = self.cat.relations.values().find(|r| r.conserve_span.is_some()) {
                             if let Some(cs) = rel.conserve_span {
-                                d = d.secondary(cs, format!("`conserve per (..)` declared on `{}` here", rel.name));
+                                d = d.warrant(cs, format!("`conserve per (..)` declared on `{}` here", rel.name));
                             }
                         }
                         self.d.push(d);

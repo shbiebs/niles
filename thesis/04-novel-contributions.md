@@ -105,6 +105,175 @@ against full materialization's C_full = C_apply(λ, |K|) + C_mem(|K|). For every
 
 **What it does not give.** Clause (3) is enforcement of authorization, not of solvency: Proposition 3.2 proves non-negativity is not coordination-free, so the type system can require that the capability be present and the runtime must still coordinate at the reservation. Two further limits are declared rather than glossed. Refinement-style predicates (e.g. richer overdraft conditions) are decidable only relative to a chosen qualifier set, which is the standard price of liquid typing [Rondon et al., PLDI '08]. And confidentiality typing (Section 6.18) is a non-interference-style discipline whose *static-label* fragment is well understood, while dynamic labels remain an open problem in the information-flow literature — Sabelfeld and Myers note that no non-interference results exist for the dynamic-label fragment they describe. Niles therefore restricts confidentiality annotations to static labels, and says so.
 
+
+### 4.5.1 The Currency-Row Solver: What the Analysis Actually Is
+
+Contribution 4's conservation clause rests on a static analysis, and the thesis previously
+asserted its properties in a sentence. This section places it in the program-analysis
+literature, states its soundness precisely, and records where the original framing was
+wrong — in two cases badly enough that the implementation was wrong with it.
+
+**The carrier.** A transaction's net effect is not a number but a *row*: a finite map from
+currency to a signed amount. Amounts are affine forms over opaque atoms, `c₀ + Σ kᵢ·xᵢ`
+with integer coefficients, closed under addition, negation and integer scaling but not
+under multiplication of two symbolic values or division. The whole state is the direct sum
+`⨁_c (ℤ^X ⊕ ℤ)` over currencies.
+
+That carrier is not new, and its pedigree is worth claiming rather than reinventing:
+Ellerman's algebraic reconstruction of double-entry bookkeeping gives exactly this structure
+as the *Pacioli group*, a group of differences on T-account pairs, generalized to vectors
+indexed by property type. The row is his multi-dimensional generalization with currency as
+the index.
+
+**What it is, in the standard taxonomy.** The honest name is *a combination domain of affine
+expressions over Herbrand atoms, restricted to a single accumulator per currency*. Two
+components, and separating them matters because they fail differently.
+
+The relationship to Karr's algorithm is best stated as an **encoding rather than a
+specialization**. Introduce a ghost variable `net_c` per currency, model `debit` as
+`net_c := net_c − m` and `credit` as `net_c := net_c + m`, and model each opaque money
+source as a nondeterministic assignment. Then "this transaction conserves *c*" is exactly
+the Karr query *does the affine relation `net_c = 0` hold at the transaction's exit?* The
+solver is therefore a **cheap, non-relational implementation of one Karr query**, not a
+degenerate case of Karr's domain — and it is strictly weaker at joins, where Karr's affine
+hull can retain `net = x − y` across branches that disagree on `x` and `y` separately.
+
+It is also *incomparable* to Karr on a second axis: Karr's variables are program locations,
+whereas the atoms here are named values, so two reads of the same pure call should be the
+same atom. That is a Herbrand-equality component, and the literature for the combination
+exists — Gulwani and Necula's polynomial-time global value numbering, Müller-Olm, Rüthing
+and Seidl on checking Herbrand equalities, and the interprocedural version.
+
+**It is not a decision procedure.** The thesis previously used that phrase and it is an
+overclaim. What the solver has is a canonical form and an equality test against zero, which
+is *complete for the word problem in a finitely generated free abelian group* and decidable
+in time linear in term size. It is not a decision procedure for Presburger arithmetic and
+not the Omega test; the fragment sits far below both, deliberately.
+
+**Where the incompleteness actually lives.** The thesis previously attributed the analysis's
+limits to its inability to see that `x − x` is zero when the two `x` come from separate
+calls. That is a *value-numbering* failure, not an arithmetic one, and it is fixable by
+congruence closure. The arithmetic limits are different and worse, and they are where real
+banking bugs live: **division and rounding** (`fee = amount * 3 / 10000`, then split with a
+remainder leg), products of two symbolic values, guards, `min`/`max`, and — since amounts
+are machine integers rather than mathematical ones — modular wraparound. An affine domain
+over ℚ or ℤ is unsound with respect to overflow, so overflow-freedom is a side condition
+this thesis discharges by construction (i128 minor units against realistic magnitudes) and
+does not prove.
+
+**The third verdict is forced, not conceded.** Müller-Olm and Seidl show by reduction from
+Post's Correspondence Problem that in affine programs *with affine equality guards*, whether
+a given affine relation holds at a program point is **undecidable**. `Undecided` is therefore
+not an engineering weakness that more effort would remove; it is the shape of the problem,
+and a decidable island inside it is the most any analysis of this kind can offer.
+
+**Soundness, restated after two corrections.** The verdicts are `Conserves` (a proof),
+`Violates` (an accusation) and `Undecided` (an obligation discharged to the runtime). The
+standard vocabulary is *sound but incomplete*, and *must* versus *may*; "three-valued
+analysis" is avoided because it names Sagiv–Reps–Wilhelm's shape analysis, which is a
+different thing.
+
+Getting `Violates` sound took two attempts, and both failures are instructive.
+
+*The first* was that the analysis had **no control-flow join at all**. It walked both arms
+of a branch into one accumulator, which is not an abstract interpretation of the program but
+an analysis of a different program — one in which both branches run. On an eleven-line
+transaction whose two arms each conserve, it produced four false errors: a phantom
+imbalance, a spurious "never consumed", and two spurious "consumed twice". A checker that
+accuses correct programs is worse than no checker, because it teaches its users to disable
+it. The fix is a **top-preserving join**: where the arms agree the entry survives, where they
+disagree it is poisoned to `Undecided`. On a single-expression-per-currency representation
+that is the only sound join available, and the weakening is always toward silence.
+
+*The second* was an over-correction. Faced with the observation that an aborting path leaves
+a partial row, the analysis was made to weaken its verdict whenever a `?` appeared — and
+promptly downgraded an unambiguous forty-dollar hole to a warning. The right treatment is
+not to weaken but to **drop**: a `txn` is sealed atomically, so a path that leaves early
+commits nothing and is not a path whose conservation is a question. This is a case of a
+*runtime* guarantee buying *static* precision, and it is worth stating as such, because the
+usual direction of that trade is the reverse.
+
+With a top-preserving join and atomic transactions, a decided non-zero entry surviving a
+merge was agreed by every arm — so it is a must-violation, and no provenance-based weakening
+is needed. The machinery introduced to defend against merges turned out to be made
+unnecessary by doing the merges correctly.
+
+**The loop rule, which is a small result.** Because a row is a monoid homomorphism from
+statement sequences into a free abelian group, *if each iteration's net is zero, the loop's
+net is zero for any trip count* — with no widening, no trip-count reasoning and no fixpoint.
+Conversely a body netting `m` contributes `n·m` for symbolic `n`, a product of two symbolic
+values, hence `Undecided`. The asymmetry is not a limitation to apologise for: it is exactly
+the discipline a batch-posting loop should follow, and it makes "balance every iteration" a
+checkable style rule rather than advice.
+
+**What conservation is not.** Linearity conserves *identity*; the row solver conserves
+*magnitude*; **neither implies the other**. A linear type on `Money` guarantees the token is
+not duplicated or dropped and says nothing about whether `split(m, k)` returns parts summing
+to `m`. Conversely the row solver would accept `credit(b, m); credit(c, m)` from a single
+external `m` — coefficient `2m`, verdict `Undecided`. Niles carries both disciplines, and
+the thesis previously blurred them.
+
+**The comparison to Move, corrected.** Earlier drafts stated that Move guarantees resources
+cannot be created or destroyed. Move's own paper says the opposite: it guarantees no copying,
+no implicit discarding and no reuse after move — *resource safety* — and then states
+explicitly that "the Move type system cannot catch all implementation mistakes inside the
+module. For example, the type system will not ensure that the total value of all Coins in
+existence is preserved." Conservation in Move is a specification obligation discharged by
+the Move Prover with hand-written invariants and an SMT backend. The same correction applies
+to Nomos, whose linearity holds *modulo minting and burning* by design.
+
+This correction **strengthens** the contribution rather than weakening it: the property
+Move's type system explicitly declines to check is the one this solver checks
+automatically, without user-written specs and without an SMT call.
+
+**The closest prior art** is SolType, which gives Solidity refinement types with a `sum`
+abstraction over mappings and can express `sum(balances) == totalSupply`. It is heavier
+(refinement types plus SMT, so less predictable than normalization), it targets overflow
+safety with the sum invariant as a means rather than an end, and it is single-asset — there
+is no currency dimension. An extensive search did not surface prior work checking
+double-entry balance as a static type or abstract-interpretation property; that is stated as
+the outcome of a search rather than as an absolute, because the accounting-information-
+systems literature is poorly indexed by computer-science search.
+
+**The currency dimension is grading, not units and not rows.** Two terminological corrections.
+It is *not* Kennedy's units-of-measure setting: currencies do not form a free abelian group
+under multiplication, because `USD · EUR` names nothing. `Money` is a **Currency-graded
+abelian group**, and conservation says a well-typed transaction is homogeneously zero in
+every grade. Nor is the currency-variable machinery *row polymorphism* in Wand's or Leijen's
+sense; it is ordinary first-order unification on a phantom type parameter, and calling it
+row polymorphism was a misuse. There is a nearby design in which the term would be earned —
+effect rows of the form `net ⟨usd: 0, eur: 0 | ρ⟩`, where a row variable and scoped-label
+constraints would supply the *absence* facts ("this transaction has no JPY leg") that
+unification alone cannot — and §12 records it as future work.
+
+**FX pulls Kennedy straight back in, and it is where the solver stops.** A typed rate
+`Rate<C₁,C₂>` has dimension `C₂·C₁⁻¹`, and `convert` multiplies a symbolic amount by a
+symbolic rate: a product of two symbolic values, outside the fragment. The thesis therefore
+does *not* claim static conservation across an FX conversion. What it claims, and what the
+`fx` form implements, is the construction real systems use: the trade becomes **two balanced
+single-currency legs against a position account**, each of which the solver handles
+unchanged. Stating that converts a hole into a design decision, which is what it should have
+been from the start.
+
+**Interprocedurally, the analysis is currently weak, and the strong version has a citation.**
+Today it inlines where a callee body is available and havocs to a fresh atom otherwise —
+cloning-based context sensitivity plus havoc abstraction, sound but defeating cancellation
+across the boundary. The compositional version is not speculative: Müller-Olm and Seidl's
+POPL 2004 result computes all valid affine relations context-sensitively, representing each
+procedure as a finite-dimensional vector space of weakest-precondition transformers, in time
+linear in program size. For this domain it would be easier still, because the net effect of a
+function is a homomorphism into a commutative group, so a summary is one row:
+
+```niles
+fn transfer<C>(from, to, m: Money<C>) -> ()      net { C: 0 }
+fn fee<C>(m: Money<C>) -> Money<C>               net { C: -1*m + 1*result }
+```
+
+That is a type-and-effect system whose effect algebra is a currency-indexed free ℤ-module,
+and it would make conservation **separately checkable per function** rather than only within
+a transaction — the same move AARA makes with potential annotations. It is the single
+highest-value extension to this contribution and it is not built.
+
 ## 4.6 Contribution 5 (SC5) — The Adaptive Materialization Calculus and Optimizer
 
 The engineering requirement is an algorithm that decides what to materialize fully, what to keep on demand, and what to evict. The scientific contribution is to give that decision a formal object, a cost order, and provable guarantees — and to be explicit about which classical guarantees survive the setting and which do not.

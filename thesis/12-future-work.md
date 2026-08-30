@@ -17,3 +17,44 @@
 **Industrial validation.** Replace synthetic mixes with anonymized industrial traces under partnership; run the audit-rehearsal protocol with a real supervisory team against the audit-trail alternative that regulation now permits; and port one production product to `std::bank`, measuring the architectural-audit deltas in the field rather than in the laboratory.
 
 **Beyond banking.** The conservation pattern generalizes to any conserved-quantity domain — inventory, emissions accounting, energy markets, in-game economies, clinical supply chains. A systematic treatment of the pattern family — which indexed monoids, which capability structures, which commit rules — would test whether Contribution 4 is a *schema* for domain calculi rather than one instance, which is the most interesting way this thesis could turn out to be more general than it claims.
+
+## 12.x Work Named by the Counterproposal and the Solver Analysis
+
+Six items, each arising from a specific gap identified in Chapters 4 and 6 rather than from
+a general wish for more.
+
+**A defect corpus drawn independently.** E14's twelve defect classes were chosen because
+this thesis claims to catch them, which biases the result toward Niles. A corpus drawn from
+CVEs, from published bank incident reports, or from the commit history of an open-source
+ledger would be far stronger, and its absence is E14's largest single weakness. This is the
+missing *frequency* premise of §6.10.3, and without it the argument for Niles is incomplete
+in a way no amount of further engineering repairs.
+
+**A cost study.** Against nine avoided defect classes stands the cost of adopting a new
+language. Measuring it needs at minimum a migration of a real schema, timed, with the
+reserved-word collisions of §9.13.5 counted rather than anticipated.
+
+**A diagnostics trial.** The same money-safety violation rendered three ways — single span;
+span plus prose warrant; span plus a second span at the rule — measured on blame-attribution
+accuracy and time-to-correct-fix. No study has compared multi-span against single-span
+diagnostics for any error class in any language, so this would be the first, it is small, and
+§6.10.2's design rests on its outcome.
+
+**A compositional conservation summary.** The solver is interprocedural only by inlining.
+Müller-Olm and Seidl's context-sensitive affine analysis shows the compositional version is
+tractable, and for this domain it is easier still, because a function's net effect is a
+homomorphism into a commutative group and so a summary is a single row: `fn fee<C>(m:
+Money<C>) -> Money<C> net { C: -1*m + 1*result }`. That would make conservation separately
+checkable per function rather than only within a transaction — the single highest-value
+extension to Contribution 4.
+
+**Effect rows that earn the name.** §4.5.1 records that the currency-variable machinery is
+first-order unification on a phantom parameter, not row polymorphism. The design in which the
+term would be earned — `net ⟨usd: 0, eur: 0 | ρ⟩`, with a row variable and scoped-label
+constraints supplying the *absence* facts that unification cannot — is strictly better than
+what is built, and would let a function state that it has no JPY leg.
+
+**Congruence closure over pure calls.** The solver's inability to see that `f(a) − f(a)` is
+zero is a value-numbering failure, not an arithmetic one, and Gulwani and Necula's
+polynomial-time global value numbering fixes it. This is the cheapest precision improvement
+available and it was misattributed as a fundamental limit in earlier drafts.

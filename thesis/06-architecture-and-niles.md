@@ -138,6 +138,201 @@ That is a fact about the instrument's value that no amount of prose could have e
 
 **Precedent for the decision.** In 2024 ISO published GQL as a standalone database language rather than as another SQL part, developed by the same working group that maintains SQL, while *also* standardizing SQL/PGQ as a read-only embedded sublanguage over the same graph patterns. The standards community thus treats "embedded sublanguage" and "standalone language" as genuinely different artifacts and has recently chosen the latter when the model differs enough. That is not proof that Niles is justified, but it is evidence that the question this gate asks is the right one.
 
+
+### 6.10.2 Diagnostics as a Design Obligation, and the Evidence for It
+
+The gate argument above claims that a library encoding degrades the *diagnostics*, and that
+this is part of why the language is warranted. That claim needs its own evidence, because it
+is the kind that is easy to assert and rarely checked.
+
+**The theoretical case is strong and it is not about spans.** Haack and Wells's position on
+type errors is that the location of an error is not a point but "a set of program points (a
+slice) all of which are necessary for the type error", and that algorithms which "identify
+one node of the program tree which participates in the type error … will often be the wrong
+node to blame". Zhang and Myers reach the same place through constraint analysis; Chen and
+Erwig note that committing to a single location fails "because in some cases the program
+text does not contain enough information to confidently make the right decision".
+
+That argument transfers to money safety exactly. A conservation violation is constituted by
+the postings that fail to net *and* the rule that says they must. A double resolution is
+constituted by the binding and both consumptions. A rung violation is constituted by the
+contract, the read, and the view in between. Reporting one of those is reporting an
+arbitrary member of a set, and the choice is a heuristic rather than a fact about the
+program. This is a soundness-of-blame argument, and it needs no human-subjects result.
+
+**The empirical case is weaker than this thesis previously implied, and the correction is
+worth making explicitly.** No controlled study compares multi-span against single-span
+diagnostics, for any error class, in any language. The relevant results are these:
+
+* Barik et al.'s eye-tracking study (56 participants, defects derived from an analysis of 26
+  million builds) found that developers *do* read error messages — 13–25% of task time — and
+  that reading them is as effortful per fixation as reading source code (419 ms against
+  394 ms, versus ~275 ms for silent English reading). It also found, in one task, that two
+  identical messages for two subclasses led 55 of 56 participants to the wrong fix when the
+  correct change was in the parent. That is a misattribution-of-blame result, which is
+  suggestive for this design and is not evidence about span count.
+* Barik, Ford, Murphy-Hill and Parnin's later work models a message as a Toulmin argument —
+  claim, grounds, **warrant**, backing — and finds, with 68 professional developers, that
+  developers prefer proper argument structure *when neither message offers a resolution*,
+  **but will accept a deficient structure if it provides a resolution**. The `conserve per
+  (txn, cur)` rule is the warrant, and pointing at its declaration is the backing; but the
+  second half of that sentence is a constraint on the design, not a footnote.
+* Denny, Luxton-Reilly and Carpenter found **no effect** from enhanced messages on any of
+  three measures (83 CS1 students, randomised). The result stands for what it tested —
+  syntax errors, novices, submission-count proxies — and the authors note a confound running
+  against the enhancement: their enhanced condition displayed *one* error where the control
+  displayed two. It should be cited, not dismissed.
+* And the compiler most often held up as exemplary for humane errors, Elm, is largely
+  **single-region**, with the counterparty expressed in prose.
+
+**So the honest claim is convergence on dual *reference*, not on dual *spans*.** rustc's
+`note: required by this bound in …` and `note: the lint level is defined here`, GCC's
+labelled ranges — introduced to make mismatches clear "without requiring users to
+cross-reference distant code locations" — and the Language Server Protocol's first-class
+`relatedInformation` field all point at the other place; whether that is a span, a note or
+prose is an open rendering question.
+
+**Two design rules follow, and both are concessions rather than wins.**
+
+*The primary label must stand alone.* rustc's own guidance requires that a primary label
+make sense "if it were the only thing being displayed", because in an IDE it often is. If a
+Niles money-safety diagnostic is unintelligible without its second span, the primary label is
+underspecified — so `net movement on every path through this transaction is −40.00, which
+must be zero` carries the whole claim, and the rule reference is additive.
+
+*A fix outranks a warrant.* Following Barik et al.'s second clause, the rule reference is
+attached only when the diagnostic has no machine-applicable suggestion, and is elided when it
+has one, with the rule's identity remaining in the message text either way. This is
+implemented — `Diagnostic::warrant` — rather than described, and the number of elisions is
+observable so that the rule cannot silently stop firing.
+
+**The precedent for the specific error class is rustc's borrow checker**, which is the
+industrial system closest to this one. A use-after-move (E0382) is reported with *seven*
+labelled locations across three windows, whose core is precisely the shape Niles uses for a
+doubly-resolved hold: *bound here*, *first consumed here*, *consumed again here*, with the
+caret on the second use rather than the first. Conflicting-borrow errors (E0499, E0502) use
+three. This thesis follows that layout because it is the only place the pattern has been
+exercised at scale, not because a study has validated it.
+
+**What is not claimed.** That developers attend to the second span; no eye-tracking study has
+looked inside a diagnostic. That message enhancement improves outcomes; the record there is
+mixed to null. That there is literature on diagnostics for linear or effect type systems;
+there is none, and that gap is a research opportunity rather than a citation. The experiment
+that would settle it is small and well-scoped — the same violation rendered three ways,
+measured on blame-attribution accuracy and time-to-correct-fix — and §12 records it as future
+work rather than pretending it has been run.
+
+### 6.10.3 The Counterproposal, and Where It Leaves Both Gates
+
+The gates above ask whether Niles *could* be a library or an SQL extension. A sharper
+question is the one a committee will actually ask: **why not simply add reconstructible
+epoch-anchored views to PostgreSQL, and keep SQL?** That is the minimal counterproposal, and
+because it is the strongest objection available it was built and measured rather than
+argued. Experiment E14 is the result; the harness is `crates/counterproposal/run.sh` and it
+runs against PostgreSQL 16.13.
+
+**The mechanism survives the counterproposal intact, and this thesis reports that first
+because it goes against its own emphasis.** A good-faith PostgreSQL schema — money as
+`numeric`, immutability by trigger, idempotency by unique index, conservation as a deferred
+constraint trigger, reconstruction as a `STABLE` function folding the suffix after the newest
+checkpoint, and the REV itself as a table with a `state ∈ {present, hole, pending}` column —
+reproduces every mechanical property: zero divergences across fifty keys under continuous
+eviction, honest absence with fifty versions kept and zero values kept, checkpoint-bounded
+reconstruction at five buffer hits, and maintenance proportional to deltas rather than to
+view size. **Reconstructible epoch-anchored views can be built in PostgreSQL today.** Anyone
+who wants the mechanism can have it without adopting anything from this thesis, and the
+engine contribution must be argued on other grounds.
+
+Two of those grounds survive. PostgreSQL's own `REFRESH MATERIALIZED VIEW` is wholesale and
+takes no key, so a REV in PostgreSQL is *application code the database does not verify*, and
+every team writes it again. And PostgreSQL isolation is a property of a transaction rather
+than of a view, so "this balance may be four epochs stale and that one may not" has no SQL
+spelling at all — which is why the consistency ladder cannot be expressed, let alone checked.
+
+**The defect corpus is where the case inverts.** Twelve defect classes, written twice, scored
+by the stage at which each is caught:
+
+| Stage | PostgreSQL | Niles |
+|---|---:|---:|
+| Compile time | 0 | 11 (+1 warning) |
+| Runtime | 3 | — |
+| Never caught | 9 | — |
+| Not expressible | 1 | 1 |
+
+PostgreSQL wins one comparison outright: a mixed-currency transaction moving 100 USD to 100
+EUR is caught at COMMIT, because the deferred trigger groups by `(txn, cur)` and both groups
+are non-zero. That is a complete and correct detection.
+
+The nine it never catches are the ones without an SQL spelling to check against: adding USD
+to EUR in a query; `100.50 jpy` where JPY has scale zero, which PostgreSQL stores as
+`-100.5000` without complaint; an authorization derived from a bounded-stale view; a
+materialized view whose predicate reads `now()`; a filter on a column that should be
+encrypted; an unauthorized overdraft; a missing anchor index. These are not gaps PostgreSQL
+could close with more triggers, because a trigger is a runtime object.
+
+**Which the tenth defect demonstrates.** One statement —
+
+```sql
+drop trigger postings_conserve on postings;
+```
+
+— followed by a single one-legged insert, and the ledger's control total reads −500.00 with
+nothing left in the database that will ever say so. This is not a criticism of PostgreSQL; a
+trigger is supposed to be droppable, and a migration, a `pg_restore`, or a replication tool
+that omits triggers will drop it without anyone deciding to. It is an observation about
+**where the invariant lives**. In the SQL version conservation is a runtime object that can
+be removed from a running system; in Niles it is a property of the program text, and a
+program without a balancing posting has no executable form from which to remove the check.
+
+**What E14 settles, and what it does not.** It settles that the engine case is the weaker of
+the two and the language case the stronger — the opposite of where this thesis spends its
+pages, and §12 records the rebalancing as work the document still needs. It does not settle
+that Niles should exist, and three premises are missing before it could:
+
+1. **Frequency.** The table shows these defects are undetectable, not that they are common.
+   A defect class nobody writes costs nothing to miss. Establishing frequency needs a corpus
+   of real banking code or an incident study, and this thesis has neither.
+2. **Cost.** Against nine avoided defect classes stands training, tooling, hiring, the
+   reserved-word collisions of §9.13.5, and the risk that the compiler is itself wrong. E14
+   measures only the benefit column.
+3. **Human effect.** Whether a compile-time rejection prevents an incident that a runtime
+   exception would also have prevented is a question about developers, not compilers.
+
+The verdict this thesis therefore reaches is **argued, with the argument's missing premises
+named** — which is a weaker claim than "proved", and the right one.
+
+### 6.10.4 The Second Gate: Should Nilestream Exist?
+
+The language-creation gate has an engine counterpart, and this thesis previously did not
+state it. Applying the same three conditions:
+
+**(E1) Can the required semantics be obtained from an existing engine?** Partly, and more
+than expected. E14 shows the REV mechanism running in PostgreSQL with the right asymptotics.
+What cannot be obtained is per-view consistency — isolation is per-transaction — and a
+stable, user-visible read anchor, since neither `xmin` nor an LSN is one. E1 **fails as
+stated** and survives only in the narrower form: *some* required semantics are unavailable,
+not all.
+
+**(E2) Can they be added without semantic dishonesty?** Per-view consistency cannot be added
+to an engine whose isolation is a transaction property without changing what a transaction
+means. A read anchor could be exposed. Partial materialization could be added to materialized
+views. So E2 is **partly satisfiable**: a determined PostgreSQL fork could reach much of this,
+and the honest position is that Nilestream's engine contribution is *cumulative* rather than
+*enabling*.
+
+**(E3) Is the engine load-bearing for the scientific claims?** This is where it holds, and
+for one reason: the theorems quantify over a **typed IR with anchors, contracts and
+provenance on every node**, and the accessed-field discipline that makes an engine fail
+loudly when it ignores one of them. A conventional engine has no such object, so the proofs
+would be about something other than what runs. The instrument is load-bearing even where the
+mechanism is not.
+
+**Verdict on Nilestream: weaker than the verdict on Niles, and the thesis should say so.**
+The engine is justified as the *instrument that makes the theory testable* and as an
+integration of mechanisms that are individually available elsewhere — not as a set of
+capabilities no existing system could reach. Chapter 11's risk register gains this as a
+named risk, and Chapter 12 records rebalancing the document's emphasis as outstanding work.
+
 ## 6.11 Memory Model, Allocation, Immutability, and Memory Safety
 
 The runtime's memory model mirrors the formal one. Sealed data is immutable: epoch segments are frozen buffers, and resident view entries are immutable values *replaced* rather than mutated on anchor advance, with structural sharing. Allocation is arena-per-epoch on the write path — an epoch's allocations free as a unit after sealing and migration — and slab-based for resident maps under the optimizer's budget.

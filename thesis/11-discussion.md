@@ -30,6 +30,14 @@ A theory is trusted in proportion to the honesty of its boundary claims. This de
 
 **Cryptographic and standards agility.** Commitment schemes, hash functions and currency data all age. Mitigated by algorithm identifiers in segment headers, rotation as an audited ledger event, and per-currency scale carried in the type rather than assumed.
 
+**Misplaced emphasis between the two artifacts.** E14 establishes that the language case is
+stronger than the engine case, and this document is weighted the other way: Nilestream
+occupies substantially more of it than Niles does. That is a defect in the thesis rather
+than in the work, and the honest mitigation is not to argue the engine up but to rebalance
+the writing — §12 records it. A committee is entitled to ask why an argument whose evidence
+favours the compiler spends most of its pages on the database, and the answer is historical
+(the engine was built first) rather than principled.
+
 **Seductive generality.** The temptation to grow Niles into an application language. Mitigated by holding the scope tiers of Section 6.12 as normative and by treating any proposal to add ambient I/O, wall-clock reads or unguarded recursion as a change to the thesis's claims rather than a feature.
 
 **Optimizer opacity.** An adaptive component that changes behaviour under load is operationally frightening if it cannot be interrogated. Mitigated by Theorem 4.5(a) — mode changes cannot change answers — and by logging every transition with the estimates that caused it.
@@ -44,6 +52,23 @@ Stated explicitly, because a thesis that cannot name its own refutation is not f
 * *"Per-key anchor indices make reconstruction cost history-independent."* **Refuted twice** — once with a fixed key space and once with the key space grown in proportion — and then **restored** by a mechanism the design did not have: per-key checkpointing, which held cost flat at ≈ 8.5 base rows across a 64× increase in history (§9.4.1). This produced SC7 and is the clearest case in the thesis of an experiment changing the theory.
 * *"The prototype can speak to hot-account contention."* **Refuted as a matter of instrument**: single-threaded execution cannot exhibit contention, so the flat hot-share result is a non-result and is reported as one (§9.4.4).
 * *"A single-sealer write path is the throughput ceiling."* **Refuted, and in the useful direction.** The measured cost of durability *falls* as concurrency rises — 5.7× at one thread, 4.8× at sixteen — because an `fsync` costs the same whether it commits one transaction or five hundred, and the sealer batches. Transactions per fsync rise 1.0 → 8.8 (§9.13.3). This was a design worry, not a stated claim, which is why it appears here rather than in Chapter 4; it is recorded because it was the objection the design was most likely to fail on.
+* *"Reconstructible epoch-anchored views need a new engine."* **Refuted.** The whole
+  mechanism — partial materialization, honest absence, anchored reconstruction, per-key
+  checkpoints, delta-proportional maintenance — runs in stock PostgreSQL 16 with zero
+  divergences under eviction and the right asymptotics (§6.10.3, E14). This is the finding
+  that most damages this thesis's own emphasis, and it stands: the engine contribution is
+  cumulative rather than enabling, and Nilestream is justified as the instrument that makes
+  the theory testable rather than as a capability nothing else could provide.
+* *"The currency-row solver was sound."* **Refuted, twice, by reading it against the
+  literature.** It had no control-flow join, so it analysed a program in which both arms of
+  every branch run, and produced four false errors on an eleven-line correct transaction.
+  The first fix over-corrected and downgraded a real forty-dollar hole to a warning. Both
+  are recorded in §4.5.1, because a checker that accuses correct programs is worse than no
+  checker.
+* *"Move guarantees conservation of value."* **Refuted by Move's own paper**, which states
+  that its type system "will not ensure that the total value of all Coins in existence is
+  preserved". The correction strengthens rather than weakens this thesis, which is why it
+  was easy to miss.
 * *"The worked example demonstrates the calculus."* **Refuted in the most useful way available.** It violated the calculus. `available_balance` promised `ledger_consistent` over a `read_your_writes` input, which is the two-views-disagreeing failure Chapter 1 opens with, present in the author's own example until the compiler was run over it (§9.13.4). Nothing in this thesis argues better for a compiler than that.
 
 **Still standing, with the result that would overturn each.**

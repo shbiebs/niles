@@ -41,12 +41,16 @@ pub struct Parser<'a> {
     /// opens the body rather than a struct literal. The classic Rust ambiguity, solved
     /// the way Rust solves it: a flag, not a grammar change.
     no_struct_depth: u32,
+    /// Non-zero while parsing a SQL projection or table reference, where a trailing `as`
+    /// introduces an *alias*, not a cast. Both readings are legal Niles elsewhere, and the
+    /// ambiguity is genuinely local: only SQL clause position disambiguates them.
+    no_alias_depth: u32,
 }
 
 /// Parse a whole file. Always returns a program; the diagnostics say whether it is sound.
 pub fn parse_program(src: &str) -> (Program, Diagnostics) {
     let (toks, lex_errors) = lex(src);
-    let mut p = Parser { toks, pos: 0, src, diags: Diagnostics::new(), fuel: 100_000, no_struct_depth: 0 };
+    let mut p = Parser { toks, pos: 0, src, diags: Diagnostics::new(), fuel: 100_000, no_struct_depth: 0, no_alias_depth: 0 };
     for e in lex_errors {
         p.diags.push(Diagnostic::error(e.code, e.msg).primary(e.span, "here"));
     }
@@ -57,7 +61,7 @@ pub fn parse_program(src: &str) -> (Program, Diagnostics) {
 /// Parse a single expression, for tests and for the REPL.
 pub fn parse_expr(src: &str) -> (Expr, Diagnostics) {
     let (toks, _) = lex(src);
-    let mut p = Parser { toks, pos: 0, src, diags: Diagnostics::new(), fuel: 100_000, no_struct_depth: 0 };
+    let mut p = Parser { toks, pos: 0, src, diags: Diagnostics::new(), fuel: 100_000, no_struct_depth: 0, no_alias_depth: 0 };
     let e = p.expr();
     (e, p.diags)
 }
@@ -1483,7 +1487,7 @@ impl<'a> Parser<'a> {
                     let span = e.span().to(end);
                     e = Expr::Try { expr: Box::new(e), span };
                 }
-                Tok::Kw(Kw::As) => {
+                Tok::Kw(Kw::As) if self.no_alias_depth == 0 => {
                     self.bump();
                     let ty = self.ty();
                     let span = e.span().to(ty.span());
@@ -1888,7 +1892,9 @@ impl<'a> Parser<'a> {
                 let s = self.bump();
                 projections.push((Expr::Path(Path { segments: vec![Name::new("*", s)], span: s }), None));
             } else {
+                self.no_alias_depth += 1;
                 let e = self.expr();
+                self.no_alias_depth -= 1;
                 let alias = if self.eat_kw(Kw::As) {
                     Some(self.ident("a column alias"))
                 } else if matches!(self.cur(), Tok::Ident) {

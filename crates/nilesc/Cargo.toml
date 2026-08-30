@@ -1,0 +1,14 @@
+[package]
+name = "nilesc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "nilesc"
+path = "src/main.rs"
+
+[dependencies]
+niles-lang = { path = "../niles-lang" }
+niles-ir = { path = "../niles-ir" }

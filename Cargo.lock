@@ -40,6 +40,14 @@ name = "niles-stdlib"
 version = "0.1.0"
 
 [[package]]
+name = "nilesc"
+version = "0.1.0"
+dependencies = [
+ "niles-ir",
+ "niles-lang",
+]
+
+[[package]]
 name = "nilestream-core"
 version = "0.1.0"
 dependencies = [

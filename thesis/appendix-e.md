@@ -1,5 +1,17 @@
 # Appendix E. The Niles Self-Hosting Compiler
 
+## E.0 Status: What Is Built, and What This Appendix Describes
+
+This appendix is written in the present tense throughout, and the reader is owed an explicit statement of what that tense refers to, because the answer differs by section and a document that blurred the difference would be overclaiming.
+
+**Built and running** (`crates/niles-lang`, and reproducible by `cargo test -p niles-lang`): the stage-0 front end. The keyword registry of B.19; the normative grammar of B.15; a lossless two-layer lexer covering every literal form of B.2, including money with per-currency scale, both temporal axes, epochs and durations; a resilient hand-written recursive-descent parser with Pratt expression parsing, which is total on arbitrary input and recovers at item and statement boundaries; the surface AST; the diagnostics subsystem with stable `NL` codes, multi-span labels and machine-applicable suggestions; the epoch-anchored resolver and catalog; the currency-row solver; the consistency-effect calculus with the rung-monotonicity judgement; the linearity checker; and lowering to the typed IR of Appendix D. This front end compiles the worked program of B.20, which is kept compiling by a test so that the thesis's example cannot drift from the language it describes.
+
+**Designed and specified, not built**: everything from E.6 onward — the self-hosted middle end, the WASM-hosted optimizer, instruction selection, register allocation, machine-code encoding, object emission and linking. The three-stage bootstrap of E.1 requires a stage-0 compiler that accepts the *whole* language, and the stage-0 compiler that exists accepts a large but proper subset: it has no trait solver, no monomorphisation, and no code generation for the imperative tier beyond lowering to the IR. Stage 1 therefore has no input yet, and no line of the Niles-written compiler has been written.
+
+The reader should read E.1–E.5 as a specification with a partial implementation behind it, and E.6–E.19 as a specification with none. Where a section makes a claim about an artifact — "adding the WSL profile required a record and linker flags, and no compiler-code change" in E.2 — that claim describes the *design's intent* and has not been demonstrated, because the back end it would be demonstrated in does not exist. §11.2 lists an unfinished instrument as the most likely failure mode of this project, and this appendix is where that risk is largest.
+
+**Why the appendix is retained in full despite that.** Because the boundary argument in E.19 — what belongs in the language and what stays in the host — is a design result that can be stated and criticised without the code, and because a phased programme whose later phases are undocumented cannot be evaluated for feasibility, which is what a committee is being asked to do. The honest position is to describe the design completely and label its status precisely, rather than to shorten the appendix and thereby hide how much remains.
+
 ## E.1 Self-Hosting Strategy: The Three-Stage Bootstrap
 
 Stage 0: a compiler written in the host language, compiling the full Niles language (slowly, with unoptimized output). Stage 1: the Niles-written compiler sources, compiled by stage 0. Stage 2: stage 1 recompiling the same sources. Stage 3: an optional further self-build used as a consistency check.

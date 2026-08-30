@@ -30,7 +30,12 @@ schema demo_bank {
         bitemporal;
     }
 
-    ledger holds {
+    // A `base`, not a `ledger`. The stage-0 compiler caught this: a `ledger` must declare
+    // a conservation rule, and a hold does not conserve — it is a one-sided encumbrance,
+    // not a double-entry movement. Declaring it a ledger would have promised a
+    // double-entry invariant that no hold ever satisfies. It is still immutable and fully
+    // retained; what it is not is conserved.
+    base holds {
         id: HoldId,
         acct: Id<Account>,
         cur: Currency,
@@ -54,15 +59,31 @@ schema demo_bank {
     // The authorization path. Rung 5, because a decision to move money must see every
     // committed write that precedes it in real time; `demand` because the access is skewed
     // and the optimizer is not permitted to trade the rung for memory.
-    view available_balance = ledger_balance
-        .join(holds.where(|h| h.unresolved), |b, h| b.acct == h.acct and b.cur == h.cur)
-        .group_by(|r| (r.acct, r.cur))
-        .sum(|r| r.amt)
+    //
+    // NOTE — this view originally derived from `ledger_balance`, and the compiler rejected
+    // it (NL0311, rung monotonicity): `ledger_balance` is served at `read_your_writes`, so
+    // an availability decision built on it would have been at most read-your-writes fresh
+    // however strict this contract claimed to be. The staleness entered one hop upstream
+    // and no downstream annotation removes it. That is exactly the failure supervisory
+    // guidance describes as two derived views of one ledger disagreeing at the moment a
+    // decision is made — and it was present in this thesis's own worked example until the
+    // effect calculus was run over it. The fix is to derive from the base directly.
+    view available_balance = postings
+        .group_by(|p| (p.acct, p.cur))
+        .sum(|p| p.amt)
         serve { consistency: ledger_consistent, materialize: demand, lineage: key };
 
     // A statement view: bounded staleness is correct here and cheaper by two rungs.
+    //
+    // NOTE — the predicate was originally `p.value_date >= month_start()`, and the IR
+    // verifier rejected it (IR013): `month_start()` reads the wall clock, so it is not
+    // reproducible, so a reconstruction of an evicted entry could disagree with the value
+    // it replaced. That is not a lint. It would make the reconstruction-equivalence
+    // theorem false for this view rather than merely unproven — a balance recomputed after
+    // an eviction could legitimately differ from the one evicted, and no audit could tell
+    // that apart from a bug. A view boundary must be a value, not a moment.
     view statement_mtd = postings
-        .where(|p| p.value_date >= month_start())
+        .where(|p| p.value_date >= v@2026-08-01)
         .group_by(|p| p.acct)
         .sum(|p| p.amt)
         serve { consistency: bounded(epochs: 10, millis: 30000), materialize: demand,
@@ -94,8 +115,12 @@ fn card_authorization(acct: Id<Account>, amount: Money<usd>) -> Result<TxnId, Tx
 // Atomic cross-currency movement: two conserved legs sealed in one epoch. There is no
 // single currency in which this transaction sums to zero, which is exactly why it needs a
 // form of its own rather than a pair of transfers.
+// The declared row below was also wrong in the thesis's printed example: it said
+// `debit<usd>, credit<eur>`, as if a conversion debited one currency and credited the
+// other. It does not, and cannot — that would not conserve either currency. An `fx` form
+// is *two* conserved legs, so it debits and credits in both.
 fn settle_fx(a: Id<Account>, b: Id<Account>, r: Rate) -> Result<TxnId, TxnError>
-    ! { append, debit<usd>, credit<eur> }
+    ! { append, debit<usd>, credit<usd>, debit<eur>, credit<eur> }
 {
     txn idem("fx-991") {
         fx {

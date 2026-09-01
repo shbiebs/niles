@@ -6,6 +6,7 @@
 pub mod keywords;
 pub mod lexer;
 pub mod parser;
+pub mod postings;
 pub mod ast;
 pub mod resolve;
 pub mod typecheck;

@@ -10,6 +10,7 @@
 //! nilesc upquery FILE V   the reconstruction path for view V, and whether it is anchored
 //! nilesc verify  FILE     run the IR verifier over the lowered circuit
 //! nilesc effects FILE     the inferred effect row of every function
+//! nilesc postings FILE FN the legs a function declares, in source order
 //! nilesc plan    FILE     the materialization plan the optimizer would choose
 //! ```
 //!
@@ -83,6 +84,38 @@ fn main() -> ExitCode {
                 match report.view_rungs[v] {
                     Some(r) => println!("  view {v:<22} reads no stricter than {r}"),
                     None => println!("  view {v:<22} reads nothing"),
+                }
+            }
+        }
+        // `nilesc postings FILE [FN]` — the legs a function declares, in source order.
+        //
+        // The conformance surface. GBS has two implementations of every product — Rust in
+        // `gbs-products`, Niles in `gbs.niles` — and thesis §6.9 argues against exactly that
+        // seam. This is what lets the two be compared without either repository depending on
+        // the other's types: a documented text format, produced by the compiler that owns the
+        // schema, checked against a fixture produced by the Rust that owns the product.
+        //
+        // It reports the *declared shape*, not an evaluation. What that does and does not
+        // cover is in `niles_lang::postings`, and the output carries its own caveats —
+        // `branched`, `fx` — so a fixture cannot rely on them silently.
+        "postings" => {
+            use niles_lang::postings;
+            match args.get(3) {
+                Some(function) => match postings::shape_of(&prog, function) {
+                    Some(shape) => print!("{}", shape.render()),
+                    None => {
+                        // Distinguished from a function with no legs, which prints a header
+                        // and nothing else. A conformance test that could not tell the two
+                        // apart would pass against a typo in the function name.
+                        eprintln!("nilesc: {path} declares no function `{function}`");
+                        return ExitCode::from(2);
+                    }
+                },
+                None => {
+                    for shape in postings::all_shapes(&prog) {
+                        print!("{}", shape.render());
+                        println!();
+                    }
                 }
             }
         }
@@ -170,6 +203,7 @@ USAGE:
     nilesc upquery FILE VIEW   the reconstruction path for VIEW
     nilesc verify  FILE        run the IR verifier
     nilesc effects FILE        inferred effect rows
+    nilesc postings FILE [FN]  the legs a function declares, for conformance
 ";
 
 fn describe_item(i: &niles_lang::ast::Item) -> String {

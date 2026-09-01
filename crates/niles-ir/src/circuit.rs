@@ -150,6 +150,43 @@ impl Node {
         self.conservation_transparent.reset();
         self.lineage.reset();
     }
+
+    /// A new node carrying this one's **semantic** fields, with a new operator and inputs.
+    ///
+    /// For a rewrite that inserts a node — the compensating projection a commuted join needs,
+    /// or a filter moved below one. The anchor discipline, the serve contract, the lineage
+    /// mode and conservation transparency are inherited deliberately rather than defaulted:
+    /// a rewrite must not be able to *change* a node's epoch discipline as a side effect, and
+    /// defaulting them would do exactly that while looking like housekeeping.
+    ///
+    /// Conservation transparency is the one that would bite hardest. A `Map` that reorders
+    /// columns moves every monetary quantity that enters it, so it inherits the join's
+    /// transparency; a node that defaulted to opaque would make the circuit's control totals
+    /// unusable for a reason no answer-level test would find.
+    pub fn clone_shell(
+        &self,
+        id: NodeId,
+        op: Op,
+        inputs: Vec<NodeId>,
+        arity: u16,
+        label: String,
+    ) -> Node {
+        Node {
+            id,
+            op,
+            inputs,
+            key: self.key.clone(),
+            arity,
+            anchor: Checked::new("anchor", self.anchor.peek().clone()),
+            contract: Checked::new("contract", self.contract.peek().clone()),
+            conservation_transparent: Checked::new(
+                "conservation_transparent",
+                *self.conservation_transparent.peek(),
+            ),
+            lineage: Checked::new("lineage", *self.lineage.peek()),
+            label,
+        }
+    }
 }
 
 /// A whole circuit: the lowered form of one or more views.

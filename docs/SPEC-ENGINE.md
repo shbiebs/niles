@@ -252,12 +252,75 @@ and unnested forms MUST report the ratio. **Status: Specified — top priority.*
 
 ### E-opt-3 Verified schedules
 
-**A schedule attached to a query MUST be verified to preserve the algorithm's denotation.**
+**A schedule attached to a query MUST name only rewrites from the catalogue below, and each
+MUST be applied where its stated side condition holds.**
 
-The novel contribution, specified in `SPEC-LANGUAGE.md` L-8/L-9. PostgreSQL's six objections
-to hints all reduce to *hints are unverified*; a verified schedule eliminates five.
-**Nilestream is unusually well placed because the IR verifier is already in the trusted
-base.** **Status: Specified.**
+**Status: Built** — `niles-ir::schedule`.
+
+#### Why the earlier wording was unimplementable
+
+This requirement previously read: *a schedule MUST be verified to preserve the algorithm's
+denotation*. That cannot be built, and the architecture review recorded why rather than
+treating it as difficult.
+
+The operator set includes `Op::Negate` — Z-set negation, which is how `except` and outer-join
+retraction are expressed — and `Op::Fixpoint`. **Equivalence of relational algebra with
+difference is undecidable** (Trakhtenbrot; Abiteboul–Hull–Vianu §6.3). No engineering effort
+produces a decision procedure for it, so `ROADMAP.md` Phase 5's kill criterion — "if it needs a
+general theorem prover, narrow the language" — would have fired on the first day, because the
+fragment was never fixed.
+
+Narrowing does not rescue the original shape either. Equivalence of conjunctive queries is
+NP-complete (Chandra–Merlin 1977) — acceptable for a checker, since queries are small, and
+worth stating. But Z-sets carry weights, so the relevant semantics is **bag** rather than set:
+bag-equivalence of conjunctive queries is graph-isomorphism-hard, and bag *containment* is
+open. A verifier that answered "maybe" would have rebuilt the query hint it was meant to
+replace.
+
+#### The requirement as built
+
+Turn the problem around. A schedule **names the rewrites that produced the plan**, drawn from a
+finite catalogue whose members are individually proven equivalence-preserving under a stated
+side condition. The checker verifies each side condition *syntactically*, in the IR, and
+performs the rewrite itself. Equivalence is then true **by construction**.
+
+| Rewrite | Side condition (syntactic) | Why it preserves denotation |
+|---|---|---|
+| `commute-join` | inner join, no residual predicate | `A ⋈ B = B ⋈ A` up to column order, which a compensating `Map` restores exactly |
+| `push-filter-into-left` | inner join, predicate reads only left columns, no UDF | selection distributes over inner join on the side it mentions |
+| `push-filter-into-right` | as above, right side; predicate is reindexed | as above |
+| `commute-union` | exactly two inputs | Z-set union is addition in an abelian group |
+| `elide-double-negate` | a `Negate` whose only input is a `Negate` | negation is an involution: `−(−z) = z` |
+
+Anything else is refused with `ScheduleError::NotInCatalogue`. **The error type has no
+`Unknown` variant**, which is the requirement's teeth: a checker that could answer "I could not
+tell" would be a hint generator with extra steps.
+
+#### What is deliberately absent
+
+Rewrites whose soundness needs a *semantic* condition. Projection pushdown requires
+functional-dependency inference; pushing a filter into an outer join's null-extended side is
+simply false and is refused by name. Adding a rule means proving it and expressing its side
+condition syntactically — the bar this design exists to impose.
+
+#### Conformance
+
+`cargo test -p niles-ir schedule` runs, per rule, a **1,000-trial denotation test**: the
+original and rewritten circuits are evaluated by a reference Z-set interpreter on generated
+inputs *including negative weights*, and must agree. Signed weights are not a detail — a
+rewrite can be sound on sets, wrong on bags, and wrong again on Z-sets, and this IR has the
+third semantics. Each rule also carries a negative control: the outer-join refusals, the
+both-sides predicate, the residual join, the UDF predicate, the single negation.
+
+#### What this is, as a contribution
+
+Not a decision procedure for plan equivalence. **Query hints become checked rewrites.**
+PostgreSQL has refused hints for twenty-five years and its objections reduce to the observation
+that a hint is an unverified assertion the optimizer must trust. A catalogue step is not an
+assertion — it is an operation whose precondition is checked before it is performed — so a
+wrong schedule is rejected rather than silently obeyed. Nilestream is unusually well placed
+because the IR verifier is already in the trusted base: this needed a new judgement, not a new
+subsystem, and deliberately no SMT solver and no e-graph.
 
 ---
 

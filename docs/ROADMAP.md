@@ -135,25 +135,43 @@ compiler or to SIMD would be attributing it to the wrong thing.
 
 ---
 
-### Phase 5 — The schedule verifier · *the novel contribution*
+### Phase 5 — The schedule checker · **BUILT** *(and re-specified first)*
 
-**Build.** A schedule term attached to a query, and a verifier judgement proving it preserves
-the algorithm's denotation.
+**What changed before anything was built.** The phase asked for a verifier that *decides*
+denotational equivalence over the operator set. That operator set includes Z-set negation, and
+equivalence of relational algebra with difference is **undecidable**. The kill criterion below
+would have fired on day one — not because the work was hard, but because the fragment was never
+fixed. Narrowing to conjunctive queries does not rescue it either: under the bag semantics
+Z-sets actually have, equivalence is graph-isomorphism-hard and containment is open.
 
-**Gate.** A schedule that changes the result MUST be rejected *by the verifier*, not merely
-produce a different plan. A schedule that is only slower MUST be accepted. The negative
-control — a schedule reordering a non-commutative operation — MUST fail.
+**Built instead.** `niles-ir::schedule`: a schedule names rewrites from a **finite catalogue**,
+each proven equivalence-preserving under a side condition the checker verifies *syntactically*
+before performing it. Five rules today — join commutativity with a compensating projection,
+filter pushdown into either side of an inner join, union commutativity, double-negation
+elision. Equivalence holds by construction, and `ScheduleError` has **no `Unknown` variant**,
+so the checker cannot answer "maybe".
 
-**Kill criterion.** If the verifier cannot decide denotational equivalence for the operator
-set without a general theorem prover, narrow the schedule language until it can. A verifier
-that says "maybe" is a hint, and hints are what this is meant to replace.
+**Gate — met.** A schedule step whose side condition fails is rejected by `check`; a schedule
+that is only slower is accepted (commuting a join twice is legal and strictly worse); the
+negative control — pushing a predicate that spans both sides — is refused by name. Each rule
+carries a **1,000-trial denotation test** against a reference Z-set interpreter on inputs
+including negative weights, because a rewrite can be sound on sets, wrong on bags, and wrong
+again on Z-sets.
 
-**Why it matters.** PostgreSQL has refused query hints for twenty-five years, and every one
-of its six objections reduces to *hints are unverified*. A verified schedule eliminates five
-of six. **Nobody has built this** — Halide separates algorithm from schedule, SaneQL and
-"Against SQL" both ask for the same separation, and none makes the schedule carry a proof.
-Nilestream is unusually well placed because the IR verifier is already in the trusted base:
-this needs a new judgement, not a new subsystem.
+**The kill criterion is deleted.** It cannot fire on a checker: there is no equivalence to
+decide, only side conditions to verify.
+
+**Why it matters, restated precisely.** PostgreSQL has refused query hints for twenty-five
+years and every one of its objections reduces to *hints are unverified*. This does not decide
+plan equivalence — nothing can. It makes a hint into an operation whose precondition is checked
+before it is performed. **Nobody has built this**: Halide separates algorithm from schedule,
+SaneQL and "Against SQL" both ask for the same separation, and none makes the schedule carry a
+proof.
+
+**What remains.** The catalogue is five rules. Projection pushdown needs functional-dependency
+inference and is deliberately absent; semi-join introduction arrives with Phase 2's unnesting;
+physical-operator choice belongs in the optimizer, where `plan_space::check` is already the
+side condition.
 
 ---
 
@@ -235,7 +253,7 @@ well suited to a problem it was not designed for.
 | 2.5 **Read path on `proto-engine`** | **Built** — E16 `point` is PARITY at a 9% miss rate | Done | — |
 | 3 Adaptive tiering | Makes the OLTP target reachable at all | Weeks | Medium |
 | 4 PAX columnar storage | 10× analytical | Months | Medium |
-| 5 **Schedule verifier** | **The novel contribution** | Months | High |
+| 5 **Schedule checker** | **Built** — five proven rewrites, 1,000-trial denotation tests | Done | — |
 | 6 WCOJ | Graph parity | Months | Low |
 | 7 Distributed over a network | Validates what is built | Months | High |
 | 8 GBS on the engine | The end-to-end claim | Ongoing | Medium |
@@ -256,8 +274,10 @@ Stated so it is falsifiable rather than a plan that survives contact with any ev
   too blunt.
 * **If PAX leaves regress point lookups below PostgreSQL**, phase 4 stops: the seam has
   reappeared and the single-format claim is false for our implementation.
-* **If the schedule verifier needs a general theorem prover**, phase 5 narrows its language
-  until it does not, or is abandoned. A verifier that answers "maybe" has rebuilt hints.
+* **The schedule verifier did need a general theorem prover**, and this is what changed:
+  equivalence over an operator set with Z-set negation is undecidable, so the phase was
+  re-specified as a *checker* over a finite catalogue of proven rewrites before any of it was
+  built. The prediction held and the response was to narrow, exactly as written.
 * **If the distributed protocols fail over a real network** in a way the simulator could not
   have caught, the simulator's fault model is wrong and needs rebuilding before the protocols
   do.

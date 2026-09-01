@@ -18,6 +18,9 @@ members = [
     "crates/nilestream",
     "crates/nilestream-consensus",
     "crates/niles-interp",
+    "gbs/crates/gbs-kernel",
+    "gbs/crates/gbs-mechanisms",
+    "gbs/crates/gbs-products",
 ]
 
 [workspace.package]

@@ -25,6 +25,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "gbs-kernel"
+version = "0.1.0"
+dependencies = [
+ "nilestream-ledger",
+]
+
+[[package]]
+name = "gbs-mechanisms"
+version = "0.1.0"
+dependencies = [
+ "gbs-kernel",
+]
+
+[[package]]
+name = "gbs-products"
+version = "0.1.0"
+dependencies = [
+ "gbs-kernel",
+ "gbs-mechanisms",
+]
+
+[[package]]
 name = "niles-interp"
 version = "0.1.0"
 dependencies = [

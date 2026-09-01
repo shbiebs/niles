@@ -11,3 +11,7 @@
 //! a named test, which turns the refutation condition from a promise into a build failure.
 
 pub mod fx;
+pub mod lending;
+pub mod derivatives;
+pub mod liquidity;
+pub mod tradefinance;

@@ -55,26 +55,42 @@ use std::fmt;
 
 /// An exact rational share. Never a decimal, never a float.
 ///
-/// Stored unreduced with an `i128` numerator and denominator; the arithmetic below reduces
-/// only where it must, because reducing eagerly costs a `gcd` on every construction and buys
-/// nothing — the participant set is small and the amounts are checked.
+/// **Always stored in lowest terms.** An earlier version kept shares unreduced, on the
+/// reasoning that contract denominators are small (100, 10 000) so the products would stay
+/// bounded. That reasoning was wrong, and the lending product found it: summing eleven
+/// shares each with denominator 10 000 by the schoolbook rule `a/b + c/d = (ad+cb)/bd`
+/// reaches a denominator of 10^44, which overflows `i128` at around 1.7×10^38.
+///
+/// An eleven-lender syndicate is not exotic. Reducing on construction costs one `gcd` and
+/// removes the failure entirely, and the arithmetic below reduces again after each addition
+/// so a long sum cannot grow its denominator either.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Share {
     pub num: i128,
     pub den: i128,
 }
 
+/// Greatest common divisor, by Euclid. On `i128` so a share of any representable size
+/// reduces.
+fn gcd(a: i128, b: i128) -> i128 {
+    let (mut a, mut b) = (a.abs(), b.abs());
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
+    }
+    a.max(1)
+}
+
 impl Share {
-    /// A share of `num/den`. Panics on a zero denominator, which is a programming error
-    /// rather than a runtime condition — there is no sensible `Result` for "one over zero"
-    /// that a caller could act on.
+    /// A share of `num/den`, reduced to lowest terms. Panics on a zero denominator, which is
+    /// a programming error rather than a runtime condition — there is no sensible `Result`
+    /// for "one over zero" that a caller could act on.
     pub fn new(num: i128, den: i128) -> Self {
         assert!(den != 0, "a share's denominator cannot be zero");
-        if den < 0 {
-            Share { num: -num, den: -den }
-        } else {
-            Share { num, den }
-        }
+        let (num, den) = if den < 0 { (-num, -den) } else { (num, den) };
+        let g = gcd(num, den);
+        Share { num: num / g, den: den / g }
     }
 
     /// `bps` basis points — the unit syndicated loan documents are actually written in.
@@ -92,12 +108,16 @@ impl Share {
     }
 
     fn add(&self, other: &Share) -> Option<Share> {
-        // a/b + c/d = (ad + cb) / bd. No reduction: the denominators here are contract
-        // denominators (100, 10 000), so the product stays small, and `checked_*` catches
-        // the pathological case rather than wrapping.
-        let n = self.num.checked_mul(other.den)?.checked_add(other.num.checked_mul(self.den)?)?;
-        let d = self.den.checked_mul(other.den)?;
-        Some(Share::new(n, d))
+        // a/b + c/d over the *least* common denominator rather than the product. Using
+        // `bd` is what made an eleven-lender sum overflow; using `lcm(b,d)` keeps the
+        // denominator at 10 000 however many shares are added.
+        let g = gcd(self.den, other.den);
+        let lcm = self.den.checked_div(g)?.checked_mul(other.den)?;
+        let n = self
+            .num
+            .checked_mul(lcm.checked_div(self.den)?)?
+            .checked_add(other.num.checked_mul(lcm.checked_div(other.den)?)?)?;
+        Some(Share::new(n, lcm))
     }
 
     fn is_one(&self) -> bool {
@@ -452,6 +472,44 @@ mod tests {
     }
 
     // ── the refusals ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn a_large_syndicate_sums_without_overflowing() {
+        // **The regression test for a real defect.** An earlier version kept shares
+        // unreduced and summed by `a/b + c/d = (ad+cb)/bd`, on the reasoning that contract
+        // denominators are small. Eleven lenders at 10 000ths reaches a denominator of
+        // 10^44 and overflows i128 at ~1.7×10^38, so an ordinary syndicated loan failed to
+        // construct at all.
+        //
+        // It was found by the lending product rather than by this module's own tests, which
+        // is the layering working: a mechanism's tests use the sizes its author imagined,
+        // and a product uses the sizes the business has.
+        let mut parties = vec![(p("agent"), Share::bps(2_000))];
+        for i in 0..10 {
+            parties.push((p(&format!("lender-{i}")), Share::bps(800)));
+        }
+        let set = ParticipantSet::new(parties, p("agent")).expect("2000 + 10*800 = 10000 bps");
+        assert_eq!(set.len(), 11);
+
+        // And much larger sets, with awkward denominators that do not share factors.
+        for n in [1usize, 2, 11, 50, 200] {
+            let parties: Vec<_> = (0..n).map(|i| (p(&format!("l{i}")), Share::new(1, n as i128))).collect();
+            let set = ParticipantSet::new(parties, p("l0")).unwrap_or_else(|e| panic!("n={n}: {e}"));
+            let alloc = set.allocate(&Amount::minor_2dp(1_000_003, "USD")).unwrap();
+            assert_eq!(sum_of(&alloc), 1_000_003, "n={n}");
+        }
+    }
+
+    #[test]
+    fn shares_are_stored_in_lowest_terms() {
+        // The fix, pinned at the smallest scope. If reduction were removed, this fails
+        // before the overflow test does, which is a better place to find out.
+        assert_eq!(Share::new(50, 100), Share::new(1, 2));
+        assert_eq!(Share::bps(2_500), Share::new(1, 4));
+        assert_eq!(Share::percent(20), Share::new(1, 5));
+        assert_eq!(Share::new(0, 7), Share::new(0, 1), "zero reduces to 0/1");
+        assert_eq!(Share::new(3, -6), Share::new(-1, 2), "a negative denominator normalises");
+    }
 
     #[test]
     fn shares_that_do_not_sum_to_one_are_refused_with_the_exact_shortfall() {

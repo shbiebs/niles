@@ -16,6 +16,11 @@
 mod pg_wire;
 #[path = "session.rs"]
 mod session;
+// The daemon uses one policy (`insecure`) and one negotiation, so most of `tls.rs` is dead
+// code *in this binary* while being live in the library and exercised by its 17 tests. The
+// alternative — trimming the module to what the binary happens to call — would delete the
+// policy layer that exists so a deployment can turn TLS on with one line.
+#[allow(dead_code)]
 #[path = "tls.rs"]
 mod tls;
 
@@ -174,15 +179,6 @@ fn serve(stream: TcpStream, schema: String, engine: Arc<Mutex<MemoryEngine>>) ->
     }
     eprintln!("nilestreamd: {peer} disconnected after {} queries", session.queries_served);
     Ok(())
-}
-
-/// The mutual-TLS refusal is constructed only on a path this build does not take (no
-/// provider ships, so `RequireClientCert` never passes preflight). Naming it here keeps
-/// the variant live and documents that the gap is a missing provider rather than a
-/// missing policy.
-#[allow(dead_code)]
-fn _assert_mutual_tls_refusal_exists() -> tls::Refusal {
-    tls::Refusal::ClientCertificateMissing
 }
 
 /// A tiny helper so the `SSLRequest` refusal reads clearly at the call site.

@@ -203,9 +203,9 @@ a kernel change, falsifies the claim of §1.**
 | FX and multi-currency | ● | | | | | ● | ● |
 | Forwards and swaps | ● | ● | ● | | | ● | ● |
 | OTC, caps and floors | ● | ● | ● | | | ● | ● |
-| Lending — revolving | ● | ● | ● | | | ● | |
-| Lending — term | ● | ● | ● | | | ● | |
-| Lending — syndicated | ● | ● | ● | ● | | ● | |
+| Lending — revolving | ● | ● | ● | | | ● | ● |
+| Lending — term | ● | ● | ● | | | ● | ● |
+| Lending — syndicated | ● | ● | ● | ● | | ● | ● |
 | Letters of credit | ● | ● | ● | | ● | ● | |
 | Trade loans | ● | ● | ● | | ● | ● | |
 | Supply-chain finance | ● | ● | ● | ● | ● | ● | |
@@ -231,6 +231,13 @@ a kernel change, falsifies the claim of §1.**
 | Advisor-guided and self-directed | ● | ● | ● | ● | ● | ● | ● |
 
 Two observations worth stating now, before the code either confirms or embarrasses them.
+
+**Interest accrual is M7, and the first draft of this matrix forgot it.** Revolving and term
+lending were marked as needing no rate-indexed valuation, which is wrong — an accrual is
+exactly a rate applied to a balance over a period, and it is the same `accrue` a swap's
+fixed leg uses. The coverage test in `crates/gbs-products/tests/coverage.rs` caught it by
+comparing the row against what `lending.rs` actually imports, which is the reason that test
+exists.
 
 **Risk analytics is the only row with no M1.** It moves no money — it is read-side only,
 M6 and M7. That is a real structural fact and a good sign: the decomposition distinguishes
@@ -283,3 +290,53 @@ the general core into a banking core:
   (`fx { leg a: …, leg b: …, rate: r }`), never an amount multiplied by a rate in a
   posting. A rate applied inside a posting is how a cross-currency imbalance becomes
   invisible.
+
+---
+
+## 7. Status
+
+`cargo test --workspace` runs **624 tests**, of which 205 are GBS's.
+
+| Layer | Status |
+|---|---|
+| `gbs-kernel` | **Built**, 32 tests — posting sets, per-currency conservation, the chart, bitemporal stamps |
+| M1 balanced posting set | **Built** — `Sealed` is unforgeable; only `PostingSet::seal` produces one |
+| M2 contingent schedule | **Built** — generators checked at declaration; roll conventions; observations passed in |
+| M3 hold / commitment | **Built** — resolved exactly once; expiry is a resolution; liveness never reads a clock |
+| M4 fractional participation | **Built** — exact rationals in lowest terms, largest-remainder with quota, designated residual holder |
+| M5 capability-gated lifecycle | **Built** — no status field; `state_at(epoch)`; undeclared-sink detection |
+| M6 position signal | **Built** — `Present`/`Absent`/`Unavailable`; available and ledger balance from one anchor |
+| M7 rate-indexed valuation | **Built** — five rounding modes, exact integer arithmetic, recorded inputs, `reproduces_under` |
+| FX and multi-currency | **Built** — two conserved legs, one epoch |
+| Lending: revolving, term, syndicated | **Built** — 13 tests including a thousand draw/repay cycles with no drift |
+| Trade finance: LC, SCF | **Built** — 15 tests including state-at-presentation and three-party assignment |
+| Derivatives: forwards, swaps, caps, floors | **Built** — 14 tests including collar parity |
+| Liquidity: sweep, pooling, ZBA | **Built** — 11 tests including conservation under arbitrary balances |
+| `tests/layering.rs` | **Built**, 6 tests — the falsification check, with a negative control |
+| `tests/coverage.rs` | **Built**, 9 tests — the matrix checked against the code, with a negative control |
+| The other 18 product lines | **Not built.** Their matrix rows are predictions |
+| Niles schema and views | **Not built** |
+| `gbs-api` | **Not built** |
+| Matching engine (tier 1) | **Not built.** See `PLAN.md` — a different latency regime, deliberately separated |
+
+**11 of 29 product lines implemented.** `the_honest_ratio_of_built_to_claimed_is_reported`
+prints the figure from the build, so it cannot drift from this table.
+
+### Four defects the tests found, recorded because they are the evidence this works
+
+1. **`Share` overflowed on an ordinary syndicate.** Shares were kept unreduced and summed by
+   `a/b + c/d = (ad+cb)/bd`, on the reasoning that contract denominators stay small. Eleven
+   lenders at 10 000ths reaches 10⁴⁴ and overflows `i128`. Found by the *lending product*,
+   not by M4's own tests — a mechanism's tests use the sizes its author imagined, and a
+   product uses the sizes the business has. Fixed by reducing to lowest terms and summing
+   over the LCM.
+2. **`HalfUp` rounded the wrong way on negatives.** −7/2 gave −3 instead of −4 — exactly the
+   asymmetry that makes a refund round differently from the payment it reverses.
+3. **The LC rule set forbade partial drawings.** UCP 600 permits them; `present` needed to be
+   a self-loop. Found by a product exercising a mechanism against a real domain rule.
+4. **This matrix forgot that interest accrual is M7.** Revolving and term lending were marked
+   as needing no rate-indexed valuation. Found by `coverage.rs` comparing the row against
+   what `lending.rs` imports, which is why that test exists.
+
+Two of the four were found by the layer *above* the defect, which is the argument for the
+layering being real rather than decorative.

@@ -24,10 +24,10 @@ pub mod schedule;
 pub mod signal;
 pub mod valuation;
 
-pub use hold::{Hold, HoldId, Outcome};
-pub use lifecycle::{Actor, Capability, Lifecycle, Rule, State};
+pub use hold::{Hold, HoldError, HoldId, Outcome};
+pub use lifecycle::{Actor, Capability, Lifecycle, LifecycleError, Rule, State};
 pub use participation::{ParticipantSet, ParticipationError, Share};
 pub use signal::{available_balance, Available, Reading, Signal};
 pub use valuation::{accrue, apply_rate, cap_payoff, convert, floor_payoff, Priced, Rate, Rounding, ValuationError};
-pub use schedule::{Calendar, Contingency, Observations, Occurrence, RollConvention, Schedule};
+pub use schedule::{equal_instalments, AllDays, Generator, ScheduleError, Weekdays, Calendar, Contingency, Observations, Occurrence, RollConvention, Schedule};
 

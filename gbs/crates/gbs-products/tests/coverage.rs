@@ -91,6 +91,7 @@ fn implemented_rows() -> Vec<(&'static str, &'static str)> {
         ("Securities — fixed income", "securities.rs"),
         ("ETF platform", "securities.rs"),
         ("Multi-asset and alternatives", "securities.rs"),
+        ("Trading and operations", "matching.rs"),
     ]
 }
 

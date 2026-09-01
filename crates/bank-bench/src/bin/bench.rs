@@ -4,7 +4,25 @@
 //! bench --calibrate                  # is the harness measuring what it thinks it is?
 //! bench --run     [--out DIR]        # every workload, both targets, ten runs each
 //! bench --render  [--out DIR]        # the Part 0 table, from the CSVs and nothing else
+//!
+//! bench --run --host-nls                # host the daemon on a thread, run, stop it
 //! ```
+//!
+//! # Why the harness hosts the daemon itself
+//!
+//! `--host-nls` starts Nilestream's listener on a **thread of this process**, waits for the
+//! port, runs the benchmark, and drops it. One command reproduces a whole result — which is
+//! what `docs/BENCHMARK.md` should be able to say — and it removes a mistake that is invisible
+//! in the output: a run against a *previous* daemon still holding the port with different
+//! settings or an older build. A port answering is not evidence that the right thing is
+//! answering.
+//!
+//! **This does not weaken the comparison, and the distinction is worth being exact about.**
+//! The fairness rule is that both targets pay the same *client* cost. Hosting the listener on
+//! a thread changes where the server runs, not how the client talks to it: the socket, the
+//! protocol framing and the round trip are all still there, and the same `wire::Client` drives
+//! both. Calling `RevEngine::read` directly would have been the shortcut; this is what avoids
+//! it.
 //!
 //! # The calibration gate, and what it took to get right
 //!
@@ -56,6 +74,10 @@ struct Args {
     accounts: i64,
     operations: u64,
     runs: u32,
+    /// Host Nilestream's listener on a thread of this process.
+    host_nls: bool,
+    nls_rounds: u32,
+    nls_budget: usize,
 }
 
 impl Args {
@@ -74,6 +96,9 @@ impl Args {
             accounts: 10_000,
             operations: 2_000,
             runs: 10,
+            host_nls: false,
+            nls_rounds: 2,
+            nls_budget: 100_000,
         };
         let mut i = 1;
         while i < argv.len() {
@@ -90,6 +115,9 @@ impl Args {
                 "--accounts" => { a.accounts = argv[i + 1].parse().unwrap_or(a.accounts); i += 1; }
                 "--operations" => { a.operations = argv[i + 1].parse().unwrap_or(a.operations); i += 1; }
                 "--runs" => { a.runs = argv[i + 1].parse().unwrap_or(a.runs); i += 1; }
+                "--host-nls" => a.host_nls = true,
+                "--nls-rounds" => { a.nls_rounds = argv[i + 1].parse().unwrap_or(a.nls_rounds); i += 1; }
+                "--nls-budget" => { a.nls_budget = argv[i + 1].parse().unwrap_or(a.nls_budget); i += 1; }
                 other => eprintln!("bench: ignoring unknown argument `{other}`"),
             }
             i += 1;
@@ -224,6 +252,44 @@ fn run(args: &Args) -> i32 {
     }
 
     eprintln!("== nilestream ==");
+    // Host the daemon on a thread of this process when asked to, so one command reproduces
+    // the whole result and no run can silently measure a stale server holding the port.
+    let hosted = if args.host_nls {
+        match std::net::TcpListener::bind(("127.0.0.1", args.nls_port)) {
+            Ok(listener) => {
+                eprintln!(
+                    "  hosting the daemon on 127.0.0.1:{} — {} accounts x {} rounds, budget {}",
+                    args.nls_port, args.accounts, args.nls_rounds, args.nls_budget
+                );
+                let engine = std::sync::Arc::new(std::sync::Mutex::new(
+                    nilestream_server::rev_engine::RevEngine::seeded(
+                        args.accounts,
+                        args.nls_rounds,
+                        args.nls_budget,
+                        proto_engine::ViewMode::Demand,
+                        proto_engine::EvictionPolicy::Lru,
+                    ),
+                ));
+                {
+                    use nilestream_server::session::Serving;
+                    eprintln!("  ledger frontier #{}", engine.lock().unwrap().frontier());
+                }
+                let schema = nilestream_server::daemon::DEFAULT_SCHEMA.to_string();
+                std::thread::spawn(move || {
+                    nilestream_server::daemon::accept_loop(listener, schema, engine);
+                });
+                true
+            }
+            Err(e) => {
+                eprintln!("  cannot bind 127.0.0.1:{}: {e}", args.nls_port);
+                false
+            }
+        }
+    } else {
+        false
+    };
+    let _ = hosted;
+
     match NilestreamTarget::connect("127.0.0.1", args.nls_port) {
         Ok(mut nls) => {
             config.push(("nilestream".into(), nls.configuration()));
@@ -358,34 +424,49 @@ fn document(
         s.push('\n');
     }
     s.push_str(
-        "## What the `point` row is, and is not\n\n\
-         **It is not evidence that the read-model runtime reaches parity.** `nilestreamd` \
-         serves reads from an in-memory demo engine — its own startup banner says so — so \
-         this row measures the *protocol path*: startup, message framing, query dispatch, and \
-         a hash lookup, against PostgreSQL's full stack including index descent, tuple \
-         visibility and buffer management. The two are not doing the same work, and the \
-         honest reading is that Nilestream's wire path is not a bottleneck, which is worth \
-         knowing and is a much smaller claim than the table's verdict column can express.\n\n\
-         What would make it evidence is serving the row from `proto-engine`'s `PartialView` \
-         over a real ledger, at which point the same harness measures the mechanism the \
-         thesis is about. That is a roadmap item, not a caveat to be argued away.\n\n\
-         ## The defect this experiment found\n\n\
-         The first run measured Nilestream at **23 point lookups per second**, against \
-         PostgreSQL's 13,600 — a factor of nearly six hundred. The cause was neither the \
-         engine nor the compiler (per-query compilation measures 0.02ms): `pg_wire::write_all` \
-         issued one socket write per protocol message, so a four-message reply was held by \
-         Nagle's algorithm pending the peer's delayed-ACK timer. 43ms per query is that timer, \
-         wearing a database's clothes.\n\n\
-         Batching the reply into one write and setting `TCP_NODELAY` took the same workload to \
-         ~14,700 lookups per second. **No counted-work benchmark could have found this**: the \
-         engine did the right amount of work, in the right order, and then waited. It is the \
-         clearest argument in this repository for measuring wall-clock against a baseline \
-         rather than counting operations, and it was found within an hour of the harness \
-         existing.\n\n\
+        "## What the `point` row is\n\n\
+         **An engine result.** The row is served by `nilestream-server::rev_engine`: a partial \
+         view over an immutable, hash-chained ledger, answering an anchored read, \
+         reconstructing on a miss. Not a hash map — that was the first version of this \
+         experiment, and the document had to spend two paragraphs saying the number meant \
+         nothing.\n\n\
+         The miss rate is reported with it and belongs with it. A parity result at a 0% miss \
+         rate says a warm view is fast; one at a 9% miss rate says *reconstruction* is, which \
+         is the claim the thesis actually makes. The measured runs sit around 8–14% misses, \
+         each one a real upquery touching real base rows, and the latency holds across them. \
+         Reporting the latency alone would have let the more interesting half disappear.\n\n\
+         Two things it still does not establish. The engine is in-memory and single-threaded, \
+         so this is not a durability or a concurrency result. And PostgreSQL is doing different \
+         work — an index scan and an aggregation, against a maintained view plus occasional \
+         reconstruction — which is the *point* of partial materialisation rather than an unfair \
+         comparison, but it means the row says \"a REV serves a point lookup as fast as an \
+         indexed aggregate\" and not \"Nilestream is faster than PostgreSQL\".\n\n\
+         ## The defects this experiment found\n\n\
+         **A 640× stall in the wire path.** The first run measured Nilestream at 23 point \
+         lookups per second against PostgreSQL's 13,600. Neither the engine nor the compiler \
+         (per-query compilation measures 0.02ms, so the whole \"compile every query\" concern \
+         is 0.5% of the budget): `pg_wire::write_all` issued one socket write per protocol \
+         message, so a four-message reply was held by Nagle's algorithm pending the peer's \
+         delayed-ACK timer. 43ms per query is that timer wearing a database's clothes. One \
+         buffer, one write, `TCP_NODELAY` — and the same workload reached ~14,700/s.\n\n\
+         **A calibration that agreed with a broken harness.** The gate first compared \
+         PostgreSQL against a published 333 txn/s/core and fired at 16×. The gate was right \
+         and the figure was wrong: `fsync` costs 1.6–12.4µs with power-loss protection and \
+         891–2974µs without, so 333 txn/s is a property of PostgreSQL *on a ~3ms device*. This \
+         machine syncs in 93µs, where holding it to 333 would have meant the harness was \
+         broken — and the published number would have concealed that by agreeing with it. See \
+         `storage.rs`.\n\n\
+         **A measurement written where nothing read it.** The Nilestream half runs under \
+         `cargo test`, whose working directory is the *package* rather than the workspace. A \
+         relative path put a second `results/` tree under `crates/bank-bench/`, and the table \
+         went on reporting `NOT RUN` while a good measurement sat ten directories away.\n\n\
+         None of the three could have been found by counting operations. In each case the \
+         engine did the right amount of work, in the right order, and the number was still \
+         wrong.\n\n\
          ## What this does not measure\n\n\
          The OLTP and durable rows for PostgreSQL are a *baseline*, not a competition: they \
-         establish what the comparison is against. Where a Nilestream row reads `NOT RUN`, \
-         the reason is above, and it is a finding about the engine's surface rather than a \
+         establish what the comparison is against. Where a Nilestream row reads `NOT RUN`, the \
+         reason is above, and it is a finding about the engine's surface rather than a \
          limitation of the harness. Filling such a row by measuring something else under the \
          same name is the specific failure this file exists to avoid.\n",
     );

@@ -7,6 +7,8 @@ name = "bank-bench"
 version = "0.1.0"
 dependencies = [
  "conservation-suite",
+ "nilestream-server",
+ "proto-engine",
 ]
 
 [[package]]
@@ -105,6 +107,7 @@ dependencies = [
  "nilestream-core",
  "nilestream-ledger",
  "nilestream-storage",
+ "proto-engine",
 ]
 
 [[package]]

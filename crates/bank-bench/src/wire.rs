@@ -76,13 +76,34 @@ pub struct Rows {
 }
 
 impl Rows {
-    /// The first column of the first row, parsed as an `i128`.
+    /// Column `col` of the first row, parsed as an `i128`.
     ///
-    /// The shape a balance query returns, and `None` rather than zero when there is no row:
-    /// an account with no postings and an account with a zero balance are different facts,
-    /// and this is the layer where the difference would be quietest to lose.
+    /// `None` rather than zero for a missing row **and** for a SQL NULL: an account with no
+    /// postings and an account with a zero balance are different facts, and this is the layer
+    /// where the difference would be quietest to lose. A client that flattened NULL to zero
+    /// would make every honest absence in the engine invisible from the outside — which is the
+    /// §1.1.1 defect, one layer further out than usual.
+    pub fn nth(&self, col: usize) -> Option<i128> {
+        self.rows.first()?.get(col)?.as_ref()?.trim().parse().ok()
+    }
+
+    /// The first column of the first row.
+    ///
+    /// Note that a `select acct, sum(amt) ... group by acct` returns the *key* first, so this
+    /// is the account and not the balance. Use [`nth`](Self::nth) or [`by_name`](Self::by_name)
+    /// when the value is wanted; the name is kept because a single-column query is common.
     pub fn scalar(&self) -> Option<i128> {
-        self.rows.first()?.first()?.as_ref()?.trim().parse().ok()
+        self.nth(0)
+    }
+
+    /// The named column of the first row.
+    ///
+    /// The two servers name the same quantity differently — PostgreSQL calls it `sum` and
+    /// Nilestream calls it `value` — so a test that asserts on a balance should say which
+    /// column it means rather than counting positions and being right by accident.
+    pub fn by_name(&self, column: &str) -> Option<i128> {
+        let i = self.columns.iter().position(|c| c == column)?;
+        self.nth(i)
     }
 }
 
@@ -385,7 +406,7 @@ mod tests {
     }
 
     #[test]
-    fn scalar_reads_the_first_column_and_reports_absence_as_absence() {
+    fn a_reading_reports_absence_as_absence_whether_it_is_a_missing_row_or_a_null() {
         let present = Rows {
             columns: vec!["sum".into()],
             rows: vec![vec![Some("-4200".into())]],
@@ -402,6 +423,29 @@ mod tests {
             tag: "SELECT 1".into(),
         };
         assert_eq!(null.scalar(), None, "and neither is NULL");
+    }
+
+    #[test]
+    fn a_balance_is_read_by_name_because_the_two_servers_name_it_differently() {
+        // `select acct, sum(amt) ... group by acct` puts the *key* first on both servers, so
+        // `scalar()` is the account number. A test that asserted on position would be right by
+        // accident on one server and wrong on the other.
+        let pg = Rows {
+            columns: vec!["acct".into(), "sum".into()],
+            rows: vec![vec![Some("42".into()), Some("-4200".into())]],
+            tag: "SELECT 1".into(),
+        };
+        assert_eq!(pg.scalar(), Some(42), "the key, not the balance");
+        assert_eq!(pg.nth(1), Some(-4_200));
+        assert_eq!(pg.by_name("sum"), Some(-4_200));
+
+        let nls = Rows {
+            columns: vec!["key".into(), "value".into(), "anchor".into()],
+            rows: vec![vec![Some("42".into()), Some("-4200".into()), Some("7".into())]],
+            tag: "SELECT 1".into(),
+        };
+        assert_eq!(nls.by_name("value"), Some(-4_200), "the same quantity, a different name");
+        assert_eq!(nls.by_name("sum"), None, "and asking for the wrong name yields nothing");
     }
 
     #[test]

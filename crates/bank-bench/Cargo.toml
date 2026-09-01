@@ -7,3 +7,5 @@ authors.workspace = true
 
 [dependencies]
 conservation-suite = { path = "../conservation-suite" }
+nilestream-server = { path = "../nilestream-server" }
+proto-engine = { path = "../proto-engine" }

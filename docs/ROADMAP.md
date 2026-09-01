@@ -59,34 +59,34 @@ a correctness failure, not a performance one.
 
 ---
 
-### Phase 2.5 — Serve the read path from `proto-engine` · *before any Nilestream number is quoted*
+### Phase 2.5 — Serve the read path from `proto-engine` · **BUILT**
 
-**Why this appeared.** The E16 wall-clock harness (`results/E16-wallclock.md`) can now compare
-Nilestream to PostgreSQL over the wire, and immediately exposed that there is currently
-**nothing to compare**: `nilestreamd` serves reads from an in-memory demo engine, so its
-point-lookup row measures the protocol path rather than the read-model runtime. The row reads
-`PARITY` and the document says in full why that is not an engine result.
+**Why it appeared.** The E16 harness could compare Nilestream to PostgreSQL over the wire and
+immediately exposed that there was nothing to compare: `nilestreamd` served reads from a hash
+map, so the point-lookup row measured the protocol path rather than the read-model runtime.
 
-**Build.** A `Serving` implementation over `proto_engine::{Ledger, PartialView}`, so a wire
-query is answered by the actual mechanism: partial materialisation, the absence lattice,
-anchored reconstruction on a miss.
+**Built.** `nilestream-server::rev_engine` implements `Serving` over
+`proto_engine::{Ledger, PartialView}`: partial materialisation, the absence lattice, an
+anchored upquery on a miss. A historical read (`anchor < head`) reconstructs from the base
+rather than reusing a fresher slot — the view's hit rule is right for a bounded-staleness rung
+and wrong for the as-of read a dispute asks.
 
-**Gate.** The `point` row of E16 must be produced by a `PartialView` read, and the run must
-report the miss rate alongside the latency — a parity result at a 0% miss rate and one at a
-40% miss rate are different findings, and the phase diagram needs both.
+**Gate — met.** `results/E16-wallclock.md` reports the `point` row at **PARITY**: 130µs p99
+against PostgreSQL's 128µs, at an **8–14% miss rate**, each miss a real reconstruction over a
+real base. The miss rate is printed with every run, because a parity result at 0% says only
+that a warm view is fast while one at 9% says reconstruction is — and the second is the claim.
 
-**Kill criterion.** If an anchored reconstruction on the read path cannot stay inside
-PostgreSQL's point-lookup latency at any miss rate, partial materialisation is not viable for
-OLTP reads and the specification's parity claim is refuted rather than merely unmet.
+**What the phase bought on the way.** Three defects, none findable by counting operations:
 
-**Cost.** Days. The mechanism exists and is tested; this is an adapter and a wiring change.
+1. `pg_wire::write_all` issued one socket write per protocol message, so a four-message reply
+   stalled on Nagle plus the peer's delayed-ACK timer — 23 lookups/s against PostgreSQL's
+   13,600. One buffer, one write, `TCP_NODELAY`: ~14,700/s, a factor of 640.
+2. The calibration gate's own baseline was wrong (see the phase table's note on `storage.rs`).
+3. A measurement written to a path nothing read, because `cargo test` runs from the package
+   directory.
 
-**What this phase already bought, before being built.** The harness found a defect in its first
-hour: `pg_wire::write_all` issued one socket write per protocol message, so a four-message
-reply stalled on Nagle plus the peer's delayed-ACK timer — 23 point lookups per second against
-PostgreSQL's 13,600. Batching the reply and setting `TCP_NODELAY` took it to ~14,700, a factor
-of 640. **No counted-work benchmark could have found it**: the engine did the right amount of
-work, in the right order, and then waited.
+**What remains.** The write path over the wire, and a scan-and-group-by read surface. Both are
+`NOT RUN` rows in E16 today, with the reason printed under the table.
 
 ---
 
@@ -232,7 +232,7 @@ well suited to a problem it was not designed for.
 |---|---|---|---|
 | 1 Plan-space restriction | 38% → <4% of queries badly planned | Days | Low |
 | 2 **Subquery unnesting** | **~510× geomean** | Weeks | Low |
-| 2.5 **Read path on `proto-engine`** | **Makes any Nilestream number an engine result** | Days | Low |
+| 2.5 **Read path on `proto-engine`** | **Built** — E16 `point` is PARITY at a 9% miss rate | Done | — |
 | 3 Adaptive tiering | Makes the OLTP target reachable at all | Weeks | Medium |
 | 4 PAX columnar storage | 10× analytical | Months | Medium |
 | 5 **Schedule verifier** | **The novel contribution** | Months | High |

@@ -7,13 +7,30 @@
 //! *reads*, and reads over an immutable base need no coordination at all.
 //!
 //! ```text
-//! nilestreamd [--port N] [--schema FILE] [--accounts N] [--seed N]
+//! nilestreamd [--port N] [--schema FILE] [--accounts N] [--rounds N]
+//!             [--budget N] [--mode demand|full]
 //! ```
+//!
+//! # What serves a read
+//!
+//! Reads are answered by a **partial view over an immutable, hash-chained ledger**
+//! (`rev_engine`): partial materialisation, the absence lattice, an anchored upquery on a
+//! miss. The daemon used to answer from a `HashMap` and say so in this banner, which was
+//! honest and made it unmeasurable — the E16 wall-clock harness could compare it to
+//! PostgreSQL but the resulting `PARITY` measured the protocol path rather than the engine.
+//!
+//! `--budget` and `--mode` are the levers the phase diagram is swept with: a parity result at
+//! a 0% miss rate and one at a 40% miss rate are different findings, and a server that could
+//! only be run warm would only ever produce the flattering half.
 //!
 //! Point `psql -h 127.0.0.1 -p 5433 -U anyone bank` at it.
 
+#[path = "daemon.rs"]
+mod daemon;
 #[path = "pg_wire.rs"]
 mod pg_wire;
+#[path = "rev_engine.rs"]
+mod rev_engine;
 #[path = "session.rs"]
 mod session;
 // The daemon uses one policy (`insecure`) and one negotiation, so most of `tls.rs` is dead
@@ -24,37 +41,29 @@ mod session;
 #[path = "tls.rs"]
 mod tls;
 
-use pg_wire::{Backend, Frontend};
-use session::{MemoryEngine, Serving, Session};
-use std::collections::HashMap;
-use std::io::BufReader;
-use std::net::{TcpListener, TcpStream};
+use rev_engine::RevEngine;
+use session::Serving;
+use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 
-const DEFAULT_SCHEMA: &str = "\
-schema bank {
-    currency usd { scale: 2 }
-    ledger postings {
-        txn: TxnId, acct: Id<Account>, cur: Currency, amt: Money,
-        idem: IdemKey window 30.days,
-        conserve per (txn, cur);
-        retain forever;
-    }
-    index ix_postings on postings (acct) anchor;
-}
-";
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut port = 5433u16;
     let mut schema_path: Option<String> = None;
     let mut accounts = 1000i64;
+    let mut rounds = 3u32;
+    let mut budget = 100_000usize;
+    let mut full = false;
     let mut i = 1;
     while i + 1 < args.len() {
         match args[i].as_str() {
             "--port" => port = args[i + 1].parse().unwrap_or(port),
             "--schema" => schema_path = Some(args[i + 1].clone()),
             "--accounts" => accounts = args[i + 1].parse().unwrap_or(accounts),
+            "--rounds" => rounds = args[i + 1].parse().unwrap_or(rounds),
+            "--budget" => budget = args[i + 1].parse().unwrap_or(budget),
+            "--mode" => full = args[i + 1] == "full",
             _ => {}
         }
         i += 2;
@@ -65,7 +74,7 @@ fn main() {
             eprintln!("nilestreamd: cannot read {p}: {e}");
             std::process::exit(2);
         }),
-        None => DEFAULT_SCHEMA.to_string(),
+        None => daemon::DEFAULT_SCHEMA.to_string(),
     };
 
     // Refuse to start on a schema that does not compile. A server that accepted a broken
@@ -80,18 +89,19 @@ fn main() {
         std::process::exit(1);
     }
 
-    // A seeded balance set, so a connecting client has something to read. This is a demo
-    // engine, and the banner says so: a reader who mistook it for a durable one would
-    // draw a wrong conclusion from every number it returned.
-    let mut data = HashMap::new();
-    for a in 1..=accounts {
-        data.insert(("__wire_result".to_string(), a), (a as i128) * 100);
-    }
-    let engine = Arc::new(Mutex::new(MemoryEngine {
-        frontier: 1,
-        data,
-        views: cat.views.keys().map(|k| (k.clone(), 2)).collect(),
-    }));
+    // The read side: a partial view over an immutable ledger, seeded with `rounds` balanced
+    // transfers per account. Seeded rather than empty because a benchmark against an empty
+    // server reports excellent latencies for queries that return nothing, and because a view
+    // over a base with no history never exercises the miss path — which is the interesting
+    // one.
+    let mode = if full { proto_engine::ViewMode::Full } else { proto_engine::ViewMode::Demand };
+    let engine = Arc::new(Mutex::new(RevEngine::seeded(
+        accounts,
+        rounds,
+        budget,
+        mode,
+        proto_engine::EvictionPolicy::Lru,
+    )));
 
     let listener = match TcpListener::bind(("127.0.0.1", port)) {
         Ok(l) => l,
@@ -102,103 +112,20 @@ fn main() {
     };
     eprintln!("nilestreamd 0.1 — PostgreSQL wire protocol on 127.0.0.1:{port}");
     eprintln!("  schema: {} ({} view(s), {} relation(s))", schema_path.as_deref().unwrap_or("<default>"), cat.views.len(), cat.relations.len());
-    eprintln!("  NOTE: the read side is an in-memory demo engine. It is not durable, and no");
-    eprintln!("        number it returns should be read as a measurement of a database.");
+    {
+        let e = engine.lock().unwrap();
+        eprintln!(
+            "  read path: partial view ({:?}, budget {budget}) over a hash-chained ledger, \
+             frontier #{}",
+            mode,
+            e.frontier()
+        );
+    }
+    eprintln!("  NOTE: the read side is in-memory and single-threaded, with no durability and");
+    eprintln!("        no consensus. It serves the real REV mechanism -- partial state, honest");
+    eprintln!("        absence, anchored reconstruction -- and it is not a production database.");
     eprintln!("  try:  psql -h 127.0.0.1 -p {port} -U anyone bank");
 
-    for stream in listener.incoming() {
-        let Ok(stream) = stream else { continue };
-        let schema = schema.clone();
-        let engine = Arc::clone(&engine);
-        std::thread::spawn(move || {
-            if let Err(e) = serve(stream, schema, engine) {
-                eprintln!("nilestreamd: connection ended: {e}");
-            }
-        });
-    }
+    daemon::accept_loop(listener, schema, engine);
 }
 
-fn serve(stream: TcpStream, schema: String, engine: Arc<Mutex<MemoryEngine>>) -> std::io::Result<()> {
-    let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
-    // **Disable Nagle.** A request/response protocol with small replies is the exact shape
-    // Nagle's algorithm penalises: the reply is held pending an acknowledgement the peer's
-    // delayed-ACK timer will not send for 40ms. The wall-clock harness measured 23 point
-    // lookups per second before this line existed, against PostgreSQL's 12,000 — a factor of
-    // five hundred, none of which was the engine doing anything wrong.
-    stream.set_nodelay(true)?;
-    let mut w = stream.try_clone()?;
-    let mut r = BufReader::new(stream);
-
-    // The startup exchange, routed through the TLS policy of §6.12 rather than through a
-    // hardcoded refusal. This build ships no TLS provider — the cryptography is delegated,
-    // see `tls.rs` — so the policy here is `Disabled` and the negotiation answers `N`,
-    // which is the protocol-correct refusal: it lets the client's own `sslmode` decide,
-    // where an `ErrorResponse` would break a `prefer` client that would have connected.
-    //
-    // The point of going through the policy rather than around it is that changing this
-    // one line to `Policy::Require` with a provider is the whole of what enabling TLS
-    // costs, and that a `Require` policy with no provider refuses the connection here
-    // instead of silently serving it in the clear.
-    let tls_config = tls::TlsConfig::insecure();
-    let mut startup = pg_wire::read_startup(&mut r)?;
-    if startup == Frontend::SslRequest {
-        match tls::PgNegotiation::new(&tls_config).decide(true) {
-            tls::PgStep::Cleartext(reply) | tls::PgStep::Upgrade(reply) => {
-                w.write_all_bytes(&[reply.byte()])?;
-            }
-            tls::PgStep::Refuse(why) => {
-                eprintln!("nilestreamd: {peer} refused: {}", why.message());
-                return Ok(());
-            }
-        }
-        startup = pg_wire::read_startup(&mut r)?;
-    } else if let tls::PgStep::Refuse(why) = tls::PgNegotiation::new(&tls_config).decide(false) {
-        eprintln!("nilestreamd: {peer} refused: {}", why.message());
-        return Ok(());
-    }
-    let Frontend::Startup { params, .. } = startup else {
-        return Ok(());
-    };
-    let get = |k: &str| params.iter().find(|(a, _)| a == k).map(|(_, v)| v.clone()).unwrap_or_default();
-    let mut session = Session::new(get("user"), get("database"), schema);
-    eprintln!("nilestreamd: {peer} connected as `{}` to `{}`", session.user, session.database);
-
-    let pid = std::process::id();
-    pg_wire::write_all(&mut w, &pg_wire::startup_reply(pid, 0x5eed))?;
-
-    loop {
-        let msg = match pg_wire::read_message(&mut r) {
-            Ok(m) => m,
-            Err(_) => break,
-        };
-        if msg == Frontend::Terminate {
-            break;
-        }
-        let replies = {
-            let mut e = engine.lock().unwrap();
-            session.handle(msg, &mut *e)
-        };
-        if replies.is_empty() {
-            break;
-        }
-        pg_wire::write_all(&mut w, &replies)?;
-    }
-    eprintln!("nilestreamd: {peer} disconnected after {} queries", session.queries_served);
-    Ok(())
-}
-
-/// A tiny helper so the `SSLRequest` refusal reads clearly at the call site.
-trait WriteBytes {
-    fn write_all_bytes(&mut self, b: &[u8]) -> std::io::Result<()>;
-}
-impl<T: std::io::Write> WriteBytes for T {
-    fn write_all_bytes(&mut self, b: &[u8]) -> std::io::Result<()> {
-        self.write_all(b)?;
-        self.flush()
-    }
-}
-
-#[allow(dead_code)]
-fn _assert_backend_is_used(_: Backend) {}
-#[allow(dead_code)]
-fn _assert_serving_is_used(_: &dyn Serving) {}

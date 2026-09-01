@@ -19,18 +19,32 @@ initdb -D /var/lib/pgdata -U bench --auth=trust
 pg_ctl -D /var/lib/pgdata -l /tmp/pg.log \
        -o '-p 5433 -c listen_addresses=127.0.0.1' start
 
-# 2. Nilestream, on its own port.
-cargo build --release -p nilestream-server
-./target/release/nilestreamd --port 5434 --accounts 10000 &
-
-# 3. Check the harness before trusting it, then run.
+# 2. Check the harness before trusting it, then run the PostgreSQL half.
 cargo run --release -p bank-bench --bin bench -- --calibrate --pg-port 5433
 cargo run --release -p bank-bench --bin bench -- --run \
-      --pg-port 5433 --nls-port 5434 --accounts 10000 --operations 2000 --runs 10
+      --pg-port 5433 --accounts 10000 --operations 2000 --runs 10
+
+# 3. The Nilestream half, which hosts the daemon on a thread of the test process
+#    and drives it over TCP with the same client. Merges into the same CSVs.
+cargo test --release -p bank-bench --test e16_nilestream -- --ignored --nocapture
 
 # 4. Re-render the table from the CSVs alone, without re-running anything.
 cargo run --release -p bank-bench --bin bench -- --render
 ```
+
+### Why the two halves run differently
+
+PostgreSQL is a server somebody else started, so the harness connects *out* to it. Nilestream
+is this repository's own code, and the harness hosts its listener on a thread and drives it
+over a TCP port — because environments differ in whether a benchmark binary may fork a
+long-lived child or bind a listener, and a Nilestream column that read `NOT RUN` for
+*sandbox* reasons would be worthless.
+
+**The fairness rule is untouched**, and the distinction is exact: both targets pay the same
+*client* cost — socket, protocol framing, round trip — because the same `wire::Client` drives
+both. Hosting the listener on a thread changes where the server runs, not how the client talks
+to it. Calling `RevEngine::read` directly would have been the shortcut; going through a port is
+what avoids it.
 
 Outputs: `results/E16-wallclock/{oltp,analytical,point,durable}.csv` and the rendered
 `results/E16-wallclock.md`. **Nothing in the rendered file is typed in by hand** — that is why
@@ -97,6 +111,14 @@ not on Nilestream (`nilestreamd` implements the extended query protocol in `exte
 does not wire it into its connection loop), which would have flattered PostgreSQL. Preparing on
 both is fair and preparing on neither is fair; preparing on one is not.
 
+## A third defect, worth recording because it is the quietest
+
+The Nilestream half runs under `cargo test`, whose working directory is the **package**
+directory rather than the workspace root. A relative output path therefore created a second
+`results/` tree under `crates/bank-bench/`, where `bench --render` never looked — so the table
+went on reporting `NOT RUN` for a workload that had just been measured perfectly well, ten
+directories away. Nothing failed; a good number simply went somewhere nobody read.
+
 ## The defect the harness found in its first hour
 
 The first Nilestream run measured **23 point lookups per second** against PostgreSQL's 13,600.
@@ -129,11 +151,29 @@ by measuring something else under the same name is the specific failure this who
 exists to avoid, and `render.rs` enforces it: a declared gap wins over any measurement, even
 one that exists.
 
-## What the results do not establish
+## What the results do and do not establish
 
-The `point` row currently reads `PARITY`, and it is **not** evidence that the read-model
-runtime reaches parity. `nilestreamd` serves reads from an in-memory demo engine — its own
-startup banner says so — so that row measures the protocol path against PostgreSQL's full
-stack. The honest reading is that Nilestream's wire path is not a bottleneck. Making it an
-engine result means serving the row from `proto-engine`'s `PartialView` over a real ledger,
-at which point the same harness measures the mechanism the thesis is about.
+The `point` row reads `PARITY` and it **is** an engine result: served by
+`nilestream-server::rev_engine`, a partial view over an immutable hash-chained ledger,
+answering an anchored read and reconstructing on a miss. The measured runs sit at 8–14%
+misses, each a real upquery touching real base rows, and the latency holds across them.
+
+That combination is the claim worth having. A parity result at a 0% miss rate would only say a
+warm cache is fast; at 9% it says *reconstruction* is, which is what the thesis argues. The
+miss rate is printed with every run for exactly this reason, and a result quoted without it
+should be treated as incomplete.
+
+Two things it does not establish:
+
+* **Nothing about durability or concurrency.** The read engine is in-memory and
+  single-threaded. The durable path is measured separately, in GBS, where `make fsync-proof`
+  counts the syscalls.
+* **Not "faster than PostgreSQL".** The two are doing different work — an index scan and an
+  aggregation against a maintained view plus occasional reconstruction. That difference is the
+  point of partial materialisation rather than an unfair comparison, but it means the row says
+  *a REV serves a point lookup as fast as an indexed aggregate*, which is a narrower and more
+  useful statement.
+
+The three `NOT RUN` rows are findings about the engine's surface: `nilestreamd` exposes no
+write path over the wire, and its read surface serves per-key balances rather than scans. Those
+are the next things to build, not caveats to argue away.

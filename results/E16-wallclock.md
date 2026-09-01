@@ -6,10 +6,10 @@
 
 | Workload | Contract (SPEC-ENGINE Part 0) | PostgreSQL | Nilestream | Ratio | Verdict |
 |---|---|---|---|---|---|
-| oltp | 5–10× PostgreSQL | 4553 ops/s | — ops/s | — | **NOT RUN** |
-| analytical | 10–12× PostgreSQL | 346.3 ops/s | — ops/s | — | **NOT RUN** |
-| point | parity with PostgreSQL | 121.8 µs p99 | 117.6 µs p99 | 1.04× | **PARITY** |
-| durable | parity with PostgreSQL | 5564 ops/s | — ops/s | — | **NOT RUN** |
+| oltp | 5–10× PostgreSQL | 4500 ops/s | — ops/s | — | **NOT RUN** |
+| analytical | 10–12× PostgreSQL | 344.2 ops/s | — ops/s | — | **NOT RUN** |
+| point | parity with PostgreSQL | 127.9 µs p99 | 130.3 µs p99 | 0.98× | **PARITY** |
+| durable | parity with PostgreSQL | 4966 ops/s | — ops/s | — | **NOT RUN** |
 
 Why a row is `NOT RUN`:
 
@@ -36,22 +36,23 @@ Why a row is `NOT RUN`:
 * `wal_level` = `replica`
 * `full_page_writes` = `on`
 
-### nilestream
+## What the `point` row is
 
-* `engine` = `nilestreamd`
-* `frontier` = `1`
+**An engine result.** The row is served by `nilestream-server::rev_engine`: a partial view over an immutable, hash-chained ledger, answering an anchored read, reconstructing on a miss. Not a hash map — that was the first version of this experiment, and the document had to spend two paragraphs saying the number meant nothing.
 
-## What the `point` row is, and is not
+The miss rate is reported with it and belongs with it. A parity result at a 0% miss rate says a warm view is fast; one at a 9% miss rate says *reconstruction* is, which is the claim the thesis actually makes. The measured runs sit around 8–14% misses, each one a real upquery touching real base rows, and the latency holds across them. Reporting the latency alone would have let the more interesting half disappear.
 
-**It is not evidence that the read-model runtime reaches parity.** `nilestreamd` serves reads from an in-memory demo engine — its own startup banner says so — so this row measures the *protocol path*: startup, message framing, query dispatch, and a hash lookup, against PostgreSQL's full stack including index descent, tuple visibility and buffer management. The two are not doing the same work, and the honest reading is that Nilestream's wire path is not a bottleneck, which is worth knowing and is a much smaller claim than the table's verdict column can express.
+Two things it still does not establish. The engine is in-memory and single-threaded, so this is not a durability or a concurrency result. And PostgreSQL is doing different work — an index scan and an aggregation, against a maintained view plus occasional reconstruction — which is the *point* of partial materialisation rather than an unfair comparison, but it means the row says "a REV serves a point lookup as fast as an indexed aggregate" and not "Nilestream is faster than PostgreSQL".
 
-What would make it evidence is serving the row from `proto-engine`'s `PartialView` over a real ledger, at which point the same harness measures the mechanism the thesis is about. That is a roadmap item, not a caveat to be argued away.
+## The defects this experiment found
 
-## The defect this experiment found
+**A 640× stall in the wire path.** The first run measured Nilestream at 23 point lookups per second against PostgreSQL's 13,600. Neither the engine nor the compiler (per-query compilation measures 0.02ms, so the whole "compile every query" concern is 0.5% of the budget): `pg_wire::write_all` issued one socket write per protocol message, so a four-message reply was held by Nagle's algorithm pending the peer's delayed-ACK timer. 43ms per query is that timer wearing a database's clothes. One buffer, one write, `TCP_NODELAY` — and the same workload reached ~14,700/s.
 
-The first run measured Nilestream at **23 point lookups per second**, against PostgreSQL's 13,600 — a factor of nearly six hundred. The cause was neither the engine nor the compiler (per-query compilation measures 0.02ms): `pg_wire::write_all` issued one socket write per protocol message, so a four-message reply was held by Nagle's algorithm pending the peer's delayed-ACK timer. 43ms per query is that timer, wearing a database's clothes.
+**A calibration that agreed with a broken harness.** The gate first compared PostgreSQL against a published 333 txn/s/core and fired at 16×. The gate was right and the figure was wrong: `fsync` costs 1.6–12.4µs with power-loss protection and 891–2974µs without, so 333 txn/s is a property of PostgreSQL *on a ~3ms device*. This machine syncs in 93µs, where holding it to 333 would have meant the harness was broken — and the published number would have concealed that by agreeing with it. See `storage.rs`.
 
-Batching the reply into one write and setting `TCP_NODELAY` took the same workload to ~14,700 lookups per second. **No counted-work benchmark could have found this**: the engine did the right amount of work, in the right order, and then waited. It is the clearest argument in this repository for measuring wall-clock against a baseline rather than counting operations, and it was found within an hour of the harness existing.
+**A measurement written where nothing read it.** The Nilestream half runs under `cargo test`, whose working directory is the *package* rather than the workspace. A relative path put a second `results/` tree under `crates/bank-bench/`, and the table went on reporting `NOT RUN` while a good measurement sat ten directories away.
+
+None of the three could have been found by counting operations. In each case the engine did the right amount of work, in the right order, and the number was still wrong.
 
 ## What this does not measure
 

@@ -7,4 +7,7 @@ authors.workspace = true
 
 [dependencies]
 nilestream-ledger = { path = "../nilestream-ledger" }
-# blake3 = "1"   # Phase 0: real hash swap (ADR 0002)
+# No external dependencies, deliberately. The hash the chain uses is SHA-256, implemented
+# in `nilestream-ledger::chain` (ADR 0003, superseding ADR 0002 which planned a blake3 swap):
+# the chain hash is an audit artefact, and a dependency is a thing that can change what a
+# hash is without changing this repository.

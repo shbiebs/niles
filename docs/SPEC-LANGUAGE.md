@@ -154,6 +154,16 @@ rather than per read. So the trust boundary is exactly where the hash chain ends
 from the ledger is sound, zero-copy from a client's wire buffer is not, and the two are
 distinguishable in the type system rather than by convention.
 
+*What the validation is, since the argument depends on it.* **SHA-256 (FIPS 180-4)**, over the
+canonical body, chained parent-first so the digest at any epoch commits to every epoch before
+it (`nilestream_ledger::chain`, ADR 0003). This sentence used to be missing, and the review was
+right that its absence mattered: the chain was a 256-bit FNV variant whose own doc comment said
+it was not collision resistant, and a chain that is not collision resistant validates against
+accident rather than against an adversary. The resolution above is only as strong as the
+function underneath it, so the function is now named and its conformance is a test — the NIST
+vectors, including the long message, plus a chunking-invariance check the segment writer
+relies on.
+
 *Acceptance test.* A read of *n* ledger rows MUST perform O(1) allocations, not O(n). A
 decode from a client buffer MUST be rejected if the chain does not verify.
 **Status: Specified.**

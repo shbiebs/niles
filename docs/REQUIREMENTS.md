@@ -73,7 +73,7 @@ numbers. **Verdict key:** ✅ consistent and achievable · ⚠️ achievable but
 | L-10 | Set-at-a-time semantics | ✅ | |
 | L-11 | Iterative graphs, recursive analytics, ML without impedance mismatch | ✅ | Guarded recursion + WCOJ + typed arrays, one type system |
 | L-12 | Strict serializability | ❌→⚠️ | **Category error.** Not a language property. §3.4 |
-| L-13 | No unnecessary type conversion or copying | ⚠️ | Zero-copy is bounded by trust. §3.5 — and the ledger's hash chain resolves it |
+| L-13 | No unnecessary type conversion or copying | ⚠️ | Zero-copy is bounded by trust. §3.5 — and the ledger's SHA-256 hash chain resolves it (ADR 0003) |
 | L-14 | Compose clean functional code | ✅ | |
 | L-15 | Nested subqueries and CTEs | ✅ | And **unnesting them is where the optimizer's real win is.** §4 |
 | L-16 | Compiles to machine code without an interpreter | ⚠️ | Contradicts L-5 for short queries. §3.6 |
@@ -178,6 +178,14 @@ append-only ledger written only by the engine is a trusted writer.** The chain *
 validation, amortised per epoch rather than per read. So zero-copy from the ledger is safe
 and zero-copy from a client's wire buffer is not, and the boundary is exactly where the
 hash chain ends.
+
+**And the chain is SHA-256** (FIPS 180-4, `nilestream_ledger::chain`, ADR 0003). Worth stating
+because the argument above is only as strong as the function underneath it: until the
+architecture review the chain was a 256-bit FNV variant whose own doc comment said it was not
+collision resistant, which validates against accident and not against an adversary. Three
+documents rested on it in the meantime. The conformance obligation is now a test rather than a
+sentence — the NIST vectors, the long message, and a chunking-invariance check the segment
+writer depends on.
 
 ### 3.6 "No interpreter" — contradicts being a PostgreSQL replacement
 

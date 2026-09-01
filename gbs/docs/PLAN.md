@@ -56,7 +56,7 @@ is refuted by three independent theorems rather than being an engineering gap.
 
 | | Closest on | Missing |
 |---|---|---|
-| **Umbra / CedarDB** | The only genuine **single-format** HTAP engine: a B⁺-tree with PAX-layout leaf pages, so there is no rowstore/columnstore seam, one MVCC scheme, one compiler. 3.0× geomean over HyPer on the Join Order Benchmark; buffer-manager overhead under 6% against pure in-memory. Ships **worst-case-optimal joins** with a hybrid optimizer — ~77× on a 4-clique against a commercial RDBMS **with zero regression on TPC-H and JOB** | Streaming and incremental view maintenance entirely — not even on the roadmap. Graph is recursive CTEs plus WCOJ; SQL/PGQ only "planned". Single node. Free tier caps at 64 GB with no HA or failover shipped |
+| **Umbra / CedarDB** | The only genuine **single-format** HTAP engine: a B⁺-tree with PAX-layout leaf pages, so there is no rowstore/columnstore seam, one MVCC scheme, one compiler. 3.0× geomean over HyPer on the Join Order Benchmark; buffer-manager overhead under 6% against pure in-memory. Ships **worst-case-optimal joins** with a hybrid optimizer — 4.5–6.9× on a 4-clique against EmptyHeaded, **with zero regression on TPC-H and JOB** | Streaming and incremental view maintenance entirely — not even on the roadmap. Graph is recursive CTEs plus WCOJ; SQL/PGQ only "planned". Single node. Free tier caps at 64 GB with no HA or failover shipped |
 | **Materialize** | **Strict serializability is its default isolation level**, over incrementally maintained views, with a published ladder (Strict Serializable → Serializable → Bounded Staleness). This is close prior art for an epoch-based consistency ladder and the thesis must engage it directly | General OLTP writes; columnar analytics; graph. Its views are **fully** materialized |
 | **Noria / ReadySet** | The only system pairing partial materialization with upqueries | **Explicitly eventually consistent** — "Noria operators and the contents of its external views are eventually-consistent." No OLAP, no graph |
 | **Kùzu** | Best columnar graph DBMS in the literature: factorisation, ASP-join, multiway WCOJ, >10× over DuckDB and Umbra on selective multi-hop | It is **dead** — archived by its own company in October 2025. Single-writer, no OLAP or streaming. A cautionary data point: technical excellence was not the binding survival constraint |
@@ -114,13 +114,20 @@ necessary).
 * **Seamless HTAP.** PAX-in-B-tree, since 2020, commercially available since May 2025.
 * **Graph speed inside a relational engine.** Worst-case-optimal joins, VLDB 2020, with no
   regression on conventional workloads. **A separate graph engine is not needed** — which
-  removes a whole subsystem from the Nilestream roadmap.
+  removes a whole subsystem from the Nilestream roadmap. But note the size of the prize:
+  Freitag's own hybrid optimizer chose WCOJ **zero times out of 923 joins** across TPC-H and
+  JOB. It is a *parity* requirement for graph-shaped queries, not a differentiator on
+  relational ones.
 * **Serializability at snapshot-isolation cost** on a single node — precision-locking MVCC,
   SIGMOD 2015.
 * **Vectorised versus compiled is not a dichotomy.** Kersten et al. (VLDB 2018) found them
   "quite similar in OLAP workloads"; InkFuse unifies them via suboperators; Umbra tiers
-  adaptively. One number the evaluation chapter must not overclaim: **SIMD buys about 1.4×
-  on real TPC-H Q6 and ~1.1× on Q3/Q9 — not 8×.** The 8.4× figure is a microbenchmark.
+  adaptively. Two numbers the evaluation chapter must not overclaim. **SIMD buys about 1.4× on real
+  TPC-H Q6 and ~1.1× on Q3/Q9 — not 8×**; the 8.4× figure is a microbenchmark. And
+  **compiled versus vectorized is a wash**: on Q6 the two are a dead tie at 15 ms, and the
+  paper's whole spread is 0.66×–1.93×, which its authors describe as "not large
+  differences." The 1.4× is the AVX-512 gain, not the compilation gain, and conflating them
+  would be citing the right number for the wrong claim.
 * **The highest-leverage optimizer fix is not better estimation.** Leis et al. cut queries
   running more than 2× slower from **38% to under 4%** by disabling risky nested loops and
   enabling runtime hash-table resizing. **Restricting the plan space beats improving the

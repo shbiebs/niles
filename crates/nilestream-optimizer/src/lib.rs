@@ -15,6 +15,7 @@ pub mod estimators;
 pub mod modes;
 pub mod eviction;
 pub mod join_order;
+pub mod plan_space;
 pub mod offline;
 
 pub use modes::{Mode, ModeDecision};

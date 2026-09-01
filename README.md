@@ -72,7 +72,7 @@ cannot do (durability, concurrency, distribution, the compiler); no number there
 Reproduce everything:
 
 ```sh
-cargo test --workspace                      # 418 tests
+cargo test --workspace                      # 430 tests
 cargo test -p niles-interp                  # the Appendix E bootstrap gates
 
 # the compiler, on the thesis's own worked example
@@ -180,3 +180,26 @@ Phased program (thesis Ch. 8) with pre-registered kill criteria: Phase 0 ledger 
 break-even → Phase 1 formal model and language → Phase 2 single-node vertical slice →
 Phase 3 adaptive materialization, optimizer and language evaluation → Phase 4 distributed
 execution → Phase 5 hardening.
+
+
+## GBS — the core banking system built on this
+
+GBS lives in **its own repository**, beside this one, and depends on Nilestream only
+optionally.
+
+The extraction produced a finding worth recording here, because it is evidence about this
+project rather than about GBS: across an entire core banking platform — a kernel, seven
+mechanisms and sixteen product lines — GBS used exactly **two** things from Nilestream,
+`Epoch(u64)` and `Minor = i128`. So GBS now defines its own vocabulary and states what it
+needs of a system of record as a three-operation trait, with Nilestream as one adapter and
+an in-memory reference implementation as the other.
+
+That is the right outcome for both projects. GBS's kernel has no dependencies at all, which
+makes its "banking is a library" claim stronger than it could be inside this workspace. And
+it turns a thesis observation into something testable: E14 built the whole REV mechanism in
+stock PostgreSQL 16 and concluded the theory is not engine-specific, so a `gbs-postgres`
+adapter is possible and would be the Nilestream one with different internals.
+
+The one place GBS genuinely needs this repository is checking its Niles schema, which needs
+`nilesc`. Its test suite looks for a checkout at `$NILES_ROOT` or a sibling `../niles` and
+skips loudly without one.

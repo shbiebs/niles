@@ -3,7 +3,7 @@
 Speed is the primary goal, so this roadmap is **sequenced by measured value, not by
 instinct**, and every phase carries a numeric gate and a kill criterion.
 
-Three findings from `gbs/docs/performance-baselines.md` set the order, and all three point
+Three findings from `docs/research/performance-baselines.md` set the order, and all three point
 away from where effort would naturally go:
 
 | Instinct says | Measurement says |

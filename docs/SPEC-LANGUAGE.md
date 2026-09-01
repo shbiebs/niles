@@ -58,7 +58,7 @@ is the empty row, and the compiler infers it rather than trusting an annotation.
 
 *Acceptance test.* `crates/niles-lang/src/effects.rs` — a function declaring an empty row
 whose body appends MUST fail with `NL0310`. Verified in
-`gbs/crates/gbs-products/tests/niles_schema.rs::an_understated_effect_row_is_rejected_with_both_spans`.
+GBS's `tests/niles_schema.rs::an_understated_effect_row_is_rejected_with_both_spans`.
 **Status: Built.**
 
 ---
@@ -316,7 +316,7 @@ The organising constraint. Each finding becomes a requirement the language MUST 
 | Finding | Grade | Language obligation | Status |
 |---|---|---|---|
 | Anchored reconstruction (Thm 4.1) | Enabling | Every view MUST declare an anchor; a non-reconstructible input MUST be a compile error, not a cost | **Built** — `join_order.rs` prunes it as *legality* before costing |
-| Honest absence | Enabling | A miss MUST NOT be expressible as zero. `Reading` has no numeric arm | **Built** — `gbs-mechanisms::signal` |
+| Honest absence | Enabling | A miss MUST NOT be expressible as zero. `Reading` has no numeric arm | **Built** — GBS's `gbs-mechanisms::signal` |
 | Static conservation under control flow | Enabling | A `txn` MUST balance per currency on every path, decided before running | **Built** — 11 of 12 defect classes at compile time (E14) |
 | Coordination-free cross-shard reads | Enabling | A read of a frozen prefix MUST require no coordination and MUST be cacheable without invalidation | **Built** — `nilestream-core::distributed` |
 | Per-view rungs with monotonicity | Cumulative | L-12 | **Built** |

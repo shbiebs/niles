@@ -4,8 +4,8 @@
 on four workload classes simultaneously. Every performance requirement carries a **number**
 and a **workload it applies to**, because a speed specification without both is a slogan.
 
-Companion to `SPEC-LANGUAGE.md`. Evidence in `gbs/docs/performance-baselines.md` (33
-primary sources) and `gbs/docs/engine-landscape.md` (40).
+Companion to `SPEC-LANGUAGE.md`. Evidence in `docs/research/performance-baselines.md` (33
+primary sources) and `docs/research/engine-landscape.md` (40).
 
 Status values as in the language specification: **Built** · **Partial** · **Specified** ·
 **Adopt**.
@@ -90,7 +90,7 @@ compile.**
 ledger, and the SC7 bound on reconstruction cost does not hold — so a view without one is a
 view whose cost model is false, not merely slow.
 
-*Acceptance test.* `gbs/niles/gbs.niles` declares five anchor indices and compiles; removing
+*Acceptance test.* the GBS schema (`niles/gbs.niles` in the GBS repository) declares five anchor indices and compiles; removing
 one MUST fail. Reconstruction cost MUST be bounded at C/2+1 per SC7, measured flat at ≈8.5
 base rows across a 64× increase in history. **Status: Built.**
 

@@ -215,7 +215,7 @@ simply by disabling risky nested loops and enabling runtime hash-table resizing.
 
 ## 4. What the measurements say about where to spend effort
 
-The performance survey (`gbs/docs/performance-baselines.md`, 33 primary sources) produced
+The performance survey (`docs/research/performance-baselines.md`, 33 primary sources) produced
 one finding that reorders the entire optimizer roadmap, and two that prevent overclaiming.
 
 **Subquery unnesting is worth ~510× geomean. Join ordering is worth ~7%.**

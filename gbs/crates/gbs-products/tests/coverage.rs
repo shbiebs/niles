@@ -87,6 +87,10 @@ fn implemented_rows() -> Vec<(&'static str, &'static str)> {
         ("Funds sweep", "liquidity.rs"),
         ("Cash pooling", "liquidity.rs"),
         ("Zero-balance structures", "liquidity.rs"),
+        ("Securities — equities", "securities.rs"),
+        ("Securities — fixed income", "securities.rs"),
+        ("ETF platform", "securities.rs"),
+        ("Multi-asset and alternatives", "securities.rs"),
     ]
 }
 

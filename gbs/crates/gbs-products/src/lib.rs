@@ -14,4 +14,5 @@ pub mod fx;
 pub mod lending;
 pub mod derivatives;
 pub mod liquidity;
+pub mod securities;
 pub mod tradefinance;

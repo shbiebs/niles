@@ -295,7 +295,7 @@ the general core into a banking core:
 
 ## 7. Status
 
-`cargo test --workspace` runs **635 tests**, of which 216 are GBS's.
+`cargo test --workspace` runs **664 tests**, of which 233 are GBS's.
 
 | Layer | Status |
 |---|---|
@@ -312,6 +312,7 @@ the general core into a banking core:
 | Trade finance: LC, SCF | **Built** — 15 tests including state-at-presentation and three-party assignment |
 | Derivatives: forwards, swaps, caps, floors | **Built** — 14 tests including collar parity |
 | Liquidity: sweep, pooling, ZBA | **Built** — 11 tests including conservation under arbitrary balances |
+| Securities, ETFs, multi-asset | **Built** — 17 tests. A holding is a balance whose currency is an instrument, so the kernel's per-currency check becomes a per-instrument check with no change at all |
 | `tests/layering.rs` | **Built**, 6 tests — the falsification check, with a negative control |
 | `tests/coverage.rs` | **Built**, 9 tests — the matrix checked against the code, with a negative control |
 | The other 18 product lines | **Not built.** Their matrix rows are predictions |
@@ -334,10 +335,10 @@ static check nobody has tested. Both errors the architecture leans on fire:
   `available_balance` from `ledger_balance` — the obvious, cheaper, tempting thing — does
   not compile.
 
-**11 of 29 product lines implemented.** `the_honest_ratio_of_built_to_claimed_is_reported`
+**15 of 29 product lines implemented.** `the_honest_ratio_of_built_to_claimed_is_reported`
 prints the figure from the build, so it cannot drift from this table.
 
-### Four defects the tests found, recorded because they are the evidence this works
+### Five defects the tests found, recorded because they are the evidence this works
 
 1. **`Share` overflowed on an ordinary syndicate.** Shares were kept unreduced and summed by
    `a/b + c/d = (ad+cb)/bd`, on the reasoning that contract denominators stay small. Eleven
@@ -352,6 +353,11 @@ prints the figure from the build, so it cannot drift from this table.
 4. **This matrix forgot that interest accrual is M7.** Revolving and term lending were marked
    as needing no rate-indexed valuation. Found by `coverage.rs` comparing the row against
    what `lending.rs` imports, which is why that test exists.
+5. **NAV was quoted at the currency's own scale.** A fund with a hundred million units and a
+   NAV rounded to cents carries up to half a cent per unit of subscription mispricing — half
+   a million dollars. Found by a test that asked a fund worth one cent across three units
+   for its NAV and correctly received zero: right at cent precision, and useless. `nav_scale`
+   exists because of it, and defaults to four decimals.
 
 Two of the four were found by the layer *above* the defect, which is the argument for the
 layering being real rather than decorative.

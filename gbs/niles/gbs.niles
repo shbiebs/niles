@@ -1,0 +1,314 @@
+// GBS — the core banking schema, in Niles.
+//
+// This is the other half of the system. `gbs/crates/` is the Rust that composes mechanisms
+// into products; this file is the *ledger and the read models*, where the guarantees the
+// products rely on are declared and checked before anything runs.
+//
+// Checked by `nilesc check gbs/niles/gbs.niles`, and kept checking by
+// `gbs/crates/gbs-products/tests/niles_schema.rs`, so the schema cannot drift from the
+// language that validates it.
+//
+// The division of labour is worth stating, because it is the point of having both:
+//
+//   * The **kernel and mechanisms** (Rust) enforce conservation, linearity and honest
+//     absence at run time, on values.
+//   * **This file** declares them where the compiler can check them *statically* — per-view
+//     consistency rungs, rung monotonicity, conservation obligations, capability
+//     requirements, retention.
+//
+// The Rust half catches a violation when it happens. This half catches it before the
+// program runs, which is the whole of Contribution 4's claim and the reason the E14
+// differential corpus puts Niles at 11 of 12 defect classes against PostgreSQL's zero.
+
+schema gbs {
+    // ── currencies ───────────────────────────────────────────────────────────────────
+    //
+    // Scale is declared per currency, not assumed. JPY at scale 0 and BTC at scale 8 are
+    // the cases where an assumed two decimals silently multiplies or divides by a hundred,
+    // and the kernel's `ScaleMismatch` is the run-time half of this declaration.
+
+    currency usd { scale: 2 }
+    currency eur { scale: 2 }
+    currency gbp { scale: 2 }
+    currency chf { scale: 2 }
+    currency jpy { scale: 0 }
+
+    // ── parties and accounts ─────────────────────────────────────────────────────────
+    //
+    // A `table`, not a `base`: the chart of accounts is reference data that is genuinely
+    // amended — an account is reclassified, a party is renamed — and pretending otherwise
+    // would force every correction to be an append nobody could interpret.
+    //
+    // The distinction matters for reconstruction: a view rooted in a `table` is not
+    // reconstructible, because the history it would fold no longer exists. That is why the
+    // balance views below root in `postings` and join the chart only for presentation.
+
+    table parties {
+        id: Id<Party> primary key,
+        legal_name: Text @confidential(e2ee),
+        jurisdiction: Text,
+    }
+
+    table accounts {
+        id: Id<Account> primary key,
+        owner: Id<Party>,
+        cur: Currency,
+        class: Text,
+        nature: Text,
+        opened_at: Instant,
+    }
+
+    // ── the ledger ───────────────────────────────────────────────────────────────────
+    //
+    // The one authoritative base. Every product's every movement lands here, and nowhere
+    // else. `conserve per (txn, cur)` is the kernel's per-currency invariant declared where
+    // the compiler can check a program against it.
+
+    ledger postings {
+        txn: TxnId,
+        acct: Id<Account>,
+        cur: Currency,
+        amt: Money,
+        // Both temporal axes. `value_date` is the world axis — when the movement is deemed
+        // to have taken effect — and the epoch is the system axis. A back-valued correction
+        // is a new row with an earlier `value_date`, never an update.
+        value_date: Date,
+        idem: IdemKey window 30.days,
+        conserve per (txn, cur);
+        retain forever;
+        bitemporal;
+    }
+
+    // Holds: M3, as a base rather than a ledger.
+    //
+    // A `base` because a hold does not conserve. It is a one-sided encumbrance, not a
+    // double-entry movement, and declaring it a `ledger` would promise an invariant no
+    // hold ever satisfies. Immutable and fully retained all the same — a hold's history is
+    // exactly what an APSN dispute turns on.
+    base holds {
+        id: HoldId,
+        acct: Id<Account>,
+        cur: Currency,
+        amount: Money,
+        expires: Instant,
+        idem: IdemKey window 7.days,
+        retain forever;
+    }
+
+    // Lifecycle transitions: M5. The state of a letter of credit is a fold over these, and
+    // there is no status column anywhere in this schema.
+    base transitions {
+        subject: Text,
+        rule: Text,
+        // `actor` is reserved for future use in the keyword registry, so the field is
+        // `acted_by`. Recorded rather than escaped as `r#actor`: a raw identifier in a
+        // schema is a hint that the schema is fighting the language, and `acted_by` reads
+        // better anyway.
+        acted_by: Id<Party>,
+        to_state: Text,
+        at: Instant,
+        retain forever;
+        bitemporal;
+    }
+
+    // Observations: M7's inputs, retained so a valuation can be reproduced.
+    //
+    // A base, not a table. A rate fixing is a fact about a moment, and amending one would
+    // make every valuation derived from it irreproducible — which would defeat
+    // `reproduce e at #4200` for the whole derivatives book.
+    base fixings {
+        index_name: Text,
+        value: Int,
+        scale: Int,
+        observed_on: Date,
+        retain forever;
+        bitemporal;
+    }
+
+    // ── anchor indices ───────────────────────────────────────────────────────────────
+    //
+    // Mandatory on every key a view reconstructs by. Without one, an upquery scans the
+    // ledger, and the SC7 bound on reconstruction cost does not hold.
+
+    index by_acct on postings (acct, cur) anchor;
+    index by_txn on postings (txn) anchor;
+    index by_hold_acct on holds (acct, cur) anchor;
+    index by_subject on transitions (subject) anchor;
+    index by_index on fixings (index_name) anchor;
+
+    // ── the read models ──────────────────────────────────────────────────────────────
+    //
+    // Each declares its own consistency rung, and the compiler enforces rung monotonicity:
+    // a view served at rung ℓ may not read a view served below ℓ. That check is what makes
+    // "the risk number was stale but the limit check used it" a compile error rather than
+    // an incident report.
+
+    // The ledger balance. `read_your_writes` is enough for a customer reading back their
+    // own payment, and two rungs cheaper than the authorisation path.
+    view ledger_balance = postings
+        .group_by(|p| (p.acct, p.cur))
+        .sum(|p| p.amt)
+        serve { consistency: read_your_writes, materialize: auto, retain: evictable };
+
+    // Encumbrances: the total of live holds per account.
+    //
+    // Served at the same rung as `available_balance`, because that view reads it and rung
+    // monotonicity would reject anything weaker. This is the constraint doing real work:
+    // an encumbrance view served at `bounded` would make every availability decision
+    // downstream at most bounded-fresh, however strict its own contract claimed to be.
+    view encumbrances = holds
+        .group_by(|h| (h.acct, h.cur))
+        .sum(|h| h.amount)
+        serve { consistency: ledger_consistent, materialize: demand, lineage: key };
+
+    // **The availability decision.** Rung 5: a decision to move money must see every
+    // committed write that precedes it in real time.
+    //
+    // Derived from `postings` directly rather than from `ledger_balance`. Deriving it from
+    // the cheaper view is the mistake the thesis's own worked example contained until the
+    // effect calculus was run over it: the staleness enters one hop upstream and no
+    // downstream annotation removes it. That is precisely the FDIC/CFPB authorize-positive-
+    // settle-negative pattern — two derived views of one ledger disagreeing at the moment a
+    // decision is made — arriving as a compile error instead of a supervisory finding.
+    view available_balance = postings
+        .group_by(|p| (p.acct, p.cur))
+        .sum(|p| p.amt)
+        serve { consistency: ledger_consistent, materialize: demand, lineage: key };
+
+    // A party's position across every account it owns, per currency. M6 at party scope.
+    //
+    // `demand` because the access is Pareto-skewed — a handful of parties are read
+    // constantly and the long tail almost never — which is the shape the thesis's
+    // partial-materialisation argument depends on.
+    view party_position = postings
+        .group_by(|p| (p.acct, p.cur))
+        .sum(|p| p.amt)
+        serve { consistency: snapshot, materialize: demand, retain: evictable };
+
+    // Month-to-date statement. Bounded staleness is correct here and two rungs cheaper.
+    //
+    // The boundary is a literal instant, not `month_start()`. A wall-clock read inside a
+    // view predicate is rejected by the IR verifier (IR013), and rightly: it would make a
+    // reconstruction after eviction disagree with the value it replaced, which falsifies the
+    // reconstruction-equivalence theorem for this view rather than merely leaving it
+    // unproven. A view boundary must be a value, not a moment.
+    view statement_mtd = postings
+        .where(|p| p.value_date >= v@2026-09-01)
+        .group_by(|p| p.acct)
+        .sum(|p| p.amt)
+        serve { consistency: bounded(epochs: 10, millis: 30000), materialize: demand,
+                retain: evictable, budget: 50000 };
+
+    // Trial balance: every account, for the general ledger.
+    //
+    // Fully materialised, because it is read in its entirety at period close and partial
+    // materialisation buys nothing for a full scan. The optimizer is told rather than left
+    // to discover it.
+    view trial_balance = postings
+        .group_by(|p| (p.acct, p.cur))
+        .sum(|p| p.amt)
+        serve { consistency: snapshot, materialize: full, retain: pinned };
+}
+
+// ── the products, as functions with declared effects ─────────────────────────────────
+//
+// The effect row is part of the signature. A caller sees from the type alone what a
+// function does to the ledger and in which currencies — and the compiler checks that the
+// body does no more.
+
+// A transfer. The simplest composition of M1, and the one everything else generalises.
+fn transfer(from: Id<Account>, to: Id<Account>, amount: Money<usd>)
+    -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("transfer", window: 30.days) {
+        let d = debit(from, amount)?;
+        let c = credit(to, amount);
+        post(d, c)
+    }
+}
+
+// A card authorisation: M3. The hold is linear — the type system rejects a program that
+// resolves it twice, or that lets it fall out of scope unresolved.
+//
+// The settlement amount differs from the authorisation, because it almost always does.
+fn card_authorization(acct: Id<Account>, amount: Money<usd>)
+    -> Result<TxnId, TxnError>
+    ! { append, hold<usd> }
+{
+    let h = hold(acct, amount, expires: 7.days)?;
+    resolve h post 43.17 usd
+}
+
+// FX: M1 twice, sealed in one epoch. Two conserved legs, never a rate inside a posting.
+//
+// The effect row debits and credits in *both* currencies, because that is what an `fx`
+// form does. A row reading `debit<usd>, credit<eur>` would describe a transaction that
+// conserves neither.
+fn fx_settle(a: Id<Account>, b: Id<Account>, r: Rate)
+    -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd>, debit<eur>, credit<eur> }
+{
+    txn idem("fx-gbs-1") {
+        fx {
+            leg usd_side: post(debit(a, 1000.00 usd)?, credit(b, 1000.00 usd)),
+            leg eur_side: post(debit(b, 920.00 eur)?, credit(a, 920.00 eur)),
+            rate: r,
+        }
+    }
+}
+
+// A syndicated drawdown: M4 over M1.
+//
+// Three lenders at a third each. Written out rather than looped, because the point of this
+// function is that the conservation obligation is discharged *statically* — the compiler
+// sums the three legs against the borrower's and proves the transaction balances, which is
+// exactly the check the E14 corpus found PostgreSQL cannot make.
+fn syndicated_drawdown(
+    borrower: Id<Account>,
+    lender_a: Id<Account>,
+    lender_b: Id<Account>,
+    lender_c: Id<Account>,
+) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("draw-gbs-1", window: 30.days) {
+        // 300.00 split three ways: 100.00 each, exactly.
+        let a = debit(lender_a, 100.00 usd)?;
+        let b = debit(lender_b, 100.00 usd)?;
+        let c = debit(lender_c, 100.00 usd)?;
+        let to_borrower = credit(borrower, 300.00 usd);
+        post(a, b, c, to_borrower)
+    }
+}
+
+// An interest accrual: M7's arithmetic, posted as M1.
+fn accrue_interest(loan: Id<Account>, income: Id<Account>, amount: Money<usd>)
+    -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("accrual", window: 1.days) {
+        let d = debit(income, amount)?;
+        let c = credit(loan, amount);
+        post(d, c)
+    }
+}
+
+// The SQL surface, lowering to the same IR as the pipeline surface above.
+//
+// Present because §6.9's commitment is that a wire protocol is a *surface, not a
+// semantics*: a query arriving over the PostgreSQL wire is parsed as Niles, lowered to the
+// same circuit, verified by the same verifier and served from the same runtime. Two ways to
+// compute an answer is two answers that can disagree.
+view sql_positions = sql {
+    select acct, cur, sum(amt) as position
+    from postings
+    group by acct, cur
+} serve { consistency: snapshot, materialize: auto };
+
+fn main() -> Result<(), TxnError> ! { append, read@ledger_consistent } {
+    let _t = transfer(acct(1001), acct(2002), 850.00 usd)?;
+    let b = available_balance.get((acct(1001), usd))?;
+    explain b;
+    Ok(())
+}

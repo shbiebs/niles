@@ -295,7 +295,7 @@ the general core into a banking core:
 
 ## 7. Status
 
-`cargo test --workspace` runs **624 tests**, of which 205 are GBS's.
+`cargo test --workspace` runs **635 tests**, of which 216 are GBS's.
 
 | Layer | Status |
 |---|---|
@@ -315,9 +315,24 @@ the general core into a banking core:
 | `tests/layering.rs` | **Built**, 6 tests — the falsification check, with a negative control |
 | `tests/coverage.rs` | **Built**, 9 tests — the matrix checked against the code, with a negative control |
 | The other 18 product lines | **Not built.** Their matrix rows are predictions |
-| Niles schema and views | **Not built** |
+| **Niles schema and views** | **Built** — `gbs/niles/gbs.niles`, 11 tests. Compiles: 6 relations, 7 views, 6 functions, **5 conservation obligations proved statically and 0 discharged to the runtime**; the lowered circuit passes the IR verifier with no violations |
 | `gbs-api` | **Not built** |
 | Matching engine (tier 1) | **Not built.** See `PLAN.md` — a different latency regime, deliberately separated |
+
+### The two static checks, exercised rather than trusted
+
+`tests/niles_schema.rs` runs the real `nilesc` binary over the schema *and* over
+deliberately broken ones, because a static check that has never rejected anything is a
+static check nobody has tested. Both errors the architecture leans on fire:
+
+* **NL0310** — a function moving a currency its signature does not declare. Two spans (where
+  the effect was incurred, where the row was declared) and a machine-applicable fix.
+* **NL0311** — rung monotonicity. A view promising `ledger_consistent` while reading a
+  `bounded` one is refused, with the explanation that *a computation is no fresher than its
+  stalest input*. This is the FDIC/CFPB authorize-positive-settle-negative pattern arriving
+  as a compile error, and the counterfactual is run rather than asserted: deriving
+  `available_balance` from `ledger_balance` — the obvious, cheaper, tempting thing — does
+  not compile.
 
 **11 of 29 product lines implemented.** `the_honest_ratio_of_built_to_claimed_is_reported`
 prints the figure from the build, so it cannot drift from this table.

@@ -14,4 +14,5 @@ pub mod effects;
 pub mod currency_rows;
 pub mod lower;
 pub mod sql_surface;
+pub mod sexpr;
 pub mod diagnostics;

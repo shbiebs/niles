@@ -12,7 +12,9 @@ This appendix is written in the present tense throughout, and the reader is owed
 
 `bootstrap/lexer.niles` is a lexer **written in Niles** — the first line of the Niles compiler written in Niles, and stage 1's first input. It covers identifiers, keywords (all 174, generated from the registry), integers, money literals, epoch literals, strings, comments and the full punctuation table. It does *not* cover instants, durations, byte strings or raw identifiers; E.19 records that, and the equivalence gate excludes those constructs visibly rather than letting them pass.
 
-**Designed and specified, not built**: everything from E.6 onward — the self-hosted middle end, the WASM-hosted optimizer, instruction selection, register allocation, machine-code encoding, object emission and linking. The stage-0 front end still accepts a large but proper subset of the whole language: no trait solver, no monomorphisation, no native code generation. A parser, a type-checker and a lowering pass written in Niles remain unwritten, so what E.18's gates now cover is one front-end stage rather than a compiler.
+`bootstrap/parser.niles` is a recursive-descent parser **written in Niles**, ~1,050 lines, loaded with the lexer as one program. It builds a tree rather than emitting text — `enum Node { Atom(str), List([Node]) }`, walked afterwards by `render_node` — because the claim under test is that Niles can hold a syntax tree, not that it can concatenate strings in the right order; and it keeps the lexer's no-aliasing calling convention, since the subset has nothing that could hold a mutable cursor. It covers the imperative subset the interpreter executes, including the full operator table of B.10.1, and excludes the relational and SQL surfaces visibly. **The status line for E.4 and E.5 is therefore: lexer and parser self-hosted; type-checking and IR lowering are Rust.**
+
+**Designed and specified, not built**: everything from E.6 onward — the self-hosted middle end, the WASM-hosted optimizer, instruction selection, register allocation, machine-code encoding, object emission and linking. The stage-0 front end still accepts a large but proper subset of the whole language: no trait solver, no monomorphisation, no native code generation. A **type-checker and a lowering pass** written in Niles remain unwritten, so what E.18's gates now cover is two front-end stages rather than a compiler.
 
 The reader should read E.1–E.5 as a specification with a partial implementation behind it, and E.6–E.19 as a specification with none. Where a section makes a claim about an artifact — "adding the WSL profile required a record and linker flags, and no compiler-code change" in E.2 — that claim describes the *design's intent* and has not been demonstrated, because the back end it would be demonstrated in does not exist. §11.2 lists an unfinished instrument as the most likely failure mode of this project, and this appendix is where that risk is largest.
 
@@ -113,9 +115,9 @@ This section exists because the natural claim here is wrong, and stating it wron
 
 **The honest position.** The gates of E.18 deliver reproducibility and self-consistency, which are prerequisites and are worth having. Executing a genuine diverse double-compilation of the Niles bootstrap is future work (Chapter 12), and the thesis claims no trusting-trust guarantee until it is done.
 
-### E.19.1 The Four Gates That Now Run, and What Each Establishes
+### E.19.1 The Gates That Now Run, and What Each Establishes
 
-`crates/niles-interp/tests/bootstrap_stages.rs` runs fourteen tests implementing four gates. Their scope is a *lexer*, not a compiler, and the table says so in each row.
+`crates/niles-interp/tests/bootstrap_stages.rs` runs fourteen tests over the lexer; `crates/niles-interp/tests/bootstrap_parser.rs` runs sixteen more over the parser. Their scope is a *front end*, not a compiler, and the tables say so in each row.
 
 | Gate | What it runs | What it establishes | What it does not |
 |---|---|---|---|
@@ -123,6 +125,18 @@ This section exists because the natural claim here is wrong, and stating it wron
 | **Stage 1 equivalence** | Niles lexer vs. Rust lexer over a 29-case corpus | The two agree on every token's kind, span and text | Only over the declared scope; four literal forms are excluded |
 | **Stage 2 self-application** | Niles lexer over its own source | It lexes itself, identically to the reference | Not "recompiles itself" — a lexer compiles nothing |
 | **Stage 3 fixpoint** | Repeated runs, and repeated self-application | Byte-identical output run to run | **Run-to-run on one target only**; cross-target determinism (C.4) remains unmet |
+
+And, one stage up:
+
+| Gate | What it runs | What it establishes | What it does not |
+|---|---|---|---|
+| **Stage 1 runs** | `bootstrap/parser.niles` under `niles-interp` | Stage 0 executes a ~1,050-line Niles program that builds and walks a recursive tree | Nothing about type-checking |
+| **Stage 1 equivalence** | Niles parser vs. Rust parser over a 48-case corpus | The two agree on **every node of every tree** | Spans are excluded by design — token offsets are the lexer's gate |
+| **Stage 2 self-application** | Niles front end over its own two source files | It parses 1,200 lines of Niles, including itself, identically to the reference (127,165 bytes of tree) | Still not "recompiles itself": no code is generated |
+| **Stage 3 fixpoint** | Repeated runs, and repeated self-application | Byte-identical output run to run | As above |
+| **Negative controls** | A missing brace; a token that cannot begin an expression; `a - b - c`; `a = b = c` | Both parsers recover to the *same* tree, and associate the way B.10.1 says | The Niles parser has no diagnostic channel; see below |
+
+Comparison is on a rendering, not on structures: the two parsers share no types, so a structural comparison would need an adapter, and an adapter is the one thing a gate must not be, since a defect in it cancels a defect in either side. Both sides render independently to the S-expression form defined in `niles_lang::sexpr`, in which optional slots are never elided — an absent `else` renders `(none)` — so two different trees cannot produce one string.
 
 The corpus is chosen for the decisions a hand-written lexer actually gets wrong: longest-match punctuation (`::` before `:`, `|>` and `||` before `|`, `=>` and `==` before `=`), the sigil rule that distinguishes `#4200` from `#[attr]`, the rule that distinguishes `10.00 usd` from `10` followed by `.days`, escapes inside strings, and **unterminated constructs at end of input**. That last class is deliberately *not* excluded: a malformed input is exactly where two lexers most easily disagree, because each must decide independently where the broken construct ends, and dropping those cases would have removed the hardest evidence in the name of tidiness.
 
@@ -135,7 +149,21 @@ The corpus is chosen for the decisions a hand-written lexer actually gets wrong:
 
 Findings 1 and 2 are the argument for the keyword registry (§6.4) arriving as evidence rather than assertion: two implementations of one language drifted apart within a day of the second one existing. The response was not to fix the table but to remove the possibility — the Niles-side table is now **generated from `keywords.rs`**, and `keyword_table_matches_the_registry_exactly` fails the build if the two ever diverge again. The single source of truth crosses the bootstrap boundary; it does not stop at the host language.
 
-**What the gates do not establish, stated plainly.** They do not establish that Niles can express a compiler. They establish that it can express a lexer, that the lexer agrees with an independent implementation, and that it is deterministic. The distance from here to E.1's stage 2 — "stage 1 recompiling the same sources" — is a parser, a type-checker, and a lowering pass, none of which is written. The bootstrap has gone from *no input* to *one front-end stage, verified against the reference implementation*. That is a first rung, and calling it a ladder would be exactly the overclaim this appendix's E.0 exists to prevent.
+### E.19.2 The Parser Round, and the Three Defects It Rejected
+
+The parser gates failed in three different artefacts before passing, and the three are worth separating because only one of them is the kind of defect the exercise was designed to find.
+
+1. **In the stage-0 interpreter.** A tree-walking interpreter spends host stack in proportion to the interpreted program's call depth, and a `match` over thirty expression variants compiles, unoptimised, to a frame holding the union of every arm's locals. Measured: ~95 KB of host stack per Niles call frame in a debug build against 4.8 KB in a release build — a twentyfold build-mode penalty — which put a recursive-descent parser out of reach on any ordinary stack, and whose failure mode was a **process abort with no diagnostic**, because a stack overflow in Rust does not unwind. Moving the cold arms behind `#[inline(never)]` brought debug to 32 KB, and a call-depth counter now turns the remaining limit into an ordinary error carrying a span. The default ceiling is the depth that fits a 1 MB stack in the widest build; the first value tried assumed a 2 MB thread stack and aborted the test process, which is how the number came to be measured rather than assumed.
+
+2. **In the reference parser.** Assignment was **left**-associative. `expr_bp` recursed for the right-hand side at binding power 1, which placed assignment outside its own `min_bp == 0` guard, so `a = b = c` parsed as `(a = b) = c` — the opposite of Rust's rule and of the comment sitting directly above the code. This is the finding the exercise exists for. It had survived every test in the workspace because associativity is invisible in a token stream: the lexer round could not have found it, and nothing else was looking. It surfaced within minutes of a second implementation of the same grammar existing.
+
+3. **In this thesis.** §6.25 makes Appendix B normative — where the appendix and the implementation disagree, the appendix wins — but B had no operator precedence table, so the rule had nothing to adjudicate with and finding 2 was arguable rather than decidable. B.10.1 now states precedence and associativity normatively, and `crates/niles-lang/tests/precedence.rs` reads the table out of the markdown and checks every level against the compiler's own `BinOp::precedence`, so the two cannot drift and the lineage rule is enforced rather than declared.
+
+Finding 2 is the one to carry forward as a claim. The argument for stage-1 equivalence has until now been made in the future tense — that a second implementation *would* catch disagreements a single implementation cannot see. It has now caught one, in the reference implementation, in a construct every program uses.
+
+**One gap, declared rather than closed.** `bootstrap/parser.niles` has no *diagnostic* channel. Where the reference parser builds an error node, the Niles parser builds the same error node and the trees agree; where the reference parser reports a message and builds an ordinary node — a reserved word used as an identifier is the case that arises — the Niles parser is silent. A test pins both halves, so the gap stays known rather than becoming a surprise. Diagnostics in Niles are part of the same work as the type-checker, and neither is written.
+
+**What the gates do not establish, stated plainly.** They do not establish that Niles can express a compiler. They establish that it can express a lexer and a parser, that both agree with an independent implementation — the parser node for node, over a corpus and over 1,200 lines of real source including its own — and that both are deterministic. The distance from here to E.1's stage 2 — "stage 1 recompiling the same sources" — is a type-checker and a lowering pass, neither of which is written. The bootstrap has gone from *no input* to *two front-end stages, verified against the reference implementation*. That is two rungs, and calling it a ladder would be exactly the overclaim this appendix's E.0 exists to prevent.
 
 ## E.20 Thesis Consistency: What Is in Niles and Why the Boundary Holds
 

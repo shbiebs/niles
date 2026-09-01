@@ -1,0 +1,1647 @@
+// bootstrap/parser.niles — the Niles-written parser.
+//
+// The second stage of the Appendix E bootstrap to exist in Niles rather than in prose.
+// It is loaded *together with* `bootstrap/lexer.niles` — the two files are one program —
+// and consumes the `[Token]` that file produces. Its output is compared, node for node,
+// with `niles-lang`'s Rust parser over the same text; that comparison is the stage-1
+// equivalence gate for the parser, in the same shape as the lexer's.
+//
+// ── the representation, and why it is a tree ─────────────────────────────────────────
+//
+// The obvious shortcut here is for each parse function to return the *rendered* text of
+// the subtree it just parsed. It would be shorter, and it would be a lie: a
+// syntax-directed translator is not a parser, and the claim under test is that Niles can
+// hold a syntax tree, not that it can concatenate strings in the right order. So the
+// parser builds an n-ary tagged tree —
+//
+//     enum Node { Atom(str), List([Node]) }
+//
+// — and `render_node` walks it afterwards. That the stage-0 interpreter can carry a
+// recursive enum whose payload is an array of itself is itself a small result about the
+// subset; it was checked before this file was written rather than assumed.
+//
+// ── no aliasing, again ───────────────────────────────────────────────────────────────
+//
+// The lexer's `Step { tok, next }` discipline carries over: every parse function takes
+// the token array and an index and returns a *new* node plus the index to continue from.
+// There is no mutable cursor, because there is nothing in the subset that could hold one.
+// `P` carries one node, `PL` a run of them, `W` a name. This is §6.6's memory model
+// showing up as a calling convention, which is the most concrete form of evidence a
+// design claim of that kind can have.
+//
+// ── scope, stated honestly ───────────────────────────────────────────────────────────
+//
+// This parser covers the *imperative subset the stage-0 interpreter executes*: `fn`,
+// `struct`, `enum`, `use`, `let`, `if`/`else`, `match`, `while`, `loop`, `for`, `return`,
+// `break`, `continue`, closures, calls, stages, indexing, field access, struct literals,
+// tuples, arrays, casts, `?`, effect rows, and the full operator table of Appendix B.10.1.
+//
+// It does **not** cover: `schema`, `view`, `trait`, `impl`, `mod`, `const`, `static`,
+// `type`, attributes, the SQL surface (`select`, `sql`, `case`), or the novel relational
+// forms (`txn`, `fx`, `hold`, `resolve`, `fixpoint`, `authorize`, `declassify`,
+// `explain`, `reproduce`, `impact`). Nor floats, instants, durations or byte strings,
+// which are already outside the lexer's scope.
+//
+// The Rust-side renderer emits `(unsupported <form>)` for every one of those, and the
+// gate excludes any input whose rendering contains one — visibly, with the exclusions
+// listed. Narrowing what a gate proves is honest; letting an unimplemented form pass by
+// accident is not.
+//
+// One further gap, recorded rather than papered over: this parser has no *diagnostic*
+// channel. Where the Rust parser both builds an error node and reports a message, this
+// one builds the error node; where the Rust parser reports a message and builds an
+// ordinary node — a reserved word used as an identifier is the case that arises — this
+// one is silent and the trees still agree. §E.19 says so.
+
+// ── the tree ─────────────────────────────────────────────────────────────────────────
+
+enum Node {
+    Atom(str),
+    List([Node]),
+}
+
+// One node and where to continue.
+struct P {
+    node: Node,
+    next: i64,
+}
+
+// A name and where to continue. Separate from `P` so a caller that needs the *text* of an
+// identifier does not have to take an atom apart again.
+struct W {
+    text: str,
+    next: i64,
+}
+
+fn atom(t: str) -> Node {
+    Node::Atom(t)
+}
+
+// The filled-in absence. Optional slots are never elided: `(let p (none) e)` and
+// `(let p t (none))` must be distinguishable, or two parsers could disagree and still
+// produce the same string.
+fn no_node() -> Node {
+    Node::List([Node::Atom("none")])
+}
+
+fn atom_text(n: Node) -> str {
+    match n {
+        Node::Atom(t) => t,
+        Node::List(ks) => "",
+    }
+}
+
+fn head_tag(n: Node) -> str {
+    match n {
+        Node::Atom(t) => t,
+        Node::List(ks) => if len(ks) > 0 { atom_text(ks[0]) } else { "" },
+    }
+}
+
+fn kid(n: Node, at: i64) -> Node {
+    match n {
+        Node::Atom(t) => Node::Atom(t),
+        Node::List(ks) => if at < len(ks) { ks[at] } else { Node::Atom("") },
+    }
+}
+
+// ── rendering ────────────────────────────────────────────────────────────────────────
+
+fn render_node(n: Node) -> str {
+    match n {
+        Node::Atom(t) => t,
+        Node::List(ks) => {
+            let mut s = "(";
+            let mut i = 0;
+            while i < len(ks) {
+                if i > 0 {
+                    s = s + " ";
+                }
+                s = s + render_node(ks[i]);
+                i = i + 1;
+            }
+            s + ")"
+        }
+    }
+}
+
+// ── token access ─────────────────────────────────────────────────────────────────────
+//
+// Every read goes through `tok_at`, which clamps rather than indexing out of bounds. The
+// last token is always `Eof` — `lex` guarantees it — so a clamped read is an `Eof` read,
+// which is exactly what the Rust parser sees when it runs off the end.
+
+fn tok_at(ts: [Token], i: i64) -> Token {
+    if i < len(ts) {
+        ts[i]
+    } else {
+        ts[len(ts) - 1]
+    }
+}
+
+fn kind_at(ts: [Token], i: i64) -> Kind {
+    tok_at(ts, i).kind
+}
+
+fn text_at(ts: [Token], i: i64) -> str {
+    tok_at(ts, i).text
+}
+
+fn at_end(ts: [Token], i: i64) -> bool {
+    kind_at(ts, i) == Kind::Eof
+}
+
+fn at_p(ts: [Token], i: i64, s: str) -> bool {
+    kind_at(ts, i) == Kind::Punct && text_at(ts, i) == s
+}
+
+// Keyword matching is case-insensitive, for the same SQL-lineage reason the lexer's is.
+fn at_w(ts: [Token], i: i64, w: str) -> bool {
+    kind_at(ts, i) == Kind::Keyword && text_at(ts, i).to_lower() == w
+}
+
+fn at_name(ts: [Token], i: i64) -> bool {
+    kind_at(ts, i) == Kind::Ident || kind_at(ts, i) == Kind::Keyword
+}
+
+// ── the reserved-word table ──────────────────────────────────────────────────────────
+//
+// **Generated from `crates/niles-lang/src/keywords.rs`**: the 68 words whose category is
+// not usable as an identifier. `keyword_table_matches_the_registry_exactly` has a sibling
+// gate for this one, for the reason the lexer's table has one — two implementations of a
+// word list drift within a day of the second one existing.
+//
+// It is needed because `ident()` in the Rust parser treats the two classes differently:
+// an unreserved keyword used as a name keeps its *source* spelling, a reserved one is
+// canonicalised to the registry's. Getting that backwards would show up as a case
+// difference in one identifier somewhere in a thousand-line file.
+
+fn reserved() -> [str] {
+    [
+     "Self", "actor", "all", "and", "as", "async",
+     "await", "break", "by", "case", "const", "continue",
+     "crate", "cross", "distinct", "dyn", "else", "enum",
+     "except", "false", "fn", "for", "full", "having",
+     "if", "impl", "in", "inner", "intersect", "is",
+     "join", "left", "let", "loop", "macro", "match",
+     "mod", "move", "mut", "natural", "not", "null",
+     "on", "or", "outer", "pub", "ref", "return",
+     "right", "select", "self", "static", "stream", "struct",
+     "super", "then", "trait", "true", "type", "union",
+     "unsafe", "use", "using", "when", "where", "while",
+     "with", "yield",
+    ]
+}
+
+fn is_reserved(w: str) -> bool {
+    let table = reserved();
+    let mut i = 0;
+    let mut found = false;
+    while i < len(table) {
+        if table[i] == w {
+            found = true;
+        }
+        i = i + 1;
+    }
+    found
+}
+
+// ── the stage table ──────────────────────────────────────────────────────────────────
+//
+// A method call becomes a `stage` node carrying both the *kind* the language recognises
+// and the *name* as written, because `q.wehre(p)` must parse — and be diagnosed later
+// with a suggestion — rather than fail at a dot.
+
+fn stage_names() -> [str] {
+    [
+     "map", "select", "group_by", "having", "join", "left_join",
+     "right_join", "full_outer_join", "cross_join", "union", "union_all", "except",
+     "intersect", "distinct", "distinct_by", "order_by", "limit", "offset",
+     "sum", "count", "min", "max", "avg", "fold",
+     "fixpoint", "as_of", "valid_at", "get", "range",
+    ]
+}
+
+fn stage_kind(nm: str) -> str {
+    if nm == "where" || nm == "filter" {
+        "where"
+    } else {
+        let table = stage_names();
+        let mut i = 0;
+        let mut out = "unknown";
+        while i < len(table) {
+            if table[i] == nm {
+                out = nm;
+            }
+            i = i + 1;
+        }
+        out
+    }
+}
+
+// ── literal text ─────────────────────────────────────────────────────────────────────
+
+fn strip_us(s: str) -> str {
+    let n = len(s);
+    let mut out = "";
+    let mut i = 0;
+    while i < n {
+        if s.byte_at(i) != 95 {
+            out = out + chr(s.byte_at(i));
+        }
+        i = i + 1;
+    }
+    out
+}
+
+// `007` parses to 7 on the Rust side and formats back without the zeros, so the rendering
+// has to do the same or two correct parsers would disagree about a literal.
+fn strip_lead(s: str) -> str {
+    let n = len(s);
+    let mut i = 0;
+    while i + 1 < n && s.byte_at(i) == 48 {
+        i = i + 1;
+    }
+    s.slice(i, n)
+}
+
+fn int_text(s: str) -> str {
+    strip_lead(strip_us(s))
+}
+
+// The six escapes the reference lexer decodes: \n \t \r \0 \\ \". An unknown escape keeps
+// the escaped character, which is what the reference lexer does after reporting it.
+fn unquote(raw: str) -> str {
+    let n = len(raw);
+    let mut out = "";
+    let mut i = 1;
+    let mut going = true;
+    while going {
+        if i >= n {
+            going = false;
+        } else {
+            let c = raw.byte_at(i);
+            if c == 34 {
+                going = false;
+            } else if c == 92 {
+                if i + 1 < n {
+                    let d = raw.byte_at(i + 1);
+                    if d == 110 {
+                        out = out + chr(10);
+                    } else if d == 116 {
+                        out = out + chr(9);
+                    } else if d == 114 {
+                        out = out + chr(13);
+                    } else if d == 48 {
+                        out = out + chr(0);
+                    } else {
+                        out = out + chr(d);
+                    }
+                    i = i + 2;
+                } else {
+                    going = false;
+                }
+            } else {
+                out = out + chr(c);
+                i = i + 1;
+            }
+        }
+    }
+    out
+}
+
+// The same six rules, run backwards. Not a Niles string literal in general — it does not
+// need to be one, it needs to be injective, which these rules make it.
+fn requote(s: str) -> str {
+    let n = len(s);
+    let mut out = "\"";
+    let mut i = 0;
+    while i < n {
+        let c = s.byte_at(i);
+        if c == 92 {
+            out = out + "\\\\";
+        } else if c == 34 {
+            out = out + "\\\"";
+        } else if c == 10 {
+            out = out + "\\n";
+        } else if c == 9 {
+            out = out + "\\t";
+        } else if c == 13 {
+            out = out + "\\r";
+        } else if c == 0 {
+            out = out + "\\0";
+        } else {
+            out = out + chr(c);
+        }
+        i = i + 1;
+    }
+    out + "\""
+}
+
+// `10.00 usd` -> minor 1000, scale 2, currency usd. The scale is kept, never assumed to
+// be 2: that assumption is the defect §3.2 exists to exclude, and a parser is where it
+// would first be made.
+fn money_node(t: str) -> Node {
+    let n = len(t);
+    let mut i = 0;
+    let mut ip = "";
+    while i < n && (t.byte_at(i).is_digit() || t.byte_at(i) == 95) {
+        if t.byte_at(i) != 95 {
+            ip = ip + chr(t.byte_at(i));
+        }
+        i = i + 1;
+    }
+    let mut fp = "";
+    if i < n && t.byte_at(i) == 46 {
+        i = i + 1;
+        while i < n && (t.byte_at(i).is_digit() || t.byte_at(i) == 95) {
+            if t.byte_at(i) != 95 {
+                fp = fp + chr(t.byte_at(i));
+            }
+            i = i + 1;
+        }
+    }
+    while i < n && t.byte_at(i).is_space() {
+        i = i + 1;
+    }
+    let mut cy = "";
+    while i < n && t.byte_at(i).is_ident_continue() {
+        cy = cy + chr(t.byte_at(i));
+        i = i + 1;
+    }
+    Node::List([atom("money"), atom(strip_lead(ip + fp)), atom(len(fp).to_string()), atom(cy)])
+}
+
+// ── names and paths ──────────────────────────────────────────────────────────────────
+
+fn p_ident(ts: [Token], i: i64) -> W {
+    let kd = kind_at(ts, i);
+    if kd == Kind::Ident {
+        W { text: text_at(ts, i), next: i + 1 }
+    } else if kd == Kind::Keyword {
+        let word = text_at(ts, i);
+        if is_reserved(word.to_lower()) {
+            // The reference parser reports this and yields the registry's spelling. This
+            // parser has no diagnostic channel, so it yields the same spelling silently —
+            // the trees agree, the messages do not, and §E.19 records the difference.
+            W { text: word.to_lower(), next: i + 1 }
+        } else {
+            W { text: word, next: i + 1 }
+        }
+    } else {
+        // Not a name at all. The reference parser does *not* consume here, so neither
+        // does this one: consuming would move the error and lose the token.
+        W { text: "<error>", next: i }
+    }
+}
+
+// A name after `.` or `|>`, or a struct-literal field. Any word is unambiguous here, so
+// no word is refused — reservation exists to resolve grammar ambiguity, and there is none
+// in this position.
+fn p_member(ts: [Token], i: i64) -> W {
+    let kd = kind_at(ts, i);
+    if kd == Kind::Ident {
+        W { text: text_at(ts, i), next: i + 1 }
+    } else if kd == Kind::Keyword {
+        W { text: text_at(ts, i).to_lower(), next: i + 1 }
+    } else if kd == Kind::Int {
+        // `t.0` — tuple field access.
+        W { text: int_text(text_at(ts, i)), next: i + 1 }
+    } else {
+        p_ident(ts, i)
+    }
+}
+
+fn p_path(ts: [Token], i: i64) -> W {
+    let first = p_ident(ts, i);
+    let mut s = first.text;
+    let mut j = first.next;
+    let mut going = true;
+    while going {
+        if at_p(ts, j, "::") {
+            let more = p_ident(ts, j + 1);
+            s = s + "::" + more.text;
+            j = more.next;
+        } else {
+            going = false;
+        }
+    }
+    W { text: s, next: j }
+}
+
+fn is_lower_start(s: str) -> bool {
+    let c = s.byte_at(0);
+    (c >= 97 && c <= 122) || c == 95
+}
+
+// ── error recovery ───────────────────────────────────────────────────────────────────
+//
+// A parser that stopped at the first error would report one defect per run, which is the
+// single most expensive property a compiler can have. Recovery skips to a token at which
+// the parser is certain again, tracking bracket depth so a stray `}` inside a nested
+// block does not end an outer one, and always consuming at least one token so recovery
+// terminates.
+
+fn is_open(t: str) -> bool {
+    t == "{" || t == "(" || t == "["
+}
+
+fn is_close(t: str) -> bool {
+    t == "}" || t == ")" || t == "]"
+}
+
+fn in_set(t: str, syncs: [str]) -> bool {
+    let mut i = 0;
+    let mut found = false;
+    while i < len(syncs) {
+        if syncs[i] == t {
+            found = true;
+        }
+        i = i + 1;
+    }
+    found
+}
+
+fn recover_to(ts: [Token], i: i64, syncs: [str]) -> i64 {
+    let mut j = i;
+    let mut depth = 0;
+    let mut first = true;
+    let mut going = true;
+    while going {
+        if at_end(ts, j) {
+            going = false;
+        } else {
+            let t = text_at(ts, j);
+            let punct = kind_at(ts, j) == Kind::Punct;
+            let word = if kind_at(ts, j) == Kind::Keyword { t.to_lower() } else { t };
+            if punct && is_open(t) {
+                depth = depth + 1;
+            } else if punct && is_close(t) {
+                if depth == 0 && in_set(t, syncs) && first == false {
+                    going = false;
+                } else {
+                    depth = depth - 1;
+                }
+            } else if depth == 0 && in_set(word, syncs) && first == false {
+                going = false;
+            }
+            if going {
+                j = j + 1;
+                first = false;
+                if depth < 0 {
+                    going = false;
+                }
+            }
+        }
+    }
+    j
+}
+
+fn expr_sync() -> [str] {
+    [";", "}", ")", ","]
+}
+
+fn item_sync() -> [str] {
+    ["schema", "fn", "struct", "enum", "trait", "impl", "mod", "use",
+     "const", "static", "type", "view", "pub", "capability", "}", ";"]
+}
+
+// ── types ────────────────────────────────────────────────────────────────────────────
+
+fn p_ty(ts: [Token], i: i64) -> P {
+    if at_p(ts, i, "&") {
+        let mut j = i + 1;
+        let mut m = "imm";
+        if at_w(ts, j, "mut") {
+            m = "mut";
+            j = j + 1;
+        }
+        let r = p_ty(ts, j);
+        P { node: Node::List([atom("tref"), atom(m), r.node]), next: r.next }
+    } else if at_p(ts, i, "(") {
+        let mut j = i + 1;
+        if at_p(ts, j, ")") {
+            P { node: Node::List([atom("tunit")]), next: j + 1 }
+        } else {
+            let mut kids = [atom("ttuple")];
+            let mut count = 0;
+            let mut only = no_node();
+            let mut going = true;
+            while going {
+                let r = p_ty(ts, j);
+                kids = kids.push(r.node);
+                only = r.node;
+                count = count + 1;
+                j = r.next;
+                if at_p(ts, j, ",") {
+                    j = j + 1;
+                    if at_p(ts, j, ")") {
+                        going = false;
+                    }
+                } else {
+                    going = false;
+                }
+            }
+            if at_p(ts, j, ")") {
+                j = j + 1;
+            }
+            if count == 1 {
+                P { node: only, next: j }
+            } else {
+                P { node: Node::List(kids), next: j }
+            }
+        }
+    } else if at_p(ts, i, "[") {
+        let elem = p_ty(ts, i + 1);
+        let mut j = elem.next;
+        if at_p(ts, j, ";") {
+            let n = p_expr(ts, j + 1, 0);
+            j = n.next;
+            if at_p(ts, j, "]") {
+                j = j + 1;
+            }
+            P { node: Node::List([atom("tarray"), elem.node, n.node]), next: j }
+        } else {
+            if at_p(ts, j, "]") {
+                j = j + 1;
+            }
+            P { node: Node::List([atom("tslice"), elem.node]), next: j }
+        }
+    } else if kind_at(ts, i) == Kind::Ident && text_at(ts, i) == "_" {
+        P { node: Node::List([atom("tinfer")]), next: i + 1 }
+    } else if at_w(ts, i, "dyn") {
+        let w = p_path(ts, i + 1);
+        P { node: Node::List([atom("tdyn"), atom(w.text)]), next: w.next }
+    } else if at_w(ts, i, "fn") {
+        let mut j = i + 1;
+        let mut kids = [atom("params")];
+        if at_p(ts, j, "(") {
+            j = j + 1;
+        }
+        let mut going = true;
+        while going {
+            if at_p(ts, j, ")") || at_end(ts, j) {
+                going = false;
+            } else {
+                let r = p_ty(ts, j);
+                kids = kids.push(r.node);
+                j = r.next;
+                if at_p(ts, j, ",") {
+                    j = j + 1;
+                } else {
+                    going = false;
+                }
+            }
+        }
+        if at_p(ts, j, ")") {
+            j = j + 1;
+        }
+        let mut ret = Node::List([atom("tunit")]);
+        if at_p(ts, j, "->") {
+            let r = p_ty(ts, j + 1);
+            ret = r.node;
+            j = r.next;
+        }
+        let mut eff = Node::List([atom("effects")]);
+        if at_p(ts, j, "!") {
+            let r = p_effects(ts, j);
+            eff = r.node;
+            j = r.next;
+        }
+        P { node: Node::List([atom("tfn"), Node::List(kids), ret, eff]), next: j }
+    } else if at_name(ts, i) {
+        let w = p_path(ts, i);
+        let mut kids = [atom("tp"), atom(w.text)];
+        let mut j = w.next;
+        if at_p(ts, j, "<") {
+            j = j + 1;
+            let mut going = true;
+            while going {
+                if at_p(ts, j, ">") || at_end(ts, j) {
+                    going = false;
+                } else {
+                    let r = p_ty(ts, j);
+                    kids = kids.push(r.node);
+                    j = r.next;
+                    if at_p(ts, j, ",") {
+                        j = j + 1;
+                    } else {
+                        going = false;
+                    }
+                }
+            }
+            if at_p(ts, j, ">") {
+                j = j + 1;
+            }
+        }
+        P { node: Node::List(kids), next: j }
+    } else {
+        P { node: Node::List([atom("terr")]), next: i + 1 }
+    }
+}
+
+// `! { read@snapshot, append, debit<usd> }` — the effect row is part of the type, which is
+// why it is parsed here and not skipped as decoration.
+fn p_effects(ts: [Token], i: i64) -> P {
+    let mut j = i + 1;
+    let mut kids = [atom("effects")];
+    if at_p(ts, j, "{") {
+        j = j + 1;
+        let mut going = true;
+        while going {
+            if at_p(ts, j, "}") || at_end(ts, j) {
+                going = false;
+            } else {
+                let nm = p_ident(ts, j);
+                j = nm.next;
+                let mut rung = no_node();
+                if at_p(ts, j, "@") {
+                    let r = p_ident(ts, j + 1);
+                    rung = atom(r.text);
+                    j = r.next;
+                }
+                let mut args = [atom("args")];
+                if at_p(ts, j, "<") {
+                    j = j + 1;
+                    let mut more = true;
+                    while more {
+                        if at_p(ts, j, ">") || at_end(ts, j) {
+                            more = false;
+                        } else {
+                            let a = p_ident(ts, j);
+                            args = args.push(atom(a.text));
+                            j = a.next;
+                            if at_p(ts, j, ",") {
+                                j = j + 1;
+                            } else {
+                                more = false;
+                            }
+                        }
+                    }
+                    if at_p(ts, j, ">") {
+                        j = j + 1;
+                    }
+                }
+                kids = kids.push(Node::List([atom("eff"), atom(nm.text), rung, Node::List(args)]));
+                if at_p(ts, j, ",") {
+                    j = j + 1;
+                } else {
+                    going = false;
+                }
+            }
+        }
+        if at_p(ts, j, "}") {
+            j = j + 1;
+        }
+    }
+    P { node: Node::List(kids), next: j }
+}
+
+// ── patterns ─────────────────────────────────────────────────────────────────────────
+
+fn p_pat(ts: [Token], i: i64) -> P {
+    let kd = kind_at(ts, i);
+    if kd == Kind::Ident && text_at(ts, i) == "_" {
+        P { node: Node::List([atom("pwild")]), next: i + 1 }
+    } else if at_w(ts, i, "mut") {
+        let w = p_ident(ts, i + 1);
+        P { node: Node::List([atom("pbind"), atom(w.text), atom("mut"), atom("val")]), next: w.next }
+    } else if at_w(ts, i, "ref") {
+        let w = p_ident(ts, i + 1);
+        P { node: Node::List([atom("pbind"), atom(w.text), atom("imm"), atom("ref")]), next: w.next }
+    } else if at_p(ts, i, "(") {
+        let mut kids = [atom("ptuple")];
+        let mut j = i + 1;
+        let mut going = true;
+        while going {
+            if at_p(ts, j, ")") || at_end(ts, j) {
+                going = false;
+            } else {
+                let r = p_pat(ts, j);
+                kids = kids.push(r.node);
+                j = r.next;
+                if at_p(ts, j, ",") {
+                    j = j + 1;
+                } else {
+                    going = false;
+                }
+            }
+        }
+        if at_p(ts, j, ")") {
+            j = j + 1;
+        }
+        P { node: Node::List(kids), next: j }
+    } else if kd == Kind::Int || kd == Kind::Str || kd == Kind::Money || kd == Kind::Epoch
+              || at_w(ts, i, "true") || at_w(ts, i, "false") {
+        let r = p_primary(ts, i, 0);
+        P { node: Node::List([atom("plit"), r.node]), next: r.next }
+    } else if at_name(ts, i) {
+        let w = p_path(ts, i);
+        let mut j = w.next;
+        if at_p(ts, j, "(") {
+            let mut kids = [atom("pctor"), atom(w.text)];
+            j = j + 1;
+            let mut going = true;
+            while going {
+                if at_p(ts, j, ")") || at_end(ts, j) {
+                    going = false;
+                } else {
+                    let r = p_pat(ts, j);
+                    kids = kids.push(r.node);
+                    j = r.next;
+                    if at_p(ts, j, ",") {
+                        j = j + 1;
+                    } else {
+                        going = false;
+                    }
+                }
+            }
+            if at_p(ts, j, ")") {
+                j = j + 1;
+            }
+            P { node: Node::List(kids), next: j }
+        } else if at_p(ts, j, "{") && w.text.contains("::") {
+            let mut fields = [atom("fields")];
+            let mut rest = "norest";
+            j = j + 1;
+            let mut going = true;
+            while going {
+                if at_p(ts, j, "}") || at_end(ts, j) {
+                    going = false;
+                } else if at_p(ts, j, "..") {
+                    rest = "rest";
+                    j = j + 1;
+                    going = false;
+                } else {
+                    let nm = p_ident(ts, j);
+                    j = nm.next;
+                    let mut sub = Node::List([atom("pbind"), atom(nm.text), atom("imm"), atom("val")]);
+                    if at_p(ts, j, ":") {
+                        let r = p_pat(ts, j + 1);
+                        sub = r.node;
+                        j = r.next;
+                    }
+                    fields = fields.push(Node::List([atom("pf"), atom(nm.text), sub]));
+                    if at_p(ts, j, ",") {
+                        j = j + 1;
+                    } else {
+                        going = false;
+                    }
+                }
+            }
+            if at_p(ts, j, "}") {
+                j = j + 1;
+            }
+            P {
+                node: Node::List([atom("pstruct"), atom(w.text), Node::List(fields), atom(rest)]),
+                next: j,
+            }
+        } else if w.text.contains("::") == false && is_lower_start(w.text) {
+            P { node: Node::List([atom("pbind"), atom(w.text), atom("imm"), atom("val")]), next: j }
+        } else {
+            P { node: Node::List([atom("ppath"), atom(w.text)]), next: j }
+        }
+    } else {
+        P { node: Node::List([atom("perr")]), next: i + 1 }
+    }
+}
+
+// ── expressions ──────────────────────────────────────────────────────────────────────
+//
+// A Pratt loop over the Appendix B.3 precedence table. `ns` is the no-struct-literal
+// flag: 1 in the head of `if`, `while`, `match` and `for`, where a `{` opens the body and
+// a struct literal would swallow it. It is threaded rather than held, because the subset
+// has nowhere to hold it — and, exactly as in the reference parser, it is *not* reset by
+// parentheses, so `if f(S { a: 1 }) { }` is refused by both.
+
+fn binop_at(ts: [Token], i: i64) -> str {
+    let kd = kind_at(ts, i);
+    let t = text_at(ts, i);
+    if kd == Kind::Punct {
+        if t == "+" { "add" }
+        else if t == "-" { "sub" }
+        else if t == "*" { "mul" }
+        else if t == "/" { "div" }
+        else if t == "%" { "rem" }
+        else if t == "==" { "eq" }
+        else if t == "!=" { "ne" }
+        else if t == "<" { "lt" }
+        else if t == "<=" { "le" }
+        else if t == ">" { "gt" }
+        else if t == ">=" { "ge" }
+        else if t == "&&" { "and" }
+        else if t == "||" { "or" }
+        else if t == "&" { "bitand" }
+        else if t == "|" { "bitor" }
+        else if t == "^" { "bitxor" }
+        else { "" }
+    } else if kd == Kind::Keyword {
+        let w = t.to_lower();
+        if w == "and" { "and" }
+        else if w == "or" { "or" }
+        else if w == "is" { "is" }
+        else if w == "in" { "in" }
+        else if w == "like" { "like" }
+        else if w == "between" { "between" }
+        else if w == "not" && at_w(ts, i + 1, "in") { "notin" }
+        else { "" }
+    } else {
+        ""
+    }
+}
+
+fn bp_of(op: str) -> i64 {
+    if op == "or" {
+        1
+    } else if op == "and" {
+        2
+    } else if op == "eq" || op == "ne" || op == "lt" || op == "le" || op == "gt" || op == "ge"
+           || op == "is" || op == "in" || op == "notin" || op == "like" || op == "between" {
+        3
+    } else if op == "bitor" {
+        4
+    } else if op == "bitxor" {
+        5
+    } else if op == "bitand" {
+        6
+    } else if op == "add" || op == "sub" {
+        7
+    } else {
+        8
+    }
+}
+
+fn p_expr(ts: [Token], i: i64, ns: i64) -> P {
+    p_expr_bp(ts, i, 0, ns)
+}
+
+fn p_expr_bp(ts: [Token], i: i64, minbp: i64, ns: i64) -> P {
+    let start = p_unary(ts, i, ns);
+    let mut lhs = start.node;
+    let mut j = start.next;
+    let mut going = true;
+    while going {
+        // Assignment is right-associative and lowest, and sits outside the table
+        // (Appendix B.10.1). The right-hand side is parsed at binding power 0 so that it can
+        // take an assignment of its own: at 1 the guard above would refuse, and `a = b = c`
+        // would come out left-associative.
+        if minbp == 0 && at_p(ts, j, "=") {
+            let r = p_expr_bp(ts, j + 1, 0, ns);
+            lhs = Node::List([atom("assign"), lhs, r.node]);
+            j = r.next;
+        } else {
+            let op = binop_at(ts, j);
+            if op == "" {
+                going = false;
+            } else {
+                let bp = bp_of(op);
+                if bp < minbp {
+                    going = false;
+                } else {
+                    let mut k = j + 1;
+                    if op == "notin" {
+                        k = k + 1;
+                    }
+                    // `is not null` consumes the `not` and stays `is`, which is what the
+                    // reference parser does; the rendering must not invent an `isnot`.
+                    if op == "is" && at_w(ts, j + 1, "not") {
+                        k = k + 1;
+                    }
+                    let r = p_expr_bp(ts, k, bp + 1, ns);
+                    lhs = Node::List([atom("binary"), atom(op), lhs, r.node]);
+                    j = r.next;
+                }
+            }
+        }
+    }
+    P { node: lhs, next: j }
+}
+
+fn p_unary(ts: [Token], i: i64, ns: i64) -> P {
+    let t = text_at(ts, i);
+    let punct = kind_at(ts, i) == Kind::Punct;
+    let mut node = no_node();
+    let mut j = i;
+    if punct && t == "-" {
+        let r = p_unary(ts, i + 1, ns);
+        node = Node::List([atom("unary"), atom("neg"), r.node]);
+        j = r.next;
+    } else if (punct && t == "!") || at_w(ts, i, "not") {
+        let r = p_unary(ts, i + 1, ns);
+        node = Node::List([atom("unary"), atom("not"), r.node]);
+        j = r.next;
+    } else if punct && t == "*" {
+        let r = p_unary(ts, i + 1, ns);
+        node = Node::List([atom("unary"), atom("deref"), r.node]);
+        j = r.next;
+    } else if punct && t == "&" {
+        let mut k = i + 1;
+        let mut o = "ref";
+        if at_w(ts, k, "mut") {
+            o = "refmut";
+            k = k + 1;
+        }
+        let r = p_unary(ts, k, ns);
+        node = Node::List([atom("unary"), atom(o), r.node]);
+        j = r.next;
+    } else {
+        let r = p_primary(ts, i, ns);
+        node = r.node;
+        j = r.next;
+    }
+    p_postfix(ts, j, node, ns)
+}
+
+fn p_postfix(ts: [Token], i: i64, e: Node, ns: i64) -> P {
+    let mut node = e;
+    let mut j = i;
+    let mut going = true;
+    while going {
+        if at_p(ts, j, ".") {
+            let m = p_member(ts, j + 1);
+            if at_p(ts, m.next, "(") {
+                let a = p_args(ts, m.next, ns);
+                node = Node::List([atom("stage"), node, atom(stage_kind(m.text)), atom(m.text), a.node]);
+                j = a.next;
+            } else {
+                node = Node::List([atom("field"), node, atom(m.text)]);
+                j = m.next;
+            }
+        } else if at_p(ts, j, "|>") {
+            let m = p_member(ts, j + 1);
+            let a = p_args(ts, m.next, ns);
+            node = Node::List([atom("stage"), node, atom(stage_kind(m.text)), atom(m.text), a.node]);
+            j = a.next;
+        } else if at_p(ts, j, "(") {
+            let a = p_args(ts, j, ns);
+            node = Node::List([atom("call"), node, a.node]);
+            j = a.next;
+        } else if at_p(ts, j, "[") {
+            let r = p_expr(ts, j + 1, ns);
+            j = r.next;
+            if at_p(ts, j, "]") {
+                j = j + 1;
+            }
+            node = Node::List([atom("index"), node, r.node]);
+        } else if at_p(ts, j, "?") {
+            node = Node::List([atom("try"), node]);
+            j = j + 1;
+        } else if at_w(ts, j, "as") {
+            let r = p_ty(ts, j + 1);
+            node = Node::List([atom("cast"), node, r.node]);
+            j = r.next;
+        } else {
+            going = false;
+        }
+    }
+    P { node: node, next: j }
+}
+
+fn p_args(ts: [Token], i: i64, ns: i64) -> P {
+    let mut kids = [atom("args")];
+    let mut j = i;
+    if at_p(ts, j, "(") {
+        j = j + 1;
+        let mut going = true;
+        while going {
+            if at_p(ts, j, ")") || at_end(ts, j) {
+                going = false;
+            } else {
+                let mut nm = no_node();
+                let mut k = j;
+                // A named argument is `word :`. `a::b` is one token here, so the two-token
+                // probe cannot mistake a path for a name.
+                if at_name(ts, j) && at_p(ts, j + 1, ":") {
+                    let w = p_ident(ts, j);
+                    nm = Node::List([atom("n"), atom(w.text)]);
+                    k = w.next + 1;
+                }
+                let r = p_expr(ts, k, ns);
+                kids = kids.push(Node::List([atom("arg"), nm, r.node]));
+                j = r.next;
+                if at_p(ts, j, ",") {
+                    j = j + 1;
+                } else {
+                    going = false;
+                }
+            }
+        }
+        if at_p(ts, j, ")") {
+            j = j + 1;
+        }
+    }
+    P { node: Node::List(kids), next: j }
+}
+
+fn p_closure(ts: [Token], i: i64, mv: str, ns: i64) -> P {
+    let mut kids = [atom("params")];
+    let mut j = i;
+    if at_p(ts, j, "||") {
+        j = j + 1;
+    } else {
+        if at_p(ts, j, "|") {
+            j = j + 1;
+        }
+        let mut going = true;
+        while going {
+            if at_p(ts, j, "|") || at_end(ts, j) {
+                going = false;
+            } else {
+                let p = p_pat(ts, j);
+                j = p.next;
+                let mut t = no_node();
+                if at_p(ts, j, ":") {
+                    let r = p_ty(ts, j + 1);
+                    t = r.node;
+                    j = r.next;
+                }
+                kids = kids.push(Node::List([atom("cp"), p.node, t]));
+                if at_p(ts, j, ",") {
+                    j = j + 1;
+                } else {
+                    going = false;
+                }
+            }
+        }
+        if at_p(ts, j, "|") {
+            j = j + 1;
+        }
+    }
+    let body = p_expr(ts, j, ns);
+    P {
+        node: Node::List([atom("closure"), atom(mv), Node::List(kids), body.node]),
+        next: body.next,
+    }
+}
+
+fn p_primary(ts: [Token], i: i64, ns: i64) -> P {
+    let kd = kind_at(ts, i);
+    if kd == Kind::Int {
+        P { node: Node::List([atom("int"), atom(int_text(text_at(ts, i)))]), next: i + 1 }
+    } else if kd == Kind::Money {
+        P { node: money_node(text_at(ts, i)), next: i + 1 }
+    } else if kd == Kind::Epoch {
+        let t = text_at(ts, i);
+        P { node: Node::List([atom("epoch"), atom(int_text(t.slice(1, len(t))))]), next: i + 1 }
+    } else if kd == Kind::Str {
+        P { node: Node::List([atom("str"), atom(requote(unquote(text_at(ts, i))))]), next: i + 1 }
+    } else if at_w(ts, i, "true") {
+        P { node: Node::List([atom("bool"), atom("true")]), next: i + 1 }
+    } else if at_w(ts, i, "false") {
+        P { node: Node::List([atom("bool"), atom("false")]), next: i + 1 }
+    } else if at_p(ts, i, "(") {
+        p_paren(ts, i, ns)
+    } else if at_p(ts, i, "[") {
+        let mut kids = [atom("array")];
+        let mut j = i + 1;
+        let mut going = true;
+        while going {
+            if at_p(ts, j, "]") || at_end(ts, j) {
+                going = false;
+            } else {
+                let r = p_expr(ts, j, ns);
+                kids = kids.push(r.node);
+                j = r.next;
+                if at_p(ts, j, ",") {
+                    j = j + 1;
+                } else {
+                    going = false;
+                }
+            }
+        }
+        if at_p(ts, j, "]") {
+            j = j + 1;
+        }
+        P { node: Node::List(kids), next: j }
+    } else if at_p(ts, i, "{") {
+        p_block(ts, i)
+    } else if at_p(ts, i, "|") || at_p(ts, i, "||") {
+        p_closure(ts, i, "nomove", ns)
+    } else if at_w(ts, i, "move") {
+        p_closure(ts, i + 1, "move", ns)
+    } else if at_w(ts, i, "if") {
+        p_if(ts, i, ns)
+    } else if at_w(ts, i, "match") {
+        p_match(ts, i, ns)
+    } else if at_w(ts, i, "while") {
+        let c = p_expr(ts, i + 1, 1);
+        let b = p_block(ts, c.next);
+        P { node: Node::List([atom("while"), c.node, b.node]), next: b.next }
+    } else if at_w(ts, i, "loop") {
+        let b = p_block(ts, i + 1);
+        P { node: Node::List([atom("loop"), b.node]), next: b.next }
+    } else if at_w(ts, i, "for") {
+        let p = p_pat(ts, i + 1);
+        let mut j = p.next;
+        if at_w(ts, j, "in") {
+            j = j + 1;
+        }
+        let it = p_expr(ts, j, 1);
+        let b = p_block(ts, it.next);
+        P { node: Node::List([atom("for"), p.node, it.node, b.node]), next: b.next }
+    } else if at_w(ts, i, "return") {
+        if at_p(ts, i + 1, ";") || at_p(ts, i + 1, "}") {
+            P { node: Node::List([atom("return"), no_node()]), next: i + 1 }
+        } else {
+            let r = p_expr(ts, i + 1, ns);
+            P { node: Node::List([atom("return"), r.node]), next: r.next }
+        }
+    } else if at_w(ts, i, "break") {
+        P { node: Node::List([atom("break")]), next: i + 1 }
+    } else if at_w(ts, i, "continue") {
+        P { node: Node::List([atom("continue")]), next: i + 1 }
+    } else if at_name(ts, i) {
+        let w = p_path(ts, i);
+        if at_p(ts, w.next, "{") && ns == 0 {
+            p_struct_lit(ts, w.next, w.text)
+        } else {
+            P { node: Node::List([atom("path"), atom(w.text)]), next: w.next }
+        }
+    } else {
+        P { node: Node::List([atom("eerr")]), next: recover_to(ts, i, expr_sync()) }
+    }
+}
+
+fn p_paren(ts: [Token], i: i64, ns: i64) -> P {
+    let mut j = i + 1;
+    if at_p(ts, j, ")") {
+        P { node: Node::List([atom("unit")]), next: j + 1 }
+    } else {
+        let first = p_expr(ts, j, ns);
+        let mut kids = [atom("tuple"), first.node];
+        let mut only = first.node;
+        let mut tup = false;
+        j = first.next;
+        let mut going = true;
+        while going {
+            if at_p(ts, j, ",") {
+                tup = true;
+                j = j + 1;
+                if at_p(ts, j, ")") {
+                    going = false;
+                } else {
+                    let r = p_expr(ts, j, ns);
+                    kids = kids.push(r.node);
+                    j = r.next;
+                }
+            } else {
+                going = false;
+            }
+        }
+        if at_p(ts, j, ")") {
+            j = j + 1;
+        }
+        if tup {
+            P { node: Node::List(kids), next: j }
+        } else {
+            P { node: only, next: j }
+        }
+    }
+}
+
+fn p_struct_lit(ts: [Token], i: i64, nm: str) -> P {
+    let mut fields = [atom("fields")];
+    let mut j = i + 1;
+    let mut going = true;
+    while going {
+        if at_p(ts, j, "}") || at_end(ts, j) {
+            going = false;
+        } else {
+            let f = p_ident(ts, j);
+            j = f.next;
+            let mut v = Node::List([atom("path"), atom(f.text)]);
+            if at_p(ts, j, ":") {
+                let r = p_expr(ts, j + 1, 0);
+                v = r.node;
+                j = r.next;
+            }
+            fields = fields.push(Node::List([atom("sf"), atom(f.text), v]));
+            if at_p(ts, j, ",") {
+                j = j + 1;
+            } else {
+                going = false;
+            }
+        }
+    }
+    if at_p(ts, j, "}") {
+        j = j + 1;
+    }
+    P { node: Node::List([atom("structlit"), atom(nm), Node::List(fields)]), next: j }
+}
+
+fn p_if(ts: [Token], i: i64, ns: i64) -> P {
+    let c = p_expr(ts, i + 1, 1);
+    let b = p_block(ts, c.next);
+    let mut j = b.next;
+    let mut els = no_node();
+    if at_w(ts, j, "else") {
+        if at_w(ts, j + 1, "if") {
+            // The reference parser calls `primary` here rather than `expr`, so an
+            // `else if` chain is a chain and not a binary expression waiting to happen.
+            let r = p_primary(ts, j + 1, ns);
+            els = r.node;
+            j = r.next;
+        } else {
+            let r = p_block(ts, j + 1);
+            els = r.node;
+            j = r.next;
+        }
+    }
+    P { node: Node::List([atom("if"), c.node, b.node, els]), next: j }
+}
+
+fn p_match(ts: [Token], i: i64, ns: i64) -> P {
+    let sc = p_expr(ts, i + 1, 1);
+    let mut j = sc.next;
+    if at_p(ts, j, "{") {
+        j = j + 1;
+    }
+    let mut arms = [atom("arms")];
+    let mut going = true;
+    while going {
+        if at_p(ts, j, "}") || at_end(ts, j) {
+            going = false;
+        } else {
+            let before = j;
+            let p = p_pat(ts, j);
+            j = p.next;
+            let mut guard = no_node();
+            if at_w(ts, j, "when") || at_w(ts, j, "if") {
+                let g = p_expr(ts, j + 1, ns);
+                guard = g.node;
+                j = g.next;
+            }
+            if at_p(ts, j, "=>") {
+                j = j + 1;
+            }
+            let body = p_expr(ts, j, ns);
+            j = body.next;
+            arms = arms.push(Node::List([atom("arm"), p.node, guard, body.node]));
+            if at_p(ts, j, ",") {
+                j = j + 1;
+            }
+            if j == before {
+                j = j + 1;
+            }
+        }
+    }
+    if at_p(ts, j, "}") {
+        j = j + 1;
+    }
+    P { node: Node::List([atom("match"), sc.node, Node::List(arms)]), next: j }
+}
+
+// ── blocks and statements ────────────────────────────────────────────────────────────
+
+fn p_block(ts: [Token], i: i64) -> P {
+    let mut j = i;
+    if at_p(ts, j, "{") {
+        j = j + 1;
+    }
+    let mut stmts = [atom("stmts")];
+    let mut tail = no_node();
+    let mut going = true;
+    while going {
+        if at_p(ts, j, "}") || at_end(ts, j) {
+            going = false;
+        } else {
+            let before = j;
+            let r = p_stmt(ts, j);
+            j = r.next;
+            let tg = head_tag(r.node);
+            if tg == "skip" {
+                // a stray `;`
+            } else if tg == "expr" && at_p(ts, j, "}") {
+                // An expression with no semicolon in final position is the block's value.
+                tail = kid(r.node, 1);
+            } else {
+                stmts = stmts.push(r.node);
+            }
+            if j == before {
+                j = j + 1;
+            }
+        }
+    }
+    if at_p(ts, j, "}") {
+        j = j + 1;
+    }
+    P { node: Node::List([atom("block"), Node::List(stmts), tail]), next: j }
+}
+
+fn p_stmt(ts: [Token], i: i64) -> P {
+    if at_p(ts, i, ";") {
+        P { node: Node::List([atom("skip")]), next: i + 1 }
+    } else if at_w(ts, i, "let") {
+        let p = p_pat(ts, i + 1);
+        let mut j = p.next;
+        let mut t = no_node();
+        if at_p(ts, j, ":") {
+            let r = p_ty(ts, j + 1);
+            t = r.node;
+            j = r.next;
+        }
+        let mut v = no_node();
+        if at_p(ts, j, "=") {
+            let r = p_expr(ts, j + 1, 0);
+            v = r.node;
+            j = r.next;
+        }
+        if at_p(ts, j, ";") {
+            j = j + 1;
+        }
+        P { node: Node::List([atom("let"), p.node, t, v]), next: j }
+    } else if at_w(ts, i, "fn") || at_w(ts, i, "struct") || at_w(ts, i, "enum")
+              || at_w(ts, i, "use") {
+        let r = p_item(ts, i);
+        P { node: Node::List([atom("item"), r.node]), next: r.next }
+    } else {
+        let r = p_expr(ts, i, 0);
+        if at_p(ts, r.next, ";") {
+            P { node: Node::List([atom("semi"), r.node]), next: r.next + 1 }
+        } else {
+            P { node: Node::List([atom("expr"), r.node]), next: r.next }
+        }
+    }
+}
+
+// ── items ────────────────────────────────────────────────────────────────────────────
+
+fn p_generics(ts: [Token], i: i64) -> PL {
+    let mut kids = [atom("generics")];
+    let mut j = i;
+    if at_p(ts, j, "<") {
+        j = j + 1;
+        let mut going = true;
+        while going {
+            if at_p(ts, j, ">") || at_end(ts, j) {
+                going = false;
+            } else {
+                let w = p_ident(ts, j);
+                kids = kids.push(atom(w.text));
+                j = w.next;
+                if at_p(ts, j, ",") {
+                    j = j + 1;
+                } else {
+                    going = false;
+                }
+            }
+        }
+        if at_p(ts, j, ">") {
+            j = j + 1;
+        }
+    }
+    PL { nodes: kids, next: j }
+}
+
+struct PL {
+    nodes: [Node],
+    next: i64,
+}
+
+fn p_fn(ts: [Token], i: i64, publ: str) -> P {
+    let nm = p_ident(ts, i + 1);
+    let gen = p_generics(ts, nm.next);
+    let mut j = gen.next;
+    let mut prms = [atom("params")];
+    if at_p(ts, j, "(") {
+        j = j + 1;
+        let mut going = true;
+        while going {
+            if at_p(ts, j, ")") || at_end(ts, j) {
+                going = false;
+            } else if at_p(ts, j, "&") && at_w(ts, j + 1, "self") {
+                prms = prms.push(Node::List([
+                    atom("param"),
+                    Node::List([atom("pbind"), atom("self"), atom("imm"), atom("ref")]),
+                    Node::List([atom("tinfer")]),
+                ]));
+                j = j + 2;
+                if at_p(ts, j, ",") {
+                    j = j + 1;
+                } else {
+                    going = false;
+                }
+            } else if at_w(ts, j, "self") {
+                prms = prms.push(Node::List([
+                    atom("param"),
+                    Node::List([atom("pbind"), atom("self"), atom("imm"), atom("val")]),
+                    Node::List([atom("tinfer")]),
+                ]));
+                j = j + 1;
+                if at_p(ts, j, ",") {
+                    j = j + 1;
+                } else {
+                    going = false;
+                }
+            } else {
+                let p = p_pat(ts, j);
+                j = p.next;
+                if at_p(ts, j, ":") {
+                    j = j + 1;
+                }
+                let t = p_ty(ts, j);
+                j = t.next;
+                prms = prms.push(Node::List([atom("param"), p.node, t.node]));
+                if at_p(ts, j, ",") {
+                    j = j + 1;
+                } else {
+                    going = false;
+                }
+            }
+        }
+        if at_p(ts, j, ")") {
+            j = j + 1;
+        }
+    }
+    let mut ret = no_node();
+    if at_p(ts, j, "->") {
+        let r = p_ty(ts, j + 1);
+        ret = r.node;
+        j = r.next;
+    }
+    let mut eff = no_node();
+    if at_p(ts, j, "!") {
+        let r = p_effects(ts, j);
+        eff = r.node;
+        j = r.next;
+    }
+    let mut body = no_node();
+    if at_p(ts, j, "{") {
+        let b = p_block(ts, j);
+        body = b.node;
+        j = b.next;
+    } else if at_p(ts, j, ";") {
+        j = j + 1;
+    }
+    P {
+        node: Node::List([
+            atom("fn"), atom(publ), atom(nm.text), Node::List(gen.nodes),
+            Node::List(prms), ret, eff, body,
+        ]),
+        next: j,
+    }
+}
+
+fn p_struct(ts: [Token], i: i64, publ: str) -> P {
+    let nm = p_ident(ts, i + 1);
+    let gen = p_generics(ts, nm.next);
+    let mut j = gen.next;
+    let mut fields = [atom("fields")];
+    if at_p(ts, j, "{") {
+        j = j + 1;
+        let mut going = true;
+        while going {
+            if at_p(ts, j, "}") || at_end(ts, j) {
+                going = false;
+            } else {
+                let before = j;
+                let f = p_ident(ts, j);
+                j = f.next;
+                if at_p(ts, j, ":") {
+                    j = j + 1;
+                }
+                let t = p_ty(ts, j);
+                j = t.next;
+                fields = fields.push(Node::List([atom("field"), atom(f.text), t.node]));
+                if j == before {
+                    j = j + 1;
+                }
+                if at_p(ts, j, ",") {
+                    j = j + 1;
+                } else {
+                    going = false;
+                }
+            }
+        }
+        if at_p(ts, j, "}") {
+            j = j + 1;
+        }
+    }
+    P {
+        node: Node::List([
+            atom("struct"), atom(publ), atom(nm.text), Node::List(gen.nodes), Node::List(fields),
+        ]),
+        next: j,
+    }
+}
+
+fn p_enum(ts: [Token], i: i64, publ: str) -> P {
+    let nm = p_ident(ts, i + 1);
+    let gen = p_generics(ts, nm.next);
+    let mut j = gen.next;
+    let mut variants = [atom("variants")];
+    if at_p(ts, j, "{") {
+        j = j + 1;
+        let mut going = true;
+        while going {
+            if at_p(ts, j, "}") || at_end(ts, j) {
+                going = false;
+            } else {
+                let vn = p_ident(ts, j);
+                j = vn.next;
+                let mut kids = [atom("variant"), atom(vn.text)];
+                if at_p(ts, j, "(") {
+                    j = j + 1;
+                    let mut more = true;
+                    while more {
+                        if at_p(ts, j, ")") || at_end(ts, j) {
+                            more = false;
+                        } else {
+                            let t = p_ty(ts, j);
+                            kids = kids.push(t.node);
+                            j = t.next;
+                            if at_p(ts, j, ",") {
+                                j = j + 1;
+                            } else {
+                                more = false;
+                            }
+                        }
+                    }
+                    if at_p(ts, j, ")") {
+                        j = j + 1;
+                    }
+                }
+                variants = variants.push(Node::List(kids));
+                if at_p(ts, j, ",") {
+                    j = j + 1;
+                } else {
+                    going = false;
+                }
+            }
+        }
+        if at_p(ts, j, "}") {
+            j = j + 1;
+        }
+    }
+    P {
+        node: Node::List([
+            atom("enum"), atom(publ), atom(nm.text), Node::List(gen.nodes), Node::List(variants),
+        ]),
+        next: j,
+    }
+}
+
+fn p_item(ts: [Token], i: i64) -> P {
+    let mut j = i;
+    let mut publ = "priv";
+    if at_w(ts, j, "pub") {
+        publ = "pub";
+        j = j + 1;
+    }
+    // `create` is optional noise from SQL: `create view v = ..` and `view v = ..` are the
+    // same declaration.
+    if at_w(ts, j, "create") {
+        j = j + 1;
+    }
+    if at_w(ts, j, "fn") {
+        p_fn(ts, j, publ)
+    } else if at_w(ts, j, "struct") {
+        p_struct(ts, j, publ)
+    } else if at_w(ts, j, "enum") {
+        p_enum(ts, j, publ)
+    } else if at_w(ts, j, "use") {
+        let w = p_path(ts, j + 1);
+        let mut k = w.next;
+        if at_p(ts, k, ";") {
+            k = k + 1;
+        }
+        P { node: Node::List([atom("use"), atom(w.text)]), next: k }
+    } else {
+        P { node: Node::List([atom("ierr")]), next: recover_to(ts, j, item_sync()) }
+    }
+}
+
+fn p_program(ts: [Token]) -> Node {
+    let mut kids = [atom("program")];
+    let mut i = 0;
+    let mut going = true;
+    while going {
+        if at_end(ts, i) {
+            going = false;
+        } else {
+            let r = p_item(ts, i);
+            kids = kids.push(r.node);
+            if r.next <= i {
+                i = i + 1;
+            } else {
+                i = r.next;
+            }
+        }
+    }
+    Node::List(kids)
+}
+
+// ── the entry point the gate calls ───────────────────────────────────────────────────
+
+fn parse_and_render(src: str) -> str {
+    render_node(p_program(lex(src)))
+}
+
+// A self-check that needs no host, in the shape of the lexer's: parse a small program and
+// print the rendering. `determinism_gate` runs this to establish that two runs of the
+// Niles parser agree with each other before either is compared with the Rust one.
+fn parser_main() -> i64 {
+    let sample = "fn transfer(a: Account, b: Account) -> i64 { let amt = 10.00 usd; if a.balance >= amt { post(a, b, amt); } 0 }";
+    print(parse_and_render(sample));
+    0
+}

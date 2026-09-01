@@ -142,7 +142,15 @@ gates) establish stage 0→1→2→3 fixpoint **for the lexer only**. Appendix E
 self-hosted front-end, type-checker, and IR lowering. The gap between "lexer in Niles" and
 "front-end in Niles" is the entire parser and AST, and no roadmap phase names it.
 
-**Severity.** Medium for G1. → **Task 8.**
+**Severity.** Medium for G1. → **Task 8.** **CLOSED.** `bootstrap/parser.niles` (~1,050
+lines) plus `crates/niles-interp/tests/bootstrap_parser.rs` (16 gates) carry the bootstrap
+from a lexer to a front end: stage-1 equivalence over a 48-case corpus, stage-2
+self-application over both bootstrap files (127,165 bytes of tree, identical to the
+reference), stage-3 fixpoint, and four negative controls. The round rejected three defects
+— a 95 KB-per-frame stack cost in the stage-0 interpreter that aborted the process rather
+than reporting, a **left-associative assignment in the reference parser**, and a missing
+operator table in Appendix B — recorded in `results/E15-bootstrap-gates.md` round 2 and
+thesis §E.19.2.
 
 ### F9 · Bottleneck · Linear scans where the thesis mandates anchors
 

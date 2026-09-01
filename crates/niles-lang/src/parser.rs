@@ -1313,9 +1313,17 @@ impl<'a> Parser<'a> {
                 return lhs;
             }
             // Assignment is right-associative and lowest; handled outside the table.
+            //
+            // The right-hand side is parsed at binding power **0**, not 1. At 1 the inner
+            // call cannot take an assignment of its own — the guard above is `min_bp == 0`
+            // — so `a = b = c` came out as `(a = b) = c`, which is left-associative and
+            // the opposite of both this comment and Rust's rule. The defect survived
+            // because no test asked, and it was found when a second implementation of the
+            // same grammar (`bootstrap/parser.niles`) was written against Appendix B.10.1 and
+            // the two disagreed. That is the whole argument for having two.
             if min_bp == 0 && self.at(&Tok::Eq) {
                 self.bump();
-                let value = self.expr_bp(1);
+                let value = self.expr_bp(0);
                 let span = lhs.span().to(value.span());
                 lhs = Expr::Assign { target: Box::new(lhs), value: Box::new(value), span };
                 continue;

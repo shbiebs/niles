@@ -166,6 +166,14 @@ pub enum Error {
     /// The fuel ran out. See [`Interp::with_fuel`].
     OutOfFuel,
     NotCallable { got: String, at: Span },
+    /// Call nesting exceeded [`Interp::max_depth`].
+    ///
+    /// This exists because the alternative is a stack overflow, and a stack overflow in
+    /// Rust aborts the *process* — a compiler that dies without a diagnostic when handed a
+    /// deeply nested input is worse than one that stops and says why. The limit is a
+    /// property of the host, not of Niles, and [`Interp::with_max_depth`] is how a caller
+    /// that has arranged a larger stack raises it.
+    TooDeep { limit: usize, at: Span },
 }
 
 impl Error {
@@ -180,7 +188,8 @@ impl Error {
             | Error::Overflow { at, .. }
             | Error::WrongArity { at, .. }
             | Error::NoMatchingArm { at }
-            | Error::NotCallable { at, .. } => Some(*at),
+            | Error::NotCallable { at, .. }
+            | Error::TooDeep { at, .. } => Some(*at),
             Error::OutOfFuel => None,
         }
     }
@@ -205,6 +214,9 @@ impl Error {
             Error::NoMatchingArm { .. } => "no arm matched".into(),
             Error::OutOfFuel => "evaluation exceeded its fuel budget".into(),
             Error::NotCallable { got, .. } => format!("`{got}` is not callable"),
+            Error::TooDeep { limit, .. } => {
+                format!("call nesting exceeded {limit}; the host stack, not Niles, is the limit")
+            }
         }
     }
 }
@@ -284,6 +296,16 @@ pub struct Interp {
     /// relational tier; the imperative tier has ordinary `while`, so an interpreter
     /// running a compiler needs a way to stop rather than hang a test suite.
     fuel: u64,
+    /// Current call nesting, and the ceiling it may not cross.
+    ///
+    /// A tree-walking interpreter consumes host stack in proportion to the *Niles* call
+    /// depth, and a stack overflow in Rust aborts the process rather than unwinding. So
+    /// the depth is counted, and crossing the ceiling is an ordinary [`Error`] with a
+    /// span. The default is chosen against the *debug* build, which is where the tests
+    /// run and where each frame is widest; [`Interp::with_max_depth`] raises it for a
+    /// caller that has arranged the stack to match (see `run_with_stack`).
+    depth: usize,
+    max_depth: usize,
 }
 
 impl Default for Interp {
@@ -300,11 +322,20 @@ impl Interp {
             structs: BTreeMap::new(),
             output: Vec::new(),
             fuel: 50_000_000,
+            depth: 0,
+            max_depth: DEFAULT_MAX_DEPTH,
         }
     }
 
     pub fn with_fuel(mut self, fuel: u64) -> Self {
         self.fuel = fuel;
+        self
+    }
+
+    /// Raise the call-depth ceiling. Only meaningful when the caller has also arranged a
+    /// stack large enough to hold that many frames — [`run_with_stack`] is the pairing.
+    pub fn with_max_depth(mut self, max_depth: usize) -> Self {
+        self.max_depth = max_depth;
         self
     }
 
@@ -381,11 +412,23 @@ impl Interp {
         for (p, v) in f.params.iter().zip(args) {
             self.bind(&mut env, &p.pat, v)?;
         }
-        match self.block(&mut env, &body) {
+        self.enter(at)?;
+        let r = match self.block(&mut env, &body) {
             Ok(v) => Ok(v),
             Err(Flow::Return(v)) => Ok(v),
             Err(other) => Err(other),
+        };
+        self.depth -= 1;
+        r
+    }
+
+    /// Count one level of call nesting, refusing rather than overflowing the host stack.
+    fn enter(&mut self, at: Span) -> Eval<()> {
+        if self.depth >= self.max_depth {
+            return Err(Error::TooDeep { limit: self.max_depth, at }.into());
         }
+        self.depth += 1;
+        Ok(())
     }
 
     fn burn(&mut self) -> Eval<()> {
@@ -608,105 +651,105 @@ impl Interp {
                 let vs = self.eval_all(env, elems)?;
                 Ok(Value::Array(Rc::new(vs)))
             }
-            Expr::StructLit { path, fields, .. } => {
-                let mut m = BTreeMap::new();
-                for (n, fe) in fields {
-                    let v = self.expr(env, fe)?;
-                    m.insert(n.text.clone(), v);
-                }
-                Ok(Value::Record { name: path_text(path), fields: Rc::new(m) })
-            }
-            Expr::Field { base, name, span } => {
-                let b = self.expr(env, base)?;
-                match &b {
-                    Value::Record { fields, .. } => fields
-                        .get(&name.text)
-                        .cloned()
-                        .ok_or_else(|| Error::NoField { name: name.text.clone(), at: *span }.into()),
-                    // Tuple field access, `t.0`.
-                    Value::Tuple(xs) => match name.text.parse::<usize>() {
-                        Ok(i) if i < xs.len() => Ok(xs[i].clone()),
-                        _ => Err(Error::NoField { name: name.text.clone(), at: *span }.into()),
-                    },
-                    other => Err(Error::TypeMismatch {
-                        want: "struct".into(),
-                        got: other.type_name().into(),
-                        at: *span,
-                    }
-                    .into()),
-                }
-            }
-            Expr::Index { base, index, span } => {
-                let b = self.expr(env, base)?;
-                let i = self.expr(env, index)?;
-                let idx = match i {
-                    Value::Int(n) => n,
-                    other => {
-                        return Err(Error::TypeMismatch {
-                            want: "int".into(),
-                            got: other.type_name().into(),
-                            at: *span,
-                        }
-                        .into())
-                    }
-                };
-                match &b {
-                    Value::Array(xs) | Value::Tuple(xs) => {
-                        if idx < 0 || idx as usize >= xs.len() {
-                            Err(Error::IndexOutOfBounds { index: idx, len: xs.len(), at: *span }.into())
-                        } else {
-                            Ok(xs[idx as usize].clone())
-                        }
-                    }
-                    Value::Bytes(bs) => {
-                        if idx < 0 || idx as usize >= bs.len() {
-                            Err(Error::IndexOutOfBounds { index: idx, len: bs.len(), at: *span }.into())
-                        } else {
-                            Ok(Value::Int(bs[idx as usize] as i128))
-                        }
-                    }
-                    other => Err(Error::TypeMismatch {
-                        want: "array".into(),
-                        got: other.type_name().into(),
-                        at: *span,
-                    }
-                    .into()),
-                }
-            }
+            Expr::StructLit { path, fields, .. } => self.struct_lit(env, path, fields),
+            Expr::Field { base, name, span } => self.field_of(env, base, name, *span),
+            Expr::Index { base, index, span } => self.index_of(env, base, index, *span),
 
-            Expr::Closure { params, body, .. } => Ok(Value::Closure(Rc::new(ClosureVal {
-                params: params.iter().map(|(p, _)| p.clone()).collect(),
-                body: (**body).clone(),
-                captured: env.flatten(),
-            }))),
+            Expr::Closure { params, body, .. } => self.make_closure(env, params, body),
 
             Expr::Call { callee, args, span } => self.call_expr(env, callee, args, *span),
 
-            Expr::Unary { op, operand, span } => {
-                let v = self.expr(env, operand)?;
-                match (op, &v) {
-                    (UnOp::Neg, Value::Int(i)) => {
-                        i.checked_neg().map(Value::Int).ok_or_else(|| Error::Overflow { op: "-", at: *span }.into())
-                    }
-                    (UnOp::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
-                    // References are a no-op here: the subset has no aliasing, because
-                    // values are cloned. §6.6's memory model is a compile-time claim, and
-                    // an interpreter that faked ownership would be evidence for nothing.
-                    (UnOp::Ref | UnOp::RefMut | UnOp::Deref, _) => Ok(v),
-                    _ => Err(Error::TypeMismatch {
-                        want: "a numeric or boolean operand".into(),
-                        got: v.type_name().into(),
-                        at: *span,
-                    }
-                    .into()),
-                }
-            }
+            Expr::Unary { op, operand, span } => self.unary_op(env, *op, operand, *span),
 
             Expr::Binary { op, lhs, rhs, span } => self.binary(env, *op, lhs, rhs, *span),
 
-            Expr::Assign { target, value, span } => {
-                let v = self.expr(env, value)?;
-                match &**target {
+            Expr::Assign { target, value, span } => self.assign(env, target, value, *span),
+
+            // A cast in the subset is between integers and is therefore the identity;
+            // `as u8`-style truncation is not modelled, because a silent truncation in a
+            // ledger interpreter is exactly the class of defect this thesis argues against.
+            Expr::Cast { expr, .. } => self.expr(env, expr),
+
+            Expr::Try { expr, span } => self.try_op(env, expr, *span),
+
+            // --- control ---
+            Expr::Block(b) => self.block(env, b),
+
+            Expr::If { cond, then, els, span } => {
+                let c = self.expr(env, cond)?.truthy(*span)?;
+                if c {
+                    self.block(env, then)
+                } else {
+                    match els {
+                        Some(e) => self.expr(env, e),
+                        None => Ok(Value::Unit),
+                    }
+                }
+            }
+
+            Expr::Case { arms, els, span } => self.case_arms(env, arms, els.as_deref(), *span),
+            Expr::Match { scrutinee, arms, span } => self.match_expr(env, scrutinee, arms, *span),
+
+            Expr::While { cond, body, span } => {
+                loop {
+                    self.burn()?;
+                    if !self.expr(env, cond)?.truthy(*span)? {
+                        break;
+                    }
+                    match self.block(env, body) {
+                        Ok(_) | Err(Flow::Continue) => {}
+                        Err(Flow::Break) => break,
+                        Err(other) => return Err(other),
+                    }
+                }
+                Ok(Value::Unit)
+            }
+
+            Expr::Loop { body, .. } => {
+                loop {
+                    self.burn()?;
+                    match self.block(env, body) {
+                        Ok(_) | Err(Flow::Continue) => {}
+                        Err(Flow::Break) => break,
+                        Err(other) => return Err(other),
+                    }
+                }
+                Ok(Value::Unit)
+            }
+
+            Expr::For { pat, iter, body, span } => self.for_expr(env, pat, iter, body, *span),
+
+            Expr::Return { value, .. } => {
+                let v = match value {
+                    Some(e) => self.expr(env, e)?,
+                    None => Value::Unit,
+                };
+                Err(Flow::Return(v))
+            }
+            Expr::Break(_) => Err(Flow::Break),
+            Expr::Continue(_) => Err(Flow::Continue),
+
+            Expr::Stage { span, .. } => self.stage_or_method(env, e, *span),
+
+            // --- the relational tier: named, refused, never approximated ---
+            _ => Err(Flow::Err(refused(e))),
+        }
+    }
+
+    /// Everything outside the imperative subset, named rather than approximated.
+    ///
+    /// Split out of [`Interp::expr`] with the other cold arms for a reason that is a
+    /// finding in its own right (§E.19): a `match` with thirty arms compiles, in a debug
+    /// build, to a frame holding the union of every arm's locals. Measured at ~95 KB per
+    /// Niles call frame, which put a recursive-descent parser out of reach on any ordinary
+    /// stack. Moving the fat arms behind `#[inline(never)]` is what makes stage 1 able to
+    /// run a parser at all.
+    #[inline(never)]
+    fn assign(&mut self, env: &mut Env, target: &Expr, value: &Expr, span: Span) -> Eval<Value> {
+        {
+            let v = self.expr(env, value)?;
+            let span = &span;
+            match target {
                     Expr::Path(p) => {
                         let name = path_text(p);
                         if env.set(&name, v) {
@@ -800,187 +843,240 @@ impl Interp {
                     _ => Err(Error::NotInSubset { form: "assignment to this place", at: *span }.into()),
                 }
             }
+    }
 
-            // A cast in the subset is between integers and is therefore the identity;
-            // `as u8`-style truncation is not modelled, because a silent truncation in a
-            // ledger interpreter is exactly the class of defect this thesis argues against.
-            Expr::Cast { expr, .. } => self.expr(env, expr),
-
-            Expr::Try { expr, span } => {
-                let v = self.expr(env, expr)?;
-                match &v {
-                    Value::Variant { path, payload } if variant_matches("Ok", path) => {
-                        Ok(payload.first().cloned().unwrap_or(Value::Unit))
-                    }
-                    Value::Variant { path, .. } if variant_matches("Err", path) => {
-                        Err(Flow::Return(v))
-                    }
-                    Value::Variant { path, payload } if variant_matches("Some", path) => {
-                        Ok(payload.first().cloned().unwrap_or(Value::Unit))
-                    }
-                    Value::Variant { path, .. } if variant_matches("None", path) => {
-                        Err(Flow::Return(v))
-                    }
-                    other => Err(Error::TypeMismatch {
-                        want: "Result or Option".into(),
-                        got: other.type_name().into(),
-                        at: *span,
-                    }
-                    .into()),
-                }
+    #[inline(never)]
+    fn field_of(&mut self, env: &mut Env, base: &Expr, name: &Name, span: Span) -> Eval<Value> {
+        let b = self.expr(env, base)?;
+        match &b {
+            Value::Record { fields, .. } => fields
+                .get(&name.text)
+                .cloned()
+                .ok_or_else(|| Error::NoField { name: name.text.clone(), at: span }.into()),
+            // Tuple field access, `t.0`.
+            Value::Tuple(xs) => match name.text.parse::<usize>() {
+                Ok(i) if i < xs.len() => Ok(xs[i].clone()),
+                _ => Err(Error::NoField { name: name.text.clone(), at: span }.into()),
+            },
+            other => Err(Error::TypeMismatch {
+                want: "struct".into(),
+                got: other.type_name().into(),
+                at: span,
             }
+            .into()),
+        }
+    }
 
-            // --- control ---
-            Expr::Block(b) => self.block(env, b),
-
-            Expr::If { cond, then, els, span } => {
-                let c = self.expr(env, cond)?.truthy(*span)?;
-                if c {
-                    self.block(env, then)
+    #[inline(never)]
+    fn index_of(&mut self, env: &mut Env, base: &Expr, index: &Expr, span: Span) -> Eval<Value> {
+        let b = self.expr(env, base)?;
+        let idx = match self.expr(env, index)? {
+            Value::Int(n) => n,
+            other => {
+                return Err(Error::TypeMismatch {
+                    want: "int".into(),
+                    got: other.type_name().into(),
+                    at: span,
+                }
+                .into())
+            }
+        };
+        match &b {
+            Value::Array(xs) | Value::Tuple(xs) => {
+                if idx < 0 || idx as usize >= xs.len() {
+                    Err(Error::IndexOutOfBounds { index: idx, len: xs.len(), at: span }.into())
                 } else {
-                    match els {
-                        Some(e) => self.expr(env, e),
-                        None => Ok(Value::Unit),
-                    }
+                    Ok(xs[idx as usize].clone())
                 }
             }
-
-            Expr::Case { arms, els, span } => {
-                for (pred, body) in arms {
-                    if self.expr(env, pred)?.truthy(*span)? {
-                        return self.expr(env, body);
-                    }
-                }
-                match els {
-                    Some(e) => self.expr(env, e),
-                    // SQL's `case` with no `else` yields null. The subset has no null, so
-                    // this is unit, and the difference is documented rather than hidden.
-                    None => Ok(Value::Unit),
+            Value::Bytes(bs) => {
+                if idx < 0 || idx as usize >= bs.len() {
+                    Err(Error::IndexOutOfBounds { index: idx, len: bs.len(), at: span }.into())
+                } else {
+                    Ok(Value::Int(bs[idx as usize] as i128))
                 }
             }
+            other => Err(Error::TypeMismatch {
+                want: "array".into(),
+                got: other.type_name().into(),
+                at: span,
+            }
+            .into()),
+        }
+    }
 
-            Expr::Match { scrutinee, arms, span } => {
-                let v = self.expr(env, scrutinee)?;
-                for arm in arms {
-                    env.push();
-                    let matched = self.try_bind(env, &arm.pat, &v)?;
-                    if matched {
-                        let guard_ok = match &arm.guard {
-                            Some(g) => self.expr(env, g)?.truthy(*span)?,
-                            None => true,
-                        };
-                        if guard_ok {
-                            let r = self.expr(env, &arm.body);
-                            env.pop();
-                            return r;
-                        }
-                    }
-                    env.pop();
-                }
-                Err(Error::NoMatchingArm { at: *span }.into())
-            }
+    #[inline(never)]
+    fn struct_lit(&mut self, env: &mut Env, path: &Path, fields: &[(Name, Expr)]) -> Eval<Value> {
+        let mut m = BTreeMap::new();
+        for (n, fe) in fields {
+            let v = self.expr(env, fe)?;
+            m.insert(n.text.clone(), v);
+        }
+        Ok(Value::Record { name: path_text(path), fields: Rc::new(m) })
+    }
 
-            Expr::While { cond, body, span } => {
-                loop {
-                    self.burn()?;
-                    if !self.expr(env, cond)?.truthy(*span)? {
-                        break;
-                    }
-                    match self.block(env, body) {
-                        Ok(_) | Err(Flow::Continue) => {}
-                        Err(Flow::Break) => break,
-                        Err(other) => return Err(other),
-                    }
-                }
-                Ok(Value::Unit)
-            }
+    #[inline(never)]
+    fn make_closure(
+        &mut self,
+        env: &mut Env,
+        params: &[(Pat, Option<Ty>)],
+        body: &Expr,
+    ) -> Eval<Value> {
+        Ok(Value::Closure(Rc::new(ClosureVal {
+            params: params.iter().map(|(p, _)| p.clone()).collect(),
+            body: body.clone(),
+            captured: env.flatten(),
+        })))
+    }
 
-            Expr::Loop { body, .. } => {
-                loop {
-                    self.burn()?;
-                    match self.block(env, body) {
-                        Ok(_) | Err(Flow::Continue) => {}
-                        Err(Flow::Break) => break,
-                        Err(other) => return Err(other),
-                    }
-                }
-                Ok(Value::Unit)
+    #[inline(never)]
+    fn unary_op(&mut self, env: &mut Env, op: UnOp, operand: &Expr, span: Span) -> Eval<Value> {
+        let v = self.expr(env, operand)?;
+        match (op, &v) {
+            (UnOp::Neg, Value::Int(i)) => i
+                .checked_neg()
+                .map(Value::Int)
+                .ok_or_else(|| Error::Overflow { op: "-", at: span }.into()),
+            (UnOp::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
+            // References are a no-op here: the subset has no aliasing, because values are
+            // cloned. §6.6's memory model is a compile-time claim, and an interpreter that
+            // faked ownership would be evidence for nothing.
+            (UnOp::Ref | UnOp::RefMut | UnOp::Deref, _) => Ok(v),
+            _ => Err(Error::TypeMismatch {
+                want: "a numeric or boolean operand".into(),
+                got: v.type_name().into(),
+                at: span,
             }
+            .into()),
+        }
+    }
 
-            Expr::For { pat, iter, body, span } => {
-                let it = self.expr(env, iter)?;
-                let items: Vec<Value> = match &it {
-                    Value::Array(xs) | Value::Tuple(xs) => (**xs).clone(),
-                    Value::Bytes(bs) => bs.iter().map(|b| Value::Int(*b as i128)).collect(),
-                    Value::Record { name, fields } if name == "Range" => {
-                        let lo = as_int(fields.get("start"), *span)?;
-                        let hi = as_int(fields.get("end"), *span)?;
-                        (lo..hi).map(Value::Int).collect()
-                    }
-                    other => {
-                        return Err(Error::TypeMismatch {
-                            want: "an iterable".into(),
-                            got: other.type_name().into(),
-                            at: *span,
-                        }
-                        .into())
-                    }
-                };
-                for v in items {
-                    self.burn()?;
-                    env.push();
-                    let bound = self.try_bind(env, pat, &v);
-                    let r = match bound {
-                        Ok(true) => self.block_inner(env, body).map(|_| ()),
-                        Ok(false) => Err(Flow::Err(Error::NoMatchingArm { at: *span })),
-                        Err(e) => Err(e),
-                    };
-                    env.pop();
-                    match r {
-                        Ok(()) | Err(Flow::Continue) => {}
-                        Err(Flow::Break) => break,
-                        Err(other) => return Err(other),
-                    }
-                }
-                Ok(Value::Unit)
+    #[inline(never)]
+    fn try_op(&mut self, env: &mut Env, inner: &Expr, span: Span) -> Eval<Value> {
+        let v = self.expr(env, inner)?;
+        match &v {
+            Value::Variant { path, payload } if variant_matches("Ok", path) => {
+                Ok(payload.first().cloned().unwrap_or(Value::Unit))
             }
+            Value::Variant { path, .. } if variant_matches("Err", path) => Err(Flow::Return(v)),
+            Value::Variant { path, payload } if variant_matches("Some", path) => {
+                Ok(payload.first().cloned().unwrap_or(Value::Unit))
+            }
+            Value::Variant { path, .. } if variant_matches("None", path) => Err(Flow::Return(v)),
+            other => Err(Error::TypeMismatch {
+                want: "Result or Option".into(),
+                got: other.type_name().into(),
+                at: span,
+            }
+            .into()),
+        }
+    }
 
-            Expr::Return { value, .. } => {
-                let v = match value {
-                    Some(e) => self.expr(env, e)?,
-                    None => Value::Unit,
-                };
-                Err(Flow::Return(v))
-            }
-            Expr::Break(_) => Err(Flow::Break),
-            Expr::Continue(_) => Err(Flow::Continue),
-
-            // --- the relational tier: named, refused, never approximated ---
-            Expr::Stage { span, .. } => self.stage_or_method(env, e, *span),
-            Expr::Txn { span, .. } => Err(Error::NotInSubset { form: "txn", at: *span }.into()),
-            Expr::Hold { span, .. } => Err(Error::NotInSubset { form: "hold", at: *span }.into()),
-            Expr::Resolve { span, .. } => Err(Error::NotInSubset { form: "resolve", at: *span }.into()),
-            Expr::Fx { span, .. } => Err(Error::NotInSubset { form: "fx", at: *span }.into()),
-            Expr::Fixpoint { span, .. } => {
-                Err(Error::NotInSubset { form: "fixpoint", at: *span }.into())
-            }
-            Expr::Authorize { span, .. } => {
-                Err(Error::NotInSubset { form: "authorize", at: *span }.into())
-            }
-            Expr::Declassify { span, .. } => {
-                Err(Error::NotInSubset { form: "declassify", at: *span }.into())
-            }
-            Expr::Explain { span, .. } => Err(Error::NotInSubset { form: "explain", at: *span }.into()),
-            Expr::Reproduce { span, .. } => {
-                Err(Error::NotInSubset { form: "reproduce", at: *span }.into())
-            }
-            Expr::Impact { span, .. } => Err(Error::NotInSubset { form: "impact", at: *span }.into()),
-            Expr::Sql { span, .. } => Err(Error::NotInSubset { form: "sql", at: *span }.into()),
-            Expr::Select(s) => Err(Error::NotInSubset { form: "select", at: s.span }.into()),
-            Expr::Error(sp) => {
-                Err(Error::NotInSubset { form: "an expression that did not parse", at: *sp }.into())
+    #[inline(never)]
+    fn case_arms(
+        &mut self,
+        env: &mut Env,
+        arms: &[(Expr, Expr)],
+        els: Option<&Expr>,
+        span: Span,
+    ) -> Eval<Value> {
+        for (pred, body) in arms {
+            if self.expr(env, pred)?.truthy(span)? {
+                return self.expr(env, body);
             }
         }
+        match els {
+            Some(e) => self.expr(env, e),
+            // SQL's `case` with no `else` yields null. The subset has no null, so this is
+            // unit, and the difference is documented rather than hidden.
+            None => Ok(Value::Unit),
+        }
+    }
+
+    #[inline(never)]
+    fn match_expr(
+        &mut self,
+        env: &mut Env,
+        scrutinee: &Expr,
+        arms: &[MatchArm],
+        span: Span,
+    ) -> Eval<Value> {
+        let v = self.expr(env, scrutinee)?;
+        for arm in arms {
+            env.push();
+            let matched = match self.try_bind(env, &arm.pat, &v) {
+                Ok(m) => m,
+                Err(e) => {
+                    env.pop();
+                    return Err(e);
+                }
+            };
+            if matched {
+                let guard_ok = match &arm.guard {
+                    Some(g) => match self.expr(env, g).and_then(|x| Ok(x.truthy(span)?)) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            env.pop();
+                            return Err(e);
+                        }
+                    },
+                    None => true,
+                };
+                if guard_ok {
+                    let r = self.expr(env, &arm.body);
+                    env.pop();
+                    return r;
+                }
+            }
+            env.pop();
+        }
+        Err(Error::NoMatchingArm { at: span }.into())
+    }
+
+    #[inline(never)]
+    fn for_expr(
+        &mut self,
+        env: &mut Env,
+        pat: &Pat,
+        iter: &Expr,
+        body: &Block,
+        span: Span,
+    ) -> Eval<Value> {
+        let it = self.expr(env, iter)?;
+        let items: Vec<Value> = match &it {
+            Value::Array(xs) | Value::Tuple(xs) => (**xs).clone(),
+            Value::Bytes(bs) => bs.iter().map(|b| Value::Int(*b as i128)).collect(),
+            Value::Record { name, fields } if name == "Range" => {
+                let lo = as_int(fields.get("start"), span)?;
+                let hi = as_int(fields.get("end"), span)?;
+                (lo..hi).map(Value::Int).collect()
+            }
+            other => {
+                return Err(Error::TypeMismatch {
+                    want: "an iterable".into(),
+                    got: other.type_name().into(),
+                    at: span,
+                }
+                .into())
+            }
+        };
+        for v in items {
+            self.burn()?;
+            env.push();
+            let bound = self.try_bind(env, pat, &v);
+            let r = match bound {
+                Ok(true) => self.block_inner(env, body).map(|_| ()),
+                Ok(false) => Err(Flow::Err(Error::NoMatchingArm { at: span })),
+                Err(e) => Err(e),
+            };
+            env.pop();
+            match r {
+                Ok(()) | Err(Flow::Continue) => {}
+                Err(Flow::Break) => break,
+                Err(other) => return Err(other),
+            }
+        }
+        Ok(Value::Unit)
     }
 
     fn eval_all(&mut self, env: &mut Env, es: &[Expr]) -> Eval<Vec<Value>> {
@@ -1062,11 +1158,14 @@ impl Interp {
         for (p, v) in c.params.iter().zip(args) {
             self.bind(&mut env, p, v)?;
         }
-        match self.expr(&mut env, &c.body) {
+        self.enter(span)?;
+        let r = match self.expr(&mut env, &c.body) {
             Ok(v) => Ok(v),
             Err(Flow::Return(v)) => Ok(v),
             Err(other) => Err(other),
-        }
+        };
+        self.depth -= 1;
+        r
     }
 
     /// Free functions. Deliberately few: this is the "100-line host shim" of Appendix E.3,
@@ -1152,6 +1251,84 @@ fn variant_matches(want: &str, got: &str) -> bool {
 
 fn path_text(p: &Path) -> String {
     p.segments.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join("::")
+}
+
+/// The relational tier and the un-parsed: named, refused, never approximated.
+///
+/// One function rather than a dozen match arms, so that `Interp::expr`'s frame does not
+/// carry a dozen `Error` constructions it will almost never perform.
+#[inline(never)]
+fn refused(e: &Expr) -> Error {
+    let (form, at) = match e {
+        Expr::Float(_, s) => ("floating-point literal", *s),
+        Expr::Instant { span, .. } => ("temporal literal", *span),
+        Expr::Duration { span, .. } => ("duration literal", *span),
+        Expr::Txn { span, .. } => ("txn", *span),
+        Expr::Hold { span, .. } => ("hold", *span),
+        Expr::Resolve { span, .. } => ("resolve", *span),
+        Expr::Fx { span, .. } => ("fx", *span),
+        Expr::Fixpoint { span, .. } => ("fixpoint", *span),
+        Expr::Authorize { span, .. } => ("authorize", *span),
+        Expr::Declassify { span, .. } => ("declassify", *span),
+        Expr::Explain { span, .. } => ("explain", *span),
+        Expr::Reproduce { span, .. } => ("reproduce", *span),
+        Expr::Impact { span, .. } => ("impact", *span),
+        Expr::Sql { span, .. } => ("sql", *span),
+        Expr::Select(s) => ("select", s.span),
+        Expr::Error(s) => ("an expression that did not parse", *s),
+        other => ("an expression outside the imperative subset", other.span()),
+    };
+    Error::NotInSubset { form, at }
+}
+
+/// The default call-depth ceiling.
+///
+/// Calibrated against the *widest* frame — a debug build, measured at ~32 KB per Niles
+/// call — on the *smallest* stack this code runs on: 1 MB. 24 frames is about 780 KB, so
+/// the ceiling is reached, and reported with a span, before the stack is.
+///
+/// The first value tried here was 64, on the assumption that a spawned thread gets 2 MB.
+/// It aborted the test process, which is how the number became measured rather than
+/// assumed — and is a small demonstration of why the counter had to exist at all.
+///
+/// It is deliberately low. A number chosen for the comfortable case would be a number
+/// that turns into a process abort on the uncomfortable one, and the whole point of the
+/// counter is that the failure mode be a diagnostic. Anything that needs more says so —
+/// [`Interp::with_max_depth`] — and arranges the stack to match, via [`run_with_stack`].
+pub const DEFAULT_MAX_DEPTH: usize = 24;
+
+/// Run `f` on a thread with a stack sized for `depth` Niles call frames.
+///
+/// **Why this exists, stated plainly.** A tree-walking interpreter spends host stack in
+/// proportion to the interpreted program's call depth, and the cost per frame is a
+/// property of the *host build*, not of Niles: measured on this interpreter it is roughly
+/// 5 KB per Niles frame in a release build and 20× that in a debug build, because a
+/// `match` over thirty expression variants compiles, unoptimised, to a frame holding the
+/// union of every arm's locals. That 20× is why `Interp::expr`'s fat arms are behind
+/// `#[inline(never)]`, and why this helper exists rather than a comment saying "be
+/// careful": a recursive-descent parser nests six interpreter frames per level of
+/// expression nesting, so `bootstrap/parser.niles` needs several hundred, and the default
+/// 8 MB main-thread stack — 2 MB under `cargo test` — does not provide them.
+///
+/// rustc does the same thing for the same reason; this is the ordinary shape of the
+/// problem, not a peculiarity of Niles.
+///
+/// [`Value`] is `Rc`-based and therefore not `Send`, so it cannot cross back out of the
+/// worker. That is a feature rather than an inconvenience: it forces the caller to say
+/// what it wants *out* of the run — a rendering, a number, a verdict — instead of moving
+/// an interpreter's heap between threads.
+pub fn run_with_stack<T: Send + 'static>(
+    depth: usize,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> std::thread::Result<T> {
+    // 128 KB per frame: the measured debug cost with headroom, so the depth ceiling is
+    // reached — and reported — before the stack is.
+    let bytes = (depth.max(64) * 128 * 1024).max(8 * 1024 * 1024);
+    std::thread::Builder::new()
+        .stack_size(bytes)
+        .spawn(f)
+        .expect("a worker thread")
+        .join()
 }
 
 /// Arithmetic and comparison. Every integer operation is checked.
@@ -1334,10 +1511,24 @@ pub struct DeterminismReport {
 /// x86-64 and the outputs compared, and which this gate cannot perform from inside one
 /// process. §E.19 should say so, and the return type does not pretend otherwise.
 pub fn determinism_gate(prog: &Program, entry: &str, runs: usize) -> Result<DeterminismReport, Error> {
+    determinism_gate_deep(prog, entry, runs, DEFAULT_MAX_DEPTH)
+}
+
+/// [`determinism_gate`] with a raised call-depth ceiling, for a program that needs one.
+///
+/// The caller is responsible for the stack: see [`run_with_stack`]. This exists because
+/// the parser's self-check nests far deeper than the lexer's, and a gate that silently
+/// used the default ceiling would report `TooDeep` as a determinism failure.
+pub fn determinism_gate_deep(
+    prog: &Program,
+    entry: &str,
+    runs: usize,
+    max_depth: usize,
+) -> Result<DeterminismReport, Error> {
     let mut first: Option<Vec<String>> = None;
     let mut divergence = None;
     for _ in 0..runs {
-        let mut it = Interp::new();
+        let mut it = Interp::new().with_max_depth(max_depth);
         it.load(prog);
         it.call(entry, vec![])?;
         match &first {
@@ -1664,5 +1855,65 @@ mod tests {
         let src = "fn main() -> i64 { let z = 0; 1 / z }";
         let (prog, _) = parser::parse_program(src);
         assert!(determinism_gate(&prog, "main", 2).is_err());
+    }
+    // ── the call-depth ceiling ───────────────────────────────────────────────────────
+
+    fn deep_program(depth: i64) -> Program {
+        let src = format!(
+            "fn down(n: i64) -> i64 {{ if n == 0 {{ 0 }} else {{ 1 + down(n - 1) }} }}\n\
+             fn main() -> i64 {{ down({depth}) }}"
+        );
+        parser::parse_program(&src).0
+    }
+
+    #[test]
+    fn deep_recursion_is_an_error_and_not_a_crash() {
+        // The point of the counter. Before it, this input aborted the *process* on a
+        // stack overflow — no diagnostic, no span, no exit status a test could read.
+        let prog = deep_program(10_000);
+        let mut it = Interp::new();
+        it.load(&prog);
+        match it.call("main", vec![]) {
+            Err(Error::TooDeep { limit, .. }) => assert_eq!(limit, DEFAULT_MAX_DEPTH),
+            other => panic!("expected a depth error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_ceiling_is_not_so_low_that_ordinary_recursion_trips_it() {
+        // A guard that fired on reasonable programs would be a worse defect than the one
+        // it prevents. Half the default must be comfortably reachable.
+        let prog = deep_program((DEFAULT_MAX_DEPTH as i64) / 2);
+        let mut it = Interp::new();
+        it.load(&prog);
+        assert_eq!(it.call("main", vec![]), Ok(Value::Int((DEFAULT_MAX_DEPTH as i128) / 2)));
+    }
+
+    #[test]
+    fn a_raised_ceiling_needs_a_stack_to_match_and_run_with_stack_provides_one() {
+        // The pairing the two APIs exist to enforce: `with_max_depth` alone would move the
+        // abort rather than remove it. 600 frames is ~19 MB of debug-build stack, well past
+        // any default, and the run must still produce the right answer rather than dying.
+        let r = run_with_stack(1200, || {
+            let prog = deep_program(600);
+            let mut it = Interp::new().with_max_depth(1200);
+            it.load(&prog);
+            // `Value` is not `Send`, so the answer crosses back as a rendering.
+            it.call("main", vec![]).map(|v| v.render()).map_err(|e| e.message())
+        })
+        .expect("the worker must not crash");
+        assert_eq!(r, Ok("600".to_string()));
+    }
+
+    #[test]
+    fn the_depth_counter_unwinds_so_repeated_calls_do_not_accumulate() {
+        // An `enter` without a matching decrement would make the tenth call fail where the
+        // first succeeded — the classic shape of a leaked counter.
+        let prog = deep_program(8);
+        let mut it = Interp::new();
+        it.load(&prog);
+        for _ in 0..50 {
+            assert_eq!(it.call("main", vec![]), Ok(Value::Int(8)));
+        }
     }
 }

@@ -380,8 +380,10 @@ Stated because a specification that named no limits would be marketing.
    §L-12 says so.
 5. **It does not claim the schedule verifier exists.** It is specified, it is the highest-
    value unbuilt item here, and it is the one genuinely novel contribution in this document.
-6. **It does not claim the bootstrap is a compiler.** One front-end stage — a lexer written
-   in Niles, verified against the reference implementation — is a first rung.
+6. **It does not claim the bootstrap is a compiler.** Two front-end stages — a lexer and a
+   parser written in Niles, each verified against the reference implementation, the parser
+   node for node over its own 1,200-line source — are two rungs, not a ladder. The
+   type-checker and the lowering pass are still Rust.
 
 ## Part V — Conformance summary
 

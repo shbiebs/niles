@@ -203,6 +203,28 @@ fn transfer(from: Id<Account>, to: Id<Account>, amt: Money<mxn>,
 }
 ```
 
+### B.10.1 Operator Precedence and Associativity
+
+Normative. Higher binding power binds tighter; every level is left-associative except assignment, which is right-associative and binds loosest of all. Where a word and a symbol denote the same operator — `and`/`&&`, `or`/`||` — they share a level and produce the same tree, because a program's meaning must not depend on which of its two ancestries the author was thinking in.
+
+| Power | Operators | Associativity |
+|---|---|---|
+| *(loosest)* | `=` | **right** |
+| 1 | `or` `\|\|` | left |
+| 2 | `and` `&&` | left |
+| 3 | `==` `!=` `<` `<=` `>` `>=` `is` `is not` `in` `not in` `like` `between` | left |
+| 4 | `\|` | left |
+| 5 | `^` | left |
+| 6 | `&` | left |
+| 7 | `+` `-` | left |
+| 8 | `*` `/` `%` | left |
+| *(tightest)* | prefix `-` `!` `not` `*` `&` `&mut`; postfix `.f` `.m(..)` `\|> m(..)` `(..)` `[..]` `?` `as T` | — |
+
+Two consequences are worth stating because they are where hand-written parsers go wrong, and where this table earned its place. First, `a - b - c` is `(a - b) - c`; a Pratt loop that recurses on the right at the *same* power instead of one above it produces the other tree, and no test that inspects only the token stream can tell. Second, `a = b = c` is `a = (b = c)`, following Rust: the reference parser recursed for the right-hand side at power 1 rather than 0, which put assignment outside its own guard and made it silently left-associative — a defect that survived until `bootstrap/parser.niles` was written against this table and the two implementations disagreed. The table exists so that a disagreement of that kind has an arbiter, and Appendix E's stage-1 equivalence gate is what forces the question to be asked.
+
+Bitwise operators sit *between* comparison and arithmetic, which is C's ordering rather than Python's, and is inherited from Rust along with the rest of the expression grammar. `between` takes a tuple — `x between (lo, hi)` — so that the parse is uniform and the operator needs no special case in the table above.
+
+
 ## B.11 Banking Domain Library
 
 `std::bank`: accounts, postings, holds, `fx`, statements, interest accrual, and the product modules of Section 6.21 (`::lending`, `::trade`, `::liquidity`, `::derivatives`). All are library code over B.4's features, with no compiler knowledge of money.

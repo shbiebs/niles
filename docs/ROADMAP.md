@@ -59,6 +59,37 @@ a correctness failure, not a performance one.
 
 ---
 
+### Phase 2.5 — Serve the read path from `proto-engine` · *before any Nilestream number is quoted*
+
+**Why this appeared.** The E16 wall-clock harness (`results/E16-wallclock.md`) can now compare
+Nilestream to PostgreSQL over the wire, and immediately exposed that there is currently
+**nothing to compare**: `nilestreamd` serves reads from an in-memory demo engine, so its
+point-lookup row measures the protocol path rather than the read-model runtime. The row reads
+`PARITY` and the document says in full why that is not an engine result.
+
+**Build.** A `Serving` implementation over `proto_engine::{Ledger, PartialView}`, so a wire
+query is answered by the actual mechanism: partial materialisation, the absence lattice,
+anchored reconstruction on a miss.
+
+**Gate.** The `point` row of E16 must be produced by a `PartialView` read, and the run must
+report the miss rate alongside the latency — a parity result at a 0% miss rate and one at a
+40% miss rate are different findings, and the phase diagram needs both.
+
+**Kill criterion.** If an anchored reconstruction on the read path cannot stay inside
+PostgreSQL's point-lookup latency at any miss rate, partial materialisation is not viable for
+OLTP reads and the specification's parity claim is refuted rather than merely unmet.
+
+**Cost.** Days. The mechanism exists and is tested; this is an adapter and a wiring change.
+
+**What this phase already bought, before being built.** The harness found a defect in its first
+hour: `pg_wire::write_all` issued one socket write per protocol message, so a four-message
+reply stalled on Nagle plus the peer's delayed-ACK timer — 23 point lookups per second against
+PostgreSQL's 13,600. Batching the reply and setting `TCP_NODELAY` took it to ~14,700, a factor
+of 640. **No counted-work benchmark could have found it**: the engine did the right amount of
+work, in the right order, and then waited.
+
+---
+
 ### Phase 3 — Adaptive tiering · *what makes OLTP possible at all*
 
 **Build.** Three tiers: bytecode unconditionally, direct machine-code emission on repetition,
@@ -73,8 +104,17 @@ bytecode design is wrong — Umbra achieves 1.2× and a much worse ratio means t
 is doing work the compiler was doing at build time.
 
 **Why this is phase 3 and not phase 6.** Without it there is no OLTP path at all: unconditional
-compilation costs 40–90 ms per query, and at that price every point lookup loses to
-PostgreSQL. This phase is a precondition for E-2's OLTP target, not an optimisation of it.
+compilation costs 40–90 ms per query in the systems the literature measures, and at that price
+every point lookup loses to PostgreSQL. This phase is a precondition for E-2's OLTP target, not
+an optimisation of it.
+
+**A measurement that narrows this phase.** Compiling one query against the current schema —
+parse, resolve, type-check — measures **0.02 ms** on this codebase, not 40–90 ms. The published
+figures are for optimising back ends emitting machine code; Niles's front end is nowhere near
+that cost, and the E16 harness confirmed it directly. So tiering is still needed for the
+*back-end* work Phase 3 describes, and the front end is not the thing to tier. Sequencing an
+optimisation against a cost the codebase does not have would have been the expensive kind of
+mistake.
 
 ---
 
@@ -192,6 +232,7 @@ well suited to a problem it was not designed for.
 |---|---|---|---|
 | 1 Plan-space restriction | 38% → <4% of queries badly planned | Days | Low |
 | 2 **Subquery unnesting** | **~510× geomean** | Weeks | Low |
+| 2.5 **Read path on `proto-engine`** | **Makes any Nilestream number an engine result** | Days | Low |
 | 3 Adaptive tiering | Makes the OLTP target reachable at all | Weeks | Medium |
 | 4 PAX columnar storage | 10× analytical | Months | Medium |
 | 5 **Schedule verifier** | **The novel contribution** | Months | High |

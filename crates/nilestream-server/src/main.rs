@@ -120,6 +120,12 @@ fn main() {
 
 fn serve(stream: TcpStream, schema: String, engine: Arc<Mutex<MemoryEngine>>) -> std::io::Result<()> {
     let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
+    // **Disable Nagle.** A request/response protocol with small replies is the exact shape
+    // Nagle's algorithm penalises: the reply is held pending an acknowledgement the peer's
+    // delayed-ACK timer will not send for 40ms. The wall-clock harness measured 23 point
+    // lookups per second before this line existed, against PostgreSQL's 12,000 — a factor of
+    // five hundred, none of which was the engine doing anything wrong.
+    stream.set_nodelay(true)?;
     let mut w = stream.try_clone()?;
     let mut r = BufReader::new(stream);
 

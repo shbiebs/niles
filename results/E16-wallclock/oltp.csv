@@ -1,0 +1,21 @@
+workload,target,run,operations,wall_ms,p50_us,p99_us,ops_per_sec,durable,not_run
+oltp,postgres,1,2000,423.700,191.6,424.7,4720.3,true,
+oltp,postgres,2,2000,439.258,193.5,482.3,4553.1,true,
+oltp,postgres,3,2000,516.678,183.6,464.7,3870.9,true,
+oltp,postgres,4,2000,414.868,186.6,409.3,4820.8,true,
+oltp,postgres,5,2000,399.194,178.1,424.0,5010.1,true,
+oltp,postgres,6,2000,439.295,196.1,496.8,4552.7,true,
+oltp,postgres,7,2000,466.350,203.6,519.0,4288.6,true,
+oltp,postgres,8,2000,589.861,212.0,573.5,3390.6,true,
+oltp,postgres,9,2000,501.084,229.9,542.6,3991.3,true,
+oltp,postgres,10,2000,444.013,201.5,434.2,4504.4,true,
+oltp,nilestream,1,0,0.000,0.0,0.0,0.0,false,nilestreamd exposes no write surface over the wire; the write path is exercised in-process by the conservation suite and is not comparable here
+oltp,nilestream,2,0,0.000,0.0,0.0,0.0,false,nilestreamd exposes no write surface over the wire; the write path is exercised in-process by the conservation suite and is not comparable here
+oltp,nilestream,3,0,0.000,0.0,0.0,0.0,false,nilestreamd exposes no write surface over the wire; the write path is exercised in-process by the conservation suite and is not comparable here
+oltp,nilestream,4,0,0.000,0.0,0.0,0.0,false,nilestreamd exposes no write surface over the wire; the write path is exercised in-process by the conservation suite and is not comparable here
+oltp,nilestream,5,0,0.000,0.0,0.0,0.0,false,nilestreamd exposes no write surface over the wire; the write path is exercised in-process by the conservation suite and is not comparable here
+oltp,nilestream,6,0,0.000,0.0,0.0,0.0,false,nilestreamd exposes no write surface over the wire; the write path is exercised in-process by the conservation suite and is not comparable here
+oltp,nilestream,7,0,0.000,0.0,0.0,0.0,false,nilestreamd exposes no write surface over the wire; the write path is exercised in-process by the conservation suite and is not comparable here
+oltp,nilestream,8,0,0.000,0.0,0.0,0.0,false,nilestreamd exposes no write surface over the wire; the write path is exercised in-process by the conservation suite and is not comparable here
+oltp,nilestream,9,0,0.000,0.0,0.0,0.0,false,nilestreamd exposes no write surface over the wire; the write path is exercised in-process by the conservation suite and is not comparable here
+oltp,nilestream,10,0,0.000,0.0,0.0,0.0,false,nilestreamd exposes no write surface over the wire; the write path is exercised in-process by the conservation suite and is not comparable here

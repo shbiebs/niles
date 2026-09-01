@@ -1,0 +1,21 @@
+workload,target,run,operations,wall_ms,p50_us,p99_us,ops_per_sec,durable,not_run
+analytical,postgres,1,100,288.134,2900.3,6734.6,347.1,false,
+analytical,postgres,2,100,308.616,2908.2,9091.5,324.0,false,
+analytical,postgres,3,100,274.371,2821.3,5803.3,364.5,false,
+analytical,postgres,4,100,284.767,2892.7,6587.1,351.2,false,
+analytical,postgres,5,100,288.822,2862.8,6275.7,346.2,false,
+analytical,postgres,6,100,286.284,2854.4,6310.8,349.3,false,
+analytical,postgres,7,100,288.806,2904.0,6505.1,346.3,false,
+analytical,postgres,8,100,290.665,2922.5,6531.1,344.0,false,
+analytical,postgres,9,100,350.674,2963.9,10844.5,285.2,false,
+analytical,postgres,10,100,293.351,2902.5,7182.7,340.9,false,
+analytical,nilestream,1,0,0.000,0.0,0.0,0.0,false,the server's read surface serves per-key balances; a scan-and-group-by surface is not exposed
+analytical,nilestream,2,0,0.000,0.0,0.0,0.0,false,the server's read surface serves per-key balances; a scan-and-group-by surface is not exposed
+analytical,nilestream,3,0,0.000,0.0,0.0,0.0,false,the server's read surface serves per-key balances; a scan-and-group-by surface is not exposed
+analytical,nilestream,4,0,0.000,0.0,0.0,0.0,false,the server's read surface serves per-key balances; a scan-and-group-by surface is not exposed
+analytical,nilestream,5,0,0.000,0.0,0.0,0.0,false,the server's read surface serves per-key balances; a scan-and-group-by surface is not exposed
+analytical,nilestream,6,0,0.000,0.0,0.0,0.0,false,the server's read surface serves per-key balances; a scan-and-group-by surface is not exposed
+analytical,nilestream,7,0,0.000,0.0,0.0,0.0,false,the server's read surface serves per-key balances; a scan-and-group-by surface is not exposed
+analytical,nilestream,8,0,0.000,0.0,0.0,0.0,false,the server's read surface serves per-key balances; a scan-and-group-by surface is not exposed
+analytical,nilestream,9,0,0.000,0.0,0.0,0.0,false,the server's read surface serves per-key balances; a scan-and-group-by surface is not exposed
+analytical,nilestream,10,0,0.000,0.0,0.0,0.0,false,the server's read surface serves per-key balances; a scan-and-group-by surface is not exposed

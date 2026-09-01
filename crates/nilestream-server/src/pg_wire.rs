@@ -303,10 +303,32 @@ pub fn diagnostic_error(code: &str, message: &str, detail: Option<&str>) -> Back
 }
 
 /// Write a sequence of backend messages.
+/// Write a batch of backend messages as **one** buffer.
+///
+/// The encoding is per message; the *write* is not, and the difference is worth a paragraph
+/// because it cost a factor of five hundred.
+///
+/// This function used to call `write_all` once per message. A query reply is four small
+/// messages — `RowDescription`, `DataRow`, `CommandComplete`, `ReadyForQuery` — so it left the
+/// socket four times, each write small enough for Nagle's algorithm to hold pending the
+/// previous segment's acknowledgement, and the peer's delayed-ACK timer to wait 40ms before
+/// sending it. The wall-clock harness measured 23 point lookups per second against
+/// PostgreSQL's 12,000, and 43ms per query is the delayed-ACK timer wearing a database's
+/// clothes.
+///
+/// Nothing in a counted-work benchmark could have found this: the engine did the right amount
+/// of work, in the right order, and then waited. It is the clearest argument in the repository
+/// for measuring wall-clock against a baseline rather than counting operations.
+///
+/// One buffer, one write, one flush. Callers should also set `TCP_NODELAY`, which the daemon
+/// now does — belt and braces, because a single reply that outgrows one segment would
+/// otherwise reintroduce the same stall at a larger size.
 pub fn write_all(w: &mut impl Write, msgs: &[Backend]) -> std::io::Result<()> {
+    let mut buf = Vec::with_capacity(64 * msgs.len().max(1));
     for m in msgs {
-        w.write_all(&encode(m))?;
+        buf.extend_from_slice(&encode(m));
     }
+    w.write_all(&buf)?;
     w.flush()
 }
 

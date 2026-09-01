@@ -6,6 +6,7 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+niles-lang = { path = "../niles-lang" }
 proto-engine = { path = "../proto-engine" }
 nilestream-ledger = { path = "../nilestream-ledger" }
 

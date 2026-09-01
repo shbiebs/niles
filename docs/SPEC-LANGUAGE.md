@@ -327,7 +327,7 @@ The organising constraint. Each finding becomes a requirement the language MUST 
 |---|---|---|---|
 | Anchored reconstruction (Thm 4.1) | Enabling | Every view MUST declare an anchor; a non-reconstructible input MUST be a compile error, not a cost | **Built** — `join_order.rs` prunes it as *legality* before costing |
 | Honest absence | Enabling | A miss MUST NOT be expressible as zero. `Reading` has no numeric arm | **Built** — GBS's `gbs-mechanisms::signal` |
-| Static conservation under control flow | Enabling | A `txn` MUST balance per currency on every path, decided before running | **Built** — 11 of 12 defect classes at compile time (E14) |
+| Static conservation under control flow | Enabling | A `txn` MUST balance per currency on every path, decided before running | **Built** — 11 of 12 defect classes at compile time (E14); **0% undecided on a 40-function corpus** (E18) |
 | Coordination-free cross-shard reads | Enabling | A read of a frozen prefix MUST require no coordination and MUST be cacheable without invalidation | **Built** — `nilestream-core::distributed` |
 | Per-view rungs with monotonicity | Cumulative | L-12 | **Built** |
 | Bitemporality | Cumulative | Two axes MUST be distinct types; a back-valued correction MUST be an append | **Built** |

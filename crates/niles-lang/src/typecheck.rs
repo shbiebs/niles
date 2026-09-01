@@ -46,7 +46,23 @@ pub struct Report {
     /// Conservation obligations the checker proved statically.
     pub conservation_proved: usize,
     /// Obligations it could not decide, and handed to the runtime. Reported, never hidden.
+    ///
+    /// The sum of [`Report::undecided`] and [`Report::may_violate`], kept because callers
+    /// have depended on it and because "how much is left for the runtime" is the number an
+    /// operator wants.
     pub runtime_obligations: usize,
+    /// Rows the checker could not see through: an amount it cannot decide is zero.
+    ///
+    /// Split out from `runtime_obligations` for the E18 measurement. The two halves mean
+    /// different things — `undecided` is the checker admitting the arithmetic is beyond its
+    /// domain, `may_violate` is the arithmetic failing along a path it cannot guarantee is
+    /// taken — and a corpus that reported only their sum could not tell whether the analysis
+    /// is weak or the programs are.
+    pub undecided: usize,
+    /// Rows whose arithmetic does not balance, reached across a merge or a possible abort.
+    pub may_violate: usize,
+    /// Must-violations: straight-line, abort-free, provably unbalanced.
+    pub violates: usize,
     /// Effect rows inferred per function, for `nilesc effects` and for lowering.
     pub inferred_effects: HashMap<String, EffRow>,
     /// The weakest rung each view body reads at, which is the ceiling on what it may promise.
@@ -132,7 +148,29 @@ impl Scope {
 ///
 /// Linear values *declared inside* an arm never reach here: they are checked at the end of
 /// that arm, because a hold created in one branch must be resolved in that branch.
-fn merge_branches(parent: &mut Scope, arms: Vec<Scope>, at: Span) -> Vec<Diagnostic> {
+///
+/// # Judging each arm before the join
+///
+/// The join is deliberately lossy: where two arms disagree on a currency's entry it goes to
+/// top, so the merged row is `Undecided` rather than an accusation. That is sound and it is
+/// the right default — a checker that accused a program it could not follow would teach its
+/// users to switch it off.
+///
+/// But it also **discards a real finding**. The E18 corpus made this concrete: a transaction
+/// whose `else` branch is short by fifty cents merges to `Undecided`, and the user is handed a
+/// runtime obligation rather than told that one path does not balance. The checker knew, and
+/// said nothing.
+///
+/// So each arm's row is checked *before* the join, and a decided non-zero residue in one arm
+/// is reported as a **may**-violation — true by construction, since some path is unbalanced,
+/// and never an accusation, since which path executes is not decidable here. This is the case
+/// `Verdict::MayViolate` was designed for and, until E18 measured it, the case it never saw.
+fn merge_branches(
+    parent: &mut Scope,
+    arms: Vec<Scope>,
+    at: Span,
+    branch_alarms: &mut usize,
+) -> Vec<Diagnostic> {
     let mut diags = Vec::new();
     if arms.is_empty() {
         return diags;
@@ -151,6 +189,28 @@ fn merge_branches(parent: &mut Scope, arms: Vec<Scope>, at: Span) -> Vec<Diagnos
                 parent.linear[i].uses = v.uses.clone();
             }
         }
+        // Judge this arm on its own, before the join loses the evidence. See the doc comment.
+        for v in rows::check_conservation(&arm.row) {
+            if let rows::Verdict::Violates { currency, residue, span } = v {
+                // Downgraded: the arithmetic is definitely wrong, and whether this arm runs is
+                // not something the checker can decide, so it is an alarm rather than a proof.
+                let alarm = rows::Verdict::MayViolate {
+                    currency,
+                    residue,
+                    span,
+                    why: rows::Provenance::Merged,
+                };
+                *branch_alarms += 1;
+                if let Some(d) = rows::diagnose(&alarm, 2) {
+                    diags.push(d.note(
+                        "this branch does not balance on its own. Whether it executes is not \
+                         decidable here, so this is a warning rather than an error — but the \
+                         residue is exact",
+                    ));
+                }
+            }
+        }
+
         merged_row = Some(match merged_row {
             None => arm.row,
             Some(acc) => acc.join(arm.row, at),
@@ -582,7 +642,7 @@ impl<'a> Cx<'a> {
                     // it would let a one-armed `if` look unconditional.
                     None => arms.push(sc.branch()),
                 }
-                for d in merge_branches(sc, arms, *span) {
+                for d in merge_branches(sc, arms, *span, &mut self.report.may_violate) {
                     self.d.push(d);
                 }
                 Shape::Opaque
@@ -607,7 +667,7 @@ impl<'a> Cx<'a> {
                     // an arm like any other.
                     None => branches.push(sc.branch()),
                 }
-                for d in merge_branches(sc, branches, *span) {
+                for d in merge_branches(sc, branches, *span, &mut self.report.may_violate) {
                     self.d.push(d);
                 }
                 Shape::Opaque
@@ -623,7 +683,7 @@ impl<'a> Cx<'a> {
                     self.expr(&a.body, &mut b);
                     branches.push(b);
                 }
-                for d in merge_branches(sc, branches, *span) {
+                for d in merge_branches(sc, branches, *span, &mut self.report.may_violate) {
                     self.d.push(d);
                 }
                 Shape::Opaque
@@ -911,15 +971,20 @@ impl<'a> Cx<'a> {
         for v in rows::check_conservation(row) {
             match &v {
                 Verdict::Conserves => self.report.conservation_proved += 1,
-                Verdict::Undecided { .. } => self.report.runtime_obligations += 1,
+                Verdict::Undecided { .. } => {
+                    self.report.runtime_obligations += 1;
+                    self.report.undecided += 1;
+                }
                 Verdict::MayViolate { currency, .. } => {
                     self.report.runtime_obligations += 1;
+                    self.report.may_violate += 1;
                     let scale = self.cat.currencies.get(currency).map(|c| c.scale).unwrap_or(2);
                     if let Some(d) = rows::diagnose(&v, scale) {
                         self.d.push(d);
                     }
                 }
                 Verdict::Violates { currency, .. } => {
+                    self.report.violates += 1;
                     let scale = self.cat.currencies.get(currency).map(|c| c.scale).unwrap_or(2);
                     if let Some(mut d) = rows::diagnose_with(&v, scale, prov) {
                         if let Some(name) = leg {

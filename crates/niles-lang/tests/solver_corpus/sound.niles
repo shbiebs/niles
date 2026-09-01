@@ -1,0 +1,566 @@
+// Forty realistic banking functions, none of which contains a conservation defect.
+//
+// The measurement E18 exists for: on code that *is* correct, how often can the checker say
+// so, and how often does it hand the obligation to the runtime? A soundness theorem whose
+// analysis is `Undecided` on ordinary code is true and useless, and until this corpus existed
+// nothing in the repository could tell the two apart.
+//
+// The functions are grouped by the shape of their arithmetic, because that is what the solver
+// sees. Within each group the banking product varies and the shape does not — which is the
+// point: it means a verdict can be attributed to a *construct* rather than to a domain.
+
+// ── group 1: straight-line two-leg transfers ────────────────────────────────────────
+//
+// The base case, and the one a checker must get right or nothing else matters.
+
+fn transfer(from: Id<Account>, to: Id<Account>, amount: Money<usd>)
+    -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("transfer", window: 30.days) {
+        let d = debit(from, amount)?;
+        let c = credit(to, amount);
+        post(d, c)
+    }
+}
+
+fn internal_book_transfer(from: Id<Account>, to: Id<Account>, amount: Money<usd>)
+    -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("book-transfer", window: 30.days) {
+        post(debit(from, amount)?, credit(to, amount))
+    }
+}
+
+fn payroll_credit(employer: Id<Account>, employee: Id<Account>, wage: Money<usd>)
+    -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("payroll", window: 30.days) {
+        post(debit(employer, wage)?, credit(employee, wage))
+    }
+}
+
+fn direct_debit_collection(payer: Id<Account>, biller: Id<Account>, amount: Money<usd>)
+    -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("dd-collect", window: 30.days) {
+        post(debit(payer, amount)?, credit(biller, amount))
+    }
+}
+
+fn refund(merchant: Id<Account>, customer: Id<Account>, amount: Money<usd>)
+    -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("refund", window: 30.days) {
+        post(debit(merchant, amount)?, credit(customer, amount))
+    }
+}
+
+fn jpy_transfer(from: Id<Account>, to: Id<Account>, amount: Money<jpy>)
+    -> Result<TxnId, TxnError>
+    ! { append, debit<jpy>, credit<jpy> }
+{
+    // Scale 0. A checker that assumed two decimals would be wrong by a hundred here, which
+    // is why the currency's scale is declared rather than inferred.
+    txn idem("jpy-transfer", window: 30.days) {
+        post(debit(from, amount)?, credit(to, amount))
+    }
+}
+
+// ── group 2: three-legged sets with a fee ───────────────────────────────────────────
+//
+// The everyday shape, and the first where the checker has to sum rather than match.
+
+fn transfer_with_fee(
+    from: Id<Account>,
+    to: Id<Account>,
+    fees: Id<Account>,
+) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("transfer-fee", window: 30.days) {
+        let d = debit(from, 100.00 usd)?;
+        let c = credit(to, 99.75 usd);
+        let f = credit(fees, 0.25 usd);
+        post(d, c, f)
+    }
+}
+
+fn wire_out_with_correspondent_fee(
+    customer: Id<Account>,
+    nostro: Id<Account>,
+    fees: Id<Account>,
+) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("wire-out", window: 30.days) {
+        post(
+            debit(customer, 5000.00 usd)?,
+            credit(nostro, 4985.00 usd),
+            credit(fees, 15.00 usd),
+        )
+    }
+}
+
+fn card_interchange(
+    acquirer: Id<Account>,
+    issuer: Id<Account>,
+    scheme: Id<Account>,
+) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("interchange", window: 30.days) {
+        post(
+            debit(acquirer, 100.00 usd)?,
+            credit(issuer, 98.20 usd),
+            credit(scheme, 1.80 usd),
+        )
+    }
+}
+
+fn atm_withdrawal_with_surcharge(
+    customer: Id<Account>,
+    vault: Id<Account>,
+    surcharge: Id<Account>,
+) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("atm", window: 30.days) {
+        post(
+            debit(customer, 203.00 usd)?,
+            credit(vault, 200.00 usd),
+            credit(surcharge, 3.00 usd),
+        )
+    }
+}
+
+fn cheque_deposit_with_float(
+    customer: Id<Account>,
+    clearing: Id<Account>,
+    provision: Id<Account>,
+) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("cheque", window: 30.days) {
+        post(
+            debit(clearing, 750.00 usd)?,
+            credit(customer, 745.00 usd),
+            credit(provision, 5.00 usd),
+        )
+    }
+}
+
+// ── group 3: many-legged allocations (M4) ───────────────────────────────────────────
+//
+// Written out rather than looped, deliberately: this is where the checker sums a set of
+// literals against one movement, and where a syndicated facility's residue would appear.
+
+fn syndicated_drawdown_three(
+    borrower: Id<Account>,
+    lender_a: Id<Account>,
+    lender_b: Id<Account>,
+    lender_c: Id<Account>,
+) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("draw-3", window: 30.days) {
+        post(
+            debit(lender_a, 100.00 usd)?,
+            debit(lender_b, 100.00 usd)?,
+            debit(lender_c, 100.00 usd)?,
+            credit(borrower, 300.00 usd),
+        )
+    }
+}
+
+fn syndicated_drawdown_uneven(
+    borrower: Id<Account>,
+    agent: Id<Account>,
+    lender_a: Id<Account>,
+    lender_b: Id<Account>,
+) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    // An awkward split that still sums exactly: 20/40/40 of 1,000,000.03.
+    txn idem("draw-uneven", window: 30.days) {
+        post(
+            debit(agent, 200000.01 usd)?,
+            debit(lender_a, 400000.01 usd)?,
+            debit(lender_b, 400000.01 usd)?,
+            credit(borrower, 1000000.03 usd),
+        )
+    }
+}
+
+fn syndicated_repayment(
+    borrower: Id<Account>,
+    lender_a: Id<Account>,
+    lender_b: Id<Account>,
+    lender_c: Id<Account>,
+) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("repay-3", window: 30.days) {
+        post(
+            debit(borrower, 300.00 usd)?,
+            credit(lender_a, 100.00 usd),
+            credit(lender_b, 100.00 usd),
+            credit(lender_c, 100.00 usd),
+        )
+    }
+}
+
+fn fund_distribution_four_holders(
+    fund: Id<Account>,
+    h1: Id<Account>,
+    h2: Id<Account>,
+    h3: Id<Account>,
+    h4: Id<Account>,
+) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("distribution", window: 30.days) {
+        post(
+            debit(fund, 1000.00 usd)?,
+            credit(h1, 250.00 usd),
+            credit(h2, 250.00 usd),
+            credit(h3, 250.00 usd),
+            credit(h4, 250.00 usd),
+        )
+    }
+}
+
+fn waterfall_application(
+    payer: Id<Account>,
+    fees: Id<Account>,
+    interest: Id<Account>,
+    principal: Id<Account>,
+) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    // Fees, then interest, then principal — the ordering almost every credit agreement uses,
+    // and the arithmetic a checker must sum across four legs.
+    txn idem("waterfall", window: 30.days) {
+        post(
+            debit(payer, 1000.00 usd)?,
+            credit(fees, 50.00 usd),
+            credit(interest, 200.00 usd),
+            credit(principal, 750.00 usd),
+        )
+    }
+}
+
+// ── group 4: symbolic amounts ───────────────────────────────────────────────────────
+//
+// The amount is a parameter rather than a literal, so the checker must cancel symbols. This
+// is the group that separates a real analysis from constant folding.
+
+fn transfer_symbolic(from: Id<Account>, to: Id<Account>, amount: Money<usd>)
+    -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("sym-transfer", window: 30.days) {
+        let d = debit(from, amount)?;
+        let c = credit(to, amount);
+        post(d, c)
+    }
+}
+
+fn accrue_interest(loan: Id<Account>, income: Id<Account>, amount: Money<usd>)
+    -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("accrual", window: 1.days) {
+        post(debit(income, amount)?, credit(loan, amount))
+    }
+}
+
+fn fee_charge(customer: Id<Account>, income: Id<Account>, fee: Money<usd>)
+    -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("fee", window: 30.days) {
+        post(debit(customer, fee)?, credit(income, fee))
+    }
+}
+
+fn provision_release(provision: Id<Account>, income: Id<Account>, amount: Money<usd>)
+    -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("provision-release", window: 30.days) {
+        post(debit(provision, amount)?, credit(income, amount))
+    }
+}
+
+fn writeoff(loan: Id<Account>, expense: Id<Account>, amount: Money<usd>)
+    -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("writeoff", window: 30.days) {
+        post(debit(expense, amount)?, credit(loan, amount))
+    }
+}
+
+fn margin_call(client: Id<Account>, margin: Id<Account>, amount: Money<usd>)
+    -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("margin", window: 30.days) {
+        post(debit(client, amount)?, credit(margin, amount))
+    }
+}
+
+fn collateral_return(margin: Id<Account>, client: Id<Account>, amount: Money<usd>)
+    -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("collateral-return", window: 30.days) {
+        post(debit(margin, amount)?, credit(client, amount))
+    }
+}
+
+fn dividend_payment(issuer: Id<Account>, holder: Id<Account>, amount: Money<usd>)
+    -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("dividend", window: 30.days) {
+        post(debit(issuer, amount)?, credit(holder, amount))
+    }
+}
+
+fn coupon_payment(issuer: Id<Account>, holder: Id<Account>, amount: Money<usd>)
+    -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("coupon", window: 30.days) {
+        post(debit(issuer, amount)?, credit(holder, amount))
+    }
+}
+
+// ── group 5: multi-currency (FX) ────────────────────────────────────────────────────
+//
+// Two conserved legs, one epoch, and a rate that relates them without balancing them. The
+// group where a checker that summed across currencies would be wrong and look right.
+
+fn fx_settle(a: Id<Account>, b: Id<Account>, r: Rate)
+    -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd>, debit<eur>, credit<eur> }
+{
+    txn idem("fx-1") {
+        fx {
+            leg usd_side: post(debit(a, 1000.00 usd)?, credit(b, 1000.00 usd)),
+            leg eur_side: post(debit(b, 920.00 eur)?, credit(a, 920.00 eur)),
+            rate: r,
+        }
+    }
+}
+
+fn fx_settle_gbp(a: Id<Account>, b: Id<Account>, r: Rate)
+    -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd>, debit<gbp>, credit<gbp> }
+{
+    txn idem("fx-2") {
+        fx {
+            leg usd_side: post(debit(a, 2500.00 usd)?, credit(b, 2500.00 usd)),
+            leg gbp_side: post(debit(b, 1975.00 gbp)?, credit(a, 1975.00 gbp)),
+            rate: r,
+        }
+    }
+}
+
+fn fx_settle_jpy_scale_zero(a: Id<Account>, b: Id<Account>, r: Rate)
+    -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd>, debit<jpy>, credit<jpy> }
+{
+    // A scale-0 currency against a scale-2 one. The case where an assumed scale multiplies
+    // by a hundred and the transaction still looks balanced within each leg.
+    txn idem("fx-jpy") {
+        fx {
+            leg usd_side: post(debit(a, 100.00 usd)?, credit(b, 100.00 usd)),
+            leg jpy_side: post(debit(b, 15000 jpy)?, credit(a, 15000 jpy)),
+            rate: r,
+        }
+    }
+}
+
+fn fx_swap_near_leg(a: Id<Account>, b: Id<Account>, r: Rate)
+    -> Result<TxnId, TxnError>
+    ! { append, debit<eur>, credit<eur>, debit<gbp>, credit<gbp> }
+{
+    txn idem("fx-swap-near") {
+        fx {
+            leg eur_side: post(debit(a, 500.00 eur)?, credit(b, 500.00 eur)),
+            leg gbp_side: post(debit(b, 430.00 gbp)?, credit(a, 430.00 gbp)),
+            rate: r,
+        }
+    }
+}
+
+fn fx_with_spread(
+    client: Id<Account>,
+    desk: Id<Account>,
+    spread: Id<Account>,
+    r: Rate,
+) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd>, debit<eur>, credit<eur> }
+{
+    // The spread is a third leg *within* the USD side, which is where it belongs: taking it
+    // out of the EUR side would make one leg conserve and the other not.
+    txn idem("fx-spread") {
+        fx {
+            leg usd_side: post(
+                debit(client, 1000.00 usd)?,
+                credit(desk, 998.00 usd),
+                credit(spread, 2.00 usd),
+            ),
+            leg eur_side: post(debit(desk, 920.00 eur)?, credit(client, 920.00 eur)),
+            rate: r,
+        }
+    }
+}
+
+// ── group 6: holds (M3) ─────────────────────────────────────────────────────────────
+//
+// A hold does not conserve — it is a one-sided encumbrance — so what the checker is asked
+// about here is linearity rather than arithmetic, and the conservation row should be empty.
+
+fn card_authorization(acct: Id<Account>, amount: Money<usd>)
+    -> Result<TxnId, TxnError>
+    ! { append, hold<usd> }
+{
+    let h = hold(acct, amount, expires: 7.days)?;
+    resolve h post 43.17 usd
+}
+
+fn authorisation_voided(acct: Id<Account>, amount: Money<usd>)
+    -> Result<TxnId, TxnError>
+    ! { append, hold<usd> }
+{
+    let h = hold(acct, amount, expires: 7.days)?;
+    resolve h void
+}
+
+fn authorisation_expired(acct: Id<Account>, amount: Money<usd>)
+    -> Result<TxnId, TxnError>
+    ! { append, hold<usd> }
+{
+    let h = hold(acct, amount, expires: 1.days)?;
+    resolve h expire
+}
+
+fn loan_commitment_hold(bank: Id<Account>, amount: Money<usd>)
+    -> Result<TxnId, TxnError>
+    ! { append, hold<usd> }
+{
+    let h = hold(bank, amount, expires: 365.days)?;
+    resolve h post 500000.00 usd
+}
+
+fn lc_limit_hold(applicant: Id<Account>, amount: Money<usd>)
+    -> Result<TxnId, TxnError>
+    ! { append, hold<usd> }
+{
+    let h = hold(applicant, amount, expires: 214.days)?;
+    resolve h void
+}
+
+// ── group 7: guarded paths ──────────────────────────────────────────────────────────
+//
+// A conditional around the posting. This is the group the review predicted would be hardest:
+// a limit check is an affine guard, and deciding whether an affine relation holds at a
+// program point is undecidable (Müller-Olm and Seidl reduce PCP to it). If the checker is
+// `Undecided` here, the soundness theorem is true and applies to code nobody writes.
+
+fn transfer_if_sufficient(
+    from: Id<Account>,
+    to: Id<Account>,
+    amount: Money<usd>,
+    available: Money<usd>,
+) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("guarded-transfer", window: 30.days) {
+        if amount <= available {
+            post(debit(from, amount)?, credit(to, amount))
+        } else {
+            abort(TxnError::Insufficient)
+        }
+    }
+}
+
+fn revolver_drawdown_within_limit(
+    borrower: Id<Account>,
+    bank: Id<Account>,
+    amount: Money<usd>,
+    undrawn: Money<usd>,
+) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("revolver-draw", window: 30.days) {
+        if amount <= undrawn {
+            post(debit(bank, amount)?, credit(borrower, amount))
+        } else {
+            abort(TxnError::Insufficient)
+        }
+    }
+}
+
+fn fee_waived_for_premium(
+    customer: Id<Account>,
+    income: Id<Account>,
+    fee: Money<usd>,
+    premium: Bool,
+) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    // Both branches conserve, and they conserve *differently*: one posts a fee and the other
+    // posts nothing. A checker that merged the branches without noticing they agree on zero
+    // would report a residue that does not exist.
+    txn idem("fee-waiver", window: 30.days) {
+        if premium {
+            post(debit(customer, 0.00 usd)?, credit(income, 0.00 usd))
+        } else {
+            post(debit(customer, fee)?, credit(income, fee))
+        }
+    }
+}
+
+fn overdraft_permitted_or_refused(
+    from: Id<Account>,
+    to: Id<Account>,
+    amount: Money<usd>,
+    balance: Money<usd>,
+    limit: Money<usd>,
+) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("overdraft", window: 30.days) {
+        if balance + limit >= amount {
+            post(debit(from, amount)?, credit(to, amount))
+        } else {
+            abort(TxnError::Insufficient)
+        }
+    }
+}
+
+fn settlement_only_on_business_day(
+    from: Id<Account>,
+    to: Id<Account>,
+    amount: Money<usd>,
+    is_business_day: Bool,
+) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("settle-bd", window: 30.days) {
+        if is_business_day {
+            post(debit(from, amount)?, credit(to, amount))
+        } else {
+            abort(TxnError::Insufficient)
+        }
+    }
+}

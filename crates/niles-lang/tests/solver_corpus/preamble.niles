@@ -1,0 +1,55 @@
+// The schema every corpus function is checked against.
+//
+// Deliberately the shape of `gbs/niles/gbs.niles` rather than a minimal one: the question
+// E18 asks is how the solver behaves on *realistic* banking code, and a schema with one
+// currency and one relation would make the answer flattering and useless.
+
+schema corpus {
+    currency usd { scale: 2 }
+    currency eur { scale: 2 }
+    currency gbp { scale: 2 }
+    currency jpy { scale: 0 }
+
+    table accounts {
+        id: Id<Account> primary key,
+        owner: Id<Party>,
+        cur: Currency,
+        class: Text,
+        nature: Text,
+        opened_at: Instant,
+    }
+
+    ledger postings {
+        txn: TxnId,
+        acct: Id<Account>,
+        cur: Currency,
+        amt: Money,
+        value_date: Date,
+        idem: IdemKey window 30.days,
+        conserve per (txn, cur);
+        retain forever;
+        bitemporal;
+    }
+
+    base holds {
+        id: HoldId,
+        acct: Id<Account>,
+        cur: Currency,
+        amount: Money,
+        expires: Instant,
+        idem: IdemKey window 7.days,
+        retain forever;
+    }
+
+    base fixings {
+        index_name: Text,
+        value: Int,
+        scale: Int,
+        observed_on: Date,
+        retain forever;
+        bitemporal;
+    }
+
+    index ix_postings on postings (acct) anchor;
+    index ix_holds on holds (acct) anchor;
+}

@@ -114,7 +114,25 @@ The burden has three parts, and they are conjunctive.
 
 **Status: (i) discharged, (ii) discharged, (iii) partially discharged.**
 
-On (i): the differential-defect experiment (§6.10.3, E14) writes twelve defect classes twice — once against a good-faith PostgreSQL 16 schema using the strongest tool PostgreSQL offers for each job, once in Niles — and records the *stage* at which each is caught. PostgreSQL catches three at run time, none at compile time, and never catches nine. Niles catches eleven at compile time and warns on the twelfth. The nine PostgreSQL never catches are not oversights in the schema; they are properties a schema cannot express, because a `CHECK` constraint sees one row and a trigger sees one transaction, while conservation under branching is a property of a *program*.
+On (i): the differential-defect experiment (§6.10.3, E14) writes twelve defect classes twice — once against a good-faith PostgreSQL 16 schema using the strongest tool PostgreSQL offers for each job, once in Niles — and records the *stage* at which each is caught. PostgreSQL catches three at run time, none at compile time, and never catches nine. Niles catches eleven at compile time and warns on the twelfth.
+
+**And a second experiment answers the objection that reading raises.** A checker with a
+`Undecided` verdict can catch eleven of twelve *deliberate* defects and still be undecided on
+ordinary code, in which case the soundness theorem is true and applies to a fragment nobody
+writes. E18 (§9.6) measures it: forty correct banking functions — transfers, fee sets,
+syndicated allocations, symbolic amounts, multi-currency legs, holds, and guarded paths — run
+one at a time through the front end. **Nothing is undecided.** Thirty-five are proved and five
+carry no conservation obligation at all, being holds.
+
+The guarded group is the surprise, and it sharpens the claim rather than merely supporting it.
+The undecidability result behind the `Undecided` verdict — Müller-Olm and Seidl's reduction
+from Post's Correspondence Problem — is about deciding whether an *affine relation holds at a
+program point*, and a limit check is exactly such a relation, so the expectation was that
+guarded transfers would be undecided. They are proved, because **conservation asks a different
+question**: whether the net is zero on every path, not whether the guard is true. A guard that
+gates *whether* a balanced transaction happens does not threaten conservation at all. The
+fourth verdict remains forced in general — a guard that made the *amounts* depend on an affine
+relation would reach it — and it is not what ordinary banking code looks like. The nine PostgreSQL never catches are not oversights in the schema; they are properties a schema cannot express, because a `CHECK` constraint sees one row and a trigger sees one transaction, while conservation under branching is a property of a *program*.
 
 On (ii): D10 of that corpus is the specific evidence. Dropping one trigger and inserting one row leaves the ledger total at `−500.0000` with nothing in the system able to say so. The APSN pattern of §1.1 is the same failure at institutional scale, and it is named in supervisory guidance rather than inferred.
 

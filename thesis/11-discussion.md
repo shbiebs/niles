@@ -124,7 +124,7 @@ The burden has three parts, and they are conjunctive.
 
 **Status: (i) discharged, (ii) discharged, (iii) partially discharged.**
 
-On (i): the differential-defect experiment (§6.10.3, E14) writes twelve defect classes twice — once against a good-faith PostgreSQL 16 schema using the strongest tool PostgreSQL offers for each job, once in Niles — and records the *stage* at which each is caught. PostgreSQL catches three at run time, none at compile time, and never catches nine. Niles catches eleven at compile time and warns on the twelfth.
+On (i): the differential-defect experiment (§6.10.3, E14) writes thirteen defect classes twice — once against a good-faith PostgreSQL 16 schema using the strongest tool PostgreSQL offers for each job, once in Niles — and records the *stage* at which each is caught. PostgreSQL catches three at run time, none at compile time, and never catches nine. Niles catches eleven at compile time, warns on one, and **accepts one in silence** — the wall-clock predicate, where an unchecked helper in a view is a gap in the checker rather than a defect with no spelling.
 
 **And a second experiment answers the objection that reading raises.** A checker with a
 `Undecided` verdict can catch eleven of twelve *deliberate* defects and still be undecided on

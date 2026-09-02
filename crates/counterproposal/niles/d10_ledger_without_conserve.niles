@@ -1,0 +1,16 @@
+// D10 — the SQL side drops the conservation trigger. There is no Niles spelling for
+// dropping a rule at run time, so the corresponding defect is declaring a ledger *without*
+// the rule and then posting into it: the same end state, reached at the only moment Niles
+// lets it be reached.
+schema bank {
+    currency usd { scale: 2 }
+    ledger postings { txn: TxnId, acct: Id<A>, cur: Currency, amt: Money,
+        idem: IdemKey window 1.days,
+        retain forever; }
+    index ix on postings (acct, cur) anchor;
+}
+fn drain(a: Id<A>, b: Id<A>) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("drain", window: 1.days) { post(debit(a, 100.00 usd)?, credit(b, 1.00 usd)) }
+}

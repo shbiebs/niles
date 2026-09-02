@@ -50,7 +50,7 @@ Transactions spanning ledger groups — an FX pair across currency-partitioned g
 
 Conservation extends because each leg balances per currency locally (Definition 3.7), so no interleaving of failures can strand value, and an aborted reservation leaves no postings.
 
-**Status: built as a protocol, tested in simulation, never run over a network** (`nilestream-consensus::cross_shard`, 12 tests). Four properties are worth stating, because each answers an objection the classical protocol attracts.
+**Status: built as a protocol, tested in a single-process simulator, never run over a network** (`nilestream-consensus::cross_shard`, 12 tests; the crate has 23 in total). Four properties are worth stating, because each answers an objection the classical protocol attracts.
 
 *The blocking objection dissolves.* Two-phase commit's standard indictment is that a coordinator failing between prepare and decide leaves participants holding locks with no one to ask. Here the coordinator **is a ledger group**: the decision is persisted through quorum before it is sent, and the implementation refuses to send a decision that is not yet durable. A successor coordinator therefore *reads* the decision rather than re-deciding it, and the window in which the classical protocol blocks does not exist.
 

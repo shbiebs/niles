@@ -33,8 +33,8 @@ instrument = "no long-horizon experiment exists: there is no live-generating sou
 id = "H-F2"
 claim = "A relation is the integral of its changelog, and a changelog the derivative of a relation."
 status = "proved"
-where = "§3.16, and a property test asserting Z-set equality at every epoch"
-instrument = ""
+where = "§3.16, and E2: a scanning fold of the base against the engine's per-epoch incremental fold, at every epoch"
+instrument = "E2 was a tautology until this cycle -- it integrated a changelog, differentiated the result and integrated again, which is a telescoping sum compared with its own parts inside one function, and no input could have made it report a mismatch. The two sides now come from `Ledger::reconstruct_balance_scan` and `PartialView::apply_epoch`, and the experiment runs a sabotaged control that withholds one epoch's deltas and asserts the comparison notices."
 
 [[claim]]
 id = "H-F3"

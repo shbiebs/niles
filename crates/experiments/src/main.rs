@@ -25,7 +25,8 @@ use std::fs;
 
 use proto_engine::workload::Lcg;
 use proto_engine::{
-    CostModel, EvictionPolicy, Ledger, Minor, PartialView, Posting, Reject, Row, ViewMode, Zipf,
+    CostModel, EvictionPolicy, Ledger, Minor, PartialView, Posting, Reject, Row, Slot, ViewMode,
+    Zipf,
 };
 
 const USD: u32 = 840;
@@ -356,75 +357,109 @@ fn e1_tamper() -> bool {
 }
 
 // ---------------------------------------------------------------------------------------
-// E2 — Stream-relation duality: integrate a changelog, differentiate the state, compare as
-// canonical Z-sets at every epoch, in both directions.
+// E2 — Stream-relation duality (H-F2), between two code paths rather than within one.
+//
+// **What this experiment used to be, and why it could not fail.** It built a state sequence
+// by integrating a changelog, differentiated that sequence, integrated the result, and
+// compared. The second integral is a telescoping sum of the first's differences, so the
+// comparison is an arithmetic identity on two arrays in one function: no input could have
+// made it report a mismatch, and "1,000 epochs, 0 mismatches" measured the associativity of
+// addition. A tautology in the shape of a result is worse than no result, because it
+// occupies the slot where a result would go.
+//
+// **What it is now.** The two sides come from two independent implementations, which is the
+// only arrangement in which a mismatch is possible:
+//
+//   * **I — the integral of the changelog.** `Ledger::reconstruct_balance_scan` folds every
+//     row of the prefix at the anchor. It knows nothing about views and holds no state.
+//   * **D then I — the derivative of the relation, re-integrated.** A `PartialView` in
+//     `Full` mode is advanced one epoch at a time by `apply_epoch`, which folds *that
+//     epoch's deltas alone* into the resident entry. Its value at epoch e is the running
+//     integral of the per-epoch derivatives the engine actually computes.
+//
+// Agreement at every epoch, for every key, is H-F2 as a property of this system: a relation
+// is the integral of its changelog and the changelog the derivative of the relation. The
+// negative control below deliberately drops one epoch's deltas and asserts the comparison
+// notices, so the test's ability to fail is itself tested.
 // ---------------------------------------------------------------------------------------
 
 fn e2_duality(seeds: &[u64]) -> (u64, u64) {
     let mut epochs_checked = 0u64;
     let mut mismatches = 0u64;
     for &seed in seeds {
-        let mut rng = Lcg::new(seed);
-        let n_keys = 50usize;
-        let n_epochs = 200usize;
+        let (c, m) = e2_one_seed(seed, false);
+        epochs_checked += c;
+        mismatches += m;
+    }
+    (epochs_checked, mismatches)
+}
 
-        // A changelog: per epoch, a Z-set of (key -> signed weight).
-        let mut deltas: Vec<Vec<(usize, i64)>> = Vec::new();
-        for _ in 0..n_epochs {
-            let m = rng.below(8) + 1;
-            let mut d = Vec::new();
-            for _ in 0..m {
-                let k = rng.below(n_keys);
-                let w = (rng.below(21) as i64) - 10; // signed: deletions are negative
-                if w != 0 {
-                    d.push((k, w));
-                }
-            }
-            deltas.push(d);
+/// **The control: the comparison can fail.**
+///
+/// Reported alongside the result, because "0 mismatches" from a comparison that cannot
+/// produce one is what this experiment used to be. One epoch's deltas are withheld from the
+/// incremental path and the scan is expected to disagree from that epoch onward.
+fn e2_control(seed: u64) -> (u64, u64) {
+    e2_one_seed(seed, true)
+}
+
+/// One seed of E2. `sabotage` drops the deltas of one epoch from the incremental path,
+/// which must produce mismatches — the control for the whole experiment.
+fn e2_one_seed(seed: u64, sabotage: bool) -> (u64, u64) {
+    let n_accounts = 50usize;
+    let n_epochs = 200usize;
+
+    let mut ledger = Ledger::new();
+    fund(&mut ledger, n_accounts as u64, 1_000);
+    // `Full` mode: everything ever touched stays resident, so the incremental path is a
+    // pure running integral of per-epoch derivatives with no reconstruction to hide behind.
+    let mut view = PartialView::new(ViewMode::Full, usize::MAX, EvictionPolicy::Lru);
+    // One read per key, to materialize it. `apply_epoch` folds deltas into *resident*
+    // entries and creates none — which is the partial-state discipline, and which means a
+    // view nobody has read is a view of nothing. The warm-up establishes each key's
+    // integral at the funding head; everything after it is derivative-folding.
+    let warm = ledger.head();
+    for a in 0..n_accounts as u64 {
+        view.read(&mut ledger, a, USD, warm, 0.0, 0.0);
+    }
+
+    let mut rng = Lcg::new(seed);
+    let mut txn = 0u64;
+    let mut epochs_checked = 0u64;
+    let mut mismatches = 0u64;
+    let sabotage_at = n_epochs / 2;
+
+    for i in 0..n_epochs {
+        let from = rng.below(n_accounts) as u64;
+        let mut to = rng.below(n_accounts) as u64;
+        if to == from {
+            to = (to + 1) % n_accounts as u64;
+        }
+        txn += 1;
+        if !transfer(&mut ledger, &format!("d-{seed}-{i}"), txn, from, to, 10) {
+            continue;
+        }
+        let e = ledger.head();
+        // D then I: fold this epoch's deltas, and this epoch's only.
+        if !(sabotage && i == sabotage_at) {
+            view.apply_epoch(&ledger, e);
         }
 
-        // Path A: integrate the changelog (I).
-        let mut state = vec![0i64; n_keys];
-        let mut states: Vec<Vec<i64>> = Vec::new();
-        for d in &deltas {
-            for (k, w) in d {
-                state[*k] += *w;
-            }
-            states.push(state.clone());
-        }
-
-        // Path B: differentiate the state sequence (D), then integrate again (I of D).
-        let mut rebuilt = vec![0i64; n_keys];
-        let mut prev = vec![0i64; n_keys];
-        for (e, s) in states.iter().enumerate() {
-            // D: the derivative at this epoch.
-            let mut d = Vec::new();
-            for k in 0..n_keys {
-                let w = s[k] - prev[k];
-                if w != 0 {
-                    d.push((k, w));
-                }
-            }
-            // I: integrate the derivative back.
-            for (k, w) in &d {
-                rebuilt[*k] += *w;
-            }
-            // Canonical Z-set comparison at every epoch: equal supports and weights.
-            let a: Vec<(usize, i64)> = (0..n_keys)
-                .filter(|k| s[*k] != 0)
-                .map(|k| (k, s[k]))
-                .collect();
-            let b: Vec<(usize, i64)> = (0..n_keys)
-                .filter(|k| rebuilt[*k] != 0)
-                .map(|k| (k, rebuilt[k]))
-                .collect();
-            if a != b {
+        // I: the fold of the whole prefix, computed by a scan that shares no state with the
+        // view. Every account is compared, not only the two this epoch touched, so a view
+        // that corrupted an untouched key would be caught here too.
+        for a in 0..n_accounts as u64 {
+            let folded = ledger.reconstruct_balance_scan(a, USD, e);
+            let incremental = match view.slot(a, USD) {
+                Slot::Present(v, _) => v,
+                // Nothing resident for a key means the integral of no deltas, which is 0.
+                _ => 0,
+            };
+            if folded != incremental {
                 mismatches += 1;
             }
-            epochs_checked += 1;
-            prev = s.clone();
-            let _ = e;
         }
+        epochs_checked += 1;
     }
     (epochs_checked, mismatches)
 }
@@ -1347,12 +1382,25 @@ fn main() {
     }
 
     if want("e2") {
-        println!("\n[E2] Stream-relation duality (I and D round-trip, canonical Z-set equality)");
+        println!("\n[E2] Stream-relation duality: a scanning fold against an incremental one");
         let (checked, mismatch) = e2_duality(&seeds);
+        let (control_checked, control_mismatch) = e2_control(seeds[0]);
         println!("  epochs compared: {checked}   mismatches: {mismatch}");
+        println!(
+            "  control (one epoch's deltas withheld): {control_checked} epochs, \
+             {control_mismatch} mismatches — must be non-zero"
+        );
+        assert!(
+            control_mismatch > 0,
+            "the control found no mismatch, so the comparison cannot fail and the \
+             experiment measures nothing"
+        );
         out(
             "e2_duality.csv",
-            &format!("epochs_compared,mismatches\n{checked},{mismatch}\n"),
+            &format!(
+                "epochs_compared,mismatches,control_epochs,control_mismatches\n\
+                 {checked},{mismatch},{control_checked},{control_mismatch}\n"
+            ),
         );
     }
 

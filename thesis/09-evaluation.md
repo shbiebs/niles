@@ -275,21 +275,37 @@ This is the most consequential empirical result in the thesis, because it conver
 
 Three policies compared on identical workloads (10,000 accounts, *s* = 0.9, budget 5%, 40,000 operations), including the randomized policy that the original partial-state system used, so the comparison has a real baseline and not merely the system against itself. `service_time` is the modelled reconstruction service time; the aggregate-delay column charges each reconstruction for the requests that queue behind it.
 
-| service_time | Policy | Misses | Base rows read | Aggregate delay |
+<!-- BEGIN:table-9.8 results/e6_policies.csv#policytable -->
+
+*Generated from `results/e6_policies.csv`. Do not edit by hand.*
+
+| service_time | policy | misses (median) | base rows read (median) | aggregate delay (median) |
 |---|---|---|---|---|
-| 0 | random | 21,170 | 92,144 | — |
+| 0 | random | 21,149 | 88,764 | — |
 | 0 | LRU | 19,583 | 41,002 | — |
-| 0 | cost-aware | **18,050** | **28,123** | — |
-| 1 | random | 21,188 | 93,255 | 211,880 |
+| 0 | cost-aware | 18,531 | 29,272 | — |
+| 1 | random | 21,149 | 88,764 | 211,490 |
 | 1 | LRU | 19,583 | 41,002 | 195,830 |
-| 1 | cost-aware | 18,749 | 33,108 | **187,490** |
-| 4 | random | 21,200 | 91,953 | 3,137,600 |
+| 1 | cost-aware | 19,004 | 33,806 | 190,040 |
+| 4 | random | 21,149 | 88,764 | 3,130,052 |
 | 4 | LRU | 19,583 | 41,002 | 2,898,284 |
-| 4 | cost-aware | 18,784 | 34,260 | **2,780,032** |
+| 4 | cost-aware | 19,041 | 34,823 | 2,818,068 |
 
-*Table 9.8 — Medians over five seeds.*
+<!-- END:table-9.8 -->
 
-Three observations, including one that qualifies the thesis's own claim. First, the gap between randomized eviction and LRU is large — 2.2× in base rows read — which is a measured argument that replacing randomized eviction is worth doing at all. Second, the cost-aware policy improves on LRU substantially on reconstruction work (**31% fewer base rows** at service_time 0) and on misses. Third, and against expectation, its advantage on *aggregate delay* is modest: 4.1% better than LRU at service_time 4. The delayed-hit weighting changes which entries it keeps, and that trade costs it some of its base-row advantage (28,123 → 34,260). The honest conclusion is that cost-awareness is clearly worth it for reconstruction work and only marginally so for latency in this configuration, and the thesis should not claim more.
+*Table 9.8 — Medians over five seeds, generated from `results/e6_policies.csv`.*
+
+Three observations, including one that qualifies the thesis's own claim. First, the gap between randomized eviction and LRU is large — 2.2× in base rows read — which is a measured argument that replacing randomized eviction is worth doing at all. Second, the cost-aware policy improves on LRU substantially on reconstruction work, and on misses. Third, and against expectation, its advantage on *aggregate delay* is modest. Both figures are generated from the file rather than typed beside it, because six cells of the table above had drifted from the run they named and the two comparisons in this sentence had drifted with them — 31% and 4.1% against a file that says:
+
+<!-- BEGIN:policy-deltas results/e6_policies.csv#policydeltas -->
+
+*Generated from `results/e6_policies.csv`. Do not edit by hand.*
+
+Cost-aware against LRU, from `results/e6_policies.csv`: **28.6% fewer base rows** at service_time 0 (41,002 → 29,272), and **2.8% less aggregate delay** at service_time 4 (2,898,284 → 2,818,068).
+
+<!-- END:policy-deltas -->
+
+The delayed-hit weighting changes which entries it keeps, and that trade costs it some of its base-row advantage. The honest conclusion is that cost-awareness is clearly worth it for reconstruction work and only marginally so for latency in this configuration, and the thesis should not claim more.
 
 ### 9.4.3 What each consistency rung costs — a measurement that was measuring its own defect
 
@@ -452,8 +468,9 @@ Constructive tests, unchanged: the banking portfolio implemented in the domain l
 | H-S1 "partiality pays on skew" | **Refuted as stated**; restated as a memory-price condition with an interior optimum (§9.3.4) |
 | C3 cost is workload- not history-shaped | **Refuted as stated; restored under checkpointing** with constant C/2 + 1 (§9.4.1) |
 | Consistency rung cost | **Refuted as stated; re-measured.** The reported 66× in deltas applied was the count of deltas a defective batching loop discarded. Corrected: ~66× in maintenance *passes*, 1.67× in deltas, and **2.5× more base rows read** on the lax rung — the tax is not absent from the read path (§9.4.3, Appendix J.16) |
-| Cost-aware eviction beats LRU | **Partly corroborated** — 31% on reconstruction work, 4% on aggregate delay (§9.4.2) |
+| Cost-aware eviction beats LRU | **Partly corroborated** — 28.6% on reconstruction work, 2.8% on aggregate delay (§9.4.2, generated from `results/e6_policies.csv`) |
 | Hot-account contention | **Not measured**; instrument cannot (§9.4.4, §9.9) |
+| ℓ₄ (serializable) price | **Not measured.** ℓ₄ coincides with ℓ₃ on read-only traces (§3.8), and every workload in this chapter is read-only at the read path, so its O(contended keys) term is never exercised |
 | Strict serializability | **Not tested**; conservation is strictly weaker (§9.2.2) |
 | SQL-completeness by conformance suite | **Withdrawn**; no such suite exists (§9.7) |
 | Everything in §9.5 | *to be measured* |

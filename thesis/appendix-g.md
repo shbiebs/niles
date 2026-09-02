@@ -46,7 +46,11 @@ Live intervals from SSA liveness; intervals sorted by start; an active set order
 
 ## G.8 Consensus Wiring and Cross-Shard Commit
 
-Each ledger group is a consensus group; sequencing follows leadership; sealing requires quorum-durable segments. Cross-shard transactions use the epoch-aligned protocol of Section 8.6, with reservation and outcome records written as ordinary base rows — so the protocol's own history is audited by the same chain it commits to, which is a small but pleasing consequence of making the log the product. The recovery matrix (coordinator loss, participant loss, partition during prepare) is tabulated in the artifact with a test per cell.
+**What exists is a single-process, deterministic simulator**: `nilestream-consensus`, 23 tests, no sockets, no clock, with message loss, reordering, partition and restart as scheduling decisions the simulator makes. The cross-shard commit protocol has never been run over a network, and no sentence here should be read as saying otherwise.
+
+In the design, each ledger group is a consensus group; sequencing follows leadership; sealing requires quorum-durable segments. Cross-shard transactions use the epoch-aligned protocol of Section 8.6, with reservation and outcome records written as ordinary base rows — so the protocol's own history is audited by the same chain it commits to, which is a small but pleasing consequence of making the log the product. In the simulator, the recovery cases (coordinator loss, participant loss, partition during prepare) each have a test; a *tabulated* recovery matrix with a test per cell is not built.
+
+Two of those tests earned their place this cycle by failing a mutation they should have failed all along, and the reason is worth recording because it generalizes. Every scenario used three or five nodes — and for an odd cluster the strict-majority rule `replicas * 2 > total` and the off-by-one `>=` accept exactly the same sets, so weakening the quorum rule passed the entire suite. Separately, the previous-term commit test let its entry commit *before* advancing the term, so deleting Raft's current-term restriction changed nothing it observed. An even-sized cluster and an uncommitted entry are what make those two rules testable, and both cases are now present.
 
 ## G.9 Benchmark Harness and Seeds
 

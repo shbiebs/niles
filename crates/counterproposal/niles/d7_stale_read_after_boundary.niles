@@ -1,0 +1,20 @@
+// D7 — the SQL side materializes the wall-clock view and then reads it after the month
+// rolls over, getting last month's answer from a view nothing invalidated. The Niles
+// spelling of the same defect is a *declared* one: a decision function that demands a
+// ledger-consistent read is composed with a view served at bounded staleness, so the answer
+// it acts on may be from before the boundary.
+//
+// The wall-clock predicate itself is D6 and is refused there. This case is what remains of
+// D7 once that is gone: staleness crossing a boundary the reader believes it is on the
+// right side of.
+schema bank {
+    currency usd { scale: 2 }
+    ledger postings { txn: TxnId, acct: Id<A>, cur: Currency, amt: Money,
+        idem: IdemKey window 1.days, conserve per (txn, cur); retain forever; }
+    index ix on postings (acct, cur) anchor;
+    view month_to_date = postings.group_by(|p| p.acct).sum(|p| p.amt)
+        serve { consistency: bounded(epochs: 64, millis: 60000), materialize: full };
+}
+fn close_the_month(a: Id<A>) -> Money<usd> ! { read@ledger_consistent } {
+    month_to_date.get(a)
+}

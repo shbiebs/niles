@@ -177,6 +177,72 @@ def reserved_list(text: str) -> str:
     return f"{count}\n\n```\n{words}\n```"
 
 
+def policy_table(text: str) -> str:
+    """Table 9.8, computed from `results/e6_policies.csv`.
+
+    The table was typed beside the run that produced it and drifted in six cells: the
+    medians it printed for `random` and `cost_aware` were not the medians of the file, and
+    the prose read 31% and 4.1% where the file says 28.6% and 2.8%. Computing it here means
+    the number in the thesis is the number in the CSV or the build fails.
+
+    Median of an even-length column is not defined here because every column has five seeds;
+    if that ever changes, the lower of the two middle values is taken, which is stated so
+    that a reader can reproduce the arithmetic.
+    """
+    rows = [ln.split(",") for ln in text.strip().splitlines()[1:] if ln.strip()]
+    by: dict[tuple[str, str], list[tuple[float, float, float]]] = {}
+    for r in rows:
+        policy, st = r[0], r[1]
+        by.setdefault((st, policy), []).append((float(r[3]), float(r[4]), float(r[5])))
+
+    def med(xs: list[float]) -> float:
+        xs = sorted(xs)
+        return xs[(len(xs) - 1) // 2]
+
+    label = {"random": "random", "lru": "LRU", "cost_aware": "cost-aware"}
+    out = [
+        "| service_time | policy | misses (median) | base rows read (median) | aggregate delay (median) |",
+        "|---|---|---|---|---|",
+    ]
+    for st in sorted({k[0] for k in by}, key=int):
+        for policy in ("random", "lru", "cost_aware"):
+            vals = by.get((st, policy))
+            if not vals:
+                continue
+            m = med([v[0] for v in vals])
+            rr = med([v[1] for v in vals])
+            d = med([v[2] for v in vals])
+            delay = "—" if st == "0" else f"{d:,.0f}"
+            out.append(f"| {st} | {label[policy]} | {m:,.0f} | {rr:,.0f} | {delay} |")
+    return "\n".join(out)
+
+
+def policy_deltas(text: str) -> str:
+    """The two comparisons the prose of §9.4.2 makes, as one generated line."""
+    rows = [ln.split(",") for ln in text.strip().splitlines()[1:] if ln.strip()]
+    by: dict[tuple[str, str], list[tuple[float, float, float]]] = {}
+    for r in rows:
+        by.setdefault((r[1], r[0]), []).append((float(r[3]), float(r[4]), float(r[5])))
+
+    def med(xs: list[float]) -> float:
+        xs = sorted(xs)
+        return xs[(len(xs) - 1) // 2]
+
+    lru_rows = med([v[1] for v in by[("0", "lru")]])
+    ca_rows = med([v[1] for v in by[("0", "cost_aware")]])
+    lru_delay = med([v[2] for v in by[("4", "lru")]])
+    ca_delay = med([v[2] for v in by[("4", "cost_aware")]])
+    rows_pc = (lru_rows - ca_rows) / lru_rows * 100
+    delay_pc = (lru_delay - ca_delay) / lru_delay * 100
+    return (
+        f"Cost-aware against LRU, from `results/e6_policies.csv`: "
+        f"**{rows_pc:.1f}% fewer base rows** at service_time 0 "
+        f"({lru_rows:,.0f} → {ca_rows:,.0f}), and "
+        f"**{delay_pc:.1f}% less aggregate delay** at service_time 4 "
+        f"({lru_delay:,.0f} → {ca_delay:,.0f})."
+    )
+
+
 EXTRACTORS = {
     "contract": lambda t: first_table(t),
     "kwsql": lambda t: keyword_column(t, "## SQL-derived keywords"),
@@ -188,6 +254,8 @@ EXTRACTORS = {
     "statustable": status_table,
     "statussummary": status_summary,
     "statusrow": status_row,
+    "policytable": policy_table,
+    "policydeltas": policy_deltas,
 }
 
 MARKER = re.compile(

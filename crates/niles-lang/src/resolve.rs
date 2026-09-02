@@ -260,7 +260,7 @@ fn collect_view(v: &ViewDecl, cat: &mut Catalog, d: &mut Diagnostics) {
         lineage: word("lineage", "off"),
         contract_span: c.map(|c| c.span).unwrap_or(v.span),
         span: v.span,
-        tail_is_incremental: tail_stage(&v.body).map_or(true, |k| k.is_incremental()),
+        tail_is_incremental: tail_stage(&v.body).is_none_or(|k| k.is_incremental()),
     };
     insert_unique(
         &mut cat.views,
@@ -374,10 +374,8 @@ fn check_schema_item(si: &SchemaItem, cat: &Catalog, d: &mut Diagnostics) {
     match si {
         SchemaItem::Base(r) | SchemaItem::Table(r) => check_relation(r, cat, d),
         SchemaItem::View(v) => check_view(v, cat, d),
-        SchemaItem::Index(ix) => {
-            if !cat.relations.contains_key(&ix.on.text) {
-                unknown_name(d, &ix.on, "relation", cat.relation_names());
-            }
+        SchemaItem::Index(ix) if !cat.relations.contains_key(&ix.on.text) => {
+            unknown_name(d, &ix.on, "relation", cat.relation_names());
         }
         _ => {}
     }

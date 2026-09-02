@@ -188,8 +188,8 @@ impl Node {
             inputs,
             key: self.key.clone(),
             arity,
-            anchor: Checked::new("anchor", self.anchor.peek().clone()),
-            contract: Checked::new("contract", self.contract.peek().clone()),
+            anchor: Checked::new("anchor", *self.anchor.peek()),
+            contract: Checked::new("contract", *self.contract.peek()),
             conservation_transparent: Checked::new(
                 "conservation_transparent",
                 *self.conservation_transparent.peek(),

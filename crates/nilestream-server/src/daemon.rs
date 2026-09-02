@@ -120,11 +120,7 @@ pub fn serve(
     let pid = std::process::id();
     pg_wire::write_all(&mut w, &pg_wire::startup_reply(pid, 0x5eed))?;
 
-    loop {
-        let msg = match pg_wire::read_message(&mut r) {
-            Ok(m) => m,
-            Err(_) => break,
-        };
+    while let Ok(msg) = pg_wire::read_message(&mut r) {
         if msg == Frontend::Terminate {
             break;
         }

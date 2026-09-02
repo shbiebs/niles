@@ -837,10 +837,8 @@ impl<'a> Cx<'a> {
             }
             // Same reasoning as `?`: a `return` out of a transaction abandons it, and an
             // abandoned transaction commits nothing.
-            Expr::Return { value, .. } => match value {
-                Some(v) => self.expr(v, sc),
-                None => Shape::Opaque,
-            },
+            Expr::Return { value: Some(v), .. } => self.expr(v, sc),
+            Expr::Return { value: None, .. } => Shape::Opaque,
             // `break` and `continue` leave a *loop*, not the transaction. The loop rule
             // handles what that does to the row; the transaction still commits.
             Expr::Break(_) | Expr::Continue(_) => Shape::Opaque,

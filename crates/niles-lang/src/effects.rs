@@ -635,7 +635,7 @@ mod tests {
         .into_iter()
         .filter(|n| {
             Effect::parse(n, Some("snapshot"), &["usd".into()])
-                .map_or(false, |e| e.requires_authority())
+                .is_some_and(|e| e.requires_authority())
         })
         .collect();
         assert_eq!(requiring, vec!["authorize", "declassify", "admin"]);

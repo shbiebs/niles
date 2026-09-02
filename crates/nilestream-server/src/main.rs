@@ -1,3 +1,10 @@
+// See lib.rs: the wire surface is incomplete by construction today (no write path, the
+// extended query protocol unwired), so several items have no caller yet. Kept rather than
+// deleted so the gap stays visible.
+#![allow(dead_code)]
+// `Backend::BackendKeyData` is the PostgreSQL message name.
+#![allow(clippy::enum_variant_names)]
+
 //! `nilestreamd` — the Nilestream daemon.
 //!
 //! Listens on TCP, speaks the PostgreSQL wire protocol, compiles each query as Niles, and

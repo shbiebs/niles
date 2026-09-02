@@ -180,6 +180,10 @@ impl Segment {
             .read(true)
             .write(true)
             .create(true)
+            // Explicit, and load-bearing: this is a ledger segment. `false` is already
+            // the default, but a segment opened with truncation would silently discard
+            // every committed epoch, so the intent is stated rather than inherited.
+            .truncate(false)
             .open(&path)?;
         if file.metadata()?.len() != valid_len {
             file.set_len(valid_len)?;

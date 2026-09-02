@@ -195,11 +195,12 @@ pub fn derive(circuit: &Circuit, node: NodeId, epoch: u64) -> Result<UpqueryPath
 
     sources.sort();
     sources.dedup();
-    all_bases = hops.iter().all(|h| h.op_name != "source") || sources.iter().all(|s| {
-        circuit.nodes.iter().any(
+    all_bases = hops.iter().all(|h| h.op_name != "source")
+        || sources.iter().all(|s| {
+            circuit.nodes.iter().any(
             |n| matches!(&n.op, Op::Source { relation, is_base, .. } if relation == s && *is_base),
         )
-    });
+        });
 
     Ok(UpqueryPath {
         origin: node,

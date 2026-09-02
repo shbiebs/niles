@@ -211,7 +211,7 @@ impl Ledger {
                         *run += p.amt;
                         let seen = self.posting_seen.entry(key).or_insert(0);
                         *seen += 1;
-                        if *seen % self.checkpoint_interval == 0 {
+                        if (*seen).is_multiple_of(self.checkpoint_interval) {
                             self.checkpoints.entry(key).or_default().push((id, *run));
                         }
                     }

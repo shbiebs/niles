@@ -54,21 +54,12 @@ impl Rng {
 }
 
 /// How hostile the network is.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct Network {
     /// Percent of messages dropped.
     pub loss: u64,
     /// Percent of messages delivered out of order.
     pub reorder: u64,
-}
-
-impl Default for Network {
-    fn default() -> Self {
-        Network {
-            loss: 0,
-            reorder: 0,
-        }
-    }
 }
 
 pub struct Cluster {

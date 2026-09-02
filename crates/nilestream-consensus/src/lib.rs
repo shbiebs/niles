@@ -1,3 +1,7 @@
+// `Sim::next` steps the deterministic message pump one delivery; it is not an iterator
+// and must not be one, because a step can inject a fault as well as deliver.
+#![allow(clippy::should_implement_trait)]
+
 //! Replicated ledger groups: agreement on the epoch order, across nodes.
 //!
 //! # Why this is a small addition rather than a new system
@@ -201,7 +205,7 @@ impl Node {
     }
 
     fn quorum(&self) -> usize {
-        (self.peers.len() + 1) / 2 + 1
+        self.peers.len().div_ceil(2) + 1
     }
 
     pub fn last_index(&self) -> Index {

@@ -189,7 +189,7 @@ impl<'a> Parser<'a> {
             }
             Tok::Kw(k) => {
                 let word = keywords::KEYWORDS.iter().find(|kw| kw.token == k);
-                if word.map_or(false, |w| w.category.usable_as_ident()) {
+                if word.is_some_and(|w| w.category.usable_as_ident()) {
                     let s = self.bump();
                     Name::new(self.text(s), s)
                 } else {
@@ -1468,7 +1468,7 @@ impl<'a> Parser<'a> {
                         .text
                         .chars()
                         .next()
-                        .map_or(false, |c| c.is_lowercase() || c == '_')
+                        .is_some_and(|c| c.is_lowercase() || c == '_')
                 {
                     let n = path.segments.into_iter().next().unwrap();
                     Pat::Bind {
@@ -2665,7 +2665,11 @@ impl<'a> Parser<'a> {
                 let asc = if self.eat_kw(Kw::Desc) {
                     false
                 } else {
-                    self.eat_kw(Kw::Asc) || true
+                    // `asc` is the default, so the keyword is optional and consuming it
+                    // is the whole point of this call; the direction is ascending either
+                    // way. Written as `eat_kw(Asc) || true` this reads as a logic bug.
+                    self.eat_kw(Kw::Asc);
+                    true
                 };
                 order_by.push((e, asc));
                 if !self.eat(&Tok::Comma) {
@@ -2737,9 +2741,8 @@ impl<'a> Parser<'a> {
             }
         } else {
             let name = self.ident("a relation name");
-            let alias = if self.eat_kw(Kw::As) {
-                Some(self.ident("an alias"))
-            } else if matches!(self.cur(), Tok::Ident) {
+            // `as x` and a bare `x` are the same alias; the `as` is optional sugar.
+            let alias = if self.eat_kw(Kw::As) || matches!(self.cur(), Tok::Ident) {
                 Some(self.ident("an alias"))
             } else {
                 None

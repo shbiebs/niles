@@ -241,7 +241,7 @@ pub fn read_startup(r: &mut impl Read) -> std::io::Result<Frontend> {
     let mut len_buf = [0u8; 4];
     r.read_exact(&mut len_buf)?;
     let len = i32::from_be_bytes(len_buf) as usize;
-    if len < 8 || len > 10_000 {
+    if !(8..=10_000).contains(&len) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "implausible startup length",
@@ -271,7 +271,7 @@ pub fn read_message(r: &mut impl Read) -> std::io::Result<Frontend> {
     let mut len_buf = [0u8; 4];
     r.read_exact(&mut len_buf)?;
     let len = i32::from_be_bytes(len_buf) as usize;
-    if len < 4 || len > 64 * 1024 * 1024 {
+    if !(4..=64 * 1024 * 1024).contains(&len) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "implausible message length",

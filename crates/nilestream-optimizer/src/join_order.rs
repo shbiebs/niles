@@ -476,8 +476,18 @@ impl JoinPlanner {
 
         let connected = self.graph_is_connected(full);
 
-        for size in 2..=n {
-            for &s in &by_size[size] {
+        // `size` is the subset cardinality, not just an index: the DP must run in
+        // increasing order of it, so the range is the algorithm rather than a loop shape.
+        for (size, of_this_size) in by_size
+            .iter()
+            .enumerate()
+            .take(n + 1)
+            .skip(2)
+            .map(|(i, v)| (i, v.clone()))
+            .collect::<Vec<_>>()
+        {
+            let _ = size; // the cardinality; the DP must ascend it, which is why it is a range
+            for &s in &of_this_size {
                 // Enumerate proper non-empty subsets of s. The standard trick: iterate
                 // sub = (sub - 1) & s. Each unordered split is seen twice; we take only
                 // the half containing the lowest set bit, which halves the work and, more

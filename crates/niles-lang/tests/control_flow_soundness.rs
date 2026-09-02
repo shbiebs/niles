@@ -375,11 +375,11 @@ fn nested_branches_join_at_every_level() {
 #[test]
 fn a_cross_currency_hole_survives_the_join() {
     // The join must not accidentally net USD against EUR while merging.
-    let o = check(&format!(
-        "fn f(a: Id<A>, b: Id<A>) -> Result<(), E> ! {{ append, debit<usd>, credit<eur> }} {{
-    txn idem(\"k\") {{ let d = debit(a, 10.00 usd)?; let c = credit(b, 10.00 eur); post(d, c) }}
-}}"
-    ));
+    let o = check(
+        "fn f(a: Id<A>, b: Id<A>) -> Result<(), E> ! { append, debit<usd>, credit<eur> } {
+    txn idem(\"k\") { let d = debit(a, 10.00 usd)?; let c = credit(b, 10.00 eur); post(d, c) }
+}",
+    );
     let holes = o.errors.iter().filter(|c| **c == "NL0300").count();
     assert_eq!(
         holes, 2,

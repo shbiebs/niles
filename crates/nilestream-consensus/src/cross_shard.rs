@@ -351,7 +351,7 @@ impl Participant {
     /// commit epoch, this answer is identical on every shard — which is precisely what makes
     /// a cross-shard transaction atomic to a reader.
     pub fn visible_at(&self, anchor: Index) -> bool {
-        self.committed_at().map_or(false, |e| e <= anchor)
+        self.committed_at().is_some_and(|e| e <= anchor)
     }
 }
 

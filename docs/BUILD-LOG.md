@@ -596,3 +596,37 @@ is a one-line change for anyone with network access.
 this commit and must not be reported as such. T-17 states it as "the toolchain file
 carries the intended pin as a comment; the channel is `stable` pending an environment
 that can install a versioned channel", or the pin is set first and the claim then stands.
+
+### [T-01] 2026-09-02T02:10Z DECISION The crate-level lint allow list (niles)
+
+Every exception is at crate level with a justification, so the complete set is auditable
+here rather than scattered over call sites. Four call-site `#[allow]`s that existed before
+this session were removed or moved.
+
+| Crate | Lint | Why |
+|---|---|---|
+| `niles-ir` | `should_implement_trait` | `Tri::not` is Kleene three-valued negation, named after the logic. Implementing `std::ops::Not` would give `!` a meaning on a value whose third answer is `Unknown` rather than a flipped bit. |
+| `nilestream-consensus` | `should_implement_trait` | `Sim::next` steps the deterministic message pump one delivery; a step can inject a fault as well as deliver, so it is not an iterator and must not become one. |
+| `nilestream-server` (lib and bin) | `dead_code`, `enum_variant_names` | The wire surface is incomplete by construction: no write path, extended protocol unwired. `ReadStats`, `MemoryEngine` and several accessors have no caller *yet*. Deleting them would hide the gap `results/E16-wallclock.md` reports; T-14 either wires or removes them. `BackendKeyData` is the PostgreSQL message name. |
+| `experiments` | `dead_code` | `RunResult` carries every counter the shared driver collects, not only the ones a given experiment prints. Narrowing it to today's questions is how a harness stops being able to answer the next one. |
+| `nilestream-optimizer` (test `unnest_corpus`) | `too_many_arguments` | The corpus builder takes one argument per dimension of a case; a struct moves the same nine values one level down. |
+
+### [T-01] 2026-09-02T02:10Z RESULT Two defects the lint gate found, neither stylistic
+
+**A logic bug clippy denies by default.** `crates/niles-lang/src/parser.rs` parsed the
+`ORDER BY` direction as `self.eat_kw(Kw::Asc) || true`. The behaviour is correct — `asc`
+is the default, so the direction is ascending whether or not the keyword is present, and
+the call is there to *consume* the token — but written that way it reads as a bug and
+`clippy::overly_complex_bool_expr` is deny-by-default, so it was an error rather than a
+warning. Rewritten as a consume followed by the constant, with the reason in a comment.
+
+**A ledger segment opened without an explicit truncation flag.**
+`crates/nilestream-ledger/src/segment.rs` opened the segment with `.create(true)` and no
+`.truncate(..)`. `false` is already the default so nothing was wrong, but on the one file
+in this system whose accidental truncation would discard every committed epoch, the
+intent should be stated rather than inherited from a default. Now explicit.
+
+### [T-01] 2026-09-02T02:10Z TESTS Gate green in both workspaces
+
+`niles` 600/0/3 → 600/0/3. Format: 1,274 diffs → 0. Clippy: ~55 warnings + 1 deny-level
+error → 0.

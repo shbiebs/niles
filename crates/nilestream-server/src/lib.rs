@@ -1,3 +1,12 @@
+// The wire surface is incomplete by construction today: there is no write path and the
+// extended query protocol is not wired into the connection loop, so `ReadStats`,
+// `MemoryEngine` and several accessors have no caller yet. They are kept, not deleted,
+// because deleting them would hide the gap that `results/E16-wallclock.md` reports.
+#![allow(dead_code)]
+// `Backend::BackendKeyData` is the PostgreSQL message name; renaming it would make the
+// protocol harder to read against the specification.
+#![allow(clippy::enum_variant_names)]
+
 //! **Nilestream server** — the daemon and its wire protocols (thesis §6.9, §7.3).
 //!
 //! The adoption argument of §6.9 is that a database nobody can connect to with the tools

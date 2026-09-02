@@ -1,3 +1,8 @@
+// The corpus builder takes one argument per dimension of a case (scale, cardinalities,
+// nulls, correlation shape). Bundling them into a struct would move the same nine values
+// one level down without making a call site clearer.
+#![allow(clippy::too_many_arguments)]
+
 //! **The unnesting corpus.**
 //!
 //! Twenty-four correlated queries, each built twice: once in nested form (an `Apply`) and
@@ -57,7 +62,7 @@ use std::collections::BTreeMap;
 /// Each block of `k` replicates the same group structure — duplicates, retractions, a null
 /// in the probed column, an empty correlation group — under fresh keys, so the *shape* of
 /// every case is scale-invariant and only the cardinality moves.
-
+///
 /// `orders(id, cust, amount)` — the outer relation. Column 1 is the correlation key and
 /// column 2 the probe.
 fn orders_at(k: usize) -> ZSet {
@@ -176,7 +181,7 @@ fn source(c: &mut Circuit, name: &str, arity: u16) -> NodeId {
 }
 
 /// One corpus case: a nested circuit, and what the rewrite should be called.
-struct Case {
+pub struct Case {
     name: &'static str,
     nested: Circuit,
     expect: &'static str,

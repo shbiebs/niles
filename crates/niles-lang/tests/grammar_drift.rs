@@ -173,7 +173,7 @@ fn every_grammar_terminal_is_a_registry_keyword_or_punctuation() {
         .collect();
     let unknown: Vec<String> = grammar_terminals()
         .into_iter()
-        .filter(|t| t.chars().next().map_or(false, |c| c.is_alphabetic()))
+        .filter(|t| t.chars().next().is_some_and(|c| c.is_alphabetic()))
         .filter(|t| !words.contains(t.as_str()) && !allowed_non_keywords.contains(t.as_str()))
         .collect();
     assert!(

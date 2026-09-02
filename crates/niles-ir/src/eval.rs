@@ -339,7 +339,7 @@ impl<'a> Eval<'a> {
                 JoinKind::Anti if !present => add(&mut out, lrow.clone(), *lw),
                 JoinKind::LeftOuter if !any => {
                     let mut combined = lrow.clone();
-                    combined.extend(std::iter::repeat(Value::Null).take(width_r));
+                    combined.extend(std::iter::repeat_n(Value::Null, width_r));
                     add(&mut out, combined, *lw);
                 }
                 _ => {}

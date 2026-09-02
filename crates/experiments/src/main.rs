@@ -1,3 +1,9 @@
+// `RunResult` carries every counter the shared workload driver collects, not only the
+// ones a given experiment prints. Dropping the unread fields would narrow the instrument
+// to whatever the current questions are, and the next question would have to widen it
+// again — which is how a measurement harness quietly stops being able to answer things.
+#![allow(dead_code)]
+
 //! The experiment harness for the thesis's empirical chapter.
 //!
 //! Every experiment here runs against the research prototype in `proto-engine`. Results are

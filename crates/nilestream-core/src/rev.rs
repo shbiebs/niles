@@ -197,7 +197,7 @@ impl Rev {
     }
 
     fn install(&mut self, key: Key, value: Value, anchor: Epoch) {
-        let was_resident = self.slots.get(&key).map_or(false, |s| s.is_resident());
+        let was_resident = self.slots.get(&key).is_some_and(|s| s.is_resident());
         self.slots.insert(key, Slot::Present(value, anchor));
         if !was_resident {
             self.resident += 1;
@@ -413,7 +413,7 @@ impl Runtime {
                 Consistency::Bounded { epochs, .. } => epochs.max(1),
                 _ => 1,
             };
-            if e % stride == 0 {
+            if e.is_multiple_of(stride) {
                 v.apply_epoch(base, e);
             } else {
                 // Still accrue the memory integral: the entries are resident whether or
@@ -476,7 +476,7 @@ mod tests {
             self.rows.push((self.head, key.clone(), delta));
             let c = self.counts.entry(key.clone()).or_insert(0);
             *c += 1;
-            if self.interval > 0 && *c % self.interval == 0 {
+            if self.interval > 0 && (*c).is_multiple_of(self.interval) {
                 let running: Value = self
                     .rows
                     .iter()

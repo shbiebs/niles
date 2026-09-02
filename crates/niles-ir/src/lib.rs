@@ -1,3 +1,8 @@
+// `Tri::not` is Kleene three-valued negation and is named after the logic, not after
+// `std::ops::Not`; implementing the trait would give `!` a meaning on a value where
+// `Unknown` is a third answer rather than a flipped bit.
+#![allow(clippy::should_implement_trait)]
+
 //! The typed intermediate representation (thesis 6.9, Appendix D.4).
 //!
 //! The IR is the *stable contract between the language and the engine*: a DBSP-style

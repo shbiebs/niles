@@ -391,7 +391,7 @@ mod tests {
         // Nearest rank on (n-1)·q, stated in the function's docs: for 1..=100 that puts p50
         // at index 50 (the 51st sample) and p99 at index 98. No interpolation, so every
         // number reported is a latency something actually took.
-        let l: Vec<Duration> = (1..=100).map(|n| Duration::from_micros(n)).collect();
+        let l: Vec<Duration> = (1..=100).map(Duration::from_micros).collect();
         let (p50, p99) = percentiles(l);
         assert_eq!(p50, Duration::from_micros(51));
         assert_eq!(p99, Duration::from_micros(99));

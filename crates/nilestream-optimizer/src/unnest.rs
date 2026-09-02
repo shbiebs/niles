@@ -149,7 +149,7 @@ pub fn unnest(c: &Circuit) -> (Circuit, Report) {
 
     for n in &c.nodes {
         let inputs: Vec<NodeId> = n.inputs.iter().map(|i| remap[*i as usize]).collect();
-        let contract = n.contract.peek().clone();
+        let contract = *n.contract.peek();
         let new_id = match &n.op {
             Op::Apply { kind, correlation } => match refuse(c, n.id, kind, correlation) {
                 Some(reason) => {
@@ -297,7 +297,7 @@ fn rewrite(
                 residual: None,
             },
             vec![outer, inner],
-            contract.clone(),
+            *contract,
             format!("{label} (exists → semi)"),
         ),
         ApplyKind::NotExists => out.add(
@@ -308,7 +308,7 @@ fn rewrite(
                 residual: None,
             },
             vec![outer, inner],
-            contract.clone(),
+            *contract,
             format!("{label} (not exists → anti)"),
         ),
         ApplyKind::In { probe, inner: icol } => {
@@ -327,7 +327,7 @@ fn rewrite(
                     residual: None,
                 },
                 vec![outer, inner],
-                contract.clone(),
+                *contract,
                 format!("{label} (in → semi)"),
             )
         }
@@ -341,7 +341,7 @@ fn rewrite(
                     predicate: not_null,
                 },
                 vec![outer],
-                contract.clone(),
+                *contract,
                 format!("{label} (probe is not null)"),
             );
 
@@ -358,7 +358,7 @@ fn rewrite(
                     residual: None,
                 },
                 vec![probed, inner],
-                contract.clone(),
+                *contract,
                 format!("{label} (not in → anti)"),
             );
 
@@ -372,7 +372,7 @@ fn rewrite(
                     predicate: Scalar::IsNull(Box::new(Scalar::Column(*icol))),
                 },
                 vec![inner],
-                contract.clone(),
+                *contract,
                 format!("{label} (null witness)"),
             );
             let witness_cols: Vec<Scalar> = if rk.is_empty() {
@@ -387,13 +387,13 @@ fn rewrite(
                     exprs: witness_cols,
                 },
                 vec![nulls],
-                contract.clone(),
+                *contract,
                 format!("{label} (witness key)"),
             );
             let witness = out.add(
                 Op::Distinct,
                 vec![projected],
-                contract.clone(),
+                *contract,
                 format!("{label} (witness distinct)"),
             );
             let witness_key: Vec<ColIdx> = (0..rk.len() as ColIdx).collect();
@@ -405,7 +405,7 @@ fn rewrite(
                     residual: None,
                 },
                 vec![unmatched, witness],
-                contract.clone(),
+                *contract,
                 format!("{label} (drop unknowns)"),
             )
         }
@@ -421,7 +421,7 @@ fn rewrite(
                     aggs: vec![(*agg, expr.clone())],
                 },
                 vec![inner],
-                contract.clone(),
+                *contract,
                 format!("{label} (subquery aggregate)"),
             );
             let joined = out.add(
@@ -432,7 +432,7 @@ fn rewrite(
                     residual: None,
                 },
                 vec![outer, grouped],
-                contract.clone(),
+                *contract,
                 format!("{label} (scalar → left outer)"),
             );
             // The join appended the group key *and* the aggregate; the apply appends only
@@ -448,7 +448,7 @@ fn rewrite(
             out.add(
                 Op::Map { exprs: keep },
                 vec![joined],
-                contract.clone(),
+                *contract,
                 format!("{label} (drop the group key)"),
             )
         }

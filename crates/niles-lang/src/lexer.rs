@@ -323,7 +323,7 @@ impl<'a> Lexer<'a> {
             let start = self.pos;
             match self.peek() {
                 Some(c) if c.is_whitespace() => {
-                    while self.peek().map_or(false, |c| c.is_whitespace()) {
+                    while self.peek().is_some_and(|c| c.is_whitespace()) {
                         self.bump();
                     }
                     self.trivia
@@ -331,7 +331,7 @@ impl<'a> Lexer<'a> {
                 }
                 Some('-') if self.peek_at(1) == Some('-') => {
                     // SQL line comment. Kept because Niles must accept pasted SQL.
-                    while self.peek().map_or(false, |c| c != '\n') {
+                    while self.peek().is_some_and(|c| c != '\n') {
                         self.bump();
                     }
                     self.trivia
@@ -339,7 +339,7 @@ impl<'a> Lexer<'a> {
                 }
                 Some('/') if self.peek_at(1) == Some('/') => {
                     let doc = self.peek_at(2) == Some('/');
-                    while self.peek().map_or(false, |c| c != '\n') {
+                    while self.peek().is_some_and(|c| c != '\n') {
                         self.bump();
                     }
                     let kind = if doc {
@@ -387,7 +387,7 @@ impl<'a> Lexer<'a> {
         // --- valid-time instant: v@... , before the identifier rule claims the `v` ---
         if c == 'v'
             && self.peek_at(1) == Some('@')
-            && self.peek_at(2).map_or(false, |c| c.is_ascii_digit())
+            && self.peek_at(2).is_some_and(|c| c.is_ascii_digit())
         {
             self.bump();
             self.bump();
@@ -397,12 +397,12 @@ impl<'a> Lexer<'a> {
         // --- raw identifier: r#ledger ---
         if c == 'r'
             && self.peek_at(1) == Some('#')
-            && self.peek_at(2).map_or(false, raw::is_ident_start)
+            && self.peek_at(2).is_some_and(raw::is_ident_start)
         {
             self.bump();
             self.bump();
             let b = self.pos;
-            while self.peek().map_or(false, raw::is_ident_continue) {
+            while self.peek().is_some_and(raw::is_ident_continue) {
                 self.bump();
             }
             let _ = &self.src[b..self.pos];
@@ -431,7 +431,7 @@ impl<'a> Lexer<'a> {
                 // literal and `@confidential` / `read@snapshot` are the attribute and the
                 // rung-qualifier forms. One character of lookahead separates them, which
                 // is why the two spellings can share the sigil.
-                if self.peek().map_or(false, |c| c.is_ascii_digit()) {
+                if self.peek().is_some_and(|c| c.is_ascii_digit()) {
                     Tok::Instant(self.lex_datetime_body())
                 } else {
                     Tok::At
@@ -443,12 +443,9 @@ impl<'a> Lexer<'a> {
                     self.bump();
                     return Tok::HashBracket;
                 }
-                if self.peek().map_or(false, |c| c.is_ascii_digit()) {
+                if self.peek().is_some_and(|c| c.is_ascii_digit()) {
                     let b = self.pos;
-                    while self
-                        .peek()
-                        .map_or(false, |c| c.is_ascii_digit() || c == '_')
-                    {
+                    while self.peek().is_some_and(|c| c.is_ascii_digit() || c == '_') {
                         self.bump();
                     }
                     let raw_digits: String = self.src[b..self.pos]
@@ -471,7 +468,7 @@ impl<'a> Lexer<'a> {
 
     fn lex_ident_or_keyword(&mut self) -> Tok {
         let b = self.pos;
-        while self.peek().map_or(false, raw::is_ident_continue) {
+        while self.peek().is_some_and(raw::is_ident_continue) {
             self.bump();
         }
         let word = &self.src[b..self.pos];
@@ -494,10 +491,7 @@ impl<'a> Lexer<'a> {
     fn lex_number(&mut self) -> Tok {
         let start = self.pos;
         let int_b = self.pos;
-        while self
-            .peek()
-            .map_or(false, |c| c.is_ascii_digit() || c == '_')
-        {
+        while self.peek().is_some_and(|c| c.is_ascii_digit() || c == '_') {
             self.bump();
         }
         let int_part: String = self.src[int_b..self.pos]
@@ -507,11 +501,11 @@ impl<'a> Lexer<'a> {
 
         // `7.days` — a number, a dot, a time unit. Checked before the fraction rule,
         // because `7.days` must not lex as `7.` followed by `days`.
-        if self.peek() == Some('.') && self.peek_at(1).map_or(false, |c| c.is_alphabetic()) {
+        if self.peek() == Some('.') && self.peek_at(1).is_some_and(|c| c.is_alphabetic()) {
             let save = self.pos;
             self.bump();
             let ub = self.pos;
-            while self.peek().map_or(false, raw::is_ident_continue) {
+            while self.peek().is_some_and(raw::is_ident_continue) {
                 self.bump();
             }
             let unit_word = &self.src[ub..self.pos];
@@ -523,13 +517,10 @@ impl<'a> Lexer<'a> {
         }
 
         let mut frac = String::new();
-        if self.peek() == Some('.') && self.peek_at(1).map_or(false, |c| c.is_ascii_digit()) {
+        if self.peek() == Some('.') && self.peek_at(1).is_some_and(|c| c.is_ascii_digit()) {
             self.bump();
             let fb = self.pos;
-            while self
-                .peek()
-                .map_or(false, |c| c.is_ascii_digit() || c == '_')
-            {
+            while self.peek().is_some_and(|c| c.is_ascii_digit() || c == '_') {
                 self.bump();
             }
             frac = self.src[fb..self.pos]
@@ -550,9 +541,9 @@ impl<'a> Lexer<'a> {
             self.bump();
             spaced = true;
         }
-        if self.peek().map_or(false, raw::is_ident_start) {
+        if self.peek().is_some_and(raw::is_ident_start) {
             let cb = self.pos;
-            while self.peek().map_or(false, raw::is_ident_continue) {
+            while self.peek().is_some_and(raw::is_ident_continue) {
                 self.bump();
             }
             let word = &self.src[cb..self.pos];
@@ -638,7 +629,7 @@ impl<'a> Lexer<'a> {
     /// time rather than here. The lexer's job is to delimit it, not to know the calendar.
     fn lex_datetime_body(&mut self) -> String {
         let b = self.pos;
-        while self.peek().map_or(false, |c| {
+        while self.peek().is_some_and(|c| {
             c.is_ascii_alphanumeric() || matches!(c, '-' | ':' | 'T' | 'Z' | '+' | '.')
         }) {
             self.bump();
@@ -764,17 +755,23 @@ mod tests {
         let (toks, trivia, errs) = Lexer::new(src).tokenize();
         assert!(errs.is_empty());
         let mut covered = vec![false; src.len()];
-        for t in &toks {
-            for i in t.span.start as usize..t.span.end as usize {
-                assert!(!covered[i], "byte {i} covered twice");
-                covered[i] = true;
+        // The byte index is the diagnostic, so it is named rather than iterated away.
+        let mut cover = |from: u32, to: u32| {
+            for (i, b) in covered
+                .iter_mut()
+                .enumerate()
+                .take(to as usize)
+                .skip(from as usize)
+            {
+                assert!(!*b, "byte {i} covered twice");
+                *b = true;
             }
+        };
+        for t in &toks {
+            cover(t.span.start, t.span.end);
         }
         for (_, s) in &trivia {
-            for i in s.start as usize..s.end as usize {
-                assert!(!covered[i], "byte {i} covered twice");
-                covered[i] = true;
-            }
+            cover(s.start, s.end);
         }
         assert!(
             covered.iter().all(|b| *b),

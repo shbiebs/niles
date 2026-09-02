@@ -54,7 +54,7 @@ Two of those tests earned their place this cycle by failing a mutation they shou
 
 ## G.9 Benchmark Harness and Seeds
 
-The harness drives everything from scenario files fixing generator parameters (account population, α, mix weights, τ, memory budget, ad hoc query rate, lineage mode, per-view contracts), seeds (derived from a base seed and run index; five runs by default), warm-up and measurement windows. Output is a raw archive plus derived figures. Every figure identifier maps to exactly one scenario file, and the figure generator refuses to emit a plot for which no pre-registered template exists (Section 5.9).
+The harness drives everything from scenario files fixing generator parameters (account population, α, mix weights, τ, memory budget, ad hoc query rate, per-view contracts; the lineage mode a scenario file would carry is specification, since no lineage mode is built), seeds (derived from a base seed and run index; five runs by default), warm-up and measurement windows. Output is a raw archive plus derived figures. Every figure identifier maps to exactly one scenario file, and the figure generator refuses to emit a plot for which no pre-registered template exists (Section 5.9).
 
 Generators cover the write and read mixes of Section 9.1, including value dates distinct from booking epochs and backdated corrections, hold lifecycles with partial capture and expiry, and the mutant corpora (ill-typed programs, corrupted segments) for the negative tests.
 

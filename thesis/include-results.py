@@ -124,16 +124,40 @@ def status_summary(text: str) -> str:
 
 
 def status_row(text: str) -> str:
-    """The verification table's last row: the aggregate, in the table's own shape."""
+    """The verification table's last row: the aggregate, in the table's own shape.
+
+    Rendered with its own header, because it was not. The block emitted a single `|`-row into
+    §3.15 with nothing above it, so a bare row appeared under the paragraph introducing it and
+    a reader saw three unlabelled cells. It is the *last row of a table*, and a one-row table
+    still needs to say what its columns are.
+
+    The vocabulary grew this cycle: `specified` for a design nothing implements, and `argued`
+    for a claim no instrument will settle. Both used to be filed under "not measured", which
+    promised a measurement that was never coming. Anything the tally does not recognise is
+    counted into `other` and named, so a new status cannot silently vanish from the total.
+    """
     claims = parse_status(text)
     proved = sum(1 for c in claims if c["status"] == "proved")
     measured = sum(1 for c in claims if c["status"] in ("measured", "partly measured"))
     unrun = sum(1 for c in claims if c["status"] == "not measured")
     refuted = sum(1 for c in claims if c["status"] == "refuted")
+    specified = sum(1 for c in claims if c["status"] == "specified")
+    argued = sum(1 for c in claims if c["status"] == "argued")
+    known = {"proved", "measured", "partly measured", "not measured", "refuted",
+             "specified", "argued"}
+    other = [c["id"] for c in claims if c["status"] not in known]
+    tally = (
+        f"{proved} proved, {measured} measured or partly measured, {specified} specified, "
+        f"{argued} argued, {refuted} refuted, {unrun} not measured"
+    )
+    if other:
+        tally += f", {len(other)} with an unrecognised status ({', '.join(other)})"
+    total = len(claims)
     return (
-        "| **All claims** | "
-        f"{proved} proved, {measured} measured or partly measured, {refuted} refuted, "
-        f"{unrun} not measured | `thesis/status.toml`, rendered into §1.9 |"
+        "| Result | Status |\n"
+        "|---|---|\n"
+        f"| **All {total} claims** | {tally}. Source: `thesis/status.toml`, rendered here "
+        "and into §1.9 |"
     )
 
 

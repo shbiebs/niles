@@ -1177,3 +1177,35 @@ awk -F, 'NR>1 && $11==""' results/e4_phase.csv | wc -l         -> 0   (z is colu
 awk -F, 'NR>1 && $8==""'  results/e12_phase_compiled.csv | wc -l -> 0 (z is column 8)
 git log --format=%H -1 -- results/E16-band.md                  -> 504c131, an ancestor of the CSV commit
 ```
+
+### [T-19] 2026-09-02T14:40Z RESULT F-48 — `make reproduce` regenerates and diffs
+
+Three results files were produced by `#[ignore]`d tests with no guard at all — E15's bootstrap
+gates, E17's unnesting corpus, E18's solver verdicts — so each could drift from the code that
+made it and no build would notice. A results file nobody can regenerate is a results file
+nobody can check.
+
+The target now runs every generator and diffs the tree:
+
+```
+cargo run -q -p niles-lang --bin gen-sql-surface
+cargo test -p niles-lang --test solver_verdicts -- --ignored
+cargo test -p nilestream-optimizer --test unnest_corpus -- --ignored
+cargo test -p nilestream-server --test psql_conformance -- --ignored transcript
+cargo run --release -p bank-bench --bin bench -- --render
+cargo run --release -p experiments -- e1 e4 e8
+./target/release/nilestream sweep examples/demo_bank.niles ledger_balance > results/e12_phase_compiled.csv
+python3 thesis/include-results.py
+git diff --exit-code -- results/ thesis/ docs/SPEC-LANGUAGE.md
+```
+
+The diff covers `thesis/` and `docs/SPEC-LANGUAGE.md` as well as `results/`, because the
+generated blocks in the thesis and the SQL-surface status sentence are derived from the same
+sources and can drift the same way.
+
+**It does not re-run `bench --run`.** That measurement is wall-clock, needs a live PostgreSQL,
+and is machine-dependent: a diff against a committed CSV would fail on any machine but the one
+that produced it. `--render` re-derives the table *from* the committed CSVs, which is the part
+that must not drift, and the durable run's own reproduction recipe is in `BENCHMARK.md`.
+
+`cd niles && make reproduce` → **exit 0** on a clean tree.

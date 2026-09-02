@@ -25,13 +25,27 @@ generated:
 bootstrap:
 	@echo "bootstrap: three-stage self-hosting build (Appendix E) — not yet implemented"
 
-# Regenerate every results file produced by an ignored measurement test or a --render
-# step, then fail if a committed file differs. Deliberately does NOT re-run the durable
-# E16 measurement (`bench --run`): that is wall-clock and machine-dependent.
+# Regenerate every results file produced by an ignored measurement test or a --render step,
+# then fail if a committed file differs.
+#
+# The point is that a results file nobody can regenerate is a results file nobody can check,
+# and three of these were produced by `#[ignore]`d tests with no guard at all: they could
+# drift from the code that made them and no build would notice.
+#
+# Deliberately does NOT re-run the durable E16 measurement (`bench --run`): that is
+# wall-clock, needs a live PostgreSQL, and is machine-dependent, so a diff against a
+# committed CSV would fail on any machine but the one that produced it. `--render` re-derives
+# the table from the committed CSVs, which is the part that must not drift.
+#
+# `nilestream sweep` needs the release binary, so `make reproduce` after `cargo build
+# --release -p nilestream`; the E12 sweep is deterministic and its diff is meaningful.
 reproduce:
 	cargo run -q -p niles-lang --bin gen-sql-surface
 	cargo test -p niles-lang --test solver_verdicts -- --ignored
 	cargo test -p nilestream-optimizer --test unnest_corpus -- --ignored
+	cargo test -p nilestream-server --test psql_conformance -- --ignored transcript
 	cargo run --release -p bank-bench --bin bench -- --render
-	cargo run --release -p experiments -- e1 e8
-	git diff --exit-code -- results/
+	cargo run --release -p experiments -- e1 e4 e8
+	./target/release/nilestream sweep examples/demo_bank.niles ledger_balance > results/e12_phase_compiled.csv
+	python3 thesis/include-results.py
+	git diff --exit-code -- results/ thesis/ docs/SPEC-LANGUAGE.md

@@ -84,7 +84,14 @@ pub fn row(vs: &[Option<i128>]) -> Row {
 }
 
 /// Evaluate a scalar against a row. Nulls propagate; comparisons are three-valued.
-pub fn eval_scalar(s: &Scalar, r: &Row) -> Value {
+///
+/// Takes a slice rather than a `Row`, so an engine folding the base can evaluate a predicate
+/// against a row it holds on the stack instead of allocating a `Vec` per posting to satisfy
+/// a signature. `&Vec<Value>` coerces, so every existing caller is unchanged — and the point
+/// is that there is still exactly one scalar evaluator: a second one would be a second
+/// three-valued logic, which is the kind of duplication that disagrees in the null cases
+/// four months later.
+pub fn eval_scalar(s: &Scalar, r: &[Value]) -> Value {
     match s {
         Scalar::Column(c) => *r.get(*c as usize).unwrap_or(&Value::Null),
         Scalar::LitInt(v) => Value::Int(*v),
@@ -130,7 +137,7 @@ fn tri_value(t: Tri) -> Value {
 }
 
 /// Whether a predicate keeps a row. Unknown discards, exactly as in `where`.
-pub fn keeps(p: &Scalar, r: &Row) -> bool {
+pub fn keeps(p: &Scalar, r: &[Value]) -> bool {
     truth(eval_scalar(p, r)).keeps()
 }
 
@@ -146,6 +153,15 @@ pub struct Eval<'a> {
     /// inner one's `Delay` must read the inner accumulator. One shared slot would silently
     /// give the inner recursion the outer's rows.
     fix_stack: Vec<ZSet>,
+    /// Nodes whose value the caller already has.
+    ///
+    /// The engine's fast paths compute a keyed aggregate by folding the base directly,
+    /// without ever materialising it as a Z-set. Everything *above* that aggregate —
+    /// `order by`, `limit` — must still mean what this evaluator says it means, and the way
+    /// to guarantee that is to let this evaluator compute it, from the value the fast path
+    /// produced. Re-implementing `Limit`'s tie-breaking rule beside this one would be two
+    /// semantics for one operator, which is the seam the whole design argues against.
+    precomputed: &'a BTreeMap<NodeId, ZSet>,
     /// Set when a fixpoint did not converge inside its round budget. Carried rather than
     /// panicked, so a caller can report it as the diagnostic it is.
     non_terminating: Option<EvalError>,
@@ -241,12 +257,41 @@ pub fn try_run_node(
     id: NodeId,
     sources: &BTreeMap<String, ZSet>,
 ) -> Result<(ZSet, u64), EvalError> {
+    try_run_node_with(c, id, sources, &BTreeMap::new())
+}
+
+/// Evaluate a named output, taking some nodes' values **as given**.
+///
+/// The entry point an engine uses when it has computed part of a circuit by a route this
+/// evaluator does not take — a fold over the base rather than a Z-set materialisation — and
+/// needs the rest of the circuit to mean exactly what the reference says it means.
+pub fn try_run_with(
+    c: &Circuit,
+    output: &str,
+    sources: &BTreeMap<String, ZSet>,
+    precomputed: &BTreeMap<NodeId, ZSet>,
+) -> Result<(ZSet, u64), EvalError> {
+    let id = *c
+        .outputs
+        .get(output)
+        .unwrap_or_else(|| panic!("no output named `{output}`"));
+    try_run_node_with(c, id, sources, precomputed)
+}
+
+/// [`try_run_node`], with precomputed nodes.
+pub fn try_run_node_with(
+    c: &Circuit,
+    id: NodeId,
+    sources: &BTreeMap<String, ZSet>,
+    precomputed: &BTreeMap<NodeId, ZSet>,
+) -> Result<(ZSet, u64), EvalError> {
     let mut e = Eval {
         circuit: c,
         sources,
         work: 0,
         fix_stack: Vec::new(),
         non_terminating: None,
+        precomputed,
     };
     let z = e.node(id);
     match e.non_terminating {
@@ -285,6 +330,11 @@ impl<'a> Eval<'a> {
     /// borrowed — exactly what they paid before, never more. The reading ones take a
     /// reference and pay nothing.
     fn node(&mut self, id: NodeId) -> Cow<'a, ZSet> {
+        // A value the caller already has costs nothing to produce and nothing to copy.
+        if let Some(z) = self.precomputed.get(&id) {
+            self.work += z.len() as u64;
+            return Cow::Borrowed(z);
+        }
         let n = self
             .circuit
             .nodes

@@ -179,19 +179,21 @@ pub fn budget(scenario: &str) -> Option<f64> {
         // A seeded ledger: one epoch record, one idempotency string and one index entry per
         // transaction, amortised over two postings.
         "ledger_seeded" => 2.6,
-        // **The three served analytical statements, and the numbers are still not typos.**
-        // An unkeyed `group by` materialises the whole base as a `BTreeMap<Vec<Value>,
-        // i128>` and folds it, so a query over 20,000 postings allocates three to eight
-        // times *per posting*. It was eight to thirteen: removing the evaluator's
-        // whole-source copy and `add`'s key clone halved these, and the halves that remain
-        // are the base materialisation itself, which a streaming fold removes rather than
-        // shrinks. These are a ratchet at what it costs today.
-        "served_group_by_cur" => 95_000.0,
-        "served_group_by_acct" => 187_000.0,
-        "served_sum_negative" => 77_000.0,
+        // **The three served analytical statements, after the fold replaced the copy.**
+        //
+        // `served_group_by_cur` and `served_sum_negative` form one group, so their whole
+        // cost is now a fixed handful of allocations and a few kilobytes — from 173,363
+        // allocations and 33MB. `served_group_by_acct` forms 10,001 groups and must send
+        // 10,001 rows over the wire, so its cost is O(groups): about nine and a half
+        // allocations per group, for the group's key, its accumulator and the row the client
+        // is sent. That is the shape to hold it to. What it must never again be is
+        // O(base rows).
+        "served_group_by_cur" => 28.0,
+        "served_group_by_acct" => 105_000.0,
+        "served_sum_negative" => 26.0,
         // A served point read goes through the anchor index, so its cost is the account's
         // own postings and the reply — not the base.
-        "served_point" => 30.0,
+        "served_point" => 32.0,
         // The REV runtime's hit path: the key is cloned into the recency map, and the answer
         // is a `Copy` struct.
         "rev_read_hit" => 2.2,

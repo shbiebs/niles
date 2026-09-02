@@ -203,11 +203,21 @@ on; a gap attributed to "it is a prototype" is not attributed at all.
    benchmark uses on both targets — compiles every statement afresh: parse, resolve,
    typecheck, lower, verify, per query. That is a real per-query cost and it is paid on every
    row of this table.
-4. **A full fold behind every scan.** `Serving::query` materialises the source as a Z-set and
-   evaluates the circuit over it. A `where acct = k` predicate is pushed into the scan through
-   the anchor index; an unkeyed `group by` is not, and materialises the whole base. **This is
-   the cause of the `analytical` NOT MET**: 20,000 postings are re-read per query against
-   PostgreSQL's sequential scan with an in-memory aggregate.
+4. **A materialising path, for the shapes outside the keyed-aggregate fragment.**
+   `Serving::query` recognises `Source → (Filter | Map)* → Aggregate{sum, count}` — the same
+   fragment the REV runtime accepts — and answers it by folding the ledger's own posting
+   records in one pass, with a per-group accumulator and no intermediate Z-set. Everything
+   above the aggregate (`order by`, `limit`) is evaluated by the reference evaluator from the
+   folded value, so those operators keep one semantics. Everything *outside* the fragment —
+   joins, `min`, `max`, `avg`, `distinct`, a bare projection — still materialises the whole
+   base as a Z-set and evaluates the circuit over it, which is the honest cost of an
+   arbitrary query against a partial-state engine.
+
+   This used to be the path for *every* query, and it was the cause of the `analytical`
+   NOT MET. Folding instead of materialising moved the four common statements by 25x, 19x,
+   3.4x and 2.4x, and two of them are now faster than PostgreSQL. The remaining gap on
+   `group_by_acct` and `top_ten_by_sum` is not the fold: those return 10,001 groups, and the
+   cost is producing and framing 10,001 rows.
 5. **No incremental maintenance on the served path.** The partially materialised view exists,
    is maintained, and is *not consulted by the wire path* — every point read is an anchored
    reconstruction. The `point` row's miss rate is therefore 1.00 by construction, which makes
@@ -223,7 +233,7 @@ on; a gap attributed to "it is a prototype" is not attributed at all.
 | row | verdict | attributed to |
 |---|---|---|
 | `oltp` | NOT MET (≈1× against a 5–10× contract) | items 3 and 6 — per-query compilation on a two-core machine, against a contract written for 48 cores. Not to the ledger: the durable row shows the write path at parity with PostgreSQL's, on the same device and the same `fsync`. |
-| `analytical` | NOT MET (≈0.13× against a 10–12× contract) | item 4 — a full fold per query. The engine is doing more work than PostgreSQL, not the same work more slowly, and the phase-diagram experiments are where that trade is characterised. |
+| `analytical` | NOT MET (still, against a 10–12× contract) | no longer item 4 for the keyed shapes: the fold answers `group by cur` at 2.7× PostgreSQL and `sum where` at 1.2×. What remains is the two statements that return 10,001 groups, where the cost is producing and sending the rows, and the protocol floor — a round trip is ~120µs here, so five statements per composite cannot be answered in the 0.25–0.30ms the contract's multiple implies whatever the engine does. See "Is this contract reachable" below. |
 
 Neither is attributed to the engine's correctness, and neither should be read as one. What
 they are is a **measured baseline and a characterised gap**, which is the claim §9.14.1 can
@@ -306,6 +316,27 @@ valgrind --tool=massif --massif-out-file=/tmp/massif.out \
       ./target/release/nilestreamd --port 5434 --accounts 10000 --rounds 2 --budget 2500
 ms_print /tmp/massif.out | head -40
 ```
+
+### Is the analytical contract reachable on this architecture?
+
+Worth the arithmetic, because "NOT MET" invites the reader to assume the gap is all engine.
+
+The contract asks for 10–12× PostgreSQL. PostgreSQL answers the common set at about 160
+composites per second here, so the target is 1,600–1,920 composites per second: 0.52–0.63ms
+for four round-tripped statements, or **130–156µs per statement including the round trip**.
+A round trip on this host measures about 120µs — `select 1` two thousand times through
+`psql` takes 0.24–0.26s — which leaves 10–36µs per statement for everything the engine does,
+against a base of 20,000 postings.
+
+A single-key read fits in that (the engine answers one in about 2µs in-process). A grouped
+aggregate over the whole base does not, and neither does sending 10,001 rows. **The
+analytical contract as written is not reachable over a per-statement request/response
+protocol at this base size, whatever the engine does**, and that is a property of the
+contract's shape rather than of the implementation. What would make it reachable: state it
+per statement, or over a pipelined or batched workload — either of which also helps
+PostgreSQL, so the ratio after the change is not predictable from these numbers. That is a
+decision for the specification and not for an implementation, and it is recorded rather than
+quietly worked around.
 
 ## How to read the verdicts
 

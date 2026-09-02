@@ -41,6 +41,9 @@ mod extended;
 mod pg_wire;
 #[path = "rev_engine.rs"]
 mod rev_engine;
+// The keyed-aggregate fast path `rev_engine` takes before materialising anything.
+#[path = "scan_fold.rs"]
+mod scan_fold;
 #[path = "session.rs"]
 mod session;
 // The daemon uses one policy (`insecure`) and one negotiation, so most of `tls.rs` is dead

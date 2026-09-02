@@ -42,5 +42,6 @@ pub mod native_proto;
 pub mod observability;
 pub mod pg_wire;
 pub mod rev_engine;
+pub mod scan_fold;
 pub mod session;
 pub mod tls;

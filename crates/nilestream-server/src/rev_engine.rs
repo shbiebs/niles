@@ -251,14 +251,52 @@ impl crate::session::Serving for RevEngine {
         // there and still applied — and the restriction goes through the anchor index,
         // which is the mechanism §9.4.1 measures at two orders of magnitude.
         // `the_pushdown_and_the_full_scan_agree` holds the two to the same answer.
-        let sources = match account_predicate(circuit) {
-            Some(acct) => self.base_for_account(acct, anchor),
-            None => self.base_at(anchor),
-        };
         self.served += 1;
-        self.served_rows += sources.values().map(|z| z.len() as u64).sum::<u64>();
-        let (z, work) = niles_ir::eval::try_run(circuit, output, &sources)
-            .map_err(|e| crate::session::ServeError::Eval(e.to_string()))?;
+        // **The fast path: fold the base, never materialise it.**
+        //
+        // `scan_fold::plan` recognises the keyed-aggregate fragment and refuses everything
+        // else, so this is a *fast path for one shape* rather than a second engine. What it
+        // computes is the aggregate node's value; everything above that — `order by`,
+        // `limit` — is evaluated by the reference from that value, so those operators keep
+        // one semantics and cannot drift from the golden corpus.
+        let (z, work) = match crate::scan_fold::plan(circuit, output) {
+            Some(p) if p.relation == "postings" => {
+                // **Streamed, not buffered.** Collecting the base into a `Vec` first cost
+                // 10MB of vector growth per query — more than the Z-set this path exists to
+                // avoid building — so the scan pushes rows into the fold one at a time and
+                // nothing holds the base at all.
+                let mut folder = crate::scan_fold::Folder::new(&p);
+                let mut scanned = 0u64;
+                self.scan(account_predicate(circuit), anchor, |row| {
+                    scanned += 1;
+                    folder.row(&row[..]);
+                });
+                self.served_rows += scanned;
+                let (folded, w) = folder.finish();
+                let mut given = std::collections::BTreeMap::new();
+                given.insert(p.node, folded);
+                let (z, w2) = niles_ir::eval::try_run_with(
+                    circuit,
+                    output,
+                    &std::collections::BTreeMap::new(),
+                    &given,
+                )
+                .map_err(|e| crate::session::ServeError::Eval(e.to_string()))?;
+                (z, w + w2)
+            }
+            // The materialising path, still here and still correct: it is what answers every
+            // shape outside the fragment, and it is the oracle the fast path is tested
+            // against.
+            _ => {
+                let sources = match account_predicate(circuit) {
+                    Some(acct) => self.base_for_account(acct, anchor),
+                    None => self.base_at(anchor),
+                };
+                self.served_rows += sources.values().map(|z| z.len() as u64).sum::<u64>();
+                niles_ir::eval::try_run(circuit, output, &sources)
+                    .map_err(|e| crate::session::ServeError::Eval(e.to_string()))?
+            }
+        };
         self.scan_work += work;
 
         // Column names from the lowering are not available here — the circuit is the
@@ -346,6 +384,49 @@ impl RevEngine {
     pub fn with_durable(mut self, path: impl AsRef<std::path::Path>) -> std::io::Result<Self> {
         self.durable = Some(DurableSink::open(path)?);
         Ok(self)
+    }
+
+    /// **The base's posting records, in the schema a lowered circuit indexes into** —
+    /// `(txn, acct, cur, amt, idem)` — written into a caller's buffer so a query costs one
+    /// allocation for the scan rather than two per row.
+    ///
+    /// `idem` is a text column and has no integer form, so it is null. That is not a
+    /// placeholder: an idempotency key is not something a read model computes with, and a
+    /// circuit filtering on one would be filtering on an absence, which the three-valued
+    /// rules already handle.
+    fn scan(&self, acct: Option<u64>, anchor: u64, mut f: impl FnMut([niles_ir::value::Value; 5])) {
+        use niles_ir::value::Value;
+        let upto = anchor.min(self.ledger.head());
+        let row = |p: &Posting| {
+            [
+                Value::Int(p.txn as i128),
+                Value::Int(p.acct as i128),
+                Value::Int(p.cur as i128),
+                Value::Int(p.amt),
+                Value::Null,
+            ]
+        };
+        match acct {
+            // Through the anchor index: the cost is that account's own postings rather than
+            // the length of history, which is the mechanism §9.4.1 measures.
+            Some(a) => {
+                for p in self.ledger.postings_for(a, upto) {
+                    f(row(&p));
+                }
+            }
+            None => {
+                for e in &self.ledger.epochs {
+                    if e.id > upto {
+                        break;
+                    }
+                    for r in &e.rows {
+                        if let Row::Post(p) = r {
+                            f(row(p));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// The `postings` base as a Z-set visible at `anchor`, in the schema the lowering gives
@@ -506,6 +587,165 @@ fn account_predicate(circuit: &niles_ir::circuit::Circuit) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Compile a wire statement against the daemon's schema, exactly as a session does.
+    fn compile(sql: &str) -> niles_lang::lower::Lowered {
+        let program = format!(
+            "{}\nview __wire_result = sql {{ {sql} }} serve {{ consistency: snapshot, materialize: auto }};\n",
+            crate::daemon::DEFAULT_SCHEMA
+        );
+        let (prog, d) = niles_lang::parser::parse_program(&program);
+        assert!(!d.has_errors(), "`{sql}`: {:?}", d.items);
+        let (cat, rd) = niles_lang::resolve::resolve_program(&prog, 0);
+        assert!(!rd.has_errors(), "`{sql}`: {:?}", rd.items);
+        let (_r, td) = niles_lang::typecheck::check_program(&prog, &cat);
+        assert!(!td.has_errors(), "`{sql}`: {:?}", td.items);
+        let (lowered, ld) = niles_lang::lower::lower_program(&prog, &cat);
+        assert!(!ld.has_errors(), "`{sql}`: {:?}", ld.items);
+        assert!(niles_ir::verify::verify(&lowered.circuit).is_ok());
+        lowered
+    }
+
+    /// Render a Z-set the way `Serving::query` renders one, so the two can be compared.
+    fn rendered(z: &niles_ir::eval::ZSet, anchor: u64) -> Vec<Vec<Option<String>>> {
+        let mut rows = Vec::new();
+        for (r, w) in z {
+            if *w <= 0 {
+                continue;
+            }
+            for _ in 0..*w {
+                let mut cells: Vec<Option<String>> = r
+                    .iter()
+                    .map(|v| match v {
+                        niles_ir::value::Value::Null => None,
+                        niles_ir::value::Value::Int(i) => Some(i.to_string()),
+                    })
+                    .collect();
+                cells.push(Some(anchor.to_string()));
+                rows.push(cells);
+            }
+        }
+        rows
+    }
+
+    /// **The obligation the fold carries.**
+    ///
+    /// Answering a keyed aggregate by folding the base cannot change what the circuit
+    /// denotes, and this is what says so rather than the module's docstring: every statement
+    /// is answered by the fold and by the reference evaluator over a materialised base, and
+    /// the two must be identical — rows, order and nulls.
+    ///
+    /// The cases are chosen to cover what the fragment's edges are made of: a grouped and an
+    /// ungrouped aggregate, a filter that keeps some rows and one that keeps none, a `sum`
+    /// over no non-null rows (which is null and not zero), an ordering and a limit above the
+    /// aggregate, a pushed-down key, and shapes the plan must *refuse* so that they take the
+    /// materialising path and still answer.
+    #[test]
+    fn the_fold_and_the_oracle_agree() {
+        use crate::session::Serving;
+        // Small enough to be a unit test, seeded densely enough that groups, filters and
+        // limits all have something to do.
+        let mut e = RevEngine::seeded(60, 3, 20, ViewMode::Demand, EvictionPolicy::Lru);
+        let anchor = e.frontier();
+
+        let folded = [
+            "select cur, sum(amt) from postings group by cur",
+            "select acct, sum(amt) from postings group by acct",
+            "select sum(amt) from postings where amt < 0",
+            "select sum(amt) from postings",
+            "select acct, sum(amt) from postings group by acct order by sum(amt) desc limit 5",
+            "select acct, sum(amt) from postings group by acct order by acct limit 3",
+            "select acct, sum(amt) from postings where acct = 7 group by acct",
+            "select acct, sum(amt) from postings where acct = 999999 group by acct",
+            "select cur, sum(amt) from postings where amt > 1000000 group by cur",
+            "select acct, count(amt) from postings group by acct",
+            "select count(amt) from postings where amt < 0",
+        ];
+        for sql in folded {
+            let lowered = compile(sql);
+            let plan = crate::scan_fold::plan(&lowered.circuit, "__wire_result");
+            assert!(
+                plan.is_some(),
+                "`{sql}` is inside the fragment and must be folded, or this case is \
+                 comparing the materialising path with itself"
+            );
+            let by_fold = e
+                .query(&lowered.circuit, "__wire_result", anchor)
+                .expect("the fold answers");
+            let sources = e.base_at(anchor);
+            let (oracle, _) = niles_ir::eval::try_run(&lowered.circuit, "__wire_result", &sources)
+                .expect("the reference answers");
+            assert_eq!(
+                by_fold.rows,
+                rendered(&oracle, anchor),
+                "`{sql}`: the fold and the reference evaluator denote different things"
+            );
+        }
+
+        // Shapes outside the fragment: the plan must refuse them — silently answering one
+        // with a sum is the failure this design is arranged to prevent — and the query must
+        // still be served, by the path that materialises.
+        for sql in [
+            "select acct, min(amt) from postings group by acct",
+            "select acct, avg(amt) from postings group by acct",
+            "select acct, amt from postings where amt < 0",
+            "select distinct acct from postings",
+        ] {
+            let lowered = compile(sql);
+            assert!(
+                crate::scan_fold::plan(&lowered.circuit, "__wire_result").is_none(),
+                "`{sql}` is outside the fragment and must be refused by the planner"
+            );
+            let served = e
+                .query(&lowered.circuit, "__wire_result", anchor)
+                .expect("the materialising path still answers");
+            let sources = e.base_at(anchor);
+            let (oracle, _) = niles_ir::eval::try_run(&lowered.circuit, "__wire_result", &sources)
+                .expect("the reference answers");
+            assert_eq!(served.rows, rendered(&oracle, anchor), "`{sql}`");
+        }
+    }
+
+    /// A `sum` over no non-null rows is **null**, and the fold must say so too.
+    ///
+    /// Called out separately because it is the one place a one-pass accumulator most easily
+    /// goes wrong: an `i128` starting at zero reports zero for a group that summed nothing,
+    /// and a balance of "nothing was ever posted" rendered as `0.00` is §1.1.1's defect
+    /// wearing an aggregate's clothes.
+    #[test]
+    fn a_sum_over_no_rows_is_absent_rather_than_zero() {
+        use crate::session::Serving;
+        let mut e = RevEngine::seeded(20, 2, 10, ViewMode::Demand, EvictionPolicy::Lru);
+        let anchor = e.frontier();
+        let lowered = compile("select cur, sum(amt) from postings where amt > 100000 group by cur");
+        assert!(crate::scan_fold::plan(&lowered.circuit, "__wire_result").is_some());
+        let out = e
+            .query(&lowered.circuit, "__wire_result", anchor)
+            .expect("answers");
+        assert!(
+            out.rows.is_empty(),
+            "no row passes the filter, so there is no group and no row: {:?}",
+            out.rows
+        );
+
+        // And a group that exists but whose aggregated expression is null everywhere: `idem`
+        // is the text column, materialised as null, so summing it forms groups with no
+        // non-null value in them.
+        let lowered = compile("select cur, sum(idem) from postings group by cur");
+        assert!(crate::scan_fold::plan(&lowered.circuit, "__wire_result").is_some());
+        let by_fold = e
+            .query(&lowered.circuit, "__wire_result", anchor)
+            .expect("answers");
+        let sources = e.base_at(anchor);
+        let (oracle, _) =
+            niles_ir::eval::try_run(&lowered.circuit, "__wire_result", &sources).expect("oracle");
+        assert_eq!(by_fold.rows, rendered(&oracle, anchor));
+        assert_eq!(
+            by_fold.rows,
+            vec![vec![Some("0".into()), None, Some(anchor.to_string())]],
+            "the group is there and its sum is absent, not zero"
+        );
+    }
 
     #[test]
     fn the_pushdown_and_the_full_scan_agree() {

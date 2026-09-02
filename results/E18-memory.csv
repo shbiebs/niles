@@ -1,9 +1,9 @@
 scenario,unit,operations,allocations,bytes,live_delta,peak_delta,allocations_per_op,bytes_per_op
 ledger_seeded,posting,40000,90057,16608467,8418859,9492956,2.3,415.2
 zset_base_at,row,40000,46665,9583856,9583856,9583856,1.2,239.6
-served_group_by_cur,query,3,260091,51471927,0,14303600,86697.0,17157309.0
-served_group_by_acct,query,3,510120,66698538,0,15353456,170040.0,22232846.0
-served_sum_negative,query,3,210078,52569423,0,16735920,70026.0,17523141.0
-served_point,query,200,5400,841000,0,3472,27.0,4205.0
+served_group_by_cur,query,3,75,9381,0,1770,25.0,3127.0
+served_group_by_acct,query,3,285105,24420792,0,3619950,95035.0,8140264.0
+served_sum_negative,query,3,69,9399,0,1928,23.0,3133.0
+served_point,query,200,5800,702200,0,1962,29.0,3511.0
 rev_read_hit,read,1000,2000,32000,0,16,2.0,32.0
 append_in_memory,transaction,500,2000,145392,67392,67548,4.0,290.8

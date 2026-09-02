@@ -1,7 +1,7 @@
 //! Derived read models: partial by default, with the absence lattice, anchored upqueries,
 //! and eviction.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::policy::EvictionPolicy;
 use crate::{Acct, Cur, Epoch, Ledger, Minor};
@@ -60,10 +60,21 @@ pub struct PartialView {
     pub mode: ViewMode,
     pub budget: usize,
     pub policy: EvictionPolicy,
-    slots: HashMap<(Acct, Cur), Slot>,
+    slots: BTreeMap<(Acct, Cur), Slot>,
     /// Bookkeeping for the eviction policy.
-    meta: HashMap<(Acct, Cur), policy_meta::Meta>,
+    meta: BTreeMap<(Acct, Cur), policy_meta::Meta>,
     pub applied: Epoch,
+    /// Whether any epoch has been folded into this view yet.
+    ///
+    /// `applied: Epoch` alone cannot say so: epochs are numbered from zero here, so a
+    /// fresh view and a view that has applied epoch 0 both read `applied == 0`. Folding
+    /// "everything after `applied`" without this flag silently skips epoch 0 — the first
+    /// epoch of the ledger, and the one that funds every account.
+    applied_any: bool,
+    /// Keys whose entry was installed at an anchor below `applied` — a historical read.
+    /// Such an entry has not seen the deltas between its anchor and `applied`, so it may
+    /// serve only reads at or below its own stamp and must receive no delta.
+    pinned: BTreeSet<(Acct, Cur)>,
     pub stats: ViewStats,
     clock: u64,
     /// Maintained incrementally; counting residents on every budget check would make
@@ -89,9 +100,11 @@ impl PartialView {
             mode,
             budget,
             policy,
-            slots: HashMap::new(),
-            meta: HashMap::new(),
+            slots: BTreeMap::new(),
+            meta: BTreeMap::new(),
             applied: 0,
+            applied_any: false,
+            pinned: BTreeSet::new(),
             stats: ViewStats::default(),
             clock: 0,
             resident_count: 0,
@@ -122,7 +135,17 @@ impl PartialView {
         for row in &rec.rows {
             if let crate::Row::Post(p) = row {
                 let k = (p.acct, p.cur);
+                if self.pinned.contains(&k) {
+                    self.stats.deltas_skipped += 1;
+                    continue;
+                }
                 match self.slots.get(&k) {
+                    // Already included: an entry reconstructed ahead of the applied
+                    // frontier carries this delta, and adding it again is the
+                    // double-application anomaly.
+                    Some(Slot::Present(_, stamp)) if *stamp >= e => {
+                        self.stats.deltas_skipped += 1;
+                    }
                     Some(Slot::Present(v, _)) => {
                         let nv = *v + p.amt;
                         self.slots.insert(k, Slot::Present(nv, e));
@@ -141,6 +164,25 @@ impl PartialView {
         // maintenance proportional to the number of deltas rather than to residency.
         self.stats.resident_entry_epochs += self.resident_count as u64;
         self.applied = e;
+        self.applied_any = true;
+    }
+
+    /// Fold every epoch not yet applied, through `e`, in order.
+    ///
+    /// This is what a maintenance pass is. A bounded-staleness rung runs it less often
+    /// than a strict one and therefore does fewer, larger passes — but it folds the same
+    /// deltas, because the epochs it batched over still have to be applied. Applying only
+    /// the boundary epoch leaves the view certified through a frontier whose deltas
+    /// nobody folded, which is a wrong answer rather than a stale one.
+    pub fn apply_through(&mut self, ledger: &Ledger, e: Epoch) {
+        let from = if self.applied_any {
+            self.applied + 1
+        } else {
+            0
+        };
+        for epoch in from..=e {
+            self.apply_epoch(ledger, epoch);
+        }
     }
 
     /// Read at an anchor. Returns `(value, anchor, was_hit)`.
@@ -162,7 +204,11 @@ impl PartialView {
         let k = (acct, cur);
 
         if let Some(Slot::Present(v, a)) = self.slots.get(&k).copied() {
-            let a = a.max(self.applied);
+            let a = if self.pinned.contains(&k) {
+                a
+            } else {
+                a.max(self.applied)
+            };
             if a >= anchor {
                 self.stats.hits += 1;
                 let m = self.meta.entry(k).or_default();
@@ -191,6 +237,13 @@ impl PartialView {
 
         if !matches!(self.slots.get(&k), Some(Slot::Present(_, _))) {
             self.resident_count += 1;
+        }
+        // A reconstruction anchored below the applied frontier is a historical answer:
+        // worth keeping, but not current, and never promoted to `applied`.
+        if anchor < self.applied {
+            self.pinned.insert(k);
+        } else {
+            self.pinned.remove(&k);
         }
         self.slots.insert(k, Slot::Present(v, anchor));
         {
@@ -223,7 +276,12 @@ impl PartialView {
                     // the version is kept, so absence of value never masquerades as absence
                     // of history.
                     if let Some(Slot::Present(_, a)) = self.slots.get(&k).copied() {
-                        self.slots.insert(k, Slot::Hole(a.max(self.applied)));
+                        let version = if self.pinned.remove(&k) {
+                            a
+                        } else {
+                            a.max(self.applied)
+                        };
+                        self.slots.insert(k, Slot::Hole(version));
                         self.resident_count -= 1;
                         self.stats.evictions += 1;
                         // Decay all credits (budget pressure), per the cost-aware policy.
@@ -244,6 +302,7 @@ impl PartialView {
 
     /// Wipe the entire derived layer (the rebuild-from-base experiment).
     pub fn wipe(&mut self) {
+        self.pinned.clear();
         self.slots.clear();
         self.meta.clear();
         self.resident_count = 0;
@@ -266,5 +325,269 @@ impl PartialView {
         cm.memory * (self.stats.resident_entry_epochs as f64)
             + cm.maintenance * (self.stats.deltas_applied as f64)
             + cm.reconstruction * (self.stats.rows_touched as f64)
+    }
+}
+
+#[cfg(test)]
+mod cert_tests {
+    //! The certification invariant, and the three defects that violated it.
+    //!
+    //! `proto-engine` is the instrument that produced every counted-work figure in the
+    //! evaluation chapter, and until this module it had no tests at all. A measurement
+    //! whose instrument is unchecked is a measurement of the instrument.
+
+    use super::*;
+    use crate::ledger::{Ledger, Posting, Reject, Row};
+
+    const USD: Cur = 840;
+
+    fn seal(l: &mut Ledger, key: &str, acct: Acct, amt: Minor) {
+        // Balanced against a contra account, because the commit rule is per (txn, currency).
+        l.submit(
+            key,
+            vec![
+                Row::Post(Posting {
+                    txn: 1,
+                    acct,
+                    cur: USD,
+                    amt,
+                    valid: 0,
+                }),
+                Row::Post(Posting {
+                    txn: 1,
+                    acct: 999,
+                    cur: USD,
+                    amt: -amt,
+                    valid: 0,
+                }),
+            ],
+        )
+        .expect("balanced");
+    }
+
+    /// An independent fold: the rows, filtered and summed in the test. Deliberately not
+    /// `Ledger::reconstruct_balance` — comparing a value against the function that
+    /// produced it is what made Table 9.1's divergence column an identity.
+    fn truth(l: &Ledger, acct: Acct, cur: Cur, anchor: Epoch) -> Minor {
+        let mut total = 0;
+        for (i, e) in l.epochs.iter().enumerate() {
+            if i as Epoch > anchor {
+                break;
+            }
+            for r in &e.rows {
+                if let Row::Post(p) = r {
+                    if p.acct == acct && p.cur == cur {
+                        total += p.amt;
+                    }
+                }
+            }
+        }
+        total
+    }
+
+    #[test]
+    fn f01_stale_hit_is_not_promoted() {
+        let mut l = Ledger::new();
+        seal(&mut l, "a", 1, 10);
+        seal(&mut l, "b", 1, 20);
+        let mut v = PartialView::new(ViewMode::Demand, 8, EvictionPolicy::Lru);
+        v.apply_epoch(&l, 1);
+
+        let (val, anch, _) = v.read(&mut l, 1, USD, 0, 0.0, 0.0);
+        assert_eq!(val, truth(&l, 1, USD, anch));
+
+        let (val, anch, _) = v.read(&mut l, 1, USD, 1, 0.0, 0.0);
+        assert_eq!(anch, 1);
+        assert_eq!(
+            val,
+            truth(&l, 1, USD, 1),
+            "a read at the applied frontier must not be answered from an older entry"
+        );
+    }
+
+    #[test]
+    fn f02_delta_is_applied_once() {
+        let mut l = Ledger::new();
+        seal(&mut l, "a", 1, 10);
+        seal(&mut l, "b", 1, 20);
+        let mut v = PartialView::new(ViewMode::Demand, 8, EvictionPolicy::Lru);
+        // Reconstruct ahead of the applied frontier: the entry already carries both epochs.
+        let (ahead, _, _) = v.read(&mut l, 1, USD, 1, 0.0, 0.0);
+        assert_eq!(ahead, truth(&l, 1, USD, 1));
+        v.apply_epoch(&l, 0);
+        v.apply_epoch(&l, 1);
+        let (after, anch, _) = v.read(&mut l, 1, USD, 1, 0.0, 0.0);
+        assert_eq!(
+            after,
+            truth(&l, 1, USD, anch),
+            "folding a delta the value already carries doubles the money"
+        );
+    }
+
+    #[test]
+    fn cert_holds_under_interleaved_reads_evictions_and_maintenance() {
+        for seed in [1u64, 7, 42, 100, 2024] {
+            let mut lcg = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let mut next = || {
+                lcg = lcg
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                lcg >> 33
+            };
+            let mut l = Ledger::new();
+            for i in 0..100u64 {
+                seal(&mut l, &format!("s{seed}-{i}"), i % 6, 1 + (i % 4) as Minor);
+            }
+            // A budget that binds, so eviction runs continuously.
+            let mut v = PartialView::new(ViewMode::Demand, 3, EvictionPolicy::Lru);
+            let mut checked = 0;
+            for e in 0..100u64 {
+                v.apply_epoch(&l, e);
+                for _ in 0..3 {
+                    let acct = next() % 6;
+                    let anchor = next() % (e + 1);
+                    let (val, anch, _) = v.read(&mut l, acct, USD, anchor, 0.0, 0.0);
+                    assert!(anch >= anchor);
+                    assert_eq!(
+                        val,
+                        truth(&l, acct, USD, anch),
+                        "seed {seed}: served value disagrees with the fold at its own anchor"
+                    );
+                    checked += 1;
+                }
+            }
+            assert!(checked >= 300);
+        }
+    }
+
+    #[test]
+    fn eviction_is_reproducible_from_the_seed_for_every_policy() {
+        for policy in [
+            EvictionPolicy::Lru,
+            EvictionPolicy::Random,
+            EvictionPolicy::CostAware,
+        ] {
+            let run = || {
+                let mut l = Ledger::new();
+                for i in 0..60u64 {
+                    seal(&mut l, &format!("k{i}"), i % 8, 1);
+                }
+                let mut v = PartialView::new(ViewMode::Demand, 3, policy);
+                for e in 0..60u64 {
+                    v.apply_epoch(&l, e);
+                    v.read(&mut l, (e * 7) % 8, USD, e, 1.0, 1.0);
+                }
+                let resident: Vec<(Acct, Cur)> = v
+                    .slots
+                    .iter()
+                    .filter(|(_, s)| matches!(s, Slot::Present(_, _)))
+                    .map(|(k, _)| *k)
+                    .collect();
+                (v.stats.rows_touched, v.stats.evictions, resident)
+            };
+            let (a, b, c) = (run(), run(), run());
+            assert_eq!(a, b, "{policy:?} is not reproducible from its seed");
+            assert_eq!(b, c, "{policy:?} is not reproducible from its seed");
+        }
+    }
+
+    #[test]
+    fn the_first_maintenance_pass_folds_epoch_zero() {
+        // Epochs are numbered from zero here, so a fresh view and a view that has applied
+        // epoch 0 both read `applied == 0`. Folding "everything after applied" without
+        // distinguishing them skips the ledger's first epoch — the one that funds the
+        // accounts — and every balance is short by its opening entry.
+        let mut l = Ledger::new();
+        seal(&mut l, "open", 1, 100);
+        seal(&mut l, "more", 1, 5);
+        let mut v = PartialView::new(ViewMode::Demand, 8, EvictionPolicy::Lru);
+        v.read(&mut l, 1, USD, 0, 0.0, 0.0); // resident, anchored at epoch 0
+        let head = l.head();
+        v.apply_through(&l, head);
+        let (val, anch, hit) = v.read(&mut l, 1, USD, head, 0.0, 0.0);
+        assert!(hit, "the entry was resident and maintained");
+        assert_eq!(val, truth(&l, 1, USD, anch));
+        assert_eq!(val, 105);
+    }
+
+    #[test]
+    fn a_batched_pass_folds_the_same_deltas_as_an_unbatched_one() {
+        // The corrected statement of what a bounded rung buys: fewer passes, identical
+        // deltas. If batching applied fewer deltas the view would be serving a value the
+        // ledger does not have.
+        let build = || {
+            let mut l = Ledger::new();
+            for i in 0..40u64 {
+                seal(&mut l, &format!("k{i}"), i % 4, 1);
+            }
+            l
+        };
+        let mut l1 = build();
+        let mut strict = PartialView::new(ViewMode::Demand, 8, EvictionPolicy::Lru);
+        for k in 0..4 {
+            strict.read(&mut l1, k, USD, 0, 0.0, 0.0);
+        }
+        for e in 0..=l1.head() {
+            strict.apply_through(&l1, e);
+        }
+
+        let mut l2 = build();
+        let mut lax = PartialView::new(ViewMode::Demand, 8, EvictionPolicy::Lru);
+        for k in 0..4 {
+            lax.read(&mut l2, k, USD, 0, 0.0, 0.0);
+        }
+        let mut e = 0;
+        while e <= l2.head() {
+            lax.apply_through(&l2, e.min(l2.head()));
+            e += 8;
+        }
+        lax.apply_through(&l2, l2.head());
+
+        assert_eq!(
+            lax.stats.deltas_applied, strict.stats.deltas_applied,
+            "batching must not lose deltas"
+        );
+        let (h1, h2) = (l1.head(), l2.head());
+        for k in 0..4 {
+            let (a, _, _) = strict.read(&mut l1, k, USD, h1, 0.0, 0.0);
+            let (b, _, _) = lax.read(&mut l2, k, USD, h2, 0.0, 0.0);
+            assert_eq!(a, b);
+            assert_eq!(a, truth(&l1, k, USD, h1));
+        }
+    }
+
+    #[test]
+    fn overflow_is_refused() {
+        // Conservation is stated over the integers. In release builds Rust's arithmetic
+        // wraps, so a set summing to zero only by wraparound would pass the commit rule
+        // and create money out of a machine word.
+        let mut l = Ledger::new();
+        let r = l.submit(
+            "wrap",
+            vec![
+                Row::Post(Posting {
+                    txn: 1,
+                    acct: 1,
+                    cur: USD,
+                    amt: Minor::MAX,
+                    valid: 0,
+                }),
+                Row::Post(Posting {
+                    txn: 1,
+                    acct: 2,
+                    cur: USD,
+                    amt: Minor::MAX,
+                    valid: 0,
+                }),
+                Row::Post(Posting {
+                    txn: 1,
+                    acct: 3,
+                    cur: USD,
+                    amt: 2,
+                    valid: 0,
+                }),
+            ],
+        );
+        assert_eq!(r, Err(Reject::Overflow));
     }
 }

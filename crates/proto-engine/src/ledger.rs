@@ -59,6 +59,14 @@ pub enum Reject {
     Duplicate,
     Unbalanced,
     BadResolution,
+    /// A per-(txn, currency) sum that does not fit in `Minor`.
+    ///
+    /// Refused rather than wrapped. In release builds Rust's integer arithmetic wraps
+    /// silently, so `[i128::MAX, i128::MAX, 2]` sums to zero and a transaction that
+    /// creates money passes the commit rule. The conservation guarantee is stated over
+    /// the integers, and this is where the implementation stops pretending its integers
+    /// are unbounded.
+    Overflow,
 }
 
 /// Where a posting lives: (epoch index, row index within the epoch).
@@ -178,7 +186,11 @@ impl Ledger {
         let mut sums: HashMap<(u64, Cur), Minor> = HashMap::new();
         for r in &rows {
             if let Row::Post(p) = r {
-                *sums.entry((p.txn, p.cur)).or_insert(0) += p.amt;
+                let slot = sums.entry((p.txn, p.cur)).or_insert(0);
+                *slot = match slot.checked_add(p.amt) {
+                    Some(v) => v,
+                    None => return Err(Reject::Overflow),
+                };
             }
         }
         if sums.values().any(|s| *s != 0) {

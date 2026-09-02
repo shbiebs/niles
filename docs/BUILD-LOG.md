@@ -658,3 +658,72 @@ The converse obligation is the one T-02 is closing: inheritance is only sound if
 never runs ahead of the deltas actually folded in. F-03 is precisely that failure — a
 stride boundary that advanced `applied` past epochs whose deltas were never applied to
 anyone — so `advance` must fold every epoch in `(applied, e]`, not only `e`.
+
+### [T-02] 2026-09-02T03:05Z RESULT The three defects reproduced, and what fixing them cost the thesis
+
+All three pointers reproduced exactly as described. Each is now a named test that fails
+without its fix — verified by reverting the fix and watching `f01_`, `f02_` and the CERT
+property test go red, which is the only thing that makes them regression tests rather
+than assertions about current behaviour.
+
+**F-01.** `install` wrote `Present(v, anchor)` for any anchor and `read` served
+`max(stamp, applied)`, so an entry installed by a *historical* read was promoted to the
+view's applied frontier and served, as a hit, for a later anchor. The fix is a `pinned`
+set: an entry installed below the applied frontier keeps its own stamp, is never
+promoted, and receives no delta (it is missing earlier ones, so folding a later one
+compounds the gap rather than closing it).
+
+**F-02.** `apply_epoch` folded a delta into any resident entry regardless of its stamp,
+so an entry reconstructed *ahead* of the frontier received epochs it already carried.
+A delta at or below an entry's own stamp is now skipped.
+
+**F-03.** `advance` applied only the boundary epoch at a stride and then set
+`applied = e`, so the `stride - 1` epochs in between were never folded into anyone while
+the view was nevertheless certified through the boundary. `advance` and the E8 loop now
+fold every epoch in `(applied, e]`.
+
+**An epoch-zero hazard the fix exposed.** `applied: Epoch` starting at 0 cannot
+distinguish "nothing folded yet" from "epoch 0 folded", and `proto-engine` numbers epochs
+from zero. Folding "everything after `applied`" therefore skipped the ledger's first
+epoch — the one that funds every account. `PartialView::apply_through` carries an
+explicit `applied_any` flag, and `the_first_maintenance_pass_folds_epoch_zero` pins it.
+
+### [T-02] 2026-09-02T03:05Z RESULT E8 re-run: the rung tax is not what was reported
+
+`cargo run --release -p experiments -- e8`, commit on `review/F-01-F-06`, workload
+parameters unchanged (10,000 accounts, 40,000 ops, budget 5%, skew 0.9, five seeds).
+**Divergences: 0** across every row — the oracle column this experiment did not have.
+
+| Rung | deltas applied | apply calls | misses | base rows read | hit rate |
+|---|---|---|---|---|---|
+| bounded(k=64) | 2,171 | 61 | 26,644 | 102,624 | 0.259 |
+| bounded(k=8) | 2,514 | 446 | 24,700 | 73,811 | 0.315 |
+| strict(k=0) | 3,621 | 4,017 | 19,658 | 40,869 | 0.456 |
+
+Thesis Table 9.9 reports, for the same workload: deltas applied **55 / 408 / 3,621**,
+misses 19,714 / 19,670 / 19,658, hit rate 0.455 / 0.456 / 0.456 — and concludes that the
+rung's price is a **66x** difference in maintenance that is **invisible on the read path**.
+
+Three claims in that sentence do not survive the correction.
+
+1. **The 66x was the count of deltas thrown away.** Corrected, the ratio in deltas
+   applied is **1.67x**, not 66x. What is still ~66x is *apply calls* — maintenance
+   passes — which is a batching saving and a materially weaker claim: the same deltas,
+   in fewer, larger passes.
+2. **The read path is not indistinguishable across rungs; it is where the cost moved.**
+   A lax rung now reads **2.5x more base rows** (102,624 vs 40,869) and misses far more
+   often (26,644 vs 19,658). This is not a new cost: it is the cost that was previously
+   hidden, because entries were being *falsely certified* through a frontier whose
+   deltas had never been applied, so they registered as hits.
+3. **The high hit rate of a lax rung was an artefact of the same defect.** 0.259 rather
+   than 0.455.
+
+The honest summary the thesis will have to carry: a bounded rung buys fewer maintenance
+passes and pays for them in reconstruction, and the trade is visible on both sides of the
+ledger rather than free on one. §9.4.3's "the tax for demanding freshness is not paid on
+the read path at all" is refuted. Carried to T-05, which rewrites §9.4.3, §9.5.2, §9.12
+and Appendix K.6 from these figures and adds Appendix J.16.
+
+### [T-02] 2026-09-02T03:05Z TESTS niles 600/0/3 -> 613/0/3
+`proto-engine` had no tests at all before this commit and now has 7; `nilestream-core`
+goes 24 -> 37. Gate green.

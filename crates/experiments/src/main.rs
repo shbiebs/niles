@@ -815,7 +815,7 @@ fn e7_write_path(seeds: &[u64]) -> String {
 
 fn e8_consistency_rungs(seeds: &[u64]) -> String {
     let mut csv = String::from(
-        "rung,staleness_epochs,seed,misses,rows_touched,deltas_applied,apply_calls,hit_rate\n",
+        "rung,staleness_epochs,seed,misses,rows_touched,deltas_applied,apply_calls,hit_rate,divergences\n",
     );
     println!("\n  Cost per consistency rung (skew s=0.9, budget=5%, identical workload)");
     println!("     rung                misses(med)  rows_read(med)  deltas_applied(med)  apply_calls(med)  hit-rate");
@@ -843,6 +843,7 @@ fn e8_consistency_rungs(seeds: &[u64]) -> String {
             let mut txn = 0u64;
             let mut pending: u64 = 0;
             let mut apply_calls: u64 = 0;
+            let mut divergences: u64 = 0;
 
             for i in 0..n_ops {
                 if rng.next_f64() < 0.9 {
@@ -850,7 +851,13 @@ fn e8_consistency_rungs(seeds: &[u64]) -> String {
                     // The rung sets the anchor the read demands.
                     let head = ledger.head();
                     let anchor = head.saturating_sub(k.min(head));
-                    view.read(&mut ledger, a, USD, anchor, 0.0, 0.0);
+                    let (v, served_at, _) = view.read(&mut ledger, a, USD, anchor, 0.0, 0.0);
+                    // The oracle column this experiment did not have. A rung that is
+                    // cheap because it drops deltas is not a cheap rung, and only a
+                    // value check can tell the two apart.
+                    if v != ledger.reconstruct_balance_scan(a, USD, served_at) {
+                        divergences += 1;
+                    }
                 } else {
                     let from = zipf.sample() as u64;
                     let mut to = zipf.sample() as u64;
@@ -862,11 +869,17 @@ fn e8_consistency_rungs(seeds: &[u64]) -> String {
                         pending += 1;
                         // A tolerant rung may batch maintenance across up to k epochs; the
                         // strict rung must apply every epoch before it can serve at head.
-                        // Batching is where the rung's cost actually lands, so the number of
-                        // apply invocations is recorded alongside the deltas they carry.
+                        //
+                        // Batching is not discarding. The earlier version of this loop
+                        // applied only `ledger.head()` at the boundary and left the k-1
+                        // epochs before it unfolded, while the view was nevertheless
+                        // certified through the boundary. Its "66x cheaper maintenance"
+                        // was the count of deltas thrown away, and the values the view
+                        // then served were wrong rather than stale. Every epoch in the
+                        // window is folded, in order; the saving a lax rung actually buys
+                        // is that there are fewer, larger passes.
                         if pending > k {
-                            let e = ledger.head();
-                            view.apply_epoch(&ledger, e);
+                            view.apply_through(&ledger, ledger.head());
                             apply_calls += 1;
                             pending = 0;
                         }
@@ -881,7 +894,7 @@ fn e8_consistency_rungs(seeds: &[u64]) -> String {
             applies.push(apply_calls as f64);
             writeln!(
                 csv,
-                "{rung},{k},{seed},{},{},{},{apply_calls},{hr:.4}",
+                "{rung},{k},{seed},{},{},{},{apply_calls},{hr:.4},{divergences}",
                 view.stats.misses, view.stats.rows_touched, view.stats.deltas_applied
             )
             .ok();

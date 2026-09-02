@@ -387,3 +387,72 @@ fn a_cross_currency_hole_survives_the_join() {
         o.rendered
     );
 }
+
+// ===================== early exit is an abort, not a leak =====================
+
+/// **A `return` inside a `txn` leaves a half unconsumed, and that is sound.**
+///
+/// The audit of this cycle proposed that linearity be tracked through `return` and `?` the
+/// way it is tracked through `break`, on the reasoning that a half bound before an early
+/// exit is dropped on that path. It is dropped — and dropping it there cannot move money,
+/// because the path that drops it is the path on which nothing is posted at all.
+///
+/// The asymmetry with `break` is the whole point and is worth stating precisely:
+///
+/// * A `txn` block accumulates legs and seals **at the end of the block**. Leaving the
+///   block by `return` or by `?` means the seal never runs, and the interpreter abandons
+///   the open transaction rather than leaving it half-built
+///   (`niles_interp::ledger::Ledger::abandon`, called from `Interp::txn` on any `Err`).
+///   No legs reach the ledger, so a half that was never posted has lost nothing.
+/// * A `break` leaves a *loop* and the enclosing `txn` then continues to its seal. The legs
+///   of earlier iterations are posted; the half from the interrupted iteration is not. That
+///   is a real leak, it is what NL0322 catches, and `break_leaves_a_half_unconsumed.niles`
+///   is the mutant for it.
+///
+/// So this test asserts an acceptance, and the comment above is the argument for it. If
+/// `txn` ever gains a form that commits before the block ends — an explicit `commit`
+/// inside the body, say — this test is the one that must be revisited first.
+#[test]
+fn a_return_inside_a_txn_is_an_abort_and_not_a_linearity_leak() {
+    let o = check(
+        "fn f(a: Id<A>, b: Id<A>, refuse: bool) -> Result<(), E>
+             ! { append, debit<usd>, credit<usd> } {
+    txn idem(\"k\") {
+        let d = debit(a, 10.00 usd)?;
+        if refuse { return Err(E::Refused) }
+        let c = credit(b, 10.00 usd);
+        post(d, c)
+    }
+}",
+    );
+    assert!(
+        !o.errors.contains(&"NL0320") && !o.errors.contains(&"NL0322"),
+        "an early exit from a `txn` posts nothing, so the half it drops loses nothing:\n{}",
+        o.rendered
+    );
+}
+
+/// The same reasoning, for `?`.
+///
+/// On the error path of the second `?` the first half is dropped — and again the seal never
+/// runs. The pattern is ubiquitous in banking code (`let d = debit(..)?; let h = hold(..)?;`)
+/// and making it an error would have been the checker accusing correct programs, which is
+/// the failure this whole file was written about.
+#[test]
+fn a_question_mark_between_two_halves_is_an_abort_and_not_a_linearity_leak() {
+    let o = check(
+        "fn f(a: Id<A>, b: Id<A>) -> Result<(), E>
+             ! { append, debit<usd>, credit<usd> } {
+    txn idem(\"k\") {
+        let d = debit(a, 10.00 usd)?;
+        let d2 = debit(a, 0.00 usd)?;
+        post(d, credit(b, 10.00 usd)); post(d2, credit(b, 0.00 usd))
+    }
+}",
+    );
+    assert!(
+        !o.errors.contains(&"NL0320") && !o.errors.contains(&"NL0322"),
+        "the error path of a `?` abandons the transaction:\n{}",
+        o.rendered
+    );
+}

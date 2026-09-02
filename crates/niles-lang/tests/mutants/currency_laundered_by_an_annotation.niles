@@ -1,0 +1,16 @@
+// RULE: T-Money-Add / W7, in a binding position. `Money<a>` and `Money<b>` do not unify,
+// and a `let` annotation is an equation like any other.
+// WHY IT MATTERS: this is the hole the audit reproduced end to end. The annotation was
+// taken as authoritative unless the initializer was a non-money scalar, so `Money<usd>`
+// over a EUR literal type-checked; every later use of the binding was `Money<usd>` on the
+// checker's word, the enclosing function's row read `debit<usd>, credit<usd>`, and
+// `nilesc run` posted two EUR legs under it. Theorem 4.4's currency clause was false of the
+// artifact, not merely overstated.
+// EXPECT: NL0332
+// STAGE: check
+fn launder(from: Id<Account>, to: Id<Account>) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    let m: Money<usd> = 10.00 eur;
+    txn idem("launder", window: 30.days) { post(debit(from, m)?, credit(to, m)) }
+}

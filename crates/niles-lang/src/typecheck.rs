@@ -681,7 +681,23 @@ impl<'a> Cx<'a> {
         let mut sc = Scope::default();
         self.seed_params(f, &mut sc);
         let caps = self.capabilities_of(f);
-        self.block(body, &mut sc);
+        let tail = self.block(body, &mut sc);
+
+        // **W7 in return position.** The same rule as the `let` annotation: a signature that
+        // says `-> Money<usd>` over a body that plainly yields `Money<eur>` is a currency
+        // conversion spelled as a type. Only the tail is checked here — an early `return`
+        // carrying the wrong currency is a path this checker does not track, and saying so
+        // is better than implying it does.
+        if let Some(Some(want)) = f.ret.as_ref().map(money_currency_of) {
+            if let (Some(want), Shape::Money(Cur::Known(got), _)) = (want.as_ref(), &tail) {
+                if got != want {
+                    let at = body.tail.as_ref().map(|t| t.span()).unwrap_or(f.name.span);
+                    let written = f.ret.as_ref().map(|t| t.span()).unwrap_or(f.name.span);
+                    let d = currency_annotation_mismatch(want, got, at, written, "returns");
+                    self.push(d);
+                }
+            }
+        }
 
         let decl_span = f.effects.as_ref().map(|r| r.span).unwrap_or(f.name.span);
         // W14: the inferred row must be permitted by the declared one.
@@ -765,12 +781,19 @@ impl<'a> Cx<'a> {
 
     // ---------------- statements ----------------
 
-    fn block(&mut self, b: &Block, sc: &mut Scope) {
+    /// Check a block, and return the shape of its tail expression.
+    ///
+    /// The return value is what makes a *return position* checkable: `fn f() -> Money<usd>`
+    /// with `10.00 eur` for a body is the same laundering as `let m: Money<usd> = 10.00 eur`,
+    /// arriving through the one position that was not looked at. Callers that do not care
+    /// about the tail ignore it, as they did when this returned nothing.
+    fn block(&mut self, b: &Block, sc: &mut Scope) -> Shape {
         for s in &b.stmts {
             self.stmt(s, sc);
         }
-        if let Some(t) = &b.tail {
-            self.expr(t, sc);
+        match &b.tail {
+            Some(t) => self.expr(t, sc),
+            None => Shape::Opaque,
         }
     }
 
@@ -819,6 +842,27 @@ impl<'a> Cx<'a> {
                 // right-hand side, and taking the annotation's word for it is how
                 // `let x: Money<usd> = "hello";` type-checked.
                 if let Some(Some(cur)) = ty.as_ref().map(money_currency_of) {
+                    // **W7 in a binding position.** The paragraph above says an annotation
+                    // does not overrule what the checker can see, and then looked only at
+                    // scalars — so `let m: Money<usd> = 10.00 eur;` was accepted, and every
+                    // later use of `m` was `Money<usd>` on the checker's word. The effect
+                    // row of the enclosing function then read `debit<usd>, credit<usd>`
+                    // over legs the interpreter posts in EUR. That is Theorem 4.4's
+                    // currency clause failing at the checker, not in the prose.
+                    if let (Some(want), Some(Shape::Money(Cur::Known(got), _))) =
+                        (cur.as_ref(), &init_shape)
+                    {
+                        if got != want {
+                            let d = currency_annotation_mismatch(
+                                want,
+                                got,
+                                init.as_ref().map(|e| e.span()).unwrap_or_default(),
+                                ty.as_ref().map(|t| t.span()).unwrap_or_default(),
+                                "annotated as",
+                            );
+                            self.push(d);
+                        }
+                    }
                     if let Some(Shape::Scalar(k)) = &init_shape {
                         self.push(
                             Diagnostic::error(
@@ -968,7 +1012,33 @@ impl<'a> Cx<'a> {
             }
 
             // ---- the conserving forms ----
-            Expr::Txn { body, span, .. } => {
+            Expr::Txn { body, span, idem } => {
+                // **W19, second clause.** "An `idem` key must declare a window; a window
+                // without a key is a static error." The first clause is enforced on the
+                // relation (NL0215). The second had no enforcement site at all: `txn
+                // idem(window: 30.days) { .. }` parsed, bound no key, and produced a
+                // transaction whose identity is the empty string — so two different
+                // transactions written that way are the *same* transaction to the
+                // idempotency store, which is the opposite of what the window was asked for.
+                if let Some(spec) = idem {
+                    if matches!(&*spec.key, Expr::Error(_)) && spec.window.is_some() {
+                        self.push(
+                            Diagnostic::error(
+                                "NL0216",
+                                "an idempotency window without a key",
+                            )
+                            .primary(spec.span, "a `window:` but nothing to key it by")
+                            .note("a window bounds how long a key is remembered; with no key there is nothing to remember, and every transaction written this way shares one identity")
+                            .note("W19: an `idem` key must declare a window; a window without a key is a static error")
+                            .suggest(
+                                spec.span,
+                                "idem(\"name\", window: 30.days)",
+                                "give the transaction an identity",
+                                crate::diagnostics::Applicability::HasPlaceholders,
+                            ),
+                        );
+                    }
+                }
                 let mut inner = sc.child_conserving();
                 self.block(body, &mut inner);
                 sc.effects.union(&inner.effects);
@@ -1977,6 +2047,29 @@ fn auth_effect_of(t: &Ty) -> Option<String> {
 }
 
 /// `Money<usd>` -> `Some(Some("usd"))`; `Money` -> `Some(None)`; anything else -> `None`.
+/// NL0332: a `Money<c>` position filled by a value the checker can see is `Money<d>`.
+///
+/// One diagnostic for both positions that take a written currency and a value in one step —
+/// a `let` annotation and a function's return type. The call boundary has its own (NL0255)
+/// because it can name the callee and the parameter.
+fn currency_annotation_mismatch(
+    want: &str,
+    got: &str,
+    at: Span,
+    written: Span,
+    what: &str,
+) -> Diagnostic {
+    Diagnostic::error(
+        "NL0332",
+        format!("this is `Money<{got}>`, but the type written here is `Money<{want}>`"),
+    )
+    .primary(at, format!("`Money<{got}>`"))
+    .secondary(written, format!("{what} `Money<{want}>`"))
+    .note("an annotation tells the checker what it could not see; it does not overrule what it can, and a currency is something it can see")
+    .note("taking the annotation's word here would let every later use of this value claim a currency it does not have, which is how a `debit<usd>` effect row comes to describe a EUR leg")
+    .note("to move value between currencies, use an `fx { leg .., leg .., rate: .. }` form, which conserves each currency separately and records the rate")
+}
+
 fn money_currency_of(t: &Ty) -> Option<Option<String>> {
     match t {
         Ty::Path { path, args, .. } if path.last().text == "Money" => Some(match args.first() {

@@ -1,0 +1,9 @@
+// RULE: T-Money-Add / W7, in return position. A signature is a claim about what the
+// function yields, and a currency is part of what it yields.
+// WHY IT MATTERS: the `let` position and the call position were the two the checker looked
+// at. A function whose body yields `Money<eur>` under a `-> Money<usd>` signature launders
+// the currency at the *callee's* boundary instead, and every caller then reasons about a
+// `Money<usd>` that never existed — the same defect, one indirection away.
+// EXPECT: NL0332
+// STAGE: check
+fn fee() -> Money<usd> ! { } { 1.50 eur }

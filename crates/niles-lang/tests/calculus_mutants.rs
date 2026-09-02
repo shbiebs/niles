@@ -99,8 +99,8 @@ fn compile(src: &str, stage: &str) -> (Vec<String>, String) {
 fn every_mutant_is_refused_with_its_own_code() {
     let ms = mutants();
     assert!(
-        ms.len() >= 14,
-        "the work order asks for at least 14 mutants; there are {}",
+        ms.len() >= 20,
+        "the work order asks for at least 20 mutants; there are {}",
         ms.len()
     );
     let mut failures = Vec::new();
@@ -192,6 +192,40 @@ fn the_well_typed_neighbour_of_each_mutant_is_accepted() {
                    ! { append, debit<usd>, credit<usd> }
                { txn idem("ok", window: 30.days) { both_halves(a, b) } }"#,
         ),
+        (
+            // The neighbour of `currency_laundered_by_an_annotation`, one token apart:
+            // `eur` becomes `usd`. An annotation that agrees with what the checker can see
+            // is still an annotation, and must not be an error.
+            "the annotation agrees with the initializer",
+            r#"fn launder(from: Id<Account>, to: Id<Account>) -> Result<TxnId, TxnError>
+                   ! { append, debit<usd>, credit<usd> }
+               { let m: Money<usd> = 10.00 usd;
+                 txn idem("launder", window: 30.days) { post(debit(from, m)?, credit(to, m)) } }"#,
+        ),
+        (
+            // The neighbour of `currency_laundered_by_a_return_type`.
+            "the return type agrees with the body",
+            "fn fee() -> Money<usd> ! { } { 1.50 usd }",
+        ),
+        (
+            // The neighbour of `currency_laundered_by_an_annotation` in its *other*
+            // direction: an annotation over a value the checker cannot see into is the
+            // programmer telling it something true, and remains accepted. Without this
+            // case, NL0332 could be "fixed" by rejecting every annotation.
+            "an annotation over a value the checker cannot see stands",
+            r#"fn opaque(from: Id<Account>, to: Id<Account>, k: Int) -> Result<TxnId, TxnError>
+                   ! { append, debit<usd>, credit<usd> }
+               { let m: Money<usd> = rate_lookup(k);
+                 txn idem("opaque", window: 30.days) { post(debit(from, m)?, credit(to, m)) } }
+               fn rate_lookup(k: Int) -> Money<usd> ! { } { 1.00 usd }"#,
+        ),
+        (
+            // The neighbour of `idem_window_without_a_key`.
+            "the window has a key to bound",
+            r#"fn sweep(a: Id<Account>, b: Id<Account>, m: Money<usd>) -> Result<TxnId, TxnError>
+                   ! { append, debit<usd>, credit<usd> }
+               { txn idem("sweep", window: 30.days) { post(debit(a, m)?, credit(b, m)) } }"#,
+        ),
     ];
     for (what, src) in cases {
         let full = format!("{schema}\n{src}\n");
@@ -202,8 +236,8 @@ fn the_well_typed_neighbour_of_each_mutant_is_accepted() {
             .iter()
             .filter(|c| {
                 [
-                    "NL0252", "NL0253", "NL0255", "NL0300", "NL0310", "NL0311", "NL0312", "NL0322",
-                    "NL0330", "NL0331",
+                    "NL0216", "NL0252", "NL0253", "NL0255", "NL0300", "NL0310", "NL0311", "NL0312",
+                    "NL0322", "NL0330", "NL0331", "NL0332",
                 ]
                 .contains(&c.as_str())
             })

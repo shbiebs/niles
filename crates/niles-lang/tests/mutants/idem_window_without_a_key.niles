@@ -1,0 +1,13 @@
+// RULE: W19, second clause — "an `idem` key must declare a window; a window without a key
+// is a static error". The first clause is checked on the relation (NL0215).
+// WHY IT MATTERS: the second clause had no enforcement site. A `txn` written this way binds
+// no key, so its identity is the empty string: two different transactions written the same
+// way are one transaction to an idempotency store, and the window that was asked for makes
+// the collision *longer*, not shorter.
+// EXPECT: NL0216
+// STAGE: check
+fn sweep(a: Id<Account>, b: Id<Account>, m: Money<usd>) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem(window: 30.days) { post(debit(a, m)?, credit(b, m)) }
+}

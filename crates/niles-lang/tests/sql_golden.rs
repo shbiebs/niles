@@ -261,11 +261,21 @@ fn the_two_surfaces_denote_the_same_zset_wherever_both_are_written() {
     // marketing if it were only asserted: `select acct, sum(amt) from postings group by
     // acct` and `postings.group_by(..).sum(..)` are the same query or they are not.
     let mut pairs = 0;
+    let mut skipped: Vec<String> = Vec::new();
     for c in cases() {
         let (Some(sql), Some(niles)) = (&c.sql, &c.niles) else {
+            // Written in one surface only. Most of these are SQL forms with no pipeline
+            // spelling (`FROM t, u`, a correlated `EXISTS`), and the mapping table of
+            // `sql_surface.rs` says so per row; a few are refusals where a second spelling
+            // would test nothing.
+            skipped.push(format!("{}: one surface only", c.name));
             continue;
         };
         if expected_body(&c.expected).starts_with("REFUSED") {
+            // A refusal is checked by `every_golden_case_denotes_what_its_file_says`, in
+            // both surfaces, against the named code. Comparing the *denotations* of two
+            // queries that do not compile would compare nothing.
+            skipped.push(format!("{}: refused in both surfaces", c.name));
             continue;
         }
         let a = compile(sql.trim(), "sql");
@@ -289,8 +299,19 @@ fn the_two_surfaces_denote_the_same_zset_wherever_both_are_written() {
         }
     }
     assert!(
-        pairs >= 15,
-        "at least fifteen cases should be written in both surfaces; {pairs} were"
+        pairs >= 18,
+        "at least eighteen cases should be written in both surfaces; {pairs} were"
+    );
+    // **What is skipped, and by how much.** A `continue` inside a loop is how a corpus
+    // quietly shrinks: the count goes up, the coverage does not, and nothing says which
+    // cases stopped being compared. The list is printed and its length is bounded, so
+    // adding a case that silently opts out of the comparison fails here.
+    assert!(
+        skipped.len() <= 32,
+        "{} cases are skipped by this comparison, which is more than the corpus leaves \
+         uncompared today (32: thirty written in one surface, two refused in both):\n{}",
+        skipped.len(),
+        skipped.join("\n")
     );
 }
 

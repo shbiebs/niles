@@ -96,7 +96,7 @@ This one decision eliminates the classic dual-write bug — a stored balance dri
 
 ## 6.9 Three Surfaces, One Intermediate Representation
 
-Niles native, the SQL surface, and the imperative Rust-shaped sublanguage all lower into one typed IR. The equivalence obligation is stated as a theorem and tested as a build gate: an SQL query in the stated fragment and its Niles counterpart lower to α-equivalent circuits (Theorem 4.6(c), Appendix H). The IR, not any surface, is what the theorems and the runtime interpret.
+Niles native, the SQL surface, and the imperative Rust-shaped sublanguage all lower into one typed IR. The equivalence obligation is stated as a theorem and tested as a build gate: an SQL query in the stated fragment and its Niles counterpart *denote the same Z-set on every finite instance* (Theorem 4.6(c), Appendix H). Circuit-level α-equivalence is not claimed — the corpus compares answers, and one query may have two honest lowerings. The IR, not any surface, is what the theorems and the runtime interpret.
 
 Embedded APIs — language bindings that construct IR directly — are a fourth surface with the same status: they are checked by the IR verifier on submission, so an embedding cannot smuggle in a circuit the type system would reject.
 

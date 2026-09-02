@@ -1,0 +1,8 @@
+# 50_right_join
+# The mirror of 18. Every `u` row survives; `u`'s (4,4) has no partner in `t`, so the
+# `t` columns are null — which is the case that distinguishes a right join from an inner
+# one, and the corpus had no case for it at all.
+1 10 100 1 1 x1
+1 10 null 1 1 x1
+2 20 200 2 2 x1
+null null null 4 4 x1

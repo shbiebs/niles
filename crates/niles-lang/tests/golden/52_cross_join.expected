@@ -1,0 +1,7 @@
+# 52_cross_join
+# **Outside SQL-Core**, and this case is why. `cross join` parsed, lowered to the IR's
+# *keyed* `Inner` join, verified, and answered with the equi-join on whatever key the two
+# relations happened to carry: four rows where the query asks for twelve, with nothing to
+# say so. Every join operator in this IR joins on a key and there is no product operator,
+# so the honest answer is a refusal until there is one.
+REFUSED NL0516

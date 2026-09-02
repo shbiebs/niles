@@ -494,6 +494,19 @@ impl<'a> Eval<'a> {
         }
         let empty: Vec<(&Row, i128)> = Vec::new();
 
+        // For the right-preserving kinds: which right rows found a partner. A right row is
+        // padded exactly when nothing on the left matched it, and "matched" has to mean the
+        // same thing on both sides — the residual included — or a `full` join would emit a
+        // row twice, once padded and once joined.
+        let mut matched_right: BTreeMap<&Row, bool> = BTreeMap::new();
+        let preserves_right = matches!(kind, JoinKind::RightOuter | JoinKind::FullOuter);
+        if preserves_right {
+            for rrow in r.keys() {
+                matched_right.insert(rrow, false);
+            }
+        }
+        let width_l = l.keys().next().map(|x| x.len()).unwrap_or(0);
+
         let mut out = ZSet::new();
         for (lrow, lw) in l {
             self.work += 1;
@@ -518,7 +531,16 @@ impl<'a> Eval<'a> {
                 }
                 total += rw;
                 any = true;
-                if matches!(kind, JoinKind::Inner | JoinKind::LeftOuter) {
+                if preserves_right {
+                    matched_right.insert(*rrow, true);
+                }
+                if matches!(
+                    kind,
+                    JoinKind::Inner
+                        | JoinKind::LeftOuter
+                        | JoinKind::RightOuter
+                        | JoinKind::FullOuter
+                ) {
                     // Weights multiply: the Z-set semantics of a join, and the reason a
                     // rewrite sound on sets can be unsound here.
                     add(&mut out, combined, lw * rw);
@@ -531,12 +553,31 @@ impl<'a> Eval<'a> {
                 // outer row into three because three inner rows matched.
                 JoinKind::Semi if present => add(&mut out, lrow.clone(), *lw),
                 JoinKind::Anti if !present => add(&mut out, lrow.clone(), *lw),
-                JoinKind::LeftOuter if !any => {
+                JoinKind::LeftOuter | JoinKind::FullOuter if !any => {
                     let mut combined = lrow.clone();
                     combined.extend(std::iter::repeat_n(Value::Null, width_r));
                     add(&mut out, combined, *lw);
                 }
                 _ => {}
+            }
+        }
+
+        // **The right-preserving pass.** Without it `RightOuter` and `FullOuter` were
+        // *accepted by the parser, lowered, verified, and evaluated to the wrong answer* —
+        // a right join returned nothing at all, because the matched pairs were emitted only
+        // for the two kinds named in the loop above and the unmatched right rows were
+        // emitted for none. Silence rather than a refusal, in the oracle that Theorem
+        // 4.6(c)'s golden cases compare against, and the corpus had no case for either kind
+        // so nothing said so.
+        if preserves_right {
+            for (rrow, rw) in r {
+                self.work += 1;
+                if matched_right.get(rrow).copied().unwrap_or(false) {
+                    continue;
+                }
+                let mut combined: Row = std::iter::repeat_n(Value::Null, width_l).collect();
+                combined.extend(rrow.iter().copied());
+                add(&mut out, combined, *rw);
             }
         }
         out

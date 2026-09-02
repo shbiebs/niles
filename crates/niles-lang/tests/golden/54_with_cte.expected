@@ -1,0 +1,6 @@
+# 54_with_cte
+# **Outside SQL-Core.** A non-recursive `with` is refused at lowering; `with recursive` has
+# a Niles spelling (`.fixpoint(..) guard measure(..)`, cases 31 and 36) and the plain form
+# does not. This is the shape of gap worth recording precisely: the harder construct is
+# supported and the easier one is not.
+REFUSED NL0500

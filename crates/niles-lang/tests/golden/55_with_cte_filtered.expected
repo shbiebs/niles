@@ -1,0 +1,4 @@
+# 55_with_cte_filtered
+# The same refusal with a predicate inside the CTE, so that a partial implementation which
+# accepted the trivial form would still be caught here.
+REFUSED NL0500

@@ -152,7 +152,7 @@ let exposure = postings
 
 **Recursive stages.** `.fixpoint(step) guard measure(m)` — the guarded least-fixpoint construct that gives Theorem 4.6(b) and serves graph traversal.
 
-The SQL surface accepts classical `SELECT … FROM … WHERE …` for the fragment of Appendix H; both lower to α-equivalent circuits.
+The SQL surface accepts classical `SELECT … FROM … WHERE …` for the fragment of Appendix H; both denote the same Z-set, which is what the golden corpus checks and what Theorem 4.6(c) claims.
 
 ## B.8 Views and the Serve Contract
 

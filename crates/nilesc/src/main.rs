@@ -85,9 +85,20 @@ fn main() -> ExitCode {
             let mut views: Vec<&String> = report.view_rungs.keys().collect();
             views.sort();
             for v in views {
+                // The sources by name, not only the rung. Two views at one rung read
+                // differently, and "does `available_balance` read `encumbrances`" is a
+                // question the rung alone cannot answer.
+                let from = report
+                    .view_sources
+                    .get(v)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.iter().cloned().collect::<Vec<_>>().join(", "))
+                    .unwrap_or_else(|| "nothing".into());
                 match report.view_rungs[v] {
-                    Some(r) => println!("  view {v:<22} reads no stricter than {r}"),
-                    None => println!("  view {v:<22} reads nothing"),
+                    Some(r) => {
+                        println!("  view {v:<22} reads {from} — no stricter than {r}")
+                    }
+                    None => println!("  view {v:<22} reads {from}"),
                 }
             }
         }

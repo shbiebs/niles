@@ -760,3 +760,85 @@ cd gbs && make schema                              -> ok (after the gbs.niles fi
 (0% of correct functions undecided, all five defects caught), and the new interprocedural
 group reports **6 of 8** conserving cases proved across the call boundary, 2 undecided, and
 both deliberate defects refuted. GC-01: the numbers are whatever the run produced.
+
+### [T-12] 2026-09-02T10:20Z RESULT F-24 confirmed, and it was worse than one view
+
+`gbs/niles/gbs.niles` had **three** views computing the same thing under different names:
+`ledger_balance`, `available_balance` and `party_position` were all
+`postings.group_by(|p| (p.acct, p.cur)).sum(|p| p.amt)`, differing only in their contracts.
+`trial_balance` is a fourth, and is legitimately that.
+
+The consequences, in order of how much they mattered:
+
+* `available_balance` read `encumbrances` nowhere, while the comment above it and the
+  comment above `encumbrances` both said it did. An availability decision that does not
+  net out live holds is a ledger balance under another name.
+* **No view in the schema read another view**, so NL0311 was vacuous in the one file it most
+  needed to hold in. The check could have been deleted and every test in
+  `tests/niles_schema.rs` would still have passed — the counterfactual there runs on a
+  nine-line hand-written mini-schema.
+* `party_position` grouped by `(acct, cur)`, so it was not a position per party at all.
+
+### [T-12] 2026-09-02T10:25Z DECISION `party_position` is `full` and `pinned`, and the reason is a result
+
+Keyed by `owner`, the view must join `accounts` — `owner` is not a column of `postings` —
+and `accounts` is a `table`. A table's history is not retained, so state evicted from a view
+rooted in one cannot be reconstructed: there is nothing left to fold. The IR verifier says
+so (IR013 on three nodes) and it is right.
+
+So the choice is real: either the chart becomes a `base`, and every reclassification becomes
+an append somebody has to interpret, or a party-keyed view is fully materialised. The schema
+takes the second, and says so in a comment. The Pareto-skew argument the old comment made
+for `demand` is a good argument that applies to views keyed by a column the *ledger* has.
+
+Two supporting changes in `niles`, both defects of the same family as F-37:
+
+* `Op::derive_key` ended in `_ => None`, so `Negate`, `OrderBy` and `Limit` lost the key.
+  None of the three touches a column — negation flips Z-set weights, ordering permutes rows,
+  a limit drops whole rows — so all three preserve it. The loss was not cosmetic: a node
+  with no derivable key is IR013, so `except` between two keyed aggregates could not be
+  written, which is exactly the shape `balance minus encumbrances` takes. Now exhaustive:
+  `Map` and `Fixpoint` are the two honest `None`s and are enumerated as such.
+* NL0223 ("no anchor index covers this key") fired on views that are never evicted. The
+  suggested remedy for `party_position` is an anchor index on a column the ledger does not
+  have, so it was a permanent, unfixable line in the gate's output — and a warning nobody
+  can act on is one everybody learns to scroll past. Now scoped to evictable views.
+
+### [T-12] 2026-09-02T10:30Z RESULT `nilesc effects` names a view's sources
+
+The acceptance check is "shows a read of `encumbrances`", and the old output could not:
+`view available_balance reads no stricter than ledger_consistent` is equally true of a view
+reading the ledger directly and of one reading another view at the same rung. The rung alone
+could never have caught F-24. `Report::view_sources` is collected from the syntax — including
+through the SQL surface's `from`, which is a `TableRef` and not an expression, so
+`sql_positions` had been reporting "reads nothing" while its effect row said
+`ledger_consistent`.
+
+```
+view available_balance      reads encumbrances, postings — no stricter than ledger_consistent
+view encumbrances           reads holds — no stricter than ledger_consistent
+view ledger_balance         reads postings — no stricter than ledger_consistent
+view party_position         reads accounts, postings — no stricter than ledger_consistent
+view sql_positions          reads postings — no stricter than ledger_consistent
+view statement_mtd          reads postings — no stricter than ledger_consistent
+view trial_balance          reads postings — no stricter than ledger_consistent
+```
+
+### [T-12] 2026-09-02T10:35Z RESULT `make schema`, recorded
+
+```
+nilesc check   ../gbs/niles/gbs.niles -> ok: 6 relation(s), 7 view(s), 12 function(s);
+                                         11 conservation obligation(s) proved statically,
+                                         0 discharged to the runtime
+nilesc verify  ../gbs/niles/gbs.niles -> verified: 22 nodes, no violations
+```
+
+22 nodes, up from 16: the `except` adds a negate and a union, and the party join adds a join
+and a second source. No warnings.
+
+### [T-12] 2026-09-02T10:38Z TESTS gbs 415/0/0 -> 417/0/0 with NILES_ROOT set; niles 610/0/3 unchanged
+
+`cd gbs && NILES_ROOT=../niles cargo test -p gbs-products --test niles_schema` → **15 tests**,
+0 failed. `NILES_ROOT=/nonexistent` → fails, naming the path and both places it looked.
+A missing checkout with no `GBS_SKIP_NILES=1` is now a failure rather than a printed skip:
+these checks used to report `ok` for work they had not done.

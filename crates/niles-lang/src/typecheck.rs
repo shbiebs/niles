@@ -148,6 +148,13 @@ pub struct Report {
     pub inferred_effects: HashMap<String, EffRow>,
     /// The weakest rung each view body reads at, which is the ceiling on what it may promise.
     pub view_rungs: HashMap<String, Option<Rung>>,
+    /// The relations and views each view body reads, by name.
+    ///
+    /// The rung alone does not say *what* was read, and "reads no stricter than
+    /// ledger_consistent" is true of a view reading the ledger directly and of one reading
+    /// another view at the same rung. Telling the two apart is the whole question when the
+    /// claim under test is "`available_balance` is ledger balance minus encumbrances".
+    pub view_sources: HashMap<String, std::collections::BTreeSet<String>>,
 }
 
 /// What one function does, as seen from a call site.
@@ -749,6 +756,11 @@ impl<'a> Cx<'a> {
         self.report
             .view_rungs
             .insert(v.name.text.clone(), sc.effects.weakest_read());
+        let mut sources = std::collections::BTreeSet::new();
+        collect_sources(&v.body, self.cat, &mut sources);
+        self.report
+            .view_sources
+            .insert(v.name.text.clone(), sources);
     }
 
     // ---------------- statements ----------------
@@ -2165,5 +2177,86 @@ fn instantiate_effect(e: &Effect, rename: &HashMap<String, String>) -> Effect {
         Effect::Hold(c) => Effect::Hold(map(c)),
         Effect::Authorize(c) => Effect::Authorize(map(c)),
         other => other.clone(),
+    }
+}
+
+/// Every declared relation or view named in an expression.
+///
+/// Read from the syntax rather than from the effect row, because the row records *rungs* and
+/// two different sources at the same rung are indistinguishable in it.
+fn collect_sources(e: &Expr, cat: &Catalog, out: &mut std::collections::BTreeSet<String>) {
+    if let Expr::Path(p) = e {
+        let n = &p.last().text;
+        if cat.views.contains_key(n) || cat.relations.contains_key(n) {
+            out.insert(n.clone());
+        }
+        return;
+    }
+    // The SQL surface names its sources in `from`, which is a `TableRef` and not an
+    // expression, so `each_child` cannot reach them. Without this arm `sql_positions`
+    // reported "reads nothing" while its effect row said `ledger_consistent` — the two
+    // halves of one answer disagreeing.
+    if let Expr::Select(sel) = e {
+        collect_sources_in_select(sel, cat, out);
+        return;
+    }
+    let (mut kids, mut blocks) = (Vec::new(), Vec::new());
+    each_child(e, &mut kids, &mut blocks);
+    for k in kids {
+        collect_sources(k, cat, out);
+    }
+    for b in blocks {
+        for st in &b.stmts {
+            match st {
+                Stmt::Let { init: Some(x), .. } | Stmt::Expr(x) | Stmt::Semi(x) => {
+                    collect_sources(x, cat, out)
+                }
+                _ => {}
+            }
+        }
+        if let Some(t) = &b.tail {
+            collect_sources(t, cat, out);
+        }
+    }
+}
+
+fn collect_sources_in_select(
+    s: &SelectStmt,
+    cat: &Catalog,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    fn table_ref(t: &TableRef, cat: &Catalog, out: &mut std::collections::BTreeSet<String>) {
+        match t {
+            TableRef::Named { name, .. } => {
+                if cat.views.contains_key(&name.text) || cat.relations.contains_key(&name.text) {
+                    out.insert(name.text.clone());
+                }
+            }
+            TableRef::Join {
+                left, right, on, ..
+            } => {
+                table_ref(left, cat, out);
+                table_ref(right, cat, out);
+                if let Some(o) = on {
+                    collect_sources(o, cat, out);
+                }
+            }
+            TableRef::Sub { query, .. } => collect_sources_in_select(query, cat, out),
+        }
+    }
+    for t in &s.from {
+        table_ref(t, cat, out);
+    }
+    for (e, _) in &s.projections {
+        collect_sources(e, cat, out);
+    }
+    for e in s.filter.iter().chain(s.having.iter()) {
+        collect_sources(e, cat, out);
+    }
+    for g in &s.group_by {
+        collect_sources(g, cat, out);
+    }
+    if let Some((_, next)) = &s.set_op {
+        collect_sources_in_select(next, cat, out);
     }
 }

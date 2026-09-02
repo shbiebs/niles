@@ -527,18 +527,36 @@ impl Op {
             Op::Apply { .. } => input_keys.first().cloned().flatten(),
             // Filtering does not change the key; mapping may, so a map that rewrites the
             // key columns loses the index and the planner must re-index.
+            //
+            // `Negate`, `OrderBy` and `Limit` are here because each of them leaves the
+            // *columns* alone: negation flips Z-set weights, ordering permutes rows, and a
+            // limit drops whole rows. None of the three can change what a row is keyed by,
+            // and all three used to fall through a `_ => None` and lose the key anyway.
+            //
+            // That was not a cosmetic loss. A node with no derivable key is refused by the
+            // verifier's IR013 — evictable state with no reconstruction path — so an
+            // `except` between two keyed aggregates could not be written at all, which is
+            // exactly the shape `available_balance = ledger balance minus encumbrances`
+            // takes.
             Op::Filter { .. }
             | Op::Delay
             | Op::Integrate
             | Op::Differentiate
             | Op::AsOf { .. }
             | Op::ValidAt { .. }
-            | Op::Distinct => input_keys.first().cloned().flatten(),
+            | Op::Distinct
+            | Op::Negate
+            | Op::OrderBy { .. }
+            | Op::Limit { .. } => input_keys.first().cloned().flatten(),
             Op::Union => match (input_keys.first(), input_keys.get(1)) {
                 (Some(Some(a)), Some(Some(b))) if a == b => Some(a.clone()),
                 _ => None,
             },
-            _ => None,
+            // A projection may rewrite the key columns, and a fixpoint's output has no
+            // stated relation to its input's indexing. Both genuinely have no derivable
+            // key; they are enumerated rather than defaulted so that the two honest `None`s
+            // are distinguishable from an operator nobody considered.
+            Op::Map { .. } | Op::Fixpoint { .. } => None,
         }
     }
 }

@@ -702,8 +702,14 @@ fn check_view(v: &ViewDecl, cat: &Catalog, d: &mut Diagnostics) {
     // W12: a view over a ledger key needs an anchor index on that key, or reconstruction
     // degrades to a scan of history. The measured cost of the difference is two orders of
     // magnitude in constant factor (thesis §9.4.1).
+    //
+    // A view that is *never* evicted has no reconstruction to be slow, so the warning does
+    // not apply to it. Emitting it anyway put a permanent, unfixable line in the gate's
+    // output — the suggested remedy is an anchor index on a column the ledger does not
+    // have — and a warning nobody can act on is one everybody learns to scroll past.
+    let evictable = info.retain != "pinned" && info.materialize != "full";
     if let Some((rel, keys, span)) = view_group_key(&v.body, cat) {
-        if rel.is_base() && !keys.is_empty() {
+        if evictable && rel.is_base() && !keys.is_empty() {
             let covered = rel
                 .anchor_indices
                 .iter()

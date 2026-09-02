@@ -813,3 +813,46 @@ accounts and anchors spread over the history, a read at a historical anchor pins
 and the next read at a different anchor misses. Reported rather than tuned away.
 
 ### [T-04] 2026-09-02T04:15Z TESTS niles 616/0/3 -> 638/0/3
+
+### [T-05] 2026-09-02T04:45Z RESULT Chapter 9 rewritten from the corrected instrument
+
+Tables 9.1 and 9.9 are now generated blocks, filled by `thesis/include-results.py` from
+`results/E1-correctness.md` and `results/E8-rungs.md`, both written by the harness itself
+rather than by a script run beside it. `thesis_drift.rs` gains two tests: the blocks must
+stay generated, and Appendix J must keep the refuted figures.
+
+**§9.4.3 is rewritten and its headline claim withdrawn.** "The tax for demanding freshness
+is not paid on the read path at all" is refuted. The corrected measurement:
+
+| Rung | deltas applied | maintenance passes | misses | base rows read | divergences |
+|---|---|---|---|---|---|
+| bounded(k=64) | 2,171 | 61 | 26,644 | 102,624 | 0 |
+| bounded(k=8) | 2,514 | 446 | 24,700 | 73,811 | 0 |
+| strict(k=0) | 3,621 | 4,017 | 19,658 | 40,869 | 0 |
+
+Replacement claim, written into §9.4.3, §9.5.2 and §9.12: a bounded rung buys fewer
+maintenance *passes* — the same deltas, folded less often — and pays for them in
+reconstruction, at 2.5x the base rows read.
+
+**Appendix J.16** retains the refuted table (55 / 408 / 3,621 deltas; misses varying by
+0.3%) with the mechanism that produced it, and J.15's count of "both wrong" rows goes from
+four to five. J.16 is the first row in that appendix refuted by *reading* an experiment
+rather than running one, and the appendix now says so: an experiment that reports counted
+work and never checks a value can be precise, reproducible across five seeds, and
+measuring its own defect.
+
+**Appendix K.6's "E8 null" narrative is corrected.** It presented the sequence
+null → diagnosis → re-instrumentation as evidence of care. The diagnosis was wrong: the
+null was real, and the re-instrumentation measured the defect more sharply. What closed it
+was an oracle column, not another counter.
+
+**§9.2.1 and K.3** now state what the E1 oracle is. The prose no longer claims an
+independent fold where there was a self-comparison, and the anchor discipline is named:
+about 3,330 of roughly 3,340 reads per seed are at a historical anchor.
+
+**Old names.** `results/e4.log`, `e56.log`, `e78.log`, `e9.log`, `e10.log` were stale
+captured transcripts carrying a "Kaskata research prototype" banner; the program has said
+"Niles" for some time. Regenerated from real runs. `grep -rli "kaskata\|upbasin"` over
+`results/`, `crates/` and `docs/` is now empty.
+
+### [T-05] 2026-09-02T04:45Z TESTS niles 638/0/3 -> 640/0/3

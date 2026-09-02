@@ -1099,3 +1099,81 @@ cargo test -p nilestream-server                          -> 152 passed
 grep -rn "fn extract_keys\|fn pick_view" src              -> no match
 grep -rn "extended::" src/session.rs                      -> 3 matches (the module is wired)
 ```
+
+### [T-15] 2026-09-02T14:10Z RESULT F-14, F-15 — the calibration probed the wrong device and three rows were refused
+
+**The `fsync` probe measured `temp_dir()`.** On this container that is a different filesystem
+from `$PGDATA`: a tmpfs reports about a microsecond per call and a ceiling near a million
+commits per second, against which every real durable rate looks implausibly low and the
+plausibility gate is measuring the wrong device. The server is now asked
+`show data_directory` and the harness refuses to guess when it will not say.
+
+Measured on `/var/lib/postgresql/16/main` (`/dev/vda`, ext4): **77.9 µs per fsync**, ceiling
+**12 845** durable commits/s per connection, PostgreSQL at **5 152 txn/s** — 40% of it, which
+is the gate's basis for passing.
+
+**Three of the four Part 0 rows were refused for reasons that had stopped being true.**
+`nilestream_gap` returned "nilestreamd exposes no write surface over the wire" for `oltp` and
+`durable`, and "a scan-and-group-by surface is not exposed" for `analytical`. T-14 made all
+three false, so three quarters of the table reported a gap in the engine that was a gap in
+the harness's beliefs about it.
+
+**The `durable` row was measured against a non-durable append.** `NilestreamTarget::is_durable`
+returned a hard-coded `false` with a comment about the read side being an in-memory demo, so
+when the server acquired a durable path nothing would have noticed. The daemon is hosted with
+a `DurableSink` at `SyncPolicy::Always` and refuses to start without one; the target asks the
+server (`select nilestream_durability`) instead of asserting.
+
+### [T-15] 2026-09-02T14:15Z RESULT the measured Part 0 table, and two NOT METs
+
+| row | contract | PostgreSQL 16.13 | Nilestream | ratio | verdict |
+|---|---|---|---|---|---|
+| oltp | 5–10× | 4 518 ops/s | 4 189 ops/s | 0.93× | **NOT MET** |
+| analytical | 10–12× | 330.0 ops/s | 44.4 ops/s | 0.13× | **NOT MET** |
+| point | parity | 122.1 µs p99 | 131.1 µs p99 | 0.93× | PARITY |
+| durable | parity | 4 654 ops/s | 3 820 ops/s | 0.82× | PARITY |
+
+Five runs, 500 operations each, 10 000 accounts, both targets over the **simple** protocol,
+both durable rows at `synchronous_commit = on` / `SyncPolicy::Always`, on two cores.
+
+Both NOT METs are attributed in `BENCHMARK.md`'s new **Known limitations of the Nilestream
+path** list — item 3 (per-query compilation: the simple path parses, resolves, typechecks,
+lowers and verifies every statement) and item 6 (two cores against a contract written for a
+48-core baseline) for `oltp`; item 4 (a full fold per unkeyed query) for `analytical`.
+Neither is attributed to the engine's correctness. What the table supports is **a measured
+baseline and a characterized gap**, which is what §9.14.1 and §11.3 must say (T-17).
+
+### [T-15] 2026-09-02T14:20Z RESULT the `point` row's parity is a stronger claim than it was
+
+`miss_rate` is now a column and it reads **1.0000**. The wire path evaluates the compiled
+circuit over a source scan through the anchor index and does **not** consult the partially
+materialised view, so every point read is an anchored reconstruction. Parity with an indexed
+aggregate while reconstructing every read is a different claim from parity with a warm cache,
+and the old harness could not have told them apart: the budget was 100 000 against 10 000
+accounts, so nothing was ever evicted, and the column read `n/a` because nothing could ask.
+
+That the view is unread by the wire path is itself a gap, and it is item 5 on the limitations
+list rather than a silence.
+
+### [T-15] 2026-09-02T14:25Z RESULT Z is recorded at every phase-diagram point
+
+`results/e4_phase.csv` and `results/e12_phase_compiled.csv` gained a `z` column, defined
+identically in both writers as base rows per reconstruction divided by deltas per read — the
+counted-work analogue of Theorem 4.2(ii)'s delayed-hit factor, stated rather than borrowed
+from a clock, because the whole point of counted work is that it transports.
+
+The column's absence is why `results/E16-band.md` can pre-register only one side of the
+crossover: every other constant in clause (ii) was measurable and this one was recorded
+nowhere. E4 now reports Z from 5.3 to 307 across the grid.
+
+### [T-15] 2026-09-02T14:28Z TESTS niles 658/0/4 -> 662/0/4
+
+```
+bench -- --calibrate --run --render --pg-port 5432 --host-nls  -> exit 0
+grep -c "NOT RUN" results/E16-wallclock.md                     -> 0
+grep -c "8-14" crates/bank-bench/src/bin/bench.rs              -> 0
+python3 thesis/include-results.py --check                      -> exit 0
+awk -F, 'NR>1 && $11==""' results/e4_phase.csv | wc -l         -> 0   (z is column 11)
+awk -F, 'NR>1 && $8==""'  results/e12_phase_compiled.csv | wc -l -> 0 (z is column 8)
+git log --format=%H -1 -- results/E16-band.md                  -> 504c131, an ancestor of the CSV commit
+```

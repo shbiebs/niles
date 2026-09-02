@@ -356,7 +356,7 @@ fn report(view: &str, cfg: &Config, s: &Stats) {
 /// many cost models without re-running anything.
 fn sweep(path: &str, view: &str, base_cfg: Config) -> Result<(), String> {
     println!(
-        "budget,memory_price,resident_entry_epochs,deltas_applied,base_rows_read,cost,hit_ratio"
+        "budget,memory_price,resident_entry_epochs,deltas_applied,base_rows_read,cost,hit_ratio,z"
     );
     let budgets: Vec<Option<u64>> = vec![
         Some(250),
@@ -373,8 +373,19 @@ fn sweep(path: &str, view: &str, base_cfg: Config) -> Result<(), String> {
         let s = run(path, view, cfg)?;
         for price in [0.0001f64, 0.0005, 0.002, 0.01, 0.05] {
             let cost = s.cost(price, 1.0, 1.0);
+            // Z, the delayed-hit factor of Theorem 4.2(ii), in counted work: base rows
+            // per reconstruction against deltas per read. Defined identically in E4's
+            // writer, so the two phase diagrams' columns mean the same thing — which is the
+            // reason to define it in units of counted work rather than borrowing a time.
+            let z = if s.misses == 0 {
+                0.0
+            } else {
+                let rows_per_reconstruction = s.base_rows_read as f64 / s.misses as f64;
+                let deltas_per_read = s.deltas_applied as f64 / s.reads.max(1) as f64;
+                rows_per_reconstruction / deltas_per_read.max(1e-9)
+            };
             println!(
-                "{},{},{},{},{},{:.3},{:.4}",
+                "{},{},{},{},{},{:.3},{:.4},{z:.4}",
                 b.map_or("full".into(), |x| x.to_string()),
                 price,
                 s.resident_entry_epochs,

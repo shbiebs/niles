@@ -500,7 +500,7 @@ fn e3_memory_vs_skew(seeds: &[u64]) -> String {
 
 fn e4_phase_diagram(seeds: &[u64]) -> String {
     let mut csv = String::from(
-        "zipf_s,budget_frac,seed,resident_entry_epochs_partial,resident_entry_epochs_full,rows_touched_partial,rows_touched_full,deltas_partial,deltas_full,hit_rate\n",
+        "zipf_s,budget_frac,seed,resident_entry_epochs_partial,resident_entry_epochs_full,rows_touched_partial,rows_touched_full,deltas_partial,deltas_full,hit_rate,z\n",
     );
     let n_accounts = 10_000;
     let n_ops = 30_000;
@@ -597,9 +597,29 @@ fn e4_phase_diagram(seeds: &[u64]) -> String {
     for (bf, s, ps, fs) in &grid {
         for (i, (p, f)) in ps.iter().zip(fs.iter()).enumerate() {
             let hr = p.hits as f64 / (p.hits + p.misses).max(1) as f64;
+            // **Z, the delayed-hit factor of Theorem 4.2(ii), in counted work.**
+            //
+            // Z is defined in the thesis as the number of inter-arrival times a
+            // reconstruction takes. There are no times here — the whole point of counted
+            // work is that it is machine-independent — so the counted-work analogue is
+            // stated rather than a time borrowed from somewhere: the base rows one
+            // reconstruction touches, divided by the deltas that arrive per operation. It
+            // has the same shape (work per reconstruction against work per arrival) and the
+            // same limit behaviour, and it is a *ratio of counts*, so it transports.
+            //
+            // The column was absent, which is why `results/E16-band.md` can register only
+            // one side of the crossover: every other constant in clause (ii) was measurable
+            // and this one was not recorded anywhere.
+            let z = if p.misses == 0 {
+                0.0
+            } else {
+                let rows_per_reconstruction = p.rows_touched as f64 / p.misses as f64;
+                let deltas_per_op = p.deltas_applied as f64 / (p.hits + p.misses).max(1) as f64;
+                rows_per_reconstruction / deltas_per_op.max(1e-9)
+            };
             writeln!(
                 csv,
-                "{s},{bf},{},{},{},{},{},{},{},{hr:.4}",
+                "{s},{bf},{},{},{},{},{},{},{},{hr:.4},{z:.4}",
                 seeds[i],
                 p.resident_entry_epochs,
                 f.resident_entry_epochs,

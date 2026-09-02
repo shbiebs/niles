@@ -356,6 +356,73 @@ mod tests {
         assert_eq!(c.nodes[3].log, c.nodes[0].log, "and end with the same log");
     }
 
+    /// **An even cluster, because an odd one cannot tell a majority from a half.**
+    ///
+    /// Every test above uses three or five nodes, and for odd `total` the strict-majority
+    /// rule `replicas * 2 > total` and the off-by-one `replicas * 2 >= total` accept exactly
+    /// the same sets — with five nodes both mean "at least three". Weakening the rule to
+    /// `>=` therefore passed the entire suite, which is to say the suite did not test the
+    /// quorum rule at all; it tested a rule that happens to agree with it on the sizes it
+    /// used.
+    ///
+    /// With four nodes the two rules part company: a strict majority is three, and `>=`
+    /// would commit on two — a split-brain, since the other two could commit something else.
+    /// This test is the one that dies when the rule is weakened.
+    #[test]
+    fn a_bare_half_of_an_even_cluster_is_not_a_quorum() {
+        let mut c = elected(4, 11);
+        // Sever the leader's link to two of its three followers, leaving it able to reach
+        // exactly one: two nodes in total, which is half of four and not a majority.
+        for b in [2u8, 3] {
+            c.partition(0, b);
+        }
+        c.propose(b"half".to_vec()).expect("the leader accepts it");
+        c.run(1000);
+        assert_eq!(
+            c.nodes[0].commit_index, 0,
+            "two of four is a half, not a majority: committing here is a split-brain,              because {{2,3}} could commit something else with equal right"
+        );
+
+        // The control, on the same cluster: restore one link and three of four is a
+        // majority, so the entry commits. Without this the assertion above would be
+        // satisfied by a cluster that never commits anything.
+        c.heal();
+        c.heartbeat();
+        c.run(1000);
+        assert!(
+            c.nodes[0].commit_index >= 1,
+            "three of four is a majority and must commit"
+        );
+    }
+
+    /// The same boundary stated without a partition: the *counting* rule itself.
+    ///
+    /// `advance_commit` is the only place a quorum is computed, and this pins its arithmetic
+    /// at the two sizes where an off-by-one is visible. It is deliberately a unit test of
+    /// the predicate rather than a scenario, so that a future refactor of the simulator
+    /// cannot make the boundary untested by making the scenario unreachable.
+    #[test]
+    fn a_quorum_is_strictly_more_than_half_at_every_cluster_size() {
+        for total in 2usize..=9 {
+            let need = total / 2 + 1;
+            for replicas in 1..=total {
+                let is_quorum = replicas * 2 > total;
+                assert_eq!(
+                    is_quorum,
+                    replicas >= need,
+                    "with {total} nodes, {replicas} replicas: a quorum is {need} or more"
+                );
+                if total % 2 == 0 && replicas == total / 2 {
+                    assert!(
+                        !is_quorum,
+                        "a bare half of {total} must never be a quorum; `replicas * 2 >= \
+                         total` would make it one, and passes every odd-sized test"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn a_candidate_whose_log_is_behind_cannot_win() {
         // The up-to-date restriction, which is the whole of election safety: a leader
@@ -492,16 +559,29 @@ mod tests {
 
     #[test]
     fn a_leader_does_not_commit_a_previous_terms_entry_on_replica_count_alone() {
-        // The subtle Raft rule, and the one most often got wrong: an entry from an earlier
-        // term is not committed merely because it is now on a quorum, because a later
-        // leader could still overwrite it. It commits implicitly when a current-term entry
-        // above it commits.
+        // **The subtle Raft rule**, and the one most often got wrong: an entry from an
+        // earlier term is not committed merely because it is now on a quorum, because a
+        // later leader could still overwrite it. It commits implicitly when a current-term
+        // entry above it commits.
+        //
+        // The earlier version of this test proposed the entry and ran the cluster for 500
+        // steps before advancing the term — by which time the entry had *already committed
+        // at its own term*, so `commit_index` could not move again and the assertion held
+        // whether or not the rule existed. Deleting the term restriction from
+        // `advance_commit` left the whole suite green. The entry must therefore be
+        // uncommitted at the moment the term advances, which means it must not have been
+        // replicated: the leader is cut off first.
         let mut c = elected(3, 7);
-        c.propose(b"term1".to_vec());
+        c.partition(0, 1);
+        c.partition(0, 2);
+        c.propose(b"term1".to_vec()).expect("the leader accepts it");
         c.run(500);
-        let before = c.nodes[0].commit_index;
+        assert_eq!(
+            c.nodes[0].commit_index, 0,
+            "the entry must still be uncommitted, or this test cannot distinguish the rule              from its absence"
+        );
 
-        // Force a new term with an entry from the old one already replicated.
+        // A later term, with the old entry now reported present on a quorum.
         c.nodes[0].term += 1;
         c.nodes[0].match_index.insert(1, 1);
         c.nodes[0].match_index.insert(2, 1);
@@ -513,8 +593,19 @@ mod tests {
             match_index: 1,
         });
         assert_eq!(
-            c.nodes[0].commit_index, before,
-            "an entry from a previous term must not be committed on replica count alone"
+            c.nodes[0].commit_index, 0,
+            "an entry from a previous term must not be committed on replica count alone: a              later leader could still overwrite it, and a reader anchored here would have              observed a write that never happened"
+        );
+
+        // **The control.** An entry from the *current* term, on the same quorum, must
+        // commit — and carries the old one with it. Without this the assertion above is
+        // satisfied by a leader that commits nothing ever.
+        c.heal();
+        c.propose(b"term2".to_vec()).expect("the leader accepts it");
+        c.run(1000);
+        assert!(
+            c.nodes[0].commit_index >= 2,
+            "a current-term entry on a quorum commits, and commits the earlier one with it"
         );
     }
 

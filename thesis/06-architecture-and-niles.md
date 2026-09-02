@@ -253,8 +253,14 @@ every team writes it again. And PostgreSQL isolation is a property of a transact
 than of a view, so "this balance may be four epochs stale and that one may not" has no SQL
 spelling at all — which is why the consistency ladder cannot be expressed, let alone checked.
 
-**The defect corpus is where the case inverts.** Twelve defect classes, written twice, scored
-by the stage at which each is caught:
+**The defect corpus is where the case inverts.** Thirteen defect classes, written twice,
+scored by the stage at which each is caught. The Niles column is computed from the corpus by
+`crates/bank-bench/tests/counterproposal.rs`, which fails the build if these numbers stop
+describing it — they had already stopped: two classes the SQL side scored (`D7`, a stale read
+after a period boundary; `D10`, dropping the conservation rule) had **no Niles file at all**,
+so "written twice" was true of nine of them and the counts below could not be derived from
+anything in the repository. Both are written now, in the form the defect takes in a language
+with no run-time rule-dropping and no wall clock.
 
 | Stage | PostgreSQL | Niles |
 |---|---:|---:|
@@ -262,6 +268,13 @@ by the stage at which each is caught:
 | Runtime | 3 | — |
 | Never caught | 9 | — |
 | Not expressible | 1 | 1 |
+
+**One case is accepted in silence, and it is not a win.** `d6` writes a view predicate over
+a wall-clock helper. Niles has no `now()`, so the defect has no direct spelling — but the
+file is accepted with *no diagnostic whatsoever*, which is a different thing from being
+inexpressible: an unknown function in a view predicate is simply not checked. A reader
+scoring this corpus should count it as a gap in the checker, and the test above names it so
+that it cannot quietly become a twelfth compile-time catch.
 
 PostgreSQL wins one comparison outright: a mixed-currency transaction moving 100 USD to 100
 EUR is caught at COMMIT, because the deferred trigger groups by `(txn, cur)` and both groups

@@ -555,3 +555,44 @@ stable.
 in `gbs` before this session. The reformat is a separate, purely mechanical commit with
 identical test counts on both sides of it, and both reformat commits are listed in
 `.git-blame-ignore-revs`.
+
+### [T-01] 2026-09-02T01:20Z BLOCKED-T-01-toolchain The version pin cannot be installed here
+
+**Question for the author.** `rust-toolchain.toml` should read `channel = "1.95.0"`, and
+does not. Which do you want: the version pin, which is correct for a stranger and makes
+Appendix C.6's "pinned toolchains" true but leaves both repositories unbuildable in the
+environment this increment was executed in; or `channel = "stable"` with the version
+recorded, which builds here and does not satisfy the pin?
+
+**Both sides, verbatim.** The work order's resolved value is `channel = "1.95.0"` in both
+`rust-toolchain.toml` files. The environment has no egress to `static.rust-lang.org`
+(`connect_rejected`, organization policy), so `rustup` cannot install a channel named by
+version:
+
+```
+error: could not download file from
+'https://static.rust-lang.org/dist/channel-rust-1.95.0.toml.sha256'
+```
+
+The obvious workaround — link the already-installed toolchain under the pinned name —
+is refused by rustup itself, because a custom toolchain may not be named like a dist
+version:
+
+```
+error: invalid value '1.95.0' for '<TOOLCHAIN>': invalid custom toolchain name '1.95.0'
+```
+
+The installed `stable` **is** the intended version: `rustc 1.95.0 (59807616e 2026-04-14)`,
+`rustfmt 1.9.0-stable (59807616e1 2026-04-14)`, `cargo 1.95.0 (f2d3ce0bd 2026-03-21)`.
+
+**What was done, and why it is not a silent workaround.** `channel = "stable"` is kept so
+that the remaining eighteen tasks can run at all — T-01 is the prerequisite for every one
+of them, and blocking it blocks the increment. The intended value, the reason it is not
+set, and a pointer to this entry are written into the file itself as a comment, so the
+deviation is visible at the place where it matters rather than only here. Setting the pin
+is a one-line change for anyone with network access.
+
+**Consequence for T-17.** Appendix C.6's "pinned toolchains" claim is *not* made true by
+this commit and must not be reported as such. T-17 states it as "the toolchain file
+carries the intended pin as a comment; the channel is `stable` pending an environment
+that can install a versioned channel", or the pin is set first and the claim then stands.

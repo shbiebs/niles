@@ -503,3 +503,55 @@ copies generated tables into the chapters between markers, `build.sh` runs it be
 pandoc, and `crates/bank-bench/tests/thesis_drift.rs` fails the build if a block is stale —
 so a table that stopped describing the run it names is caught by the test suite rather than
 by a reader.
+
+---
+
+## Session 10 — the review work order
+
+Nineteen tasks (T-01 … T-19) closing findings F-01 … F-51. Entry format, one per event:
+
+```
+### [T-nn] <ISO-8601 UTC> <KIND> <one-line title>
+KIND ∈ {START, DECISION, STALE-F-nn, BLOCKED-T-nn, MISMATCH-<id>, RESULT, TESTS, LC-n, DONE}
+```
+
+### [T-01] 2026-09-02T01:05Z START Convention baseline, and the branch stacks
+
+Floors measured before any change, on `master` at `d96e6c1`:
+
+| Workspace | passed | failed | ignored |
+|---|---|---|---|
+| `niles` (`cargo test --workspace`) | 600 | 0 | 3 |
+| `gbs` (`cargo test --workspace`) | 415 | 0 | 1 |
+| adapter (`cargo test --manifest-path crates/gbs-nilestream/Cargo.toml`) | 15 | 0 | 0 |
+
+**Branch stacks and merge order.** `master` carries T-01 only (the pins and the two
+mechanical commits); everything after it lands on a review branch rebased onto the
+reformat, so that every later diff is semantic rather than whitespace.
+
+```
+master:                 T-01 (mechanical + pins), then nothing else
+review/F-01-F-06:       T-02 -> T-03 -> T-04 -> T-05                (niles)
+review/F-28-F-29:       T-06                                        (niles)
+review/F-19-F-27:       T-07 -> T-08 -> T-09  stacked on review/F-28-F-29  (gbs; adapter after T-06)
+review/F-23:            T-10                                        (gbs, independent)
+review/F-11-F-13:       T-11 -> T-12 -> T-13 -> T-18                (niles; T-12 touches gbs)
+review/F-14-F-17:       T-14 -> T-15 -> T-19  stacked on review/F-28-F-29 and review/F-11-F-13
+review/F-18:            T-16  stacked on review/F-01-F-06, review/F-19-F-27, review/F-14-F-17
+review/thesis:          T-17  stacked on everything
+```
+
+A task in one repository that needs a change in the other lands that change as its own
+commit on the same-named branch there, and the entry names both hashes.
+
+**Toolchain.** Pinned to **1.95.0** (`rustc 1.95.0 (59807616e 2026-04-14)`, the version
+that builds both workspaces today) in both `rust-toolchain.toml` files, with `rustfmt` and
+`clippy` components, and `rust-version = "1.95.0"` under `[workspace.package]` in both
+workspace manifests. The channel was `stable`, unpinned; Appendix C.6 already claimed
+"pinned toolchains", so this makes an existing claim true as well as making the lint gate
+stable.
+
+**Format baseline.** `cargo fmt --all -- --check` reported 1,274 diffs in `niles` and 612
+in `gbs` before this session. The reformat is a separate, purely mechanical commit with
+identical test counts on both sides of it, and both reformat commits are listed in
+`.git-blame-ignore-revs`.

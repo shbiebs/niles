@@ -1,2 +1,5 @@
 [toolchain]
-channel = "stable"
+# Pinned so that `cargo clippy -- -D warnings` is a stable gate: an unpinned channel
+# turns every new Rust release into a build break for reasons unrelated to this code.
+channel = "1.95.0"
+components = ["rustfmt", "clippy"]

@@ -119,7 +119,7 @@ On (i): the differential-defect experiment (§6.10.3, E14) writes twelve defect 
 **And a second experiment answers the objection that reading raises.** A checker with a
 `Undecided` verdict can catch eleven of twelve *deliberate* defects and still be undecided on
 ordinary code, in which case the soundness theorem is true and applies to a fragment nobody
-writes. E18 (§9.6) measures it: forty correct banking functions — transfers, fee sets,
+writes. E18 (§9.14.3) measures it: forty correct banking functions — transfers, fee sets,
 syndicated allocations, symbolic amounts, multi-currency legs, holds, and guarded paths — run
 one at a time through the front end. **Nothing is undecided.** Thirty-five are proved and five
 carry no conservation obligation at all, being holds.
@@ -230,7 +230,18 @@ Yes, and the table below is the audit trail. "Corrected" means the defect is fix
 | No TLS boundary | `tls.rs`, 17 tests | §6.12 |
 | No cost-based join ordering | `join_order.rs`, 16 tests | §6.11 |
 | Appendix E stage 1 had no input | `bootstrap/lexer.niles` + 14 gates | Appendix E.0, E.19 |
+| Appendix E had a lexer and no parser | `bootstrap/parser.niles` + 16 gates | Appendix E.0, E.19.2 |
+| **Assignment was left-associative in the reference parser** | `expr_bp` recurses at power 0; `precedence.rs` | **Appendix B.10.1**, E.19.2 |
+| Appendix B had no operator precedence table, so §6.25's "the appendix wins" had nothing to win with | table added, read by a drift test | Appendix B.10.1 |
+| The stage-0 interpreter spent ~95 KB of host stack per Niles call frame, and aborted the process rather than reporting | cold arms behind `#[inline(never)]`; a depth counter with a span | Appendix E.19.2 |
+| **`select k from t where t.z = 1` returned every row** | `sql_depth` in the parser; `Lx::predicate` replaces the silent `LitBool(true)` | §9.14.2 |
+| A correlation whose columns shared a name was left behind as the tautology `k = k`, making `exists` a no-op | the qualifier decides, with resolution as the fallback | §9.14.2 |
+| The IR had no null, so `not in` was unstatable | `niles-ir::value`, Kleene three-valued logic | §9.14.2, §3.3 |
+| A dependent join could be served, though it has no delta rule | verifier rule IR018 | §9.14.2 |
+| The reference evaluator ran every equi-join as a nested loop, so counted work could not distinguish a rewrite from its absence | index-build and probe | §9.14.2 |
 | Noria "unusable in production" overstated | postmortem written | **this section**, §1.1 |
 | "REVs need a new engine" | — | §11.3, §11.5.2 |
 
 The two entries with no repository column are corrections to *claims*, and they are the two most consequential, because a defect in an argument survives every test suite.
+
+**A pattern worth naming, since it has now recurred three times.** `Err(_) => 0` in the kernel, `sum` over an empty group, and `unwrap_or(LitBool(true))` in the lowering of a `where` clause are the same defect in three costumes: an absence given a *reasonable default* that is a wrong answer wearing a plausible shape. In each case the failure mode is not a crash and not an obviously wrong number, but a well-formed answer that no answer-level test can distinguish from the right one — a balance that reads zero, a total that reads zero, a view that returns every row. §3.3's lattice of absence exists because absences are not interchangeable and not substitutable by a value; these three are what happens when that discipline is not carried down into the implementation. The rule the repository now follows is that an absence gets a *named* representation or a diagnostic, never a default, and the three sites are pinned by tests that assert the default is gone rather than merely that the current behaviour is right.

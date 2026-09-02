@@ -3,6 +3,11 @@
 # description fixes; the appendices follow, then the references.
 set -euo pipefail
 cd "$(dirname "$0")"
+
+# Refresh every generated block from the file that generated it, so no measurement is
+# typed into the thesis by hand. `crates/bank-bench/tests/thesis_drift.rs` fails the build
+# if a block is stale, which is what makes this a guarantee rather than a habit.
+python3 ./include-results.py
 FILES=(00-front-matter.md 01-introduction.md 02-background.md 03-theoretical-framework.md \
   04-novel-contributions.md 05-research-design.md 06-architecture-and-niles.md \
   07-implementation.md 08-phased-program.md 09-evaluation.md 10-related-work.md \

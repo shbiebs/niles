@@ -410,3 +410,96 @@ divergence: the single source of truth crosses the bootstrap boundary.
 * *"REVs need a new engine."* Already refuted by E14 and now restated in §11.5.2 with the
   enabling/cumulative/editorial grading applied throughout: Niles's *analysis* is
   enabling, its *surface syntax* is editorial, and Nilestream is an instrument.
+
+---
+
+## Session 9 — the parser in Niles, subquery unnesting, and four defaults that were wrong answers
+
+Two blueprint tasks closed (8 and 4, the latter in two rounds), and the thesis reconciled
+to what the repositories now do. Word count 92,773 across 26 files; `Niles-Thesis.docx`
+rebuilt.
+
+**The bootstrap has a front end rather than a lexer.** `bootstrap/parser.niles` is a
+recursive-descent parser written in Niles, ~1,050 lines, loaded with `lexer.niles` as one
+program. It builds a tree — `enum Node { Atom(str), List([Node]) }` — and renders it
+afterwards, rather than emitting text as it goes: the claim under test is that Niles can
+*hold* a syntax tree, not that it can concatenate strings in the right order. Sixteen
+gates, including the front end parsing both of its own source files, node for node
+identically to the reference, across 127,165 bytes of tree.
+
+Comparison is on an S-expression rendering produced independently by both sides, never on
+structures: the two parsers share no types, and a structural comparison would need an
+adapter, which is the one thing a gate must not be, since a defect in it cancels a defect
+in either side.
+
+**The parser round found a defect in the *reference*.** Assignment was left-associative:
+`expr_bp` recursed for the right-hand side at binding power 1, which put assignment outside
+its own `min_bp == 0` guard, so `a = b = c` parsed as `(a = b) = c` — the opposite of
+Rust's rule and of the comment directly above the code. It had survived every test in the
+workspace, because associativity is invisible in a token stream and the lexer round could
+not have found it. It surfaced within minutes of a second implementation existing. That is
+the argument for stage-1 equivalence stated as a result instead of a hope.
+
+It also found that Appendix B had no operator precedence table, so §6.25's "the appendix
+wins" had nothing to win with. B.10.1 now states precedence and associativity normatively,
+and `crates/niles-lang/tests/precedence.rs` reads the table out of the markdown and checks
+every level against `BinOp::precedence`.
+
+And it found that the stage-0 interpreter spent **~95 KB of host stack per interpreted call
+frame** in a debug build against 4.8 KB in release — a `match` over thirty expression
+variants compiles, unoptimised, to a frame holding the union of every arm's locals. A
+recursive-descent parser was unrunnable, and the failure mode was a process abort with no
+diagnostic, because a stack overflow in Rust does not unwind. Cold arms moved behind
+`#[inline(never)]` (debug 32 KB), and a call-depth counter turns the remaining limit into
+an `Error::TooDeep` carrying a span. The default ceiling is the depth that fits a 1 MB
+stack in the widest build; the first value tried assumed a 2 MB thread stack and aborted
+the test process, which is how the number became measured rather than assumed.
+
+**Subquery unnesting needed three things the IR did not have.** A *nested form*
+(`Op::Apply`, a dependent join — deliberately not incremental, so the verifier refuses one
+on a served path, which reframes unnesting as what makes a correlated query expressible as
+a view at all rather than as an optimisation). A *null* (`niles-ir::value`, Kleene
+three-valued logic; the IR's value model was `i128`, so `not in` was unstatable). And *one
+semantics* — the reference evaluator moved out of a `#[cfg(test)]` block and became public,
+shared by the schedule catalogue and the unnesting corpus, because two copies of a
+semantics is two semantics.
+
+The corpus is 24 cases checked **denotationally** rather than structurally, plus a
+hand-written three-valued oracle for the eight `not in` cases so a shared misunderstanding
+cannot cancel between the two circuits. Correlated-regime counted work: 1.44× at k=1 rising
+to 61.39× at k=64, quadrupling as k quadruples — the signature of removing a quadratic.
+
+**Two corrections the measurement forced.** The evaluator ran every equi-join as a nested
+loop, so counted work could not distinguish the two plans and reported that unnesting saved
+nothing; the *instrument* was wrong, not the rewrite. And at the original nine-by-ten
+dataset the `not in` cases did more work after unnesting, because the unnested form is six
+operators; loosening the assertion would have discarded the actual result, which is a
+crossover. The corpus is now scale-parameterised and the crossover is measured per case.
+
+**The surface round found the session's worst defect, and it had nothing to do with
+subqueries.** `select k from t where t.z = 1` returned every row. Two faults compounded:
+`=` in a SQL `where` clause parsed as an *assignment*, because Niles's two ancestries
+disagree about that character and the parser took the Rust reading everywhere; and all
+three predicate sites in `lower.rs` read `.unwrap_or(Scalar::LitBool(true))`, so a
+predicate with no lowering became the constant `true`. The query looked correct, the plan
+verified, and no answer-level test could catch it, because every row it returned was a real
+row. A second defect in the same area: a correlation whose two columns shared a name —
+`where u.k = t.k`, the commonest correlated predicate there is — was left behind as the
+tautology `k = k`, making `exists` a no-op.
+
+**The pattern, now named.** `Err(_) => 0` in the kernel, `sum` over an empty group, and
+`unwrap_or(LitBool(true))` in a `where` clause are the same defect in three costumes: an
+absence given a *reasonable default* that is a wrong answer wearing a plausible shape. The
+failure mode is never a crash and never an obviously wrong number — it is a well-formed
+answer no answer-level test can distinguish from the right one. §3.3's lattice of absence
+exists because absences are not interchangeable and not substitutable by a value; these
+three are what happens when that discipline is not carried into the implementation. The
+rule the repositories now follow is that an absence gets a *named* representation or a
+diagnostic, never a default, and each site is pinned by a test asserting the default is
+gone. §11.5.7 records it.
+
+**No measurement is typed into the thesis by hand any more.** `thesis/include-results.py`
+copies generated tables into the chapters between markers, `build.sh` runs it before
+pandoc, and `crates/bank-bench/tests/thesis_drift.rs` fails the build if a block is stale —
+so a table that stopped describing the run it names is caught by the test suite rather than
+by a reader.

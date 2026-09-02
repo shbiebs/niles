@@ -40,6 +40,10 @@ UDFs compile to wasm32 against a frozen ABI. Imports: none beyond a capability t
 
 **The gate.** Continuous integration executes the conservation suite and a query corpus on every supported target and back-end, at every optimization level, hashing every output stream; any divergence fails the build. The same gate covers the compiler itself (E.18). A test suite deliberately attempts each of the three Wasm non-determinism sources and must observe the mitigation firing.
 
+**Status, stated rather than implied.** What runs today is the *run-to-run* half of that gate, on one target: `niles_interp::determinism_gate` executes a Niles program five times over freshly loaded copies and requires byte-identical output, and the bootstrap gates of E.19 apply it to the Niles-written lexer and parser, including to each parsing its own source. That establishes freedom from the accidental non-determinism this obligation is most often violated by — hash-map iteration order, address-dependent behaviour, a seeded structure escaping into output — and it establishes nothing about a *second* target, because it runs in one process on one machine.
+
+**Cross-target verification is pending, and pending on two artefacts that do not exist**: a WASM build and an ARM64 build to compare against x86-64. Until both run and their output streams hash equal, the obligation of this section is unmet. The return type of the gate says so — it reports the number of runs and whether they agreed, and has no field in which to record a target — so the code cannot be read as claiming more than it checks.
+
 ## C.6 Build and Deployment Model
 
 **Build.** One workspace for the engine and stage-0 compiler, plus the self-hosting stages driven by a bootstrap target; hermetic builds with pinned toolchains (Appendix G.1). Outputs: the server daemon, the CLI (compile, check, REPL), the bare compiler, and the wasm optimizer module.

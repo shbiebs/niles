@@ -1,21 +1,11 @@
-workload,target,run,operations,wall_ms,p50_us,p99_us,ops_per_sec,durable,not_run
-durable,postgres,1,500,121.511,217.9,435.3,4114.9,true,
-durable,postgres,2,500,108.713,198.8,410.4,4599.3,true,
-durable,postgres,3,500,95.259,166.5,468.1,5248.8,true,
-durable,postgres,4,500,88.425,157.0,432.4,5654.5,true,
-durable,postgres,5,500,104.836,174.4,983.6,4769.3,true,
-durable,postgres,6,500,97.117,184.4,329.8,5148.4,true,
-durable,postgres,7,500,100.681,183.7,380.9,4966.2,true,
-durable,postgres,8,500,96.413,174.6,329.5,5186.0,true,
-durable,postgres,9,500,102.898,192.8,355.4,4859.2,true,
-durable,postgres,10,500,118.477,220.3,458.9,4220.2,true,
-durable,nilestream,1,0,0.000,0.0,0.0,0.0,false,nilestreamd was not reachable on 127.0.0.1:5434: Connection refused (os error 111)
-durable,nilestream,2,0,0.000,0.0,0.0,0.0,false,nilestreamd was not reachable on 127.0.0.1:5434: Connection refused (os error 111)
-durable,nilestream,3,0,0.000,0.0,0.0,0.0,false,nilestreamd was not reachable on 127.0.0.1:5434: Connection refused (os error 111)
-durable,nilestream,4,0,0.000,0.0,0.0,0.0,false,nilestreamd was not reachable on 127.0.0.1:5434: Connection refused (os error 111)
-durable,nilestream,5,0,0.000,0.0,0.0,0.0,false,nilestreamd was not reachable on 127.0.0.1:5434: Connection refused (os error 111)
-durable,nilestream,6,0,0.000,0.0,0.0,0.0,false,nilestreamd was not reachable on 127.0.0.1:5434: Connection refused (os error 111)
-durable,nilestream,7,0,0.000,0.0,0.0,0.0,false,nilestreamd was not reachable on 127.0.0.1:5434: Connection refused (os error 111)
-durable,nilestream,8,0,0.000,0.0,0.0,0.0,false,nilestreamd was not reachable on 127.0.0.1:5434: Connection refused (os error 111)
-durable,nilestream,9,0,0.000,0.0,0.0,0.0,false,nilestreamd was not reachable on 127.0.0.1:5434: Connection refused (os error 111)
-durable,nilestream,10,0,0.000,0.0,0.0,0.0,false,nilestreamd was not reachable on 127.0.0.1:5434: Connection refused (os error 111)
+workload,target,run,operations,wall_ms,p50_us,p99_us,ops_per_sec,durable,not_run,protocol_path,miss_rate
+durable,postgres,1,125,25.215,183.8,463.5,4957.3,true,,simple,n/a
+durable,postgres,2,125,23.498,171.0,361.4,5319.5,true,,simple,n/a
+durable,postgres,3,125,26.857,194.2,359.1,4654.2,true,,simple,n/a
+durable,postgres,4,125,27.430,206.3,386.0,4557.1,true,,simple,n/a
+durable,postgres,5,125,27.782,214.4,332.8,4499.4,true,,simple,n/a
+durable,nilestream,1,125,25.731,198.9,280.8,4857.9,true,,simple,n/a
+durable,nilestream,2,125,32.723,248.3,400.6,3820.0,true,,simple,n/a
+durable,nilestream,3,125,35.912,258.0,1040.1,3480.7,true,,simple,n/a
+durable,nilestream,4,125,27.038,182.7,659.6,4623.2,true,,simple,n/a
+durable,nilestream,5,125,36.438,279.3,478.4,3430.5,true,,simple,n/a

@@ -61,6 +61,15 @@ pub struct RevEngine {
     /// Counted work spent evaluating circuits, so the scan surface's cost is reported
     /// rather than hidden inside a latency number.
     scan_work: u64,
+    /// Queries served by evaluating a circuit, and base rows materialised for them.
+    ///
+    /// **Every one of these is a reconstruction.** The served path evaluates the compiled
+    /// circuit over a source scan; the partially materialised view is not consulted, so
+    /// there is no resident entry to hit. The counters are reported as what they are rather
+    /// than as a hit/miss ratio over a view nothing reads — which is what the CSV's
+    /// `miss_rate` column would otherwise be silently reporting.
+    served: u64,
+    served_rows: u64,
     /// The durable sink, when the daemon was started with one. `None` for the in-memory
     /// engine the tests and the benchmark's warm-up use.
     ///
@@ -174,6 +183,8 @@ impl RevEngine {
             currency: 0,
             views: vec![("__wire_result".to_string(), 2)],
             scan_work: 0,
+            served: 0,
+            served_rows: 0,
             durable: None,
         }
     }
@@ -230,7 +241,22 @@ impl crate::session::Serving for RevEngine {
         output: &str,
         anchor: u64,
     ) -> Result<crate::session::Rows, crate::session::ServeError> {
-        let sources = self.base_at(anchor);
+        // **Predicate pushdown into the source scan.** Without it every query materialises
+        // the whole base: the point workload went from ~12,000 ops/s to 68 when the server
+        // started evaluating the circuit instead of answering from a hard-coded fold, and
+        // 68 is what a full scan of twenty thousand postings per query costs.
+        //
+        // This is not a second answer. Restricting the source to the rows a `Filter` in the
+        // circuit would keep cannot change what the circuit denotes — the filter is still
+        // there and still applied — and the restriction goes through the anchor index,
+        // which is the mechanism §9.4.1 measures at two orders of magnitude.
+        // `the_pushdown_and_the_full_scan_agree` holds the two to the same answer.
+        let sources = match account_predicate(circuit) {
+            Some(acct) => self.base_for_account(acct, anchor),
+            None => self.base_at(anchor),
+        };
+        self.served += 1;
+        self.served_rows += sources.values().map(|z| z.len() as u64).sum::<u64>();
         let (z, work) = niles_ir::eval::try_run(circuit, output, &sources)
             .map_err(|e| crate::session::ServeError::Eval(e.to_string()))?;
         self.scan_work += work;
@@ -288,9 +314,40 @@ impl crate::session::Serving for RevEngine {
     fn views(&self) -> Vec<(String, u32)> {
         self.views.clone()
     }
+
+    fn durability(&self) -> &'static str {
+        match self.durable {
+            Some(_) => "always",
+            None => "none",
+        }
+    }
+
+    /// `(reads, hits, misses, rows_touched, resident)` for the **served** path.
+    ///
+    /// Hits are zero and misses equal reads, and that is not a placeholder: the served path
+    /// evaluates the compiled circuit over a source scan through the anchor index, so every
+    /// read is an anchored reconstruction and no resident entry is consulted. Reporting the
+    /// `PartialView`'s counters here would report a view the wire path does not read — they
+    /// would all be zero, and a benchmark would record `n/a` and move on.
+    fn read_stats(&self) -> (u64, u64, u64, u64, usize) {
+        (
+            self.served,
+            0,
+            self.served,
+            self.served_rows,
+            self.view.resident(),
+        )
+    }
 }
 
 impl RevEngine {
+    /// Attach a durable sink, so every append reaches stable storage before it is
+    /// acknowledged. Refuses any policy but `Always`, which the sequencer also refuses.
+    pub fn with_durable(mut self, path: impl AsRef<std::path::Path>) -> std::io::Result<Self> {
+        self.durable = Some(DurableSink::open(path)?);
+        Ok(self)
+    }
+
     /// The `postings` base as a Z-set visible at `anchor`, in the schema the lowering gives
     /// a source node: `(txn, acct, cur, amt, idem)` — the declared column order, so a
     /// circuit's column indices mean here what they meant when it was lowered.
@@ -320,6 +377,35 @@ impl RevEngine {
                     niles_ir::eval::add(&mut z, row, 1);
                 }
             }
+        }
+        let mut m = std::collections::BTreeMap::new();
+        m.insert("postings".to_string(), z);
+        m
+    }
+
+    /// The base restricted to one account, through the anchor index.
+    fn base_for_account(
+        &self,
+        acct: u64,
+        anchor: u64,
+    ) -> std::collections::BTreeMap<String, niles_ir::eval::ZSet> {
+        use niles_ir::value::Value;
+        let mut z: niles_ir::eval::ZSet = Default::default();
+        for p in self
+            .ledger
+            .postings_for(acct, anchor.min(self.ledger.head()))
+        {
+            niles_ir::eval::add(
+                &mut z,
+                vec![
+                    Value::Int(p.txn as i128),
+                    Value::Int(p.acct as i128),
+                    Value::Int(p.cur as i128),
+                    Value::Int(p.amt),
+                    Value::Null,
+                ],
+                1,
+            );
         }
         let mut m = std::collections::BTreeMap::new();
         m.insert("postings".to_string(), z);
@@ -378,8 +464,157 @@ impl RevEngine {
     }
 }
 
+/// The single account a circuit's filters restrict it to, if there is exactly one.
+///
+/// Conservative by construction: it looks for a `Filter` whose predicate is
+/// `Column(acct) = <literal>` and returns `None` for anything else, including a disjunction
+/// or a second filter naming a different account. A pushdown that guessed would restrict a
+/// scan the circuit does not restrict, and the answer would be missing rows — which is the
+/// one thing an optimisation must never do.
+fn account_predicate(circuit: &niles_ir::circuit::Circuit) -> Option<u64> {
+    use niles_ir::operator::{Op, Scalar, ScalarOp};
+    /// The column `postings.acct` occupies in the source schema. Declared order:
+    /// `txn, acct, cur, amt, idem`.
+    const ACCT: u16 = 1;
+    let mut found: Option<u64> = None;
+    for n in &circuit.nodes {
+        let Op::Filter { predicate } = &n.op else {
+            continue;
+        };
+        let Scalar::Binary {
+            op: ScalarOp::Eq,
+            lhs,
+            rhs,
+        } = predicate
+        else {
+            // A filter this does not understand may keep rows a restricted scan would have
+            // dropped, so the restriction is abandoned rather than narrowed.
+            return None;
+        };
+        let acct = match (&**lhs, &**rhs) {
+            (Scalar::Column(ACCT), Scalar::LitInt(k))
+            | (Scalar::LitInt(k), Scalar::Column(ACCT)) => u64::try_from(*k).ok()?,
+            _ => return None,
+        };
+        match found {
+            Some(prev) if prev != acct => return None,
+            _ => found = Some(acct),
+        }
+    }
+    found
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_pushdown_and_the_full_scan_agree() {
+        // **The obligation the optimisation carries.** Restricting the source to the rows a
+        // `Filter` would keep cannot change what the circuit denotes, and this is the test
+        // that says so rather than the comment: the same circuit is evaluated over the
+        // restricted base and over the whole one, and the two must be identical.
+        //
+        // Without the restriction the point workload measured 68 operations per second —
+        // a full scan of twenty thousand postings per query. With it, and with no
+        // difference in the answer, it is back in the thousands.
+        use crate::session::Serving;
+        let mut e = RevEngine::seeded(200, 3, 50, ViewMode::Demand, EvictionPolicy::Lru);
+        let anchor = e.frontier();
+        for acct in [1i64, 7, 42, 199] {
+            let sql =
+                format!("select acct, sum(amt) from postings where acct = {acct} group by acct");
+            let program = format!(
+                "{}\nview __wire_result = sql {{ {sql} }} serve {{ consistency: snapshot, materialize: auto }};\n",
+                crate::daemon::DEFAULT_SCHEMA
+            );
+            let (prog, d) = niles_lang::parser::parse_program(&program);
+            assert!(!d.has_errors(), "{:?}", d.items);
+            let (cat, _) = niles_lang::resolve::resolve_program(&prog, 0);
+            let (lowered, ld) = niles_lang::lower::lower_program(&prog, &cat);
+            assert!(!ld.has_errors(), "{:?}", ld.items);
+
+            // The pushdown must have fired, or the test is comparing one path with itself.
+            assert_eq!(
+                account_predicate(&lowered.circuit),
+                Some(acct as u64),
+                "the predicate on `acct = {acct}` must be recognised"
+            );
+
+            let pushed = e
+                .query(&lowered.circuit, "__wire_result", anchor)
+                .expect("pushed");
+            let full = {
+                let sources = e.base_at(anchor);
+                let (z, _) = niles_ir::eval::try_run(&lowered.circuit, "__wire_result", &sources)
+                    .expect("full");
+                z
+            };
+            let from_full: Vec<Vec<Option<String>>> = full
+                .iter()
+                .filter(|(_, w)| **w > 0)
+                .map(|(r, _)| {
+                    let mut cells: Vec<Option<String>> = r
+                        .iter()
+                        .map(|v| match v {
+                            niles_ir::value::Value::Null => None,
+                            niles_ir::value::Value::Int(i) => Some(i.to_string()),
+                        })
+                        .collect();
+                    cells.push(Some(anchor.to_string()));
+                    cells
+                })
+                .collect();
+            assert_eq!(
+                pushed.rows, from_full,
+                "the restricted scan and the full scan must denote the same thing for acct {acct}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_predicate_the_pushdown_does_not_understand_abandons_the_restriction() {
+        // The safe direction. A pushdown that guessed would restrict a scan the circuit
+        // does not restrict, and the answer would be missing rows — the one thing an
+        // optimisation must never do. Two different accounts in one circuit, a predicate on
+        // a column that is not the key, and an inequality all fall back to the full scan.
+        use niles_ir::operator::{Op, Scalar, ScalarOp};
+        let filter = |p: Scalar| {
+            let mut c = niles_ir::circuit::Circuit::new();
+            let contract = niles_ir::circuit::internal_contract();
+            let src = c.add(
+                Op::Source {
+                    relation: "postings".into(),
+                    is_base: true,
+                    anchor_key: vec![1],
+                },
+                vec![],
+                contract,
+                "postings",
+            );
+            c.add(Op::Filter { predicate: p }, vec![src], contract, "where");
+            c
+        };
+        let eq = |col: u16, k: i128| Scalar::Binary {
+            op: ScalarOp::Eq,
+            lhs: Box::new(Scalar::Column(col)),
+            rhs: Box::new(Scalar::LitInt(k)),
+        };
+        assert_eq!(account_predicate(&filter(eq(1, 7))), Some(7));
+        assert_eq!(
+            account_predicate(&filter(eq(3, 7))),
+            None,
+            "a predicate on `amt` says nothing about which accounts are needed"
+        );
+        assert_eq!(
+            account_predicate(&filter(Scalar::Binary {
+                op: ScalarOp::Gt,
+                lhs: Box::new(Scalar::Column(1)),
+                rhs: Box::new(Scalar::LitInt(7)),
+            })),
+            None,
+            "an inequality names a range, not a key"
+        );
+    }
     use super::*;
     use crate::session::Serving;
 

@@ -49,6 +49,18 @@ pub trait Serving {
 
     /// The views this server knows, and the scale each one's money column carries.
     fn views(&self) -> Vec<(String, u32)>;
+
+    /// What this server does with an append before returning: `"always"` when every epoch
+    /// is on stable storage before it is acknowledged, `"none"` when it is not.
+    ///
+    /// Asked over the wire so a benchmark reports what the server *is* rather than what its
+    /// harness believes. A `durable` row measured against a non-durable append is the
+    /// single most common way a durability number is inflated.
+    fn durability(&self) -> &'static str;
+
+    /// `(reads, hits, misses, rows_touched, resident)` for the read model, or zeroes where
+    /// the target has no partial state.
+    fn read_stats(&self) -> (u64, u64, u64, u64, usize);
 }
 
 /// A served result: column names and rows of optional text.
@@ -299,6 +311,43 @@ impl Session {
             let n = rows.len() - 1;
             rows.push(Backend::CommandComplete(format!("SELECT {n}")));
             return rows;
+        }
+        // Whether this server's appends are durable, asked rather than assumed. The
+        // benchmark used to hard-code `false` for this target with a comment explaining
+        // that the read side is an in-memory demo — which was true, and meant a `durable`
+        // row could be *measured* against a non-durable append with nothing but a comment
+        // standing between that and a fabricated durability number.
+        // The read-model counters, so a benchmark can record the miss rate beside the
+        // latency. A parity result at a zero miss rate says a warm view is fast; one at a
+        // real miss rate says *reconstruction* is, which is the claim the thesis makes —
+        // and the CSV had `n/a` in that column because nothing could ask.
+        if lower.starts_with("select") && lower.contains("nilestream_stats") {
+            let (reads, hits, misses, rows, resident) = engine.read_stats();
+            return vec![
+                Backend::RowDescription(vec![
+                    Field::int8("reads"),
+                    Field::int8("hits"),
+                    Field::int8("misses"),
+                    Field::int8("rows_touched"),
+                    Field::int8("resident"),
+                ]),
+                Backend::DataRow(vec![
+                    Some(reads.to_string()),
+                    Some(hits.to_string()),
+                    Some(misses.to_string()),
+                    Some(rows.to_string()),
+                    Some(resident.to_string()),
+                ]),
+                Backend::CommandComplete("SELECT 1".into()),
+            ];
+        }
+        if lower.starts_with("select") && lower.contains("nilestream_durability") {
+            let mode = engine.durability();
+            return vec![
+                Backend::RowDescription(vec![Field::text("durability")]),
+                Backend::DataRow(vec![Some(mode.to_string())]),
+                Backend::CommandComplete("SELECT 1".into()),
+            ];
         }
         if lower.starts_with("select") && lower.contains("nilestream_frontier") {
             let f = engine.frontier();
@@ -826,6 +875,12 @@ schema bank {
         }
         fn views(&self) -> Vec<(String, u32)> {
             self.views.clone()
+        }
+        fn durability(&self) -> &'static str {
+            "none"
+        }
+        fn read_stats(&self) -> (u64, u64, u64, u64, usize) {
+            (0, 0, 0, 0, 0)
         }
     }
 

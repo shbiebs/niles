@@ -19,7 +19,7 @@ and where claiming one would be dishonest.
 
 | Workload | PostgreSQL baseline | Target | Available? |
 |---|---|---|---|
-| **OLTP, durable, strictly serializable** | 333 txn/s/core (18.1, 1000 warehouses, 48-core EPYC) | **5–10×** | Yes, bounded |
+| **OLTP, durable, strictly serializable** | 333 txn/s/core (18.1, wh=1000, 48-core EPYC, **fsync off** — *literature, non-durable*; see `docs/research/performance-baselines.md`). The harness's own baseline is a measured PostgreSQL 16.13 at `synchronous_commit = on` and `fsync = on`. | **5–10×** | Yes, bounded |
 | **Scan-heavy analytical** | ClickBench, indexed | **10–12×** geomean | Yes — but it is *storage layout*, not execution |
 | **Point lookup by primary key** | at the achievable bound | **parity** | **No.** PostgreSQL wins 10 of 43 ClickBench queries, all of them these |
 | **Highly selective indexed access** | at the achievable bound | **parity** | **No** |
@@ -30,11 +30,18 @@ and where claiming one would be dishonest.
 
 **The OLTP ladder, and why 5–10× is the honest number:**
 
-| | txn/s/core |
-|---|---|
-| PostgreSQL 18.1 | 333 |
-| A well-built general-purpose in-memory DBMS | ~3 000 |
-| Silo (in RAM, no network, no recovery, partition-local) | 21 875 |
+The 333 figure carries its durability setting because it was quoted for years without one,
+and a non-durable published rate compared against a durable measured one is not a comparison.
+The harness therefore does not calibrate against it: it measures PostgreSQL on the same
+machine, under the same durability settings, over the same protocol, and uses *that* as the
+baseline. The published figure appears only as context, and `bench --calibrate` prints the
+ratio so a reader can see how far apart the two machines are.
+
+| | txn/s/core | durability |
+|---|---|---|
+| PostgreSQL 18.1 (literature) | 333 | **fsync off** |
+| A well-built general-purpose in-memory DBMS | ~3 000 | — |
+| Silo (in RAM, no network, no recovery, partition-local) | 21 875 | none |
 
 PostgreSQL → a well-built in-memory system is ~9×. **The next 7× to Silo is bought entirely
 with restrictions this engine cannot take**: no network round trip, no recovery, no think

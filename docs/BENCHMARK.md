@@ -13,24 +13,30 @@ This document is what it takes to run the comparison and read it correctly.
 
 ## Running it
 
+**One command runs everything.** It used to be four, one of which was a `cargo test`
+invocation whose working directory is the *package* rather than the workspace — which is how
+a second `results/` tree appeared under `crates/bank-bench/` and the table went on reporting
+a missing row while a good measurement sat ten directories away.
+
 ```sh
-# 1. A real PostgreSQL. The harness will not substitute anything for it.
-initdb -D /var/lib/pgdata -U bench --auth=trust
-pg_ctl -D /var/lib/pgdata -l /tmp/pg.log \
-       -o '-p 5433 -c listen_addresses=127.0.0.1' start
+# A real PostgreSQL. The harness will not substitute anything for it.
+pg_ctlcluster 16 main start            # or: initdb -D … && pg_ctl -D … start
 
-# 2. Check the harness before trusting it, then run the PostgreSQL half.
-cargo run --release -p bank-bench --bin bench -- --calibrate --pg-port 5433
-cargo run --release -p bank-bench --bin bench -- --run \
-      --pg-port 5433 --accounts 10000 --operations 2000 --runs 10
-
-# 3. The Nilestream half, which hosts the daemon on a thread of the test process
-#    and drives it over TCP with the same client. Merges into the same CSVs.
-cargo test --release -p bank-bench --test e16_nilestream -- --ignored --nocapture
-
-# 4. Re-render the table from the CSVs alone, without re-running anything.
-cargo run --release -p bank-bench --bin bench -- --render
+# Calibrate, run both targets on all four workloads, and render — in one process.
+cargo run --release -p bank-bench --bin bench -- \
+      --calibrate --run --render \
+      --pg-port 5432 --host-nls \
+      --accounts 10000 --operations 2000 --runs 10
 ```
+
+`--host-nls` starts `nilestreamd` on a thread of the same process and drives it over TCP with
+the same client, with a durable sink at `results/E16-wallclock/nilestream-bench.seg` under
+`SyncPolicy::Always`. Without the sink the `durable` row would be measured against an
+in-memory append; the harness refuses to start rather than run it.
+
+`--render` alone re-renders the table from the CSVs without re-running anything, which is the
+property that makes the numbers auditable: nothing in the binary contains a figure that
+appears in the document.
 
 ### Why the two halves run differently
 
@@ -82,11 +88,40 @@ Recorded because a benchmark without its machine is a number without units.
 
 | | |
 |---|---|
-| Storage | `/dev/vda`, ext4, virtualised block device |
-| `fsync` cost | **93µs** per call — "fast NVMe or virtualised block device" |
-| Implied ceiling | ~10,700 durable commits/s per connection |
-| PostgreSQL | 16.13, `synchronous_commit = on`, `fsync = on`, `shared_buffers = 128MB`, `full_page_writes = on`, `wal_level = replica` |
-| Measured durable rate | ~5,100 txn/s, **39% of the device ceiling** — consistent, and the gate's basis for passing |
+| CPU | Intel Xeon @ 2.10GHz, **2 cores** |
+| RAM | 7 GiB |
+| Kernel | 6.18.44-fc-v22 |
+| Storage | `/dev/vda`, **ext4**, virtualised block device, 252G |
+| `fsync` cost | **77.9µs** per call — "fast NVMe or virtualised block device" |
+| Implied ceiling | **12,845** durable commits/s per connection |
+| Measured durable rate | 5,152 txn/s, **40% of the device ceiling** — consistent, and the gate's basis for passing |
+
+Two cores. Every ratio below is a two-core result, and the OLTP contract's "5–10×" was
+written against a 48-core baseline figure — which is one of the reasons that row reads NOT
+MET, and it is named in the limitations list rather than left for a reader to work out.
+
+**The probe now measures the device PostgreSQL's WAL is on.** It probed `temp_dir()`, which
+on this container is a different filesystem from `$PGDATA`: a tmpfs `/tmp` reports an `fsync`
+cost of about a microsecond and a ceiling of a million commits per second, against which
+every real durable rate looks implausibly low and the plausibility gate is measuring the
+wrong device. The server is asked `show data_directory`, and refuses to guess if it will not
+say.
+
+### The eight PostgreSQL settings, read from the running server
+
+Read from `pg_settings` rather than from a config file, because the two can differ, and
+printed into the results.
+
+| setting | value |
+|---|---|
+| `server_version` | 16.13 (Ubuntu 16.13-0ubuntu0.24.04.1) |
+| `synchronous_commit` | `on` |
+| `fsync` | `on` |
+| `full_page_writes` | `on` |
+| `wal_level` | `replica` |
+| `shared_buffers` | 16384 (8kB pages = 128 MB) |
+| `work_mem` | 4096 (kB) |
+| `max_wal_size` | 1024 (MB) |
 
 PostgreSQL is left at its packaged defaults. Tuning it *down* to win would be the cheapest way
 to fabricate a margin, so every setting the harness can see is read from the running server —
@@ -136,6 +171,62 @@ in the right order, and then waited. It is the clearest argument in this reposit
 measuring wall-clock against a baseline rather than counting operations, and it is the reason
 `ROADMAP.md` now carries an item to move the read path onto `proto-engine` before any
 Nilestream number is quoted as an engine result.
+
+## Known limitations of the Nilestream path
+
+**Every NOT MET must be attributable to an item on this list or to the engine**, and saying
+which is the point of having the list. A gap with no named cause is a result nobody can act
+on; a gap attributed to "it is a prototype" is not attributed at all.
+
+1. **One mutex over the whole engine.** `daemon::accept_loop` hands every connection an
+   `Arc<Mutex<RevEngine>>`, so reads serialise against each other and against writes. The
+   benchmark drives one connection, so this does not affect these numbers — and it is the
+   first thing that would, at any concurrency.
+2. **A thread per connection.** Right at this scale and stated rather than defended; not a
+   design for thousands of connections.
+3. **A plan cache keyed by schema epoch, and nothing else.** `extended.rs` caches a compiled
+   plan against the epoch it was planned at. The *simple* query path — which is what this
+   benchmark uses on both targets — compiles every statement afresh: parse, resolve,
+   typecheck, lower, verify, per query. That is a real per-query cost and it is paid on every
+   row of this table.
+4. **A full fold behind every scan.** `Serving::query` materialises the source as a Z-set and
+   evaluates the circuit over it. A `where acct = k` predicate is pushed into the scan through
+   the anchor index; an unkeyed `group by` is not, and materialises the whole base. **This is
+   the cause of the `analytical` NOT MET**: 20,000 postings are re-read per query against
+   PostgreSQL's sequential scan with an in-memory aggregate.
+5. **No incremental maintenance on the served path.** The partially materialised view exists,
+   is maintained, and is *not consulted by the wire path* — every point read is an anchored
+   reconstruction. The `point` row's miss rate is therefore 1.00 by construction, which makes
+   its parity result a claim about reconstruction rather than about a warm cache.
+6. **Two cores.** The OLTP contract's "5–10×" was set against a 48-core baseline figure.
+   **This is a contributing cause of the `oltp` NOT MET**, together with item 3.
+7. **The budget setting.** The engine is hosted with residency for a quarter of the key
+   space. A budget at or above the key count evicts nothing and would make the `point` row a
+   measurement of a warm cache; the harness warns when it does not bind.
+
+### Attributing this run's two NOT METs
+
+| row | verdict | attributed to |
+|---|---|---|
+| `oltp` | NOT MET (≈1× against a 5–10× contract) | items 3 and 6 — per-query compilation on a two-core machine, against a contract written for 48 cores. Not to the ledger: the durable row shows the write path at parity with PostgreSQL's, on the same device and the same `fsync`. |
+| `analytical` | NOT MET (≈0.13× against a 10–12× contract) | item 4 — a full fold per query. The engine is doing more work than PostgreSQL, not the same work more slowly, and the phase-diagram experiments are where that trade is characterised. |
+
+Neither is attributed to the engine's correctness, and neither should be read as one. What
+they are is a **measured baseline and a characterised gap**, which is the claim §9.14.1 can
+support and the stronger claim it cannot.
+
+### What the analytical row compares
+
+Three of PostgreSQL's five analytical statements are outside Nilestream's lowered fragment,
+so the row compares five statements against three:
+
+| construct | why it is outside the fragment |
+|---|---|
+| `count(*)` | `*` is not a column, and the aggregate lowering resolves its argument as one (NL0502) |
+| `count(distinct acct)` | `distinct` is a stage in this fragment, not an aggregate modifier |
+| `order by sum(amt) desc` | `order by` resolves against the input schema — the choice that lets it name a column the query does not select |
+
+Widening the fragment during a benchmark would be tuning the artifact to the measurement.
 
 ## How to read the verdicts
 

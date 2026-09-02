@@ -207,11 +207,33 @@ fn connect_pg(args: &Args) -> Option<PgTarget> {
 fn calibrate(args: &Args, pg: &mut PgTarget) -> bool {
     eprintln!("== calibration ==");
 
-    // What the storage charges for a durability barrier. Measured on the harness's own
-    // filesystem, moments before the run — see `storage.rs` for why this is the denominator
-    // rather than a published throughput figure.
-    let probe_dir = std::env::var("BENCH_FSYNC_DIR")
-        .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().into_owned());
+    // What the storage charges for a durability barrier — **on the device PostgreSQL's WAL
+    // is actually on**.
+    //
+    // This probed `temp_dir()`, which on a container is very often a different filesystem
+    // from `$PGDATA`: a tmpfs `/tmp` reports an `fsync` cost of a microsecond and a ceiling
+    // of a million commits per second, against which every real durable rate looks
+    // implausibly low and the plausibility gate is measuring the wrong device. The server
+    // is asked where its data directory is, so the calibration cannot be about a filesystem
+    // the database never touches.
+    let probe_dir = match std::env::var("BENCH_FSYNC_DIR") {
+        Ok(d) => d,
+        Err(_) => match pg.data_directory() {
+            Some(d) => {
+                eprintln!("  probing the device holding PGDATA: {d}");
+                d
+            }
+            None => {
+                eprintln!(
+                    "  REFUSED: the server would not report `data_directory`, so the fsync \
+                     probe would have to guess at a device. Set BENCH_FSYNC_DIR to the \
+                     filesystem holding the WAL, or grant the bench user permission to run \
+                     `show data_directory`."
+                );
+                return false;
+            }
+        },
+    };
     let cost = match bank_bench::storage::fsync_cost(&probe_dir, 200) {
         Ok(c) => c,
         Err(e) => {
@@ -322,15 +344,38 @@ fn run(args: &Args) -> i32 {
                         args.nls_budget, args.accounts
                     );
                 }
-                let engine = std::sync::Arc::new(std::sync::Mutex::new(
-                    nilestream_server::rev_engine::RevEngine::seeded(
-                        args.accounts,
-                        args.nls_rounds,
-                        args.nls_budget,
-                        proto_engine::ViewMode::Demand,
-                        proto_engine::EvictionPolicy::Lru,
-                    ),
-                ));
+                // **A durable sink, because the `durable` row is meant to measure one.**
+                // Without it the row was measured against an in-memory append and recorded
+                // `durable=false`, which is honest in the CSV and useless as a comparison:
+                // a durable PostgreSQL commit against a non-durable Nilestream one is not a
+                // measurement of anything.
+                let seg = std::path::Path::new(&args.out).join("nilestream-bench.seg");
+                if let Some(parent) = seg.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let _ = std::fs::remove_file(&seg);
+                let base = nilestream_server::rev_engine::RevEngine::seeded(
+                    args.accounts,
+                    args.nls_rounds,
+                    args.nls_budget,
+                    proto_engine::ViewMode::Demand,
+                    proto_engine::EvictionPolicy::Lru,
+                );
+                let base = match base.with_durable(&seg) {
+                    Ok(e) => {
+                        eprintln!("  durable sink at {} — SyncPolicy::Always", seg.display());
+                        e
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "  REFUSED: cannot open a durable sink at {}: {e}. The `durable` \
+                             row would measure a non-durable append.",
+                            seg.display()
+                        );
+                        return 1;
+                    }
+                };
+                let engine = std::sync::Arc::new(std::sync::Mutex::new(base));
                 {
                     use nilestream_server::session::Serving;
                     eprintln!("  ledger frontier #{}", engine.lock().unwrap().frontier());
@@ -499,10 +544,12 @@ fn document(table: &str, config: &[(String, Vec<(String, String)>)], args: &Args
          experiment, and the document had to spend two paragraphs saying the number meant \
          nothing.\n\n\
          The miss rate is reported with it and belongs with it. A parity result at a 0% miss \
-         rate says a warm view is fast; one at a 9% miss rate says *reconstruction* is, which \
-         is the claim the thesis actually makes. The measured runs sit around 8–14% misses, \
-         each one a real upquery touching real base rows, and the latency holds across them. \
-         Reporting the latency alone would have let the more interesting half disappear.\n\n\
+         rate says a warm view is fast; one at a nonzero rate says *reconstruction* is, which \
+         is the claim the thesis actually makes — so the rate is a column of the CSV and is \
+         rendered from it below, not a range typed into this sentence. It was one: this \
+         paragraph named a range of miss rates in the high single digits while the harness \
+         configured a budget larger than the key space, under which nothing is ever evicted \
+         and the true rate after warm-up is zero.\n\n\
          Two things it still does not establish. The engine is in-memory and single-threaded, \
          so this is not a durability or a concurrency result. And PostgreSQL is doing different \
          work — an index scan and an aggregation, against a maintained view plus occasional \
@@ -527,16 +574,37 @@ fn document(table: &str, config: &[(String, Vec<(String, String)>)], args: &Args
          **A measurement written where nothing read it.** The Nilestream half runs under \
          `cargo test`, whose working directory is the *package* rather than the workspace. A \
          relative path put a second `results/` tree under `crates/bank-bench/`, and the table \
-         went on reporting `NOT RUN` while a good measurement sat ten directories away.\n\n\
-         None of the three could have been found by counting operations. In each case the \
-         engine did the right amount of work, in the right order, and the number was still \
-         wrong.\n\n\
+         went on reporting a missing row while a good measurement sat ten directories \
+         away.\n\n\
+         **Three rows the harness refused to run against an engine that could run them.** \
+         `oltp` and `durable` were refused because \"nilestreamd exposes no write surface \
+         over the wire\"; `analytical` because \"a scan-and-group-by surface is not \
+         exposed\". Both reasons were true when they were written and had stopped being \
+         true, so three quarters of this table reported a gap in the engine that was \
+         actually a gap in the harness's beliefs about it.\n\n\
+         **A budget that could not bind.** The Nilestream engine was hosted with room for \
+         ten times the key space, so after warm-up nothing was ever evicted: the `point` row \
+         measured the hit path exclusively while being presented as a measurement of partial \
+         materialisation. The budget is now a quarter of the key space and the miss rate is \
+         a column of the CSV.\n\n\
+         **A full scan behind every point lookup.** When the server began evaluating the \
+         compiled circuit rather than answering from a hard-coded fold, the `point` row fell \
+         from parity to 68 operations per second — the cost of materialising twenty thousand \
+         postings per query. The fix is predicate pushdown into the source scan through the \
+         anchor index, which cannot change what the circuit denotes and is held to that by a \
+         test.\n\n\
+         None could have been found by counting operations. In each case the engine did the \
+         right amount of work, in the right order, and the number was still wrong.\n\n\
          ## What this does not measure\n\n\
          The OLTP and durable rows for PostgreSQL are a *baseline*, not a competition: they \
-         establish what the comparison is against. Where a Nilestream row reads `NOT RUN`, the \
-         reason is above, and it is a finding about the engine's surface rather than a \
-         limitation of the harness. Filling such a row by measuring something else under the \
-         same name is the specific failure this file exists to avoid.\n",
+         establish what the comparison is against. A row that cannot be run is reported with \
+         the reason rather than omitted, and filling one by measuring something else under \
+         the same name is the specific failure this file exists to avoid.\n\n\
+         Three of PostgreSQL's five analytical statements are outside Nilestream's lowered \
+         fragment — `count(*)`, `count(distinct …)` and `order by <aggregate>` — so the \
+         analytical row compares five statements against three. Each missing construct is \
+         named with its reason in `target::ANALYTICAL_BLOCKED`. Widening the fragment during \
+         a benchmark would be tuning the artifact to the measurement.\n",
     );
     s
 }

@@ -200,6 +200,8 @@ pub fn point(
     }
     let wall = started.elapsed();
     let (p50, p99) = percentiles(latencies);
+    // Asked after the run, so the rate covers the operations just measured.
+    let miss_rate = t.miss_rate();
     Ok(Sample {
         workload: "point".into(),
         target: t.name().into(),
@@ -211,7 +213,7 @@ pub fn point(
         durable: false,
         not_run: None,
         protocol_path: PROTOCOL_PATH,
-        miss_rate: None,
+        miss_rate,
     })
 }
 
@@ -245,11 +247,21 @@ pub fn oltp(
         // One statement, so one implicit transaction: a transfer that could be half-applied
         // is the failure the ledger design exists to prevent, and a benchmark that allowed it
         // would be measuring a weaker guarantee.
-        let sql = format!(
-            "insert into postings (txn, acct, cur, amt, epoch) values \
-             ('bench-{run}-{i}', {from}, 'USD', -{amount}, {epoch}), \
-             ('bench-{run}-{i}', {to}, 'USD', {amount}, {epoch})"
-        );
+        let sql = if t.name() == "postgres" {
+            format!(
+                "insert into postings (txn, acct, cur, amt, epoch) values \
+                 ('bench-{run}-{i}', {from}, 'USD', -{amount}, {epoch}), \
+                 ('bench-{run}-{i}', {to}, 'USD', {amount}, {epoch})"
+            )
+        } else {
+            // The same two legs, in the same statement, sealed as one epoch. Nilestream's
+            // ledger *refuses* the half-applied version, which is the guarantee this
+            // workload is meant to be measuring the cost of rather than the absence of.
+            format!(
+                "insert into postings values ({txn}, {from}, 0, -{amount}), ({txn}, {to}, 0, {amount})",
+                txn = 1_000_000 + (run as i64) * 1_000_000 + i as i64
+            )
+        };
         let at = Instant::now();
         t.run(&sql)?;
         latencies.push(at.elapsed());
@@ -285,13 +297,25 @@ pub fn analytical(
     if let Some(reason) = t.unsupported("analytical") {
         return Ok(skipped("analytical", t.name(), run, reason));
     }
-    let queries = [
+    // **Per target, because the two speak different dialects of the same operation.**
+    // Three of PostgreSQL's five statements use constructs outside Nilestream's lowered
+    // fragment — `count(*)`, `count(distinct …)` and `order by <aggregate>` — and each is
+    // named in `target::ANALYTICAL_BLOCKED` with the reason. Widening the fragment during a
+    // benchmark would be tuning the artifact to the measurement; substituting a different
+    // query and calling it the same row would be worse.
+    let pg = [
         "select count(*) from postings",
         "select cur, sum(amt) from postings group by cur",
         "select acct, sum(amt) from postings group by acct order by sum(amt) desc limit 10",
         "select count(distinct acct) from postings",
         "select sum(amt) from postings where amt < 0",
     ];
+    let nls = [
+        "select cur, sum(amt) from postings group by cur",
+        "select acct, sum(amt) from postings group by acct",
+        "select sum(amt) from postings where amt < 0",
+    ];
+    let queries: &[&str] = if t.name() == "postgres" { &pg } else { &nls };
     let mut latencies = Vec::new();
     let started = Instant::now();
     for i in 0..operations {
@@ -339,11 +363,27 @@ pub fn durable(
     let started = Instant::now();
     for i in 0..operations {
         let acct = rng.key(accounts);
-        let sql = format!(
-            "insert into postings (txn, acct, cur, amt, epoch) values \
-             ('durable-{run}-{i}', {acct}, 'USD', 0, {})",
-            2_000_000 + i as i64
-        );
+        // The same operation in each target's dialect: one durable append of a posting that
+        // conserves. Nilestream's ledger refuses a set that does not, so the amount is zero
+        // — a set of one row summing to zero — which is also what PostgreSQL's row carries,
+        // so the two are the same write and not merely similarly named ones.
+        let sql = if t.name() == "postgres" {
+            format!(
+                "insert into postings (txn, acct, cur, amt, epoch) values \
+                 ('durable-{run}-{i}', {acct}, 'USD', 0, {})",
+                2_000_000 + i as i64
+            )
+        } else {
+            // **The run number belongs in the identity.** Without it the second run
+            // replays the first's transaction numbers and the ledger refuses every one of
+            // them as a duplicate — which is the idempotency guarantee working exactly as
+            // designed, reported as "a workload failed". A benchmark that re-submits the
+            // same transaction is not measuring throughput.
+            format!(
+                "insert into postings values ({}, {acct}, 0, 0)",
+                2_000_000 + (run as i64) * 1_000_000 + i as i64
+            )
+        };
         let at = Instant::now();
         t.run(&sql)?;
         latencies.push(at.elapsed());

@@ -347,6 +347,36 @@ impl Ledger {
 
     /// The number of postings on an account up to an anchor — the per-key update count that
     /// the cost law says reconstruction should depend on.
+    /// One account's postings, in epoch order, up to and including `anchor`.
+    ///
+    /// Through the **anchor index**, which is the mechanism the whole thesis is about: the
+    /// alternative is a scan of history, and the difference between the two is the
+    /// measured two orders of magnitude of §9.4.1.
+    ///
+    /// Exposed because the server needs it to restrict a circuit's source scan to the key a
+    /// predicate names. That is predicate pushdown, not a second answer: filtering the
+    /// source by a predicate the circuit itself applies cannot change what the circuit
+    /// denotes, and `the_pushdown_and_the_full_scan_agree` holds the two together.
+    pub fn postings_for(&self, acct: Acct, anchor: Epoch) -> Vec<Posting> {
+        let Some(refs) = self.by_account.get(&acct) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for r in refs {
+            if r.epoch > anchor {
+                break;
+            }
+            if let Some(Row::Post(p)) = self
+                .epochs
+                .get(r.epoch as usize)
+                .and_then(|e| e.rows.get(r.idx as usize))
+            {
+                out.push(p.clone());
+            }
+        }
+        out
+    }
+
     pub fn key_update_count(&self, acct: Acct, anchor: Epoch) -> usize {
         self.by_account
             .get(&acct)

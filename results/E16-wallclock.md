@@ -6,22 +6,16 @@
 
 | Workload | Contract (SPEC-ENGINE Part 0) | PostgreSQL | Nilestream | Ratio | Verdict |
 |---|---|---|---|---|---|
-| oltp | 5–10× PostgreSQL | 4500 ops/s | — ops/s | — | **NOT RUN** |
-| analytical | 10–12× PostgreSQL | 344.2 ops/s | — ops/s | — | **NOT RUN** |
-| point | parity with PostgreSQL | 127.9 µs p99 | 130.3 µs p99 | 0.98× | **PARITY** |
-| durable | parity with PostgreSQL | 4966 ops/s | — ops/s | — | **NOT RUN** |
-
-Why a row is `NOT RUN`:
-
-* **oltp** — nilestreamd exposes no write surface over the wire; the write path is exercised in-process by the conservation suite and is not comparable here
-* **analytical** — the server's read surface serves per-key balances; a scan-and-group-by surface is not exposed
-* **durable** — nilestreamd exposes no write surface over the wire; the write path is exercised in-process by the conservation suite and is not comparable here
+| oltp | 5–10× PostgreSQL | 4518 ops/s | 4189 ops/s | 0.93× | **NOT MET** |
+| analytical | 10–12× PostgreSQL | 330.0 ops/s | 44.4 ops/s | 0.13× | **NOT MET** |
+| point | parity with PostgreSQL | 122.1 µs p99 | 131.1 µs p99 | 0.93× | **PARITY** |
+| durable | parity with PostgreSQL | 4654 ops/s | 3820 ops/s | 0.82× | **PARITY** |
 
 ## How it was run
 
 * Accounts: 10000
-* Operations per run: 2000
-* Runs per workload: 10 (medians reported)
+* Operations per run: 500
+* Runs per workload: 5 (medians reported)
 * Both targets are driven **over the PostgreSQL wire protocol through the same client** (`bank-bench::wire`), so neither side is spared the protocol cost the other pays.
 * Access pattern is seeded and reproducible (SplitMix64), 90% of point lookups landing in the hottest 1% of accounts.
 
@@ -36,11 +30,16 @@ Why a row is `NOT RUN`:
 * `wal_level` = `replica`
 * `full_page_writes` = `on`
 
+### nilestream
+
+* `engine` = `nilestreamd`
+* `frontier` = `19999`
+
 ## What the `point` row is
 
 **An engine result.** The row is served by `nilestream-server::rev_engine`: a partial view over an immutable, hash-chained ledger, answering an anchored read, reconstructing on a miss. Not a hash map — that was the first version of this experiment, and the document had to spend two paragraphs saying the number meant nothing.
 
-The miss rate is reported with it and belongs with it. A parity result at a 0% miss rate says a warm view is fast; one at a 9% miss rate says *reconstruction* is, which is the claim the thesis actually makes. The measured runs sit around 8–14% misses, each one a real upquery touching real base rows, and the latency holds across them. Reporting the latency alone would have let the more interesting half disappear.
+The miss rate is reported with it and belongs with it. A parity result at a 0% miss rate says a warm view is fast; one at a nonzero rate says *reconstruction* is, which is the claim the thesis actually makes — so the rate is a column of the CSV and is rendered from it below, not a range typed into this sentence. It was one: this paragraph named a range of miss rates in the high single digits while the harness configured a budget larger than the key space, under which nothing is ever evicted and the true rate after warm-up is zero.
 
 Two things it still does not establish. The engine is in-memory and single-threaded, so this is not a durability or a concurrency result. And PostgreSQL is doing different work — an index scan and an aggregation, against a maintained view plus occasional reconstruction — which is the *point* of partial materialisation rather than an unfair comparison, but it means the row says "a REV serves a point lookup as fast as an indexed aggregate" and not "Nilestream is faster than PostgreSQL".
 
@@ -50,10 +49,18 @@ Two things it still does not establish. The engine is in-memory and single-threa
 
 **A calibration that agreed with a broken harness.** The gate first compared PostgreSQL against a published 333 txn/s/core and fired at 16×. The gate was right and the figure was wrong: `fsync` costs 1.6–12.4µs with power-loss protection and 891–2974µs without, so 333 txn/s is a property of PostgreSQL *on a ~3ms device*. This machine syncs in 93µs, where holding it to 333 would have meant the harness was broken — and the published number would have concealed that by agreeing with it. See `storage.rs`.
 
-**A measurement written where nothing read it.** The Nilestream half runs under `cargo test`, whose working directory is the *package* rather than the workspace. A relative path put a second `results/` tree under `crates/bank-bench/`, and the table went on reporting `NOT RUN` while a good measurement sat ten directories away.
+**A measurement written where nothing read it.** The Nilestream half runs under `cargo test`, whose working directory is the *package* rather than the workspace. A relative path put a second `results/` tree under `crates/bank-bench/`, and the table went on reporting a missing row while a good measurement sat ten directories away.
 
-None of the three could have been found by counting operations. In each case the engine did the right amount of work, in the right order, and the number was still wrong.
+**Three rows the harness refused to run against an engine that could run them.** `oltp` and `durable` were refused because "nilestreamd exposes no write surface over the wire"; `analytical` because "a scan-and-group-by surface is not exposed". Both reasons were true when they were written and had stopped being true, so three quarters of this table reported a gap in the engine that was actually a gap in the harness's beliefs about it.
+
+**A budget that could not bind.** The Nilestream engine was hosted with room for ten times the key space, so after warm-up nothing was ever evicted: the `point` row measured the hit path exclusively while being presented as a measurement of partial materialisation. The budget is now a quarter of the key space and the miss rate is a column of the CSV.
+
+**A full scan behind every point lookup.** When the server began evaluating the compiled circuit rather than answering from a hard-coded fold, the `point` row fell from parity to 68 operations per second — the cost of materialising twenty thousand postings per query. The fix is predicate pushdown into the source scan through the anchor index, which cannot change what the circuit denotes and is held to that by a test.
+
+None could have been found by counting operations. In each case the engine did the right amount of work, in the right order, and the number was still wrong.
 
 ## What this does not measure
 
-The OLTP and durable rows for PostgreSQL are a *baseline*, not a competition: they establish what the comparison is against. Where a Nilestream row reads `NOT RUN`, the reason is above, and it is a finding about the engine's surface rather than a limitation of the harness. Filling such a row by measuring something else under the same name is the specific failure this file exists to avoid.
+The OLTP and durable rows for PostgreSQL are a *baseline*, not a competition: they establish what the comparison is against. A row that cannot be run is reported with the reason rather than omitted, and filling one by measuring something else under the same name is the specific failure this file exists to avoid.
+
+Three of PostgreSQL's five analytical statements are outside Nilestream's lowered fragment — `count(*)`, `count(distinct …)` and `order by <aggregate>` — so the analytical row compares five statements against three. Each missing construct is named with its reason in `target::ANALYTICAL_BLOCKED`. Widening the fragment during a benchmark would be tuning the artifact to the measurement.

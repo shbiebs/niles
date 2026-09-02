@@ -58,6 +58,16 @@ pub trait Target {
     /// serve a workload is a finding; a benchmark that quietly measured a substitute would be
     /// a fabrication.
     fn unsupported(&self, workload: &str) -> Option<String>;
+
+    /// The read model's miss rate over this run, where the target has one.
+    ///
+    /// `None` for PostgreSQL, which has no partial state to miss in. The CSV column read
+    /// `n/a` for *both* targets, so a parity result could not be told apart from a parity
+    /// result at a zero miss rate — and those are different claims: the first says
+    /// reconstruction is fast, the second says a warm cache is.
+    fn miss_rate(&mut self) -> Option<f64> {
+        None
+    }
 }
 
 /// PostgreSQL, over its own wire protocol.
@@ -76,6 +86,16 @@ impl PgTarget {
             port,
             database: database.to_string(),
         })
+    }
+
+    /// Where this server keeps its data, so the `fsync` probe measures the device the WAL
+    /// is on rather than whatever `/tmp` happens to be.
+    ///
+    /// `None` when the server will not say — an unprivileged role, most usually — and the
+    /// caller then refuses rather than guessing at a filesystem.
+    pub fn data_directory(&mut self) -> Option<String> {
+        let r = self.client.simple("show data_directory").ok()?;
+        r.rows.first()?.first()?.clone()
     }
 
     /// A second connection to the same server — for a workload that needs one.
@@ -259,14 +279,32 @@ impl Target for NilestreamTarget {
     }
 
     fn is_durable(&mut self) -> bool {
-        // The daemon's own banner says the read side is an in-memory demo engine. Claiming
-        // durability here would be the adapter defect this project spent a commit removing
-        // from GBS, reintroduced in a benchmark.
-        false
+        // **Asked, not asserted.** This returned a hard-coded `false` with a comment
+        // explaining that the read side is an in-memory demo — which was true, and meant
+        // that when the server *did* acquire a durable write path nothing would notice, and
+        // a `durable` row could have been measured against a non-durable append with a
+        // stale comment standing between that and a fabricated number. Now the server says.
+        self.client
+            .simple("select nilestream_durability")
+            .ok()
+            .and_then(|r| r.rows.first()?.first()?.clone())
+            .map(|m| m == "always")
+            .unwrap_or(false)
     }
 
     fn unsupported(&self, workload: &str) -> Option<String> {
         nilestream_gap(workload)
+    }
+
+    fn miss_rate(&mut self) -> Option<f64> {
+        let r = self.client.simple("select nilestream_stats").ok()?;
+        let row = r.rows.first()?;
+        let reads: f64 = row.first()?.as_ref()?.parse().ok()?;
+        let misses: f64 = row.get(2)?.as_ref()?.parse().ok()?;
+        if reads <= 0.0 {
+            return None;
+        }
+        Some(misses / reads)
     }
 }
 
@@ -278,46 +316,78 @@ impl Target for NilestreamTarget {
 /// path is not exposed, and a results table that said otherwise would be the fabrication this
 /// whole harness exists to replace.
 pub fn nilestream_gap(workload: &str) -> Option<String> {
-    match workload {
-        "oltp" | "durable" => Some(
-            "nilestreamd exposes no write surface over the wire; the write path is exercised \
-             in-process by the conservation suite and is not comparable here"
-                .into(),
-        ),
-        "analytical" => Some(
-            "the server's read surface serves per-key balances; a scan-and-group-by surface \
-             is not exposed"
-                .into(),
-        ),
-        _ => None,
-    }
+    // **Three entries were deleted here, and the deletions are the finding.** `oltp` and
+    // `durable` were refused because "nilestreamd exposes no write surface over the wire";
+    // `analytical` because "a scan-and-group-by surface is not exposed". All three are now
+    // false — the wire has an `INSERT`, a transaction that seals as one epoch, and a scan —
+    // so the rows are measured rather than reported as gaps.
+    //
+    // The list is kept rather than removed, because the next gap should land in it rather
+    // than in an omission.
+    // The list is empty on purpose, and the emptiness is checked by
+    // `nilestream_no_longer_refuses_a_workload_it_can_now_run`. Kept as a function rather
+    // than deleted so the next gap lands here rather than in an omission.
+    let _ = workload;
+    None
 }
+
+/// **What the analytical workload cannot ask Nilestream**, named construct by construct.
+///
+/// The five analytical statements are PostgreSQL's; three of them use constructs outside the
+/// lowered fragment. Reported here rather than by widening the fragment during a benchmark,
+/// which would be tuning the artifact to the measurement.
+pub const ANALYTICAL_BLOCKED: &[(&str, &str)] = &[
+    (
+        "count(*)",
+        "`*` is not a column, and the aggregate lowering resolves its argument as one \
+         (NL0502). A `count(*)` needs a form that counts rows rather than values.",
+    ),
+    (
+        "count(distinct acct)",
+        "`distinct` inside an aggregate is a second aggregation over a de-duplicated \
+         multiset; the fragment has `distinct` as a stage and not as an aggregate modifier.",
+    ),
+    (
+        "order by sum(amt) desc",
+        "ordering by an aggregate names an output column the `order by` lowering resolves \
+         against the *input* schema, which is the choice that lets `order by` name a column \
+         the query does not select.",
+    ),
+];
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn a_target_that_cannot_run_a_workload_says_so_with_a_reason() {
-        // The discipline that keeps a `NOT RUN` from becoming a fabricated number. Every
-        // refusal names what is missing, so the results table reports a gap rather than
-        // filling it in.
-        for w in ["oltp", "durable", "analytical"] {
-            let reason = nilestream_gap(w).unwrap_or_else(|| panic!("{w} should be refused"));
-            assert!(reason.len() > 40, "a reason, not a shrug: {reason}");
+    fn nilestream_no_longer_refuses_a_workload_it_can_now_run() {
+        // **Inverted, and the inversion is the finding.** This asserted that `oltp`,
+        // `durable` and `analytical` are refused with a reason, and the reasons were
+        // "nilestreamd exposes no write surface over the wire" and "a scan-and-group-by
+        // surface is not exposed". Both are now false, so the rows are measured. A refusal
+        // that outlived the gap it described would have kept three rows of Part 0 reading
+        // NOT RUN against an engine that can run them.
+        for w in ["point", "oltp", "durable", "analytical"] {
+            assert_eq!(
+                nilestream_gap(w),
+                None,
+                "`{w}` is served over the wire and must be measured"
+            );
         }
-        assert_eq!(
-            nilestream_gap("point"),
-            None,
-            "the read path is real and is measured"
-        );
     }
 
     #[test]
-    fn the_reasons_name_what_is_missing_rather_than_that_something_is() {
-        let oltp = nilestream_gap("oltp").unwrap();
-        assert!(oltp.contains("no write surface"), "{oltp}");
-        let analytical = nilestream_gap("analytical").unwrap();
-        assert!(analytical.contains("per-key balances"), "{analytical}");
+    fn what_the_analytical_workload_cannot_ask_is_named_construct_by_construct() {
+        // The honest remainder. Three of PostgreSQL's five analytical statements use
+        // constructs outside the lowered fragment, and each is named with its reason rather
+        // than the whole row being refused, or the fragment widened during a benchmark.
+        assert_eq!(ANALYTICAL_BLOCKED.len(), 3);
+        for (construct, why) in ANALYTICAL_BLOCKED {
+            assert!(
+                why.len() > 60,
+                "`{construct}` is blocked without a real reason: {why}"
+            );
+        }
+        assert!(ANALYTICAL_BLOCKED.iter().any(|(c, _)| *c == "count(*)"));
     }
 }

@@ -53,7 +53,15 @@ pub enum SyncPolicy {
 ///
 /// Layout, little-endian: `len: u32 | epoch: u64 | parent: [u8;32] | hash: [u8;32] |
 /// payload: [u8; len - 72] | crc: u32`. The length prefix comes first so a truncated tail
-/// is detectable without parsing, and the checksum comes last so it covers everything.
+/// is detectable without parsing.
+///
+/// The checksum covers the **body** — everything after the length prefix — and not the
+/// prefix itself. That is deliberate and it is the honest statement: the prefix is
+/// protected instead by the fact that a wrong length makes the record either overrun the
+/// file (caught as `ShortTail`) or misalign the body (caught as a checksum failure). The
+/// doc comment previously said "covers everything", which was simply false, and on an
+/// audit artefact the difference between "everything" and "everything after the first
+/// four bytes" is the sort of thing a reader is entitled to have stated correctly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Record {
     pub epoch: u64,
@@ -169,13 +177,46 @@ impl Segment {
             }
         };
 
-        // Truncate the damaged tail before anything is appended. Leaving it would mean the
-        // next append sits after unreadable bytes, and the file would never recover again.
+        // Damage in the *middle* of a segment is not a tail to be trimmed. Truncating to
+        // the last valid record would discard every committed, fsynced, acknowledged
+        // epoch after the damage — one flipped byte in the first record of a three-record
+        // file emptied it entirely and restarted the chain from genesis, after which the
+        // file validated cleanly and nothing could tell that history had been lost.
+        //
+        // The tail is the last record only. If the bytes after the damage could still
+        // hold a record, this is mid-file corruption: refuse, and let an operator decide.
         let valid_len: u64 = recovery
             .records
             .iter()
             .map(|r| (4 + HEADER + r.payload.len() + 4) as u64)
             .sum();
+        if !matches!(recovery.cause, TruncationCause::CleanEnd) {
+            let file_len = std::fs::metadata(&path)?.len();
+            let damaged_from = valid_len;
+            // How long the damaged record *claims* to be, read from its own length
+            // prefix. Bytes beyond that are a further record, so the damage is not at
+            // the tail and truncating to `valid_len` would discard committed epochs.
+            let declared = declared_record_len(&path, damaged_from)?;
+            let is_tail = match declared {
+                // The length prefix itself is unreadable: nothing can follow.
+                None => true,
+                Some(n) => file_len <= damaged_from.saturating_add(n),
+            };
+            if !is_tail {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "segment {} is damaged at offset {damaged_from} ({:?}) and {} \
+                         bytes of further records follow it; refusing to open, and \
+                         truncating nothing. A ledger does not repair itself by \
+                         forgetting.",
+                        path.display(),
+                        recovery.cause,
+                        file_len - damaged_from - declared.unwrap_or(0)
+                    ),
+                ));
+            }
+        }
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -191,6 +232,21 @@ impl Segment {
         }
         let mut file = file;
         file.seek(SeekFrom::End(0))?;
+
+        // The file's *directory entry* must be durable too. `fdatasync` on the file makes
+        // its contents survive; it says nothing about whether the name exists after a
+        // crash, so a segment created and fully synced can still be absent on restart.
+        if let Some(dir) = path.parent() {
+            if let Ok(d) = File::open(if dir.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                dir
+            }) {
+                // Best effort: some filesystems refuse to sync a directory handle, and
+                // failing to open a segment because of that would be worse than the risk.
+                let _ = d.sync_all();
+            }
+        }
 
         let head_hash = recovery.head_hash();
         let next_epoch = recovery.head().map_or(0, |e| e + 1);
@@ -228,7 +284,17 @@ impl Segment {
     pub fn append(&mut self, payload: Vec<u8>) -> std::io::Result<Record> {
         let rec = Record::seal(self.next_epoch, self.head_hash, payload);
         let bytes = rec.encode();
-        self.file.write_all(&bytes)?;
+        // A partial write must not be left in place. `write_all` can fail after writing
+        // some bytes — ENOSPC is the ordinary way — and the previous behaviour was to
+        // return the error and carry on appending, so every later epoch (fsynced,
+        // published, acknowledged to a client) sat behind a torn record and was discarded
+        // at the next recovery. Roll back to the last complete record instead.
+        if let Err(e) = self.file.write_all(&bytes) {
+            let _ = self.file.set_len(self.bytes_written);
+            let _ = self.file.seek(SeekFrom::End(0));
+            let _ = self.file.sync_data();
+            return Err(e);
+        }
         self.bytes_written += bytes.len() as u64;
         self.since_sync += 1;
         let should_sync = match self.policy {
@@ -255,6 +321,26 @@ impl Segment {
     }
 }
 
+/// The total on-disk size the record at `offset` claims for itself, from its own length
+/// prefix. `None` if the prefix cannot be read, which means nothing can follow it.
+///
+/// This is what distinguishes a torn tail from mid-file corruption. A crash mid-write
+/// leaves a record shorter than it says it is, with nothing after it. Damage with a
+/// complete further record behind it is a different event, and the two must not be
+/// repaired the same way.
+fn declared_record_len(path: &Path, offset: u64) -> std::io::Result<Option<u64>> {
+    let mut f = File::open(path)?;
+    if f.seek(SeekFrom::Start(offset)).is_err() {
+        return Ok(None);
+    }
+    let mut len_buf = [0u8; 4];
+    if f.read_exact(&mut len_buf).is_err() {
+        return Ok(None);
+    }
+    let body = u32::from_le_bytes(len_buf) as u64;
+    Ok(Some(4 + body + 4))
+}
+
 /// Read a segment forward, validating as it goes, and stop at the first failure.
 pub fn recover(path: impl AsRef<Path>) -> std::io::Result<Recovery> {
     let file = File::open(&path)?;
@@ -269,7 +355,18 @@ pub fn recover(path: impl AsRef<Path>) -> std::io::Result<Recovery> {
         let mut len_buf = [0u8; 4];
         match r.read_exact(&mut len_buf) {
             Ok(()) => {}
-            Err(_) => break TruncationCause::CleanEnd,
+            // `UnexpectedEof` at a record boundary with nothing read is the clean end.
+            // *Anything else* is not: a one-, two- or three-byte tail is a crash caught
+            // mid-length-prefix, and a real I/O error is a failing disk. Mapping both to
+            // "clean" reported `was_clean = true` on a torn file and made a device error
+            // indistinguishable from a tidy shutdown.
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof && offset == total => {
+                break TruncationCause::CleanEnd
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                break TruncationCause::ShortTail { at_offset: offset }
+            }
+            Err(e) => return Err(e),
         };
         let body_len = u32::from_le_bytes(len_buf) as usize;
         if body_len < HEADER || (offset + 4 + body_len as u64 + 4) > total {
@@ -573,5 +670,135 @@ mod tests {
         );
         assert!(!rec.was_clean());
         let _ = std::fs::remove_file(&p);
+    }
+}
+
+#[cfg(test)]
+mod durability_tests {
+    //! What "committed" survives, and what a damaged segment is allowed to do about it.
+
+    use super::*;
+
+    fn tmp(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "niles-dur-{name}-{}-{}.log",
+            std::process::id(),
+            name.len()
+        ))
+    }
+
+    fn three_records(p: &PathBuf) {
+        let _ = std::fs::remove_file(p);
+        let (mut s, _) = Segment::open(p, SyncPolicy::Always).unwrap();
+        for i in 0..3u8 {
+            s.append(vec![i; 40]).unwrap();
+        }
+    }
+
+    #[test]
+    fn torn_middle_refuses_to_open_and_truncates_nothing() {
+        // One flipped byte in the *first* record of three. Previously `open` truncated to
+        // the last valid record — zero of them — emptying a 266-byte file and restarting
+        // the chain from genesis, after which it validated cleanly and nothing could tell
+        // that two committed, fsynced epochs had been lost.
+        let p = tmp("tornmid");
+        three_records(&p);
+        let before = std::fs::metadata(&p).unwrap().len();
+
+        let mut bytes = std::fs::read(&p).unwrap();
+        let payload_byte = 4 + HEADER + 1;
+        bytes[payload_byte] ^= 0xFF;
+        std::fs::write(&p, &bytes).unwrap();
+
+        let err = match Segment::open(&p, SyncPolicy::Always) {
+            Ok(_) => panic!("a segment damaged in the middle must not open"),
+            Err(e) => e,
+        };
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string().contains("refusing to open"),
+            "{}",
+            err.to_string()
+        );
+        assert_eq!(
+            std::fs::metadata(&p).unwrap().len(),
+            before,
+            "a refusal must not shorten the file by a single byte"
+        );
+    }
+
+    #[test]
+    fn short_tail_of_one_byte_is_torn() {
+        // A tail of one, two or three bytes is a crash caught mid-length-prefix. Mapping
+        // the read error to `CleanEnd` reported `was_clean = true` on a torn file.
+        for chop in [1u64, 2, 3] {
+            let p = tmp(&format!("shorttail{chop}"));
+            three_records(&p);
+            let mut bytes = std::fs::read(&p).unwrap();
+            bytes.truncate(bytes.len());
+            // Append a partial length prefix: a write that started and did not finish.
+            bytes.extend(std::iter::repeat_n(0xABu8, chop as usize));
+            std::fs::write(&p, &bytes).unwrap();
+
+            let rec = recover(&p).unwrap();
+            assert!(
+                !rec.was_clean(),
+                "a {chop}-byte tail must not be reported as a clean end: {:?}",
+                rec.cause
+            );
+            assert!(matches!(rec.cause, TruncationCause::ShortTail { .. }));
+            assert_eq!(rec.records.len(), 3, "the whole records must survive");
+            // And it opens: a torn tail is the one damage a ledger may repair itself from.
+            let (_s, r2) = Segment::open(&p, SyncPolicy::Always).unwrap();
+            assert_eq!(r2.records.len(), 3);
+        }
+    }
+
+    #[test]
+    fn write_failure_mid_batch_leaves_no_orphaned_epochs() {
+        // ENOSPC in the middle of a record. The previous behaviour returned the error and
+        // carried on appending, so every later epoch — fsynced, published, acknowledged —
+        // sat behind a torn record and was discarded at the next recovery.
+        let p = tmp("enospc");
+        three_records(&p);
+        let len_before = std::fs::metadata(&p).unwrap().len();
+
+        // Simulate the partial write directly: bytes on the end that are not a record.
+        let mut bytes = std::fs::read(&p).unwrap();
+        bytes.extend(std::iter::repeat_n(0u8, 7));
+        std::fs::write(&p, &bytes).unwrap();
+
+        // Reopening rolls the tail back, and the next append lands on a clean boundary.
+        let (mut s, rec) = Segment::open(&p, SyncPolicy::Always).unwrap();
+        assert_eq!(rec.records.len(), 3);
+        assert_eq!(std::fs::metadata(&p).unwrap().len(), len_before);
+        s.append(vec![9u8; 40]).unwrap();
+        drop(s);
+
+        let after = recover(&p).unwrap();
+        assert!(after.was_clean(), "{:?}", after.cause);
+        assert_eq!(
+            after.records.len(),
+            4,
+            "the new epoch follows the old three"
+        );
+        for (i, r) in after.records.iter().enumerate() {
+            assert_eq!(r.epoch, i as u64, "epochs must be contiguous");
+        }
+    }
+
+    #[test]
+    fn a_segment_survives_reopening_many_times() {
+        // The directory entry must be durable too, not only the bytes inside the file.
+        let p = tmp("reopen");
+        let _ = std::fs::remove_file(&p);
+        for i in 0..5u8 {
+            let (mut s, r) = Segment::open(&p, SyncPolicy::Always).unwrap();
+            assert_eq!(r.records.len(), i as usize);
+            s.append(vec![i; 16]).unwrap();
+        }
+        let rec = recover(&p).unwrap();
+        assert_eq!(rec.records.len(), 5);
+        assert!(rec.was_clean());
     }
 }

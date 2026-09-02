@@ -29,3 +29,24 @@ If the ratio falls as threads rise, group commit is amortising the fsync and a
 single sealer is a batching opportunity rather than the ceiling it appears to be.
 If it stays flat, the fsync is being paid per transaction and the design needs
 revisiting — which is the outcome that would matter, so it is stated first.
+
+---
+
+## A note on policy semantics (T-06, this branch)
+
+The figures above stand; what changed is what the policies are allowed to do.
+
+* **`SyncPolicy::Never` is refused by the sequencer.** It published an epoch with nothing
+  on stable storage, while `submit`'s own contract says it returns when the transaction's
+  epoch is durable and visible. The policy remains on `Segment`, because this benchmark
+  prices the guarantee by removing it; what it may no longer do is reach a path that
+  claims the guarantee. The `Never` column here is produced by driving `Segment` directly.
+* **`Every(n)` no longer syncs twice.** The sequencer synced every epoch *and* `append`
+  synced every n-th, so the batching policy was `Always` with an extra fsync.
+* **A failed write is rolled back** rather than left in place, so a later fsynced,
+  published, acknowledged epoch cannot sit behind a torn record and be discarded at the
+  next recovery.
+* **Damage anywhere but the tail refuses to open**, and truncates nothing.
+
+None of these changes the cost of an fsync, which is what the table measures. They change
+what is true when one fails.

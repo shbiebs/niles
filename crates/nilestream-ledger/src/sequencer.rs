@@ -32,7 +32,7 @@
 //! is explicit that it is a specification, not an implementation.
 
 use crate::frontiers::Frontier;
-use crate::segment::{Segment, SyncPolicy};
+use crate::segment::{Recovery, Segment, SyncPolicy};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -45,6 +45,16 @@ use std::thread::JoinHandle;
 pub struct Txn {
     pub idem_key: String,
     pub payload: Vec<u8>,
+}
+
+/// Read a little-endian `u32` at `*offset`, advancing it. `None` past the end.
+fn read_u32(buf: &[u8], offset: &mut usize) -> Option<u32> {
+    if *offset + 4 > buf.len() {
+        return None;
+    }
+    let v = u32::from_le_bytes(buf[*offset..*offset + 4].try_into().ok()?);
+    *offset += 4;
+    Some(v)
 }
 
 /// Why a submission did not commit.
@@ -97,17 +107,91 @@ pub struct Sequencer {
 
 impl Sequencer {
     /// Start a sequencer over a segment.
-    pub fn start(mut segment: Segment, frontier: Arc<Frontier>, policy: SyncPolicy) -> Sequencer {
+    /// Rebuild the idempotency window by reading the keys back out of a segment.
+    ///
+    /// The inverse of the batch framing in the sealer. A key that committed before a
+    /// restart must still be refused after it, with the epoch it originally committed at.
+    pub fn recover_seen(recovery: &Recovery) -> std::collections::BTreeMap<String, u64> {
+        let mut seen = std::collections::BTreeMap::new();
+        for rec in &recovery.records {
+            let epoch = rec.epoch + 1; // epochs are 1-based on the frontier
+            let p = &rec.payload;
+            let mut o = 0usize;
+            let Some(count) = read_u32(p, &mut o) else {
+                continue;
+            };
+            for _ in 0..count {
+                let Some(klen) = read_u32(p, &mut o) else {
+                    break;
+                };
+                if o + klen as usize > p.len() {
+                    break;
+                }
+                let key = String::from_utf8_lossy(&p[o..o + klen as usize]).into_owned();
+                o += klen as usize;
+                let Some(plen) = read_u32(p, &mut o) else {
+                    break;
+                };
+                o += plen as usize;
+                seen.insert(key, epoch);
+            }
+        }
+        seen
+    }
+
+    /// Open a sequencer over a segment at `path`, recovering the idempotency window.
+    ///
+    /// **`SyncPolicy::Never` is refused here.** `submit` promises that it returns when the
+    /// transaction's epoch is durable *and* visible, and under `Never` the frontier was
+    /// published with nothing on stable storage — so the promise was false for a policy
+    /// any caller could pass. The policy still exists on [`Segment`], because the
+    /// durability benchmark prices the guarantee by removing it; what it may not do is
+    /// reach a path that claims the guarantee.
+    pub fn open(
+        path: impl AsRef<std::path::Path>,
+        policy: SyncPolicy,
+    ) -> std::io::Result<Sequencer> {
+        if matches!(policy, SyncPolicy::Never) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "SyncPolicy::Never publishes an epoch with nothing on stable storage; a \
+                 sequencer that accepted it would be lying in `submit`'s contract. Use \
+                 `Segment` directly for the durability benchmark.",
+            ));
+        }
+        let (segment, recovery) = Segment::open(path, policy)?;
+        let frontier = Frontier::new();
+        // The window comes back with the segment: a key that committed before a restart
+        // must still be refused after it.
+        let seen = Sequencer::recover_seen(&recovery);
+        if let Some(head) = recovery.head() {
+            frontier.seal(head + 1);
+            frontier.publish(head + 1);
+        }
+        Ok(Self::start_with_window(segment, frontier, policy, seen))
+    }
+
+    pub fn start(segment: Segment, frontier: Arc<Frontier>, policy: SyncPolicy) -> Sequencer {
+        Self::start_with_window(segment, frontier, policy, Default::default())
+    }
+
+    /// Start with a recovered idempotency window.
+    pub fn start_with_window(
+        mut segment: Segment,
+        frontier: Arc<Frontier>,
+        policy: SyncPolicy,
+        recovered_seen: std::collections::BTreeMap<String, u64>,
+    ) -> Sequencer {
         let (tx, rx): (Sender<Request>, Receiver<Request>) = channel();
         let stats = Arc::new(Mutex::new(SequencerStats::default()));
         let (f, s) = (Arc::clone(&frontier), Arc::clone(&stats));
 
         let sealer = std::thread::spawn(move || {
-            // The idempotency window. In a durable deployment this is recovered from the
-            // segment at start-up; here it is in memory, and that limitation is stated
-            // rather than hidden, because an idempotency window that does not survive a
-            // restart does not protect against the retry that a restart provokes.
-            let mut seen: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+            // The idempotency window, recovered from the segment at start-up rather than
+            // starting empty. `BTreeMap`, not `HashMap`: the window decides which epoch a
+            // duplicate is told it committed at, and an epoch is a hashed, audited value
+            // (GC-12 in this repository's conventions).
+            let mut seen: std::collections::BTreeMap<String, u64> = recovered_seen;
 
             while let Ok(first) = rx.recv() {
                 // Drain everything already waiting: one fsync will commit all of it.
@@ -161,9 +245,19 @@ impl Sequencer {
                 }
 
                 // One epoch for the whole batch.
+                // One epoch for the whole batch. The framing carries each transaction's
+                // **idempotency key** as well as its payload, because the window has to be
+                // rebuildable from the segment: an idempotency window that does not
+                // survive a restart does not protect against the retry that a restart
+                // provokes, which is the one retry a client is most likely to send.
+                //
+                // Layout: count | (key_len, key, payload_len, payload)*
                 let mut payload = Vec::new();
                 payload.extend_from_slice(&(fresh.len() as u32).to_le_bytes());
                 for r in &fresh {
+                    let k = r.txn.idem_key.as_bytes();
+                    payload.extend_from_slice(&(k.len() as u32).to_le_bytes());
+                    payload.extend_from_slice(k);
                     payload.extend_from_slice(&(r.txn.payload.len() as u32).to_le_bytes());
                     payload.extend_from_slice(&r.txn.payload);
                 }
@@ -284,8 +378,11 @@ mod tests {
     }
 
     fn seq(p: &PathBuf, policy: SyncPolicy) -> Sequencer {
-        let (segment, _) = Segment::open(p, policy).unwrap();
-        Sequencer::start(segment, Frontier::new(), policy)
+        let (segment, recovery) = Segment::open(p, policy).unwrap();
+        // The window comes back with the segment: a restart must still refuse a key that
+        // committed before it.
+        let seen = Sequencer::recover_seen(&recovery);
+        Sequencer::start_with_window(segment, Frontier::new(), policy, seen)
     }
 
     #[test]
@@ -518,5 +615,97 @@ mod tests {
         assert!(rec.was_clean(), "{:?}", rec.cause);
         assert_eq!(rec.records.len() as u64, st.epochs_sealed);
         let _ = std::fs::remove_file(&p);
+    }
+}
+
+#[cfg(test)]
+mod window_tests {
+    //! The idempotency window across a restart.
+
+    use super::*;
+
+    fn tmp(name: &str) -> std::path::PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!("niles-win-{name}-{}.log", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    #[test]
+    fn idempotency_window_survives_restart() {
+        // The retry a restart provokes is the one a client is most likely to send, and it
+        // was the one retry the window could not refuse: `seen` lived in memory only, so
+        // a key that committed before the restart committed again after it. That is a
+        // duplicated payment, not an error.
+        let p = tmp("restart");
+        let first_epoch = {
+            let q = Sequencer::open(&p, SyncPolicy::Always).unwrap();
+            let e = q
+                .submit(Txn {
+                    idem_key: "payment-9".into(),
+                    payload: vec![1, 2, 3],
+                })
+                .unwrap();
+            q.shutdown();
+            e
+        };
+
+        // Restart, and retry the same key.
+        let q = Sequencer::open(&p, SyncPolicy::Always).unwrap();
+        let again = q.submit(Txn {
+            idem_key: "payment-9".into(),
+            payload: vec![1, 2, 3],
+        });
+        assert_eq!(
+            again,
+            Err(Rejected::Duplicate {
+                at_epoch: first_epoch
+            }),
+            "a key that committed before the restart must be refused after it, at the \
+             epoch it originally committed at"
+        );
+        q.shutdown();
+
+        // And exactly one record is on disk.
+        let rec = crate::segment::recover(&p).unwrap();
+        assert_eq!(rec.records.len(), 1, "the retry must not have appended");
+    }
+
+    #[test]
+    fn a_fresh_key_still_commits_after_a_restart() {
+        // The negative control: a recovered window that refused everything would pass the
+        // test above and be useless.
+        let p = tmp("fresh");
+        {
+            let q = Sequencer::open(&p, SyncPolicy::Always).unwrap();
+            q.submit(Txn {
+                idem_key: "a".into(),
+                payload: vec![1],
+            })
+            .unwrap();
+            q.shutdown();
+        }
+        let q = Sequencer::open(&p, SyncPolicy::Always).unwrap();
+        let e = q
+            .submit(Txn {
+                idem_key: "b".into(),
+                payload: vec![2],
+            })
+            .expect("a key never seen before must commit");
+        assert!(e > 1);
+        q.shutdown();
+    }
+
+    #[test]
+    fn the_sequencer_refuses_a_policy_it_cannot_honour() {
+        // `submit` promises the epoch is durable when it returns. Under `Never` the
+        // frontier was published with nothing on disk, so the promise was false for a
+        // policy any caller could pass.
+        let p = tmp("never");
+        let err = match Sequencer::open(&p, SyncPolicy::Never) {
+            Ok(_) => panic!("a sequencer must not accept a policy it cannot honour"),
+            Err(e) => e,
+        };
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     }
 }

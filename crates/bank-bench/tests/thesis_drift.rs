@@ -222,15 +222,28 @@ fn status_statement_is_single_sourced() {
     declared.sort();
     declared.dedup();
     assert!(
-        declared.len() >= 14,
-        "§1.6 should declare fourteen hypotheses; found {declared:?}"
+        declared.len() >= 13,
+        "§1.6 should declare thirteen hypotheses; found {declared:?}"
     );
     for id in &declared {
-        assert!(
-            toml.contains(&format!("id = \"{id}\"")),
-            "{id} is declared in §1.6 and has no entry in status.toml, so its status is \
-             whatever the prose happens to say"
-        );
+        // **A withdrawn hypothesis keeps its paragraph and loses its entry.** H-S9 was
+        // withdrawn when the crate that would have been its instrument turned out to be
+        // three `pub mod` lines and was deleted: with no lineage mode there is no
+        // independent variable, so there is nothing to hold constant and nothing to vary.
+        // Deleting the paragraph would hide that a hypothesis was abandoned, which is the
+        // opposite of what this file is for; the paragraph says *Withdrawn* and gives the
+        // reason, and this check requires exactly that of any id with no entry.
+        if !toml.contains(&format!("id = \"{id}\"")) {
+            // The paragraph runs from the id's declaration to the next blank line.
+            let at = intro.find(&format!("**{id} ")).unwrap_or(0);
+            let para: String = intro[at..].lines().take_while(|l| !l.is_empty()).collect();
+            assert!(
+                para.contains("Withdrawn") || para.contains("withdrawn"),
+                "{id} is declared in §1.6, has no entry in status.toml, and does not say it \
+                 is withdrawn — so its status is whatever the prose happens to say"
+            );
+            continue;
+        }
     }
 
     // Every rendering site carries the block.

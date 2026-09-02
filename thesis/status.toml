@@ -16,7 +16,13 @@
 #
 #   id         the identifier used in the text: H-F1..H-F4, H-S1..H-S10, C1..C6, SC7
 #   claim      one line, in the present tense
-#   status     one of: measured | partly measured | proved | not measured | refuted
+#   status     one of: measured | partly measured | proved | specified | argued |
+#              not measured | refuted
+#
+#              `specified` means a design exists and nothing implements it, which is a
+#              different thing from an unmeasured implementation. `argued` means the claim is
+#              established by argument and no instrument will settle it -- recording those as
+#              `not measured` promised a measurement that was never coming.
 #   where      the section that reports it, or the section that states what would
 #   instrument for anything not measured: the thing that does not exist yet. Required.
 #              "A hypothesis with no runner is a hypothesis with no status" — naming the
@@ -25,9 +31,9 @@
 [[claim]]
 id = "H-F1"
 claim = "Streaming data is unbounded, and finite-assuming designs pay for it."
-status = "not measured"
+status = "argued"
 where = "§1.6.1, §3.16"
-instrument = "no long-horizon experiment exists: there is no live-generating source, no finite-first comparison stack, and no regression of per-answer cost on accumulated input. The mismatch catalogue of §3.16 is the argument; the slope is unmeasured."
+instrument = "**argued, and not measurable by this project.** No long-horizon experiment exists -- no live-generating source, no finite-first comparison stack, no regression of per-answer cost on accumulated input -- and building one would measure a property of the comparison stack rather than of unboundedness. The mismatch catalogue of §3.16 is the argument and is the evidence; `not measured` implied an instrument was coming."
 
 [[claim]]
 id = "H-F2"
@@ -39,9 +45,9 @@ instrument = "E2 was a tautology until this cycle -- it integrated a changelog, 
 [[claim]]
 id = "H-F3"
 claim = "A database language and DBMS should be built for H-F1 and H-F2."
-status = "not measured"
+status = "argued"
 where = "§1.6.1, §4.7"
-instrument = "no comparative audit exists. §9.7 fixes the counting rules; nothing counts. The generality half is discharged by proof (§4.7) and the operational half — components, hand-written consistency code, admitted anomaly classes — has no runner."
+instrument = "**argued.** The generality half is discharged by proof (§4.7, narrowed to denotation-preservation over the fragment the compiler accepts). The operational half -- components, hand-written consistency code, admitted anomaly classes -- is a normative claim about how systems *should* be built, and §9.7 fixes counting rules for a comparative audit that would still be an argument with numbers attached. Recorded as argued rather than as awaiting an instrument that was never going to settle it."
 
 [[claim]]
 id = "H-F4"
@@ -88,9 +94,9 @@ instrument = "the throughput half is measured, and two of §7's four contract ro
 [[claim]]
 id = "H-S6"
 claim = "Static checkability subsumes runtime policing."
-status = "not measured"
-where = "§1.6.2, §6.10.3"
-instrument = "no ported corpus and no trigger-based SQL baseline exist, so neither side of the comparison has been run. The residual-violation half is addressed by the mutant corpus; the **runtime-overhead** half — 'at no measurable runtime cost' — has no measurement of any kind."
+status = "partly measured"
+where = "§1.6.2, §6.10.3, §9.11.2, results/obligations.csv"
+instrument = "the *discharge* half is now counted: `nilesc report-obligations` over every Niles program in both repositories reports 16 of 16 conservation obligations proved statically, none handed to the runtime seal (§9.11.2). Two cautions travel with it -- a four-file corpus, written by people who knew what the solver proves. The **runtime-overhead** half -- 'at no measurable runtime cost' -- still has no measurement of any kind, and needs a trigger-based SQL baseline and a ported corpus, neither of which exists."
 
 [[claim]]
 id = "H-S7"
@@ -102,16 +108,9 @@ instrument = "the adaptive optimizer of §4.6 is not built (see §4.6's own note
 [[claim]]
 id = "H-S8"
 claim = "One engine and one language serve every workload class on a general relational core."
-status = "not measured"
-where = "§6.6, §11.3"
-instrument = "the falsifier is a non-financial conservation domain built with no kernel changes. It does not exist — `grep -ri inventory` over the crates, schemas and examples returns nothing — and §6.6 records what stands in its way: seven banking forms are keywords in the compiler's registry rather than a library over it."
-
-[[claim]]
-id = "H-S9"
-claim = "Lineage is complete and affordable."
-status = "not measured"
-where = "§1.6.2"
-instrument = "`nilestream-lineage` is stubs. There is no lineage mode to switch between, no audit corpus, and therefore no completeness figure and no overhead figure."
+status = "partly measured"
+where = "§6.6, §9.11.1, §11.3, examples/inventory.niles"
+instrument = "the falsifier was built and run: `examples/inventory.niles` conserves units of a SKU across warehouses, is proved to conserve by the currency-row solver, posts and seals through `nilesc run`, and required no change to the compiler, the IR or the runtime -- a test asserts that none of them contains the word `inventory`, `widget`, `sprocket`, `warehouse` or `sku`. So the refutation condition of §11.3 is **not** met. It is `partly measured` and not `measured` because of what the falsifier found: a money literal's grade must be exactly three lowercase letters in the lexer, so `5 widget` does not lex and every quantity in that file arrives as a parameter. The machinery is general; the notation carries a banking assumption. Recorded as MISMATCH-T-22-currency-literal and deliberately not applied."
 
 [[claim]]
 id = "H-S10"
@@ -150,10 +149,10 @@ instrument = "clauses (1)–(3) proved for λ_niles; transfer to the LTS is Lemm
 
 [[claim]]
 id = "C5"
-claim = "The adaptive materialization calculus and optimizer."
-status = "partly measured"
+claim = "The adaptive materialization calculus."
+status = "specified"
 where = "§4.6, Appendix I"
-instrument = "the calculus is stated. The optimizer is specified and not built — see H-S7 — and §4.6's Landlord claim is withdrawn: the three eviction rules in the repository are an LFU, a cost-and-delay credit rule, and fifty-two lines of unused scaffolding."
+instrument = "the calculus is stated and its two proved clauses (safety, NP-hardness) stand; the greedy recovery now carries both hypotheses it needs. **The optimizer is not built** -- no estimator, no hysteresis schedule, no rent-or-buy break-even -- so `specified` is the status, and \"optimizer\" is gone from the contribution's name. §4.6's Landlord claim is withdrawn and so is the competitive-guarantee wording everywhere it described C5: the three eviction rules in the repository are an LFU, a cost-and-delay credit rule, and fifty-two lines of unused scaffolding."
 
 [[claim]]
 id = "C6"

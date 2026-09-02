@@ -1,0 +1,121 @@
+// **A conserved quantity that is not money.**
+//
+// This file is H-S8's falsifier, and it is written to be as unfriendly to the hypothesis as
+// possible while still being an honest instance of it. H-S8 says one engine and one language
+// serve every workload class on a *general relational core*, with banking a library over it;
+// §6.6 records what stands in the way — seven banking forms are keywords in the compiler's
+// registry rather than a library over general machinery — and §11.3 states the refutation
+// condition: a domain that cannot be expressed without a kernel change falsifies the claim.
+//
+// So: stock movements between warehouses. Units of a SKU are conserved exactly as money is —
+// a transfer moves units out of one place and into another, and the two legs must cancel —
+// but nothing here is money. A `unit` is not a currency in any sense a bank would recognise:
+// it has no scale, no FX, no interest, and a "balance" is a count of physical things.
+//
+// **What this file may not do is change anything.** No new keyword, no compiler change, no
+// kernel change. If the domain needs one, that is the measurement and the hypothesis is
+// refuted; `crates/conservation-suite/tests/inventory.rs` runs it and §9.11 reports which
+// happened.
+//
+// The one place the language shows its origin is `currency`, which is the declaration form
+// for a graded unit and is named for the domain it was designed in. Declaring `unit` as a
+// currency with scale 0 is using the general machinery — a graded abelian group with a
+// per-grade zero-sum rule — under a name from banking. That is exactly the shape §6.6
+// predicts: the machinery is general, the vocabulary is not, and the cost of the mismatch is
+// a word rather than a feature.
+
+schema warehouse {
+    // Two SKUs, each a grade of the conserved quantity. Scale 0: half a widget is not a
+    // thing, and a language that forced a scale of 2 here would be wrong in the way §3.2
+    // says a `Money` type fixed at two decimals is wrong.
+    currency widget { scale: 0 }
+    currency sprocket { scale: 0 }
+
+    table locations {
+        id: Id<Account> primary key,
+        site: Text,
+        kind: Text,
+    }
+
+    // The movement ledger. Identical in shape to a postings ledger, and the conservation
+    // rule is the same rule: every movement balances per SKU.
+    ledger movements {
+        txn: TxnId,
+        place: Id<Account>,
+        sku: Currency,
+        qty: Money,
+        idem: IdemKey window 30.days,
+        conserve per (txn, sku);
+        retain forever;
+    }
+
+    index ix_movements on movements (place, sku) anchor;
+
+    // Stock on hand: the same keyed sum that serves a balance.
+    view on_hand = movements.group_by(|m| m.place).sum(|m| m.qty)
+        serve { consistency: ledger_consistent, materialize: demand };
+}
+
+// A transfer between two locations. The units leave one place and arrive at another, and
+// the ledger will not seal the movement unless they cancel.
+fn move_stock(from: Id<Account>, to: Id<Account>, qty: Money<widget>)
+    -> Result<TxnId, TxnError>
+    ! { append, debit<widget>, credit<widget> }
+{
+    txn idem("move", window: 30.days) {
+        post(debit(from, qty)?, credit(to, qty))
+    }
+}
+
+// Receiving from a supplier: units enter the system from a designated origin, which is the
+// inventory equivalent of an issuance account. Conservation still holds — the origin goes
+// negative, exactly as an issuance account does — and that is the point: a system with no
+// origin account cannot state where stock came from.
+fn receive(origin: Id<Account>, into: Id<Account>, qty: Money<sprocket>)
+    -> Result<TxnId, TxnError>
+    ! { append, debit<sprocket>, credit<sprocket> }
+{
+    txn idem("receive", window: 30.days) {
+        post(debit(origin, qty)?, credit(into, qty))
+    }
+}
+
+// The negative control, written here rather than in a test: a movement that creates a unit
+// out of nothing must not check. `crates/conservation-suite/tests/inventory.rs` compiles the
+// commented form below and asserts the refusal, so this comment is a specification rather
+// than a note.
+//
+// fn conjure(into: Id<Account>) -> Result<TxnId, TxnError> ! { append, credit<widget> } {
+//     txn idem("conjure", window: 30.days) { post(credit(into, qty)) }
+// }
+
+// ─────────────────────────────────────────────────────────────────────────────────────
+// MISMATCH-T-22-currency-literal. Recorded, not applied.
+//
+// **What the falsifier found.** Every quantity above arrives as a *parameter*. It has to.
+// A money literal in this domain — `5 widget` — does not lex, and the reason is one line in
+// `crates/niles-lang/src/lexer.rs`:
+//
+//     let looks_like_currency = word.len() == 3
+//         && word.bytes().all(|b| b.is_ascii_lowercase())
+//         && keywords::lookup(word).is_none();
+//
+// A currency literal's grade must be exactly three lowercase letters. That is ISO 4217's
+// shape, hard-coded into the lexer, and `widget` is six letters. `15000 jpy` lexes and
+// `5 widget` does not.
+//
+// **What that does and does not measure.** The *machinery* is general: the schema declares
+// two non-financial grades, the currency-row solver proves both movement functions conserve,
+// the ledger seals them, `nilesc run` posts WIDGET legs, and nothing in the compiler or the
+// kernel was changed to allow any of it. What is not general is the *notation*: a grade
+// whose name is not three letters can be named in a type, a schema, an effect row and an
+// argument, but not in a literal.
+//
+// This is left as a mismatch rather than fixed, because the work order that produced this
+// file says the outcome of the falsifier is the measurement and a language change to make a
+// hypothesis pass is not a measurement. The one-line widening — accept any lowercase word
+// that resolves to a declared currency and is not a keyword — is the obvious repair, and it
+// is the kind of change that should be made deliberately, with its own diagnostics for the
+// ambiguity it introduces (`5 widgets` where `widgets` is a variable), rather than as a
+// side effect of wanting a green cell. §9.11 reports it as the limitation it is.
+// ─────────────────────────────────────────────────────────────────────────────────────

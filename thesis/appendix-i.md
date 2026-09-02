@@ -1,6 +1,8 @@
 # Appendix I. The Adaptive Materialization Optimizer: Algorithms and Analysis
 
-This appendix gives Contribution 5 as implementable algorithms, with estimators, guarantees, and the offline procedure against which the online algorithm is graded.
+**Specification. Nothing in this appendix is built.** It gives Contribution 5 as implementable algorithms, with estimators and the offline procedure against which an online algorithm would be graded — and every verb in it should be read as *would*. There is no estimator, no hysteresis schedule and no rent-or-buy break-even in the repository; `nilestream-optimizer` holds plan-time mode selection and three eviction rules (an LFU, a cost-and-delay credit rule, and fifty-two lines of unused scaffolding), and `offline.rs` is a planner rather than the dynamic program that would compute an offline optimum.
+
+That matters for two claims made elsewhere and now withdrawn. **No competitive ratio is claimed or measured anywhere in this thesis**, and H-S7 — "the optimizer beats fixed policies and approaches its competitive bound" — has nothing to measure against. The greedy (1 − 1/e) recovery of §I.5 needs *two* hypotheses rather than one, and now states both.
 
 ## I.1 The Decision, Stated
 

@@ -199,7 +199,7 @@ table is, so the two cannot disagree:
 
 *Generated from `thesis/status.toml`. Do not edit by hand.*
 
-| **All claims** | 6 proved, 7 measured or partly measured, 1 refuted, 7 not measured | `thesis/status.toml`, rendered into §1.9 |
+| **All claims** | 6 proved, 8 measured or partly measured, 1 refuted, 2 not measured | `thesis/status.toml`, rendered into §1.9 |
 
 <!-- END:status-row -->
 

@@ -462,7 +462,33 @@ The residual surface is also smaller than "two mutable structures" implies, and 
 
 ## 9.11 Language Scope
 
-Constructive tests, unchanged: the banking portfolio implemented in the domain library with the kernel change log audited; a non-financial conserved-quantity domain; representative workloads per class; and the negative corpus of programs that must be rejected. *To be measured.*
+Constructive tests: the banking portfolio implemented in the domain library with the kernel change log audited; a non-financial conserved-quantity domain; representative workloads per class; and the negative corpus of programs that must be rejected. The negative corpus is the mutant suite (§9.14.2). Two of the others are now measured and are reported here; the rest is *to be measured*.
+
+### 9.11.1 The non-financial domain (H-S8's falsifier)
+
+`examples/inventory.niles`: stock movements between warehouses, where units of a SKU are conserved exactly as money is and nothing is money. Two SKUs at scale 0, a movement ledger with `conserve per (txn, sku)`, a keyed-sum view of stock on hand, and two movement functions. Run by `crates/conservation-suite/tests/inventory.rs`.
+
+**The result is a qualified pass, and the qualification is the interesting half.**
+
+*What passed.* The domain checks; both movement functions are **proved** to conserve by the currency-row solver, not discharged to the seal; `nilesc run` posts two cancelling legs carrying `WIDGET` as their grade; a movement of two unrelated quantities is `Undecided` and the seal refuses it, naming the grade and the residual exactly as it does for money. **Nothing in the compiler, the IR or the runtime was changed**, and a test asserts that: `grep`ping `niles-lang`, `niles-ir` and `nilestream-core` for `inventory`, `widget`, `sprocket`, `warehouse` and `sku` returns nothing. The machinery §6.6 calls general — graded rows, linear halves, effect rows, declared commit rules — is general.
+
+*What did not.* Every quantity in that file arrives as a *parameter*, because it has to. A literal in this domain does not lex:
+
+```rust
+let looks_like_currency = word.len() == 3
+    && word.bytes().all(|b| b.is_ascii_lowercase())
+    && keywords::lookup(word).is_none();
+```
+
+A grade's name must be exactly three lowercase letters — ISO 4217's shape, in the lexer. `15000 jpy` lexes; `5 widget` does not. So a non-financial grade can be named in a type, a schema, an effect row and an argument, and not in a literal.
+
+*What that measures.* H-S8's refutation condition (§11.3) is a domain that cannot be expressed without a kernel change. This domain is expressible, and the kernel is untouched — so the hypothesis is **not** refuted. But the honest status is `partly measured` rather than `measured`, because the notation carries a banking assumption the machinery does not, and one plausible reading of "one language serves every workload class" is that a reader can write down a quantity. The one-line widening is recorded as `MISMATCH-T-22-currency-literal` in the example itself and deliberately **not applied**: changing the language to make a hypothesis pass is not a measurement of the language.
+
+### 9.11.2 What the checker discharges (H-S6, static half)
+
+`crates/niles-lang/tests/corpus_obligations.rs` runs `nilesc report-obligations` over every Niles program in both repositories and writes `results/obligations.csv`. Over four files — the GBS schema, the two examples and the inventory domain — **16 of 16 conservation obligations are proved statically and none is discharged to the runtime seal.**
+
+Two cautions belong beside that number. It is a small corpus, and it is a corpus of programs written *by* people who knew what the solver proves, which is exactly the selection effect §11.5 raises about a checker whose `Undecided` verdict could make it true and useless. And it measures the wrong half of H-S6 for anyone asking about cost: the hypothesis says static checking subsumes runtime policing "at no measurable runtime cost", and no measurement of runtime cost exists — that needs a trigger-based SQL baseline and a ported corpus, neither of which is built. `status.toml` records H-S6 as `partly measured` for that reason.
 
 ## 9.12 Results Analysis by Conjecture
 

@@ -631,6 +631,55 @@ intent should be stated rather than inherited from a default. Now explicit.
 `niles` 600/0/3 → 600/0/3. Format: 1,274 diffs → 0. Clippy: ~55 warnings + 1 deny-level
 error → 0.
 
+### [T-06] 2026-09-02T05:20Z RESULT Six durability holes, and the one that erased history
+
+All of F-28 and F-29 reproduced. The worst is not the one that looks worst.
+
+**Mid-file damage erased the ledger.** `open` truncated to the last valid record whatever
+the damage was. One flipped payload byte in the *first* record of a three-record segment
+therefore emptied the file — 266 bytes to 0 — and restarted the chain from genesis, after
+which the file validated cleanly and nothing could tell that two committed, fsynced,
+acknowledged epochs had ever existed. For a base whose defining property is that it is
+never partial and never forgets, self-repair by forgetting is the wrong default. `open`
+now refuses, names the offset and the cause, and truncates nothing.
+
+The discriminator took two attempts and the first was wrong in an instructive way. "A
+torn tail is smaller than the smallest complete record" fails on a large record: chopping
+9 bytes off a 120-byte record leaves 111 bytes, which is bigger than a minimal record and
+is still plainly a torn tail. The right question is not how many bytes remain but whether
+a *further* record follows, so the damaged record's own length prefix is read and the tail
+is the tail iff nothing lies beyond what it claims for itself.
+
+**A torn tail of one to three bytes was reported as a clean end**, because every
+`read_exact` error on the length prefix mapped to `CleanEnd` — which also made a real I/O
+error indistinguishable from a tidy shutdown. Now: `UnexpectedEof` exactly at the end of
+file is clean, `UnexpectedEof` anywhere else is a torn tail, and any other error is
+returned.
+
+**A partial write stayed on disk.** `write_all` can fail after writing some bytes;
+`append` returned the error and the sealer carried on, so every later epoch sat behind a
+torn record and was discarded at the next recovery. The write is now rolled back to the
+last complete record.
+
+**`Never` published before any fsync** while `submit`'s contract promises durability;
+**`Every(n)` synced twice** per n-th epoch. The sequencer now refuses `Never` outright —
+the policy stays on `Segment` for the durability benchmark, which exists to price the
+guarantee by removing it — and the double sync is gone.
+
+**No directory fsync.** A segment created and fully `fdatasync`ed can still be absent
+after a crash, because the *name* was never made durable. Now synced, best-effort.
+
+**The idempotency window did not survive a restart** (F-29): `seen` was an in-memory map,
+so the retry a restart provokes — the retry a client is most likely to send — committed
+twice. The batch framing now carries each transaction's key, `Sequencer::recover_seen`
+rebuilds the window from the segment, and `Sequencer::open` uses it. The framing change is
+inside the record payload, which is hashed; no committed fixture depended on it.
+
+**One doc comment was false**: the checksum "covers everything" — it covers the body, not
+the length prefix. On an audit artefact that distinction is worth stating correctly, and
+the comment now explains what protects the prefix instead.
+
+### [T-06] 2026-09-02T05:20Z TESTS nilestream-ledger 33 -> 40 tests; niles workspace 600/0/3 -> 607/0/3 on this branch
 ### [T-11] 2026-09-02T09:05Z RESULT F-11 confirmed in every part, by running the mutants before writing the fixes
 
 Each pointer reproduced. `nilesc check` on a file containing only the offending line:

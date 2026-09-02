@@ -131,6 +131,62 @@ struct E1Row {
     rebuild_mismatches: u64,
     miss_not_zero_ok: bool,
     idempotent_rejects: u64,
+    /// Comparisons served from a resident entry, and comparisons that reconstructed.
+    ///
+    /// Reported separately because they check different things. A miss-path comparison
+    /// exercises reconstruction; a hit-path one exercises the certification invariant —
+    /// that a resident entry is still the value the ledger has. The previous version of
+    /// this experiment could report neither, because its "oracle" was the engine's own
+    /// reconstruction and a hit-path comparison was therefore a value against itself.
+    hit_path_comparisons: u64,
+    miss_path_comparisons: u64,
+    /// Reads whose anchor was below the head. Theorem 4.1 quantifies over every anchor.
+    historical_anchor_reads: u64,
+}
+
+/// The reference oracle's balance for an account at an anchor.
+///
+/// `conservation-suite::oracle` shares no code with `proto-engine`: it is a `Vec` of
+/// epochs and a fold, obeying Appendix F's rule that the oracle is never optimised. That
+/// is the whole point — a check whose expected value comes from the system under test is
+/// not a check.
+fn oracle_balance(o: &conservation_suite::oracle::Oracle, acct: u64, anchor: u64) -> Minor {
+    o.ledger_balance(
+        conservation_suite::oracle::Acct(acct),
+        conservation_suite::oracle::Cur(USD),
+        anchor,
+    )
+}
+
+/// Mirror a funding batch into the oracle, exactly as `fund` does into the ledger.
+fn oracle_fund(o: &mut conservation_suite::oracle::Oracle, n_accounts: u64, amount: Minor) {
+    use conservation_suite::oracle as osc;
+    let batch = 500u64;
+    let (mut a, mut b) = (0u64, 0u64);
+    while a < n_accounts {
+        let hi = (a + batch).min(n_accounts);
+        let mut rows = Vec::new();
+        for x in a..hi {
+            rows.push(osc::Row::Post(osc::Posting {
+                txn: 1_000_000 + x,
+                acct: osc::Acct(x),
+                cur: osc::Cur(USD),
+                amt: amount,
+                valid: 0,
+            }));
+            rows.push(osc::Row::Post(osc::Posting {
+                txn: 1_000_000 + x,
+                acct: osc::Acct(u64::MAX),
+                cur: osc::Cur(USD),
+                amt: -amount,
+                valid: 0,
+            }));
+        }
+        o.submit(&format!("fund-{b}"), rows)
+            .expect("funding must be admitted");
+        a = hi;
+        b += 1;
+    }
 }
 
 fn e1_correctness(seeds: &[u64]) -> Vec<E1Row> {
@@ -138,7 +194,9 @@ fn e1_correctness(seeds: &[u64]) -> Vec<E1Row> {
     for &seed in seeds {
         let n_accounts: u64 = 40;
         let mut ledger = Ledger::new();
+        let mut oracle = conservation_suite::oracle::Oracle::new();
         fund(&mut ledger, n_accounts, 100_000);
+        oracle_fund(&mut oracle, n_accounts, 100_000);
 
         // A deliberately small budget, so eviction and reconstruction are exercised heavily
         // rather than incidentally.
@@ -146,6 +204,9 @@ fn e1_correctness(seeds: &[u64]) -> Vec<E1Row> {
         let mut rng = Lcg::new(seed);
         let mut divergences = 0u64;
         let mut idempotent_rejects = 0u64;
+        let mut hit_path = 0u64;
+        let mut miss_path = 0u64;
+        let mut historical = 0u64;
         let transfers = 10_000u64;
 
         for i in 0..transfers {
@@ -157,8 +218,29 @@ fn e1_correctness(seeds: &[u64]) -> Vec<E1Row> {
             let amt = (rng.below(500) + 1) as Minor;
             let key = format!("t-{seed}-{i}");
             if transfer(&mut ledger, &key, i, from, to, amt) {
-                let e = ledger.head();
-                view.apply_epoch(&ledger, e);
+                use conservation_suite::oracle as osc;
+                oracle
+                    .submit(
+                        &key,
+                        vec![
+                            osc::Row::Post(osc::Posting {
+                                txn: i,
+                                acct: osc::Acct(from),
+                                cur: osc::Cur(USD),
+                                amt: -amt,
+                                valid: 0,
+                            }),
+                            osc::Row::Post(osc::Posting {
+                                txn: i,
+                                acct: osc::Acct(to),
+                                cur: osc::Cur(USD),
+                                amt,
+                                valid: 0,
+                            }),
+                        ],
+                    )
+                    .expect("the oracle must admit what the ledger admitted");
+                view.apply_through(&ledger, ledger.head());
             }
 
             // Idempotent replay of a past key must be rejected (never double-posted).
@@ -182,12 +264,30 @@ fn e1_correctness(seeds: &[u64]) -> Vec<E1Row> {
             // Interleave reads (which may reconstruct) and forced evictions.
             if i % 3 == 0 {
                 let a = rng.below(n_accounts as usize) as u64;
-                let anchor = ledger.head();
-                let (v, got_anchor, _) = view.read(&mut ledger, a, USD, anchor, 0.0, 0.0);
-                // Independent oracle: fold the ledger for this key at the same anchor.
-                let oracle = ledger.reconstruct_balance(a, USD, got_anchor);
-                if v != oracle {
+                // Anchors from the whole retained history, not only the head. Theorem 4.1
+                // quantifies over every anchor, and reading only at the head tests it at
+                // one — which is what the previous version of this experiment did.
+                let head = ledger.head();
+                let anchor = rng.below(head as usize + 1) as u64;
+                let (v, got_anchor, hit) = view.read(&mut ledger, a, USD, anchor, 0.0, 0.0);
+                if got_anchor < anchor {
                     divergences += 1;
+                }
+                // The oracle is `conservation-suite`, which folds its own retained history
+                // and shares no code with the engine. The previous version compared
+                // `reconstruct_balance` against `reconstruct_balance` — an identity
+                // dressed as a check, and most of the 13,600 "reconstructions" it
+                // reported as agreeing were a value compared with itself.
+                if v != oracle_balance(&oracle, a, got_anchor) {
+                    divergences += 1;
+                }
+                if hit {
+                    hit_path += 1;
+                } else {
+                    miss_path += 1;
+                }
+                if anchor < head {
+                    historical += 1;
                 }
             }
         }
@@ -197,15 +297,17 @@ fn e1_correctness(seeds: &[u64]) -> Vec<E1Row> {
         view.wipe();
         let probe = 0u64;
         let anchor = ledger.head();
-        let (v, _, hit) = view.read(&mut ledger, probe, USD, anchor, 0.0, 0.0);
-        let oracle = ledger.reconstruct_balance(probe, USD, anchor);
-        let miss_not_zero_ok = !hit && v == oracle;
+        let (v, served, hit) = view.read(&mut ledger, probe, USD, anchor, 0.0, 0.0);
+        let miss_not_zero_ok = !hit && v == oracle_balance(&oracle, probe, served) && v != 0;
 
         // Rebuild-from-base: wipe the entire derived layer, reconstruct every key, compare
         // value-for-value against the independent fold at the same anchor.
+        // The pre-wipe values come from the *oracle*, so this compares the rebuilt derived
+        // layer against a fold the engine cannot reach — rather than against the engine's
+        // own reconstruction, which would agree with itself however wrong both were.
         let mut pre = Vec::new();
         for a in 0..n_accounts {
-            pre.push(ledger.reconstruct_balance(a, USD, anchor));
+            pre.push(oracle_balance(&oracle, a, anchor));
         }
         view.wipe();
         let mut rebuild_mismatches = 0u64;
@@ -231,6 +333,9 @@ fn e1_correctness(seeds: &[u64]) -> Vec<E1Row> {
             rebuild_mismatches,
             miss_not_zero_ok,
             idempotent_rejects,
+            hit_path_comparisons: hit_path,
+            miss_path_comparisons: miss_path,
+            historical_anchor_reads: historical,
         });
     }
     rows
@@ -1064,13 +1169,13 @@ fn main() {
         println!("\n[E1] Correctness under adversarial interleaving");
         let e1 = e1_correctness(&seeds);
         let mut e1csv = String::from(
-        "seed,transfers,upqueries,evictions,view_oracle_divergences,conservation_ok,chain_ok,rebuild_mismatches,miss_not_zero_ok,idempotent_rejects\n",
+        "seed,transfers,upqueries,evictions,view_oracle_divergences,conservation_ok,chain_ok,rebuild_mismatches,miss_not_zero_ok,idempotent_rejects,hit_path_comparisons,miss_path_comparisons,historical_anchor_reads\n",
     );
         let mut all_ok = true;
         for r in &e1 {
             writeln!(
                 e1csv,
-                "{},{},{},{},{},{},{},{},{},{}",
+                "{},{},{},{},{},{},{},{},{},{},{},{},{}",
                 r.seed,
                 r.transfers,
                 r.upqueries,
@@ -1080,7 +1185,10 @@ fn main() {
                 r.chain_ok,
                 r.rebuild_mismatches,
                 r.miss_not_zero_ok,
-                r.idempotent_rejects
+                r.idempotent_rejects,
+                r.hit_path_comparisons,
+                r.miss_path_comparisons,
+                r.historical_anchor_reads
             )
             .ok();
             let ok = r.divergences == 0

@@ -6,6 +6,10 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+# The reference oracle. E1's divergence column previously compared the ledger's own
+# reconstruction against itself; the expected value now comes from a fold this crate
+# cannot reach.
+conservation-suite = { path = "../conservation-suite" }
 niles-interp = { path = "../niles-interp" }
 niles-lang = { path = "../niles-lang" }
 proto-engine = { path = "../proto-engine" }

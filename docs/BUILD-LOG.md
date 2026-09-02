@@ -758,3 +758,58 @@ rather than the mean 32. The test now samples anchors across the history, which 
 the theorem says. Recorded because the failure looked exactly like a bound violation.
 
 ### [T-03] 2026-09-02T03:35Z TESTS niles 613/0/3 -> 616/0/3
+
+### [T-04] 2026-09-02T04:15Z RESULT The oracle is now the oracle
+
+`conservation-suite` was a 543-line fold with seventeen unit tests, declared as a
+dependency of `bank-bench` and referenced by nothing; `faults.rs` and `properties.rs` were
+one-line stubs. Thesis §3.11 ("all testing in Chapter 9 is differential testing against
+𝒪"), §5.2 and Appendix F ("the one component of this project that already runs") were
+therefore describing a plan.
+
+`properties.rs` is now the harness — a `Schedule` of the transitions §3.11 names, an
+`Observable` trait one anchored read wide, and a `differential` runner — and `faults.rs`
+is the campaign builder: crash, eviction storm, duplicate delivery, read reordering. Both
+`proto-engine` and `nilestream-core` have differential suites over them, each with its own
+negative control that answers zero for a miss and must be caught.
+
+**A defect in the harness, worth recording because it looked exactly like an engine bug.**
+The first `Observable` returned a bare value, and the runner compared it against the
+oracle at the *requested* anchor. That reported 2,009 units of divergence on the first
+run. The engine was right: `read(key, anchor)` means "at least as fresh as `anchor`", so a
+fresher entry may legitimately answer and says so in its returned anchor. The trait now
+returns `Answer { value, anchor }` and the runner checks two separate obligations — the
+answer is not older than the anchor asked for, and its value is exact at the anchor it
+carries. Conflating them tests something no engine promises.
+
+**The oracle could not answer its own headline question.** `rows_upto` did
+`anchor as usize + 1`, so `u64::MAX` — "everything retained" — panicked. Now saturating:
+the definition of correctness does not get to abort.
+
+### [T-04] 2026-09-02T04:15Z RESULT E1 re-run against a real oracle
+
+`cargo run --release -p experiments -- e1`. Two changes to what it measures:
+
+* the expected value comes from `conservation-suite`, not from `Ledger::reconstruct_balance`
+  compared with itself;
+* anchors are drawn from the whole retained history rather than fixed at the head.
+
+| seed | upqueries | evictions | divergences | rebuild mismatches | hit-path | miss-path | historical-anchor reads |
+|---|---|---|---|---|---|---|---|
+| 1 | 3,018 | 2,712 | 0 | 0 | 357 | 2,977 | 3,332 |
+| 7 | 3,023 | 2,698 | 0 | 0 | 352 | 2,982 | 3,333 |
+| 42 | 3,007 | 2,686 | 0 | 0 | 368 | 2,966 | 3,328 |
+| 100 | 2,990 | 2,662 | 0 | 0 | 385 | 2,949 | 3,331 |
+| 2024 | 3,017 | 2,703 | 0 | 0 | 358 | 2,976 | 3,332 |
+
+Still zero divergences, and now the claim is worth more: Table 9.1 previously reported
+~13,600 reconstructions agreeing with an oracle that was the same function, at a single
+anchor. The corrected run compares against an independent fold at ~3,330 *historical*
+anchors per seed. The rebuild-from-base check likewise now compares against the oracle
+rather than against the engine's own reconstruction.
+
+The hit-path column is small (~360 of ~3,330) and honestly so: with eight slots for forty
+accounts and anchors spread over the history, a read at a historical anchor pins its entry
+and the next read at a different anchor misses. Reported rather than tuned away.
+
+### [T-04] 2026-09-02T04:15Z TESTS niles 616/0/3 -> 638/0/3

@@ -234,10 +234,28 @@ impl Circuit {
             Op::Source { .. } => Anchor::Frontier,
             _ => Anchor::Inherited,
         };
+        let width = |i: &NodeId| self.nodes[*i as usize].arity;
         let arity = match &op {
             Op::Map { exprs } => exprs.len() as u16,
             Op::Aggregate { group_key, aggs } => (group_key.len() + aggs.len()) as u16,
-            _ => inputs.first().map(|i| self.nodes[*i as usize].arity).unwrap_or(0),
+            // A join's output width is the sum of its inputs' — **except** for semi and
+            // anti, which emit left rows only. Deriving this from the left input alone, as
+            // this did before `Semi`/`Anti` had a reference semantics, made an inner join
+            // claim its left width; nothing noticed, because no consumer read `arity` for
+            // an inner join. The distinction is load-bearing now: an engine that widened a
+            // semi-join is one that duplicated its left rows, which is the classic
+            // unnesting defect, and `verify` rejects it on exactly this field.
+            Op::Join { kind, .. } => match kind {
+                crate::operator::JoinKind::Semi | crate::operator::JoinKind::Anti => {
+                    inputs.first().map(width).unwrap_or(0)
+                }
+                _ => inputs.iter().map(width).sum(),
+            },
+            // An apply is the outer row, plus one column if a scalar subquery widened it.
+            Op::Apply { kind, .. } => {
+                inputs.first().map(width).unwrap_or(0) + kind.widens() as u16
+            }
+            _ => inputs.first().map(width).unwrap_or(0),
         };
         let lineage = contract.lineage;
         self.nodes.push(Node {

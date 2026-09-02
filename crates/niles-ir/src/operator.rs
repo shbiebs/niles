@@ -103,6 +103,13 @@ pub enum Scalar {
     /// The epoch the row was sealed at. Available to every operator, because the whole
     /// point of an epoch-ordered base is that visibility is a first-class column.
     Anchor,
+    /// The SQL null. Distinct from `Option::None` and from an evicted `Hole` — see
+    /// [`crate::value`] for why the three are kept apart.
+    LitNull,
+    /// `x is null` — a *definite* boolean about a value, never itself unknown. Needed
+    /// because the `not in` rewrite has to ask the question the three-valued comparison
+    /// operators cannot answer.
+    IsNull(Box<Scalar>),
     Not(Box<Scalar>),
     Neg(Box<Scalar>),
     Binary { op: ScalarOp, lhs: Box<Scalar>, rhs: Box<Scalar> },
@@ -130,7 +137,7 @@ impl Scalar {
             Scalar::Udf { id, args } => {
                 certified_udfs.contains(id) && args.iter().all(|a| a.is_reproducible(certified_udfs))
             }
-            Scalar::Not(x) | Scalar::Neg(x) => x.is_reproducible(certified_udfs),
+            Scalar::Not(x) | Scalar::Neg(x) | Scalar::IsNull(x) => x.is_reproducible(certified_udfs),
             Scalar::Binary { lhs, rhs, .. } => {
                 lhs.is_reproducible(certified_udfs) && rhs.is_reproducible(certified_udfs)
             }
@@ -202,6 +209,69 @@ pub enum Op {
     AsOf { epoch: Option<u64> },
     /// Pin a read to a valid-time instant — the world axis.
     ValidAt { instant: Option<i64> },
+
+    /// **The nested form of a subquery**: a dependent join.
+    ///
+    /// Inputs are `[outer, inner]`. For each row of `outer`, the matching set of `inner`
+    /// is the rows agreeing on every `correlation` pair; what is then done with that set
+    /// depends on [`ApplyKind`].
+    ///
+    /// This operator exists so that a correlated subquery has a *representation* before it
+    /// is unnested, rather than being a rewrite with no source form. Its evaluation is a
+    /// nested loop by definition — the outer cardinality times the inner — which is what
+    /// makes the unnesting gate measurable: the same query has two circuits, and the ratio
+    /// between their counted work is the result.
+    ///
+    /// It is **not incremental** and the verifier refuses it on any served view, because a
+    /// dependent join has no delta rule: a single new outer row re-scans the inner
+    /// relation. Unnesting is therefore not an optimisation in the usual sense, where the
+    /// unoptimised plan is merely slower; it is the step that makes the query
+    /// maintainable at all.
+    Apply { kind: ApplyKind, correlation: Vec<(ColIdx, ColIdx)> },
+}
+
+/// What an [`Op::Apply`] does with the matching set of the inner relation.
+///
+/// The `In`/`NotIn` variants carry the two columns whose equality is being tested, kept
+/// separate from `correlation` because they play a different role: correlation columns
+/// select which inner rows are in scope, and the probe decides the predicate over them.
+/// Merging them would work for `in` and be wrong for `not in`, where the null-witness
+/// group is the correlation and not the probe.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ApplyKind {
+    /// `exists (subquery)` — keep the outer row when the matching set is non-empty. Does
+    /// not duplicate: one outer row in, at most one out.
+    Exists,
+    /// `not exists (subquery)` — keep the outer row when the matching set is empty.
+    NotExists,
+    /// `outer.probe in (select inner from …)`. Three-valued: true on a match, and
+    /// otherwise false *or unknown* — both of which drop the row, so the two need not be
+    /// distinguished here.
+    In { probe: ColIdx, inner: ColIdx },
+    /// `outer.probe not in (select inner from …)`. Three-valued, and the trap: a null
+    /// anywhere in the matching set's `inner` column makes the predicate unknown for
+    /// **every** probe that did not match, so the row is dropped. A null probe drops too.
+    NotIn { probe: ColIdx, inner: ColIdx },
+    /// A correlated scalar subquery, appended to the outer row as one column. An empty
+    /// matching set yields `null` — SQL's rule, and the reason the unnested form needs a
+    /// *left outer* join rather than an inner one.
+    Scalar { agg: Agg, expr: Scalar },
+}
+
+impl ApplyKind {
+    pub fn name(&self) -> &'static str {
+        match self {
+            ApplyKind::Exists => "exists",
+            ApplyKind::NotExists => "not_exists",
+            ApplyKind::In { .. } => "in",
+            ApplyKind::NotIn { .. } => "not_in",
+            ApplyKind::Scalar { .. } => "scalar",
+        }
+    }
+    /// Whether the apply widens the outer row. Only a scalar subquery does.
+    pub fn widens(&self) -> bool {
+        matches!(self, ApplyKind::Scalar { .. })
+    }
 }
 
 impl Op {
@@ -224,6 +294,7 @@ impl Op {
             Op::Limit { .. } => "limit",
             Op::AsOf { .. } => "as_of",
             Op::ValidAt { .. } => "valid_at",
+            Op::Apply { .. } => "apply",
         }
     }
 
@@ -232,7 +303,7 @@ impl Op {
     pub fn arity(&self) -> usize {
         match self {
             Op::Source { .. } => 0,
-            Op::Join { .. } | Op::Union => 2,
+            Op::Join { .. } | Op::Union | Op::Apply { .. } => 2,
             _ => 1,
         }
     }
@@ -245,6 +316,10 @@ impl Op {
     pub fn is_incremental(&self) -> bool {
         match self {
             Op::OrderBy { .. } | Op::Limit { .. } => false,
+            // A dependent join has no delta rule: one new outer row re-scans the inner
+            // relation. Unnesting is therefore not a speed optimisation but the step that
+            // makes a correlated query maintainable at all, and the verifier says so.
+            Op::Apply { .. } => false,
             // A non-additive aggregate is incremental, but not in O(1) on deletion: it is
             // maintainable, at the cost of an ordered multiset per group. The distinction
             // is `is_additive`, not this predicate, and conflating them would either
@@ -267,7 +342,11 @@ impl Op {
             // total, and the verifier must know the difference.
             Op::Filter { .. } => false,
             Op::Limit { .. } => false,
-            Op::Join { kind, .. } => !kind.is_outer() && *kind != JoinKind::Anti,
+            Op::Join { kind, .. } => !kind.is_outer() && !matches!(kind, JoinKind::Anti | JoinKind::Semi),
+            // `exists` and `in` drop outer rows; `not exists` and `not in` drop different
+            // ones; a scalar subquery null-extends. None of the five moves every monetary
+            // quantity through, so none is a control total.
+            Op::Apply { .. } => false,
             // Clamps weights: two identical postings become one.
             Op::Distinct => false,
             Op::Negate => false,
@@ -284,6 +363,9 @@ impl Op {
             Op::Index { key } => Some(key.clone()),
             Op::Aggregate { group_key, .. } => Some(group_key.clone()),
             Op::Join { left_key, .. } => Some(left_key.clone()),
+            // An apply preserves the outer row's identity, so it preserves its key. That
+            // is the property the semi/anti rewrites rely on to avoid duplicating rows.
+            Op::Apply { .. } => input_keys.first().cloned().flatten(),
             // Filtering does not change the key; mapping may, so a map that rewrites the
             // key columns loses the index and the planner must re-index.
             Op::Filter { .. } | Op::Delay | Op::Integrate | Op::Differentiate
@@ -320,6 +402,9 @@ impl fmt::Display for Op {
                 write!(f, "join({kind:?}, {left_key:?} = {right_key:?})")
             }
             Op::Index { key } => write!(f, "index({key:?})"),
+            Op::Apply { kind, correlation } => {
+                write!(f, "apply({}, corr={correlation:?})", kind.name())
+            }
             Op::Limit { count, offset } => write!(f, "limit({count}, offset={offset})"),
             other => write!(f, "{}", other.name()),
         }

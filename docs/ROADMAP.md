@@ -40,22 +40,51 @@ the restriction is too blunt and the rule needs narrowing rather than the idea a
 
 ---
 
-### Phase 2 — Subquery unnesting · *the 510× line*
+### Phase 2 — Subquery unnesting · **BUILT**
 
-**Build.** The unnesting rules: correlated `exists` → semi-join, correlated scalar subquery →
-outer join with aggregation, `in`/`not in` → semi/anti-join with the three-valued-logic care
-that `not in` requires.
+**Built.** `nilestream-optimizer::unnest` — five rewrites, each named in a `Rewrite` enum so
+the gate can be checked in the IR: `exists` → semi-join, `not exists` → anti-join, `in` →
+semi-join with the probe in the key, `not in` → filter + anti-join + **null witness**, and a
+correlated scalar subquery → left outer join over a grouped aggregate. Refusals are named
+too: a `limit` or `order_by` below the apply, an uncertified UDF, an uncorrelated scalar
+subquery.
 
-**Gate.** A correlated `exists` MUST lower to a semi-join, verified in the IR rather than
-in the timing. Then the ratio between nested and unnested forms MUST be reported on a corpus
-of at least twenty correlated queries. Dreseler measured ~510× geomean; a result within an
-order of magnitude of that is a pass, and anything near 1× means the rewrite is not firing.
+Three things had to exist first, and each is a result in its own right.
 
-**Kill criterion.** If unnesting produces a *wrong* answer on any `not in` with NULLs, stop
-and fix the three-valued logic before proceeding. This is the classic unnesting bug and it is
-a correctness failure, not a performance one.
+* **A nested form.** `Op::Apply { kind, correlation }` — a dependent join. It is *not
+  incremental*: one new outer row re-scans the inner relation, so there is no delta rule,
+  and `verify` refuses one on a path to a served output (IR018). That reframes the phase:
+  unnesting is not an optimisation a planner may skip, it is what makes a correlated query
+  expressible as a view.
+* **A null.** `niles-ir::value` — `Value::{Null, Int}` and Kleene three-valued logic. The
+  IR had no null, so `not in` was unstatable. The module keeps the thesis's three absences
+  apart by name: `null`, `Option::None`, and the evicted `Hole`.
+* **One semantics.** The reference evaluator moved out of a `#[cfg(test)]` block into
+  `niles-ir::eval`, public, shared by the schedule catalogue and the unnesting corpus. Two
+  copies of a semantics is two semantics.
 
-**Cost.** Weeks. **Worth ~70× more than the join-ordering work already done.**
+**Gate — met.** A 24-case corpus, checked *denotationally* (nested and unnested denote the
+same Z-set) rather than structurally, plus a hand-written three-valued oracle for the eight
+`not in` cases so a shared misunderstanding cannot cancel between the two circuits.
+
+**Kill criterion — not triggered.** No `not in` case is wrong. Eight of them carry nulls on
+the left, on the right, on both, in a group that also matches, in an empty subquery, in an
+all-null subquery, correlated and uncorrelated.
+
+**Result.** Counted work, correlated regime: **1.44× at k=1, 4.29× at k=4, 15.71× at k=16,
+61.39× at k=64** — quadrupling as `k` quadruples, which is the signature of removing a
+quadratic. `results/E17-unnesting.md`.
+
+The 510× figure was a target taken from a different measurement and is not the comparable
+number: Dreseler's is a wall-clock geomean over TPC-H at one scale factor, and this is
+counted work over a purpose-built corpus as a function of scale. What can be said is that
+the ratio is unbounded in `k` rather than a constant, which is the property the phase was
+after; a wall-clock comparison waits on the surface syntax below.
+
+**Still open.** A correlated subquery is not reachable *from the language*. The surface has
+no `exists` form and `lower.rs` produces no `Apply`; the corpus builds circuits directly.
+L-15 is therefore partial: the rewrite exists and is verified, and nothing a user can write
+reaches it. That is a language-surface task, not an optimizer one.
 
 ---
 

@@ -17,6 +17,7 @@ pub mod eviction;
 pub mod join_order;
 pub mod plan_space;
 pub mod offline;
+pub mod unnest;
 
 pub use modes::{Mode, ModeDecision};
 

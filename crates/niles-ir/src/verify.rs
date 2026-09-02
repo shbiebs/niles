@@ -20,7 +20,7 @@
 //! would otherwise reach the engine and panic somewhere less informative.
 
 use crate::circuit::{Anchor, Circuit, NodeId};
-use crate::operator::Op;
+use crate::operator::{JoinKind, Op};
 use crate::upquery_path;
 use crate::{Consistency, Materialize, Retention};
 use std::fmt;
@@ -61,6 +61,14 @@ impl VerifyReport {
         }
         s
     }
+}
+
+/// Whether a node is reachable from any named output — i.e. whether it is *served*.
+///
+/// An unreachable node is dead plan, and holding an `Apply` in dead plan is not a
+/// correctness problem; holding one on a path a reader can query is.
+fn reaches_output(c: &Circuit, id: NodeId) -> bool {
+    c.live_nodes().contains(&id)
 }
 
 /// Verify a circuit. A circuit that fails here never reaches the engine.
@@ -171,6 +179,68 @@ pub fn verify(c: &Circuit) -> VerifyReport {
                     node: Some(n.id),
                     msg: format!("base `{relation}` cannot be partially materialized"),
                 });
+            }
+        }
+
+        // **The duplicate-inflation rule.** A semi- or anti-join emits *left rows*, so its
+        // output width is the left input's. A node claiming the sum of both widths is one
+        // whose implementation concatenated — that is, an inner join wearing a semi-join's
+        // label — and an inner join in a semi-join's place turns one outer row into as many
+        // rows as matched it. In an `exists` over postings that is one account balance
+        // reported three times, and no answer-level test catches it because every one of
+        // the three is a correct row.
+        if let Op::Join { kind, .. } = &n.op {
+            if matches!(kind, JoinKind::Semi | JoinKind::Anti) {
+                let left = n.inputs.first().and_then(|i| c.nodes.get(*i as usize)).map(|x| x.arity);
+                if let Some(w) = left {
+                    if n.arity != w {
+                        r.violations.push(Violation {
+                            code: "IR017",
+                            node: Some(n.id),
+                            msg: format!(
+                                "a {kind:?} join emits left rows and must have arity {w}, not {}; \
+                                 a wider one is an inner join that will duplicate them",
+                                n.arity
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+
+        // **A dependent join cannot be served.** `Apply` is the *nested* form of a
+        // correlated subquery: one new outer row re-scans the inner relation, so there is
+        // no delta rule and therefore no incremental maintenance. Unnesting is not an
+        // optimisation that may be skipped when the optimizer is busy; it is the step that
+        // makes the query maintainable at all, and a circuit that still holds an `Apply`
+        // on a path to a named output has not had it.
+        if let Op::Apply { kind, correlation } = &n.op {
+            if reaches_output(c, n.id) {
+                r.violations.push(Violation {
+                    code: "IR018",
+                    node: Some(n.id),
+                    msg: format!(
+                        "`apply({})` is reachable from a served output; a dependent join has \
+                         no delta rule, so the circuit must be unnested before it is served",
+                        kind.name()
+                    ),
+                });
+            }
+            let widths: Vec<u16> =
+                n.inputs.iter().filter_map(|i| c.nodes.get(*i as usize)).map(|x| x.arity).collect();
+            if widths.len() == 2 {
+                for (o, i) in correlation {
+                    if *o >= widths[0] || *i >= widths[1] {
+                        r.violations.push(Violation {
+                            code: "IR019",
+                            node: Some(n.id),
+                            msg: format!(
+                                "correlation ({o}, {i}) is outside the inputs' widths ({}, {})",
+                                widths[0], widths[1]
+                            ),
+                        });
+                    }
+                }
             }
         }
 

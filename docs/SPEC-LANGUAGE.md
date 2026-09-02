@@ -253,8 +253,24 @@ optimizer investment MUST be the unnesting rules.**
 
 *Acceptance test.* A correlated `exists` subquery MUST lower to a semi-join, not to a nested
 loop with a per-tuple subplan. A benchmark comparing the two forms MUST show the ratio.
-**Status: Specified** — the parser accepts subqueries; the unnesting rules are unbuilt and
-are now the top optimizer priority.
+**Status: Partial** — the rewrite is built and verified; the surface is not.
+
+`nilestream-optimizer::unnest` implements five rewrites (`exists`, `not exists`, `in`,
+`not in`, correlated scalar), checked over a 24-case corpus **denotationally** — nested and
+unnested must denote the same Z-set — rather than structurally, plus a hand-written
+three-valued oracle for the eight `not in` cases. Counted work in the correlated regime:
+1.44× at k=1 rising to 61.39× at k=64, quadrupling as k quadruples, which is the signature
+of removing a quadratic rather than shaving a constant (`results/E17-unnesting.md`).
+
+Three pieces had to be built first: `Op::Apply` (the dependent join, so the nested form has
+a representation at all — and it is *not incremental*, so `verify` refuses it on a served
+path), `niles-ir::value` (the IR had no null, so `not in` was unstatable), and a single
+shared reference evaluator.
+
+What is **not** done is the surface: there is no `exists` expression in the AST and
+`lower.rs` produces no `Apply`, so nothing a user can write reaches the rewrite. The corpus
+builds circuits directly. Until that is closed, this requirement is partial and saying
+otherwise would be claiming a language feature on the strength of an optimizer one.
 
 ---
 
@@ -390,7 +406,7 @@ Stated because a specification that named no limits would be marketing.
 | Part | Requirements | Built | Partial | Specified | Adopt |
 |---|---|---|---|---|---|
 | Execution model | L-1, L-2, L-6, L-16, L-17, L-13, L-22 | 1 | 1 | 4 | 1 |
-| Query semantics | L-5, L-8, L-9, L-10, L-11, L-15, L-18, L-19, L-23 | 3 | 1 | 4 | 1 |
+| Query semantics | L-5, L-8, L-9, L-10, L-11, L-15, L-18, L-19, L-23 | 3 | 2 | 3 | 1 |
 | Correctness | L-3, L-4, L-7, L-12, L-14, L-20, L-21, L-24 | 6 | 1 | 1 | 0 |
 
 **Ten of twenty-four built with passing tests. Three partial. Nine specified. Two adopt.**

@@ -7,6 +7,8 @@
 
 pub mod circuit;
 pub mod operator;
+pub mod value;
+pub mod eval;
 pub mod schedule;
 pub mod verify;
 pub mod upquery_path;

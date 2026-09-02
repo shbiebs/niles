@@ -215,7 +215,7 @@ fn node_at(circuit: &Circuit, id: NodeId, step: &'static str) -> Result<usize, S
 pub fn columns_read(s: &Scalar, out: &mut Vec<ColIdx>) {
     match s {
         Scalar::Column(c) => out.push(*c),
-        Scalar::Not(inner) | Scalar::Neg(inner) => columns_read(inner, out),
+        Scalar::Not(inner) | Scalar::Neg(inner) | Scalar::IsNull(inner) => columns_read(inner, out),
         Scalar::Binary { lhs, rhs, .. } => {
             columns_read(lhs, out);
             columns_read(rhs, out);
@@ -229,6 +229,7 @@ pub fn columns_read(s: &Scalar, out: &mut Vec<ColIdx>) {
         | Scalar::LitBool(_)
         | Scalar::LitText(_)
         | Scalar::LitMoney { .. }
+        | Scalar::LitNull
         | Scalar::Anchor => {}
     }
 }
@@ -623,140 +624,18 @@ mod tests {
     use crate::{Consistency, Lineage, Materialize, Retention, ServeContract};
     use std::collections::BTreeMap;
 
-    // ── a reference evaluator ───────────────────────────────────────────────────────
+    // ── the reference evaluator ─────────────────────────────────────────────────────
     //
-    // The catalogue's entries are stated as theorems about Z-sets. A checker that applied
-    // them without ever *evaluating* anything would be trusting its own documentation, so
-    // this is a small interpreter for the fragment the catalogue touches: rows are vectors of
-    // integers, and a collection is a multiset with signed multiplicities — a Z-set.
+    // The catalogue's entries are stated as theorems about Z-sets, and a checker that
+    // applied them without ever *evaluating* anything would be trusting its own
+    // documentation. So each is checked denotationally, against `crate::eval`.
     //
-    // Signed weights are the point rather than a detail. A rewrite can be correct on sets and
-    // wrong on bags (duplicate counts), and wrong again on Z-sets (retractions, which is how
-    // this IR expresses `except` and outer-join maintenance). The generator below produces
-    // negative weights deliberately.
+    // That evaluator used to live here, as a private copy. It moved out when the unnesting
+    // corpus needed the same semantics, because two copies of a semantics is two
+    // semantics: a rewrite could then be "correct" under the copy that its author also
+    // wrote. One implementation, used by both corpora, is the point.
 
-    type Row = Vec<i128>;
-    type ZSet = BTreeMap<Row, i128>;
-
-    fn add(z: &mut ZSet, row: Row, w: i128) {
-        let e = z.entry(row).or_insert(0);
-        *e += w;
-        if *e == 0 {
-            // A zero weight is not a member. Keeping it would make two equal Z-sets compare
-            // unequal, which would turn every denotation test into a test of the encoding.
-            let key = z.iter().find(|(_, v)| **v == 0).map(|(k, _)| k.clone());
-            if let Some(k) = key {
-                z.remove(&k);
-            }
-        }
-    }
-
-    fn eval_scalar(s: &Scalar, row: &Row) -> i128 {
-        match s {
-            Scalar::Column(c) => *row.get(*c as usize).unwrap_or(&0),
-            Scalar::LitInt(v) => *v,
-            Scalar::LitBool(b) => *b as i128,
-            Scalar::LitMoney { minor, .. } => *minor,
-            Scalar::LitText(_) | Scalar::Anchor => 0,
-            Scalar::Not(i) => (eval_scalar(i, row) == 0) as i128,
-            Scalar::Neg(i) => -eval_scalar(i, row),
-            Scalar::Udf { .. } => 0,
-            Scalar::Binary { op, lhs, rhs } => {
-                let (a, b) = (eval_scalar(lhs, row), eval_scalar(rhs, row));
-                match op {
-                    ScalarOp::Add => a + b,
-                    ScalarOp::Sub => a - b,
-                    ScalarOp::Mul => a * b,
-                    ScalarOp::Div => if b == 0 { 0 } else { a / b },
-                    ScalarOp::Rem => if b == 0 { 0 } else { a % b },
-                    ScalarOp::Eq => (a == b) as i128,
-                    ScalarOp::Ne => (a != b) as i128,
-                    ScalarOp::Lt => (a < b) as i128,
-                    ScalarOp::Le => (a <= b) as i128,
-                    ScalarOp::Gt => (a > b) as i128,
-                    ScalarOp::Ge => (a >= b) as i128,
-                    ScalarOp::And => ((a != 0) && (b != 0)) as i128,
-                    ScalarOp::Or => ((a != 0) || (b != 0)) as i128,
-                    ScalarOp::Like => (a == b) as i128,
-                }
-            }
-        }
-    }
-
-    fn eval(circuit: &Circuit, id: NodeId, sources: &BTreeMap<String, ZSet>) -> ZSet {
-        let n = circuit.nodes.iter().find(|n| n.id == id).expect("node");
-        let input = |k: usize| eval(circuit, n.inputs[k], sources);
-        match &n.op {
-            Op::Source { relation, .. } => sources.get(relation).cloned().unwrap_or_default(),
-            Op::Filter { predicate } => {
-                let mut out = ZSet::new();
-                for (row, w) in input(0) {
-                    if eval_scalar(predicate, &row) != 0 {
-                        add(&mut out, row, w);
-                    }
-                }
-                out
-            }
-            Op::Map { exprs } => {
-                let mut out = ZSet::new();
-                for (row, w) in input(0) {
-                    add(&mut out, exprs.iter().map(|e| eval_scalar(e, &row)).collect(), w);
-                }
-                out
-            }
-            Op::Join { left_key, right_key, residual, .. } => {
-                let (l, r) = (input(0), input(1));
-                let mut out = ZSet::new();
-                for (lrow, lw) in &l {
-                    for (rrow, rw) in &r {
-                        let matches = left_key.iter().zip(right_key).all(|(a, b)| {
-                            lrow.get(*a as usize) == rrow.get(*b as usize)
-                        });
-                        if !matches {
-                            continue;
-                        }
-                        let mut combined = lrow.clone();
-                        combined.extend(rrow.iter().copied());
-                        if let Some(res) = residual {
-                            if eval_scalar(res, &combined) == 0 {
-                                continue;
-                            }
-                        }
-                        // Weights multiply: the Z-set semantics of a join, and the reason a
-                        // rewrite that is sound on sets can be unsound here.
-                        add(&mut out, combined, lw * rw);
-                    }
-                }
-                out
-            }
-            Op::Union => {
-                let mut out = ZSet::new();
-                for k in 0..n.inputs.len() {
-                    for (row, w) in input(k) {
-                        add(&mut out, row, w);
-                    }
-                }
-                out
-            }
-            Op::Negate => {
-                let mut out = ZSet::new();
-                for (row, w) in input(0) {
-                    add(&mut out, row, -w);
-                }
-                out
-            }
-            Op::Distinct => {
-                let mut out = ZSet::new();
-                for (row, w) in input(0) {
-                    if w > 0 {
-                        add(&mut out, row, 1);
-                    }
-                }
-                out
-            }
-            other => panic!("the reference evaluator does not cover {}", other.name()),
-        }
-    }
+    use crate::eval::{add, run_node as eval_at, Row, ZSet};
 
     // ── building circuits ───────────────────────────────────────────────────────────
 
@@ -808,12 +687,8 @@ mod tests {
         c
     }
 
-    fn zset(rows: &[(Row, i128)]) -> ZSet {
-        let mut z = ZSet::new();
-        for (r, w) in rows {
-            add(&mut z, r.clone(), *w);
-        }
-        z
+    fn cells(vs: &[i128]) -> Row {
+        vs.iter().map(|v| crate::value::Value::Int(*v)).collect()
     }
 
     /// Deterministic inputs including **negative weights**, because a rewrite can be sound on
@@ -829,11 +704,11 @@ mod tests {
         for _ in 0..8 {
             let w = next() - 3; // −3..=3, so retractions occur
             if w != 0 {
-                add(&mut l, vec![next(), next()], w);
+                add(&mut l, cells(&[next(), next()]), w);
             }
             let w = next() - 3;
             if w != 0 {
-                add(&mut r, vec![next(), next()], w);
+                add(&mut r, cells(&[next(), next()]), w);
             }
         }
         BTreeMap::from([("l".to_string(), l), ("r".to_string(), r)])
@@ -847,8 +722,8 @@ mod tests {
     fn denotation_holds(before: &Circuit, after: &Circuit, trials: u64) {
         for seed in 0..trials {
             let src = inputs(seed);
-            let a = eval(before, output_of(before), &src);
-            let b = eval(after, output_of(after), &src);
+            let a = eval_at(before, output_of(before), &src).0;
+            let b = eval_at(after, output_of(after), &src).0;
             assert_eq!(a, b, "the rewrite changed the answer on seed {seed}");
         }
     }
@@ -879,8 +754,8 @@ mod tests {
         naive.nodes[2].inputs.swap(0, 1);
         let src = inputs(1);
         assert_ne!(
-            eval(&before, output_of(&before), &src),
-            eval(&naive, output_of(&naive), &src),
+            eval_at(&before, output_of(&before), &src).0,
+            eval_at(&naive, output_of(&naive), &src).0,
             "swapping without compensating happened to agree, so this test proves nothing"
         );
     }
@@ -1135,10 +1010,10 @@ mod tests {
         // Guarding the guard: if the evaluator ignored negative weights, every denotation test
         // above would be checking set semantics and would pass for rewrites that are wrong on
         // Z-sets — which is the semantics this IR actually has.
-        let mut z = zset(&[(vec![1, 1], 2), (vec![2, 2], -3)]);
-        assert_eq!(z.get(&vec![2, 2]), Some(&-3));
-        add(&mut z, vec![1, 1], -2);
-        assert_eq!(z.get(&vec![1, 1]), None, "a zero weight is not a member");
+        let mut z = crate::eval::zset(&[(&[1, 1], 2), (&[2, 2], -3)]);
+        assert_eq!(z.get(&cells(&[2, 2])), Some(&-3));
+        add(&mut z, cells(&[1, 1]), -2);
+        assert_eq!(z.get(&cells(&[1, 1])), None, "a zero weight is not a member");
 
         let src = inputs(3);
         assert!(

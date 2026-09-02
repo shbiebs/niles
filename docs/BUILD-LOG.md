@@ -727,3 +727,34 @@ and Appendix K.6 from these figures and adds Appendix J.16.
 ### [T-02] 2026-09-02T03:05Z TESTS niles 600/0/3 -> 613/0/3
 `proto-engine` had no tests at all before this commit and now has 7; `nilestream-core`
 goes 24 -> 37. Gate green.
+
+### [T-03] 2026-09-02T03:35Z RESULT Checkpoints were not what Definition 3.9 defines
+
+Reproduced. A checkpoint was recorded mid-epoch, at the running value after a particular
+posting, while reconstruction resumes at the first row with `epoch > cp_epoch`. Every
+later posting on that key *within the same epoch* was therefore skipped. Three postings of
++5 on one account in one epoch, at C = 2: indexed 10, full fold 15.
+
+Definition 3.9 says a checkpoint is `(e, V*(e)[k])` — the value at the **end** of epoch e.
+Recording now happens once per key per epoch, after every row of the epoch has been
+folded, and only when the posting count crossed a multiple of the interval during it.
+
+**Why no experiment could see it.** E10 and E11 both run one posting per key per epoch,
+where mid-epoch and end-of-epoch coincide. E1, the only experiment that checks *values*,
+runs with `Ledger::new()` — no checkpoints at all. So the mechanism SC7 rests on had its
+cost measured and its correctness never checked. Theorem 3.7 clause (ii) was tested;
+clause (i), that checkpointing changes cost and not value, was not.
+
+Re-running E10 after the fix gives the same figures as before — 6.8 / 8.3 / 8.0 / 8.5 at
+C = 16 across a 64x history increase — which is the expected result and worth stating:
+**SC7's cost claim is unaffected**, because the defect was invisible to that workload. The
+correction is to the mechanism's correctness, not to the measurement.
+
+**One test of mine was wrong before the code was.** The first version of the bound test
+read always at `head` and reported C = 64 missing its bound at 41 rows against 33.
+Theorem 3.7(ii) is an expectation over an anchor falling *uniformly* between checkpoints;
+reading at the head samples one fixed offset, which at 1,000 postings and C = 64 is 40
+rather than the mean 32. The test now samples anchors across the history, which is what
+the theorem says. Recorded because the failure looked exactly like a bound violation.
+
+### [T-03] 2026-09-02T03:35Z TESTS niles 613/0/3 -> 616/0/3

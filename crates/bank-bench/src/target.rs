@@ -59,6 +59,21 @@ pub trait Target {
     /// a fabrication.
     fn unsupported(&self, workload: &str) -> Option<String>;
 
+    /// **How much base this target is about to be measured over.**
+    ///
+    /// Compared across runs, and the comparison is the point: PostgreSQL was re-prepared
+    /// between runs and Nilestream was not, so each Nilestream run started with the previous
+    /// run's `oltp` and `durable` appends still in the base — about 1,250 extra legs, six
+    /// percent, compounding. The analytical row fell monotonically across five runs and the
+    /// median was the median of a drift. A number here that changes between runs means the
+    /// two targets are not being asked the same question twice.
+    ///
+    /// The unit is per target (rows for PostgreSQL, epochs for Nilestream) and is never
+    /// compared *across* targets — only against the same target's earlier runs.
+    fn base_marker(&mut self) -> Option<u64> {
+        None
+    }
+
     /// The read model's miss rate over this run, where the target has one.
     ///
     /// `None` for PostgreSQL, which has no partial state to miss in. The CSV column read
@@ -203,6 +218,14 @@ impl Target for PgTarget {
     fn unsupported(&self, _workload: &str) -> Option<String> {
         None
     }
+
+    fn base_marker(&mut self) -> Option<u64> {
+        self.client
+            .simple("select count(*) from postings")
+            .ok()
+            .and_then(|r| r.rows.first()?.first()?.clone())
+            .and_then(|v| v.trim().parse().ok())
+    }
 }
 
 /// Nilestream, over the same protocol.
@@ -296,6 +319,17 @@ impl Target for NilestreamTarget {
         nilestream_gap(workload)
     }
 
+    fn base_marker(&mut self) -> Option<u64> {
+        // The frontier: one epoch per sealed transaction, so it counts the base the same way
+        // `count(*)` counts PostgreSQL's. Compared only against this target's own earlier
+        // runs — an epoch is not a row.
+        self.client
+            .simple("select nilestream_frontier")
+            .ok()
+            .and_then(|r| r.rows.first()?.first()?.clone())
+            .and_then(|v| v.trim().parse().ok())
+    }
+
     fn miss_rate(&mut self) -> Option<f64> {
         let r = self.client.simple("select nilestream_stats").ok()?;
         let row = r.rows.first()?;
@@ -333,27 +367,36 @@ pub fn nilestream_gap(workload: &str) -> Option<String> {
 
 /// **What the analytical workload cannot ask Nilestream**, named construct by construct.
 ///
-/// The five analytical statements are PostgreSQL's; three of them use constructs outside the
-/// lowered fragment. Reported here rather than by widening the fragment during a benchmark,
-/// which would be tuning the artifact to the measurement.
+/// Keyed by `workloads::AnalyticalStatement::id`, so the coverage note under the results table
+/// is derived from the statement set rather than maintained beside it: a statement whose
+/// `nls` is `None` and which has no entry here is a gap with no stated reason, and
+/// `every_blocked_statement_names_its_reason` fails the build on one.
 pub const ANALYTICAL_BLOCKED: &[(&str, &str)] = &[
     (
-        "count(*)",
+        "count_star",
         "`*` is not a column, and the aggregate lowering resolves its argument as one \
          (NL0502). A `count(*)` needs a form that counts rows rather than values.",
     ),
     (
-        "count(distinct acct)",
+        "count_distinct_acct",
         "`distinct` inside an aggregate is a second aggregation over a de-duplicated \
          multiset; the fragment has `distinct` as a stage and not as an aggregate modifier.",
     ),
     (
-        "order by sum(amt) desc",
+        "top_ten_by_sum",
         "ordering by an aggregate names an output column the `order by` lowering resolves \
          against the *input* schema, which is the choice that lets `order by` name a column \
          the query does not select.",
     ),
 ];
+
+/// Why a statement is not in the common set, or `None` if it is.
+pub fn analytical_blocked_reason(id: &str) -> Option<&'static str> {
+    ANALYTICAL_BLOCKED
+        .iter()
+        .find(|(k, _)| *k == id)
+        .map(|(_, why)| *why)
+}
 
 #[cfg(test)]
 mod tests {
@@ -378,16 +421,63 @@ mod tests {
 
     #[test]
     fn what_the_analytical_workload_cannot_ask_is_named_construct_by_construct() {
-        // The honest remainder. Three of PostgreSQL's five analytical statements use
-        // constructs outside the lowered fragment, and each is named with its reason rather
-        // than the whole row being refused, or the fragment widened during a benchmark.
-        assert_eq!(ANALYTICAL_BLOCKED.len(), 3);
+        // The honest remainder. Statements outside the lowered fragment are named with their
+        // reason rather than the whole row being refused, or the fragment widened during a
+        // benchmark.
         for (construct, why) in ANALYTICAL_BLOCKED {
             assert!(
                 why.len() > 60,
                 "`{construct}` is blocked without a real reason: {why}"
             );
         }
-        assert!(ANALYTICAL_BLOCKED.iter().any(|(c, _)| *c == "count(*)"));
+        assert!(ANALYTICAL_BLOCKED.iter().any(|(c, _)| *c == "count_star"));
+    }
+
+    #[test]
+    fn every_blocked_statement_names_its_reason_and_no_other_does() {
+        // The coverage note under the results table is *derived* from these two lists, so a
+        // statement Nilestream cannot express and that nothing explains would print as a
+        // silent absence — which is the shape of every defect this harness has found.
+        for st in crate::workloads::ANALYTICAL_STATEMENTS {
+            match st.nls {
+                None => assert!(
+                    analytical_blocked_reason(st.id).is_some(),
+                    "`{}` is outside the fragment and names no reason",
+                    st.id
+                ),
+                Some(_) => assert!(
+                    analytical_blocked_reason(st.id).is_none(),
+                    "`{}` is in the common set and still carries a blocked reason",
+                    st.id
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn the_common_set_is_the_same_operation_on_both_sides() {
+        // The defect this pairing repairs: PostgreSQL ran `group by acct order by sum(amt)
+        // desc limit 10` where Nilestream ran a plain `group by acct`, and the two were
+        // averaged into one composite as though they were one statement. A common-set entry
+        // whose two dialects are different operations would put that back.
+        for st in crate::workloads::analytical_common() {
+            let (pg, nls) = (st.pg, st.nls.unwrap());
+            assert_eq!(
+                pg.contains("order by"),
+                nls.contains("order by"),
+                "`{}` pairs an ordered statement with an unordered one",
+                st.id
+            );
+            assert_eq!(
+                pg.contains("group by"),
+                nls.contains("group by"),
+                "`{}` pairs a grouped statement with an ungrouped one",
+                st.id
+            );
+        }
+        assert!(
+            !crate::workloads::analytical_common().is_empty(),
+            "an empty common set would make the analytical ratio vacuous"
+        );
     }
 }

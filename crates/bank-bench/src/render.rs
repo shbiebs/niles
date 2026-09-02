@@ -91,6 +91,32 @@ fn median_ops(samples: &[&Sample]) -> Option<f64> {
     Some(v[v.len() / 2])
 }
 
+/// The median absolute deviation of a set of values, in the values' own unit.
+///
+/// Reported beside every median because a 2-core container is a noisy host and a difference
+/// smaller than the spread is not a finding. MAD rather than a standard deviation: one slow
+/// run should not widen the reported spread of the other four.
+fn mad(values: &[f64]) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    let mut v = values.to_vec();
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let med = v[v.len() / 2];
+    let mut d: Vec<f64> = v.iter().map(|x| (x - med).abs()).collect();
+    d.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    Some(d[d.len() / 2])
+}
+
+/// Per-run throughput of the runs that happened.
+fn ops_series(samples: &[&Sample]) -> Vec<f64> {
+    samples
+        .iter()
+        .filter(|s| s.not_run.is_none())
+        .map(|s| s.ops_per_second())
+        .collect()
+}
+
 fn median_p99_us(samples: &[&Sample]) -> Option<f64> {
     let mut v: Vec<f64> = samples
         .iter()
@@ -224,6 +250,123 @@ pub fn contract_table(samples: &[Sample], gaps: &BTreeMap<String, String>) -> St
         out.push_str("\nWhy a row is `NOT RUN`:\n\n");
         for (w, why) in notes {
             out.push_str(&format!("* **{w}** — {why}\n"));
+        }
+    }
+    out
+}
+
+/// **The analytical workload, statement by statement.**
+///
+/// The composite ratio says how far apart the two engines are; it cannot say *which operator*
+/// the distance is in, and a composite attributed to a single cause is a guess with a number
+/// attached. This table is the attribution: one row per statement, median of the per-run
+/// medians with the spread beside it, and the coverage difference stated underneath rather
+/// than folded into the ratio.
+pub fn statement_table(samples: &[Sample]) -> String {
+    let mut out = String::new();
+    out.push_str("### The analytical workload, statement by statement\n\n");
+    out.push_str(
+        "Median of the per-run medians, with the median absolute deviation beside it. \
+         The **composite** row above is computed from the statements marked `common` \
+         and from nothing else.\n\n",
+    );
+    out.push_str(
+        "| Statement | In the ratio | PostgreSQL | Nilestream | Nilestream speed ÷ PostgreSQL |\n",
+    );
+    out.push_str("|---|---|---|---|---|\n");
+
+    let ms = |s: &Sample| s.p50.as_nanos() as f64 / 1_000_000.0;
+    for st in crate::workloads::ANALYTICAL_STATEMENTS {
+        let w = format!("analytical:{}", st.id);
+        let of = |target: &str| -> Vec<f64> {
+            samples
+                .iter()
+                .filter(|s| s.workload == w && s.target == target && s.not_run.is_none())
+                .map(ms)
+                .collect()
+        };
+        let (pg, nls) = (of("postgres"), of("nilestream"));
+        let cell = |v: &[f64]| match (median_of(v), mad(v)) {
+            (Some(m), Some(d)) => format!("{m:.2} ± {d:.2} ms"),
+            _ => "—".to_string(),
+        };
+        let ratio = match (median_of(&pg), median_of(&nls)) {
+            (Some(p), Some(n)) if n > 0.0 => format!("{:.2}×", p / n),
+            _ => "—".to_string(),
+        };
+        out.push_str(&format!(
+            "| `{}` | {} | {} | {} | {} |\n",
+            st.id,
+            if st.nls.is_some() { "common" } else { "no" },
+            cell(&pg),
+            cell(&nls),
+            ratio
+        ));
+    }
+
+    let blocked: Vec<&crate::workloads::AnalyticalStatement> =
+        crate::workloads::ANALYTICAL_STATEMENTS
+            .iter()
+            .filter(|s| s.nls.is_none())
+            .collect();
+    if !blocked.is_empty() {
+        out.push_str(&format!(
+            "\n**Coverage.** {} of {} statements are outside Nilestream's lowered fragment. \
+             They are measured on PostgreSQL — so their cost is on the record — and excluded \
+             from the ratio, because a composite that averaged a statement one side cannot \
+             express is not a comparison:\n\n",
+            blocked.len(),
+            crate::workloads::ANALYTICAL_STATEMENTS.len()
+        ));
+        for st in blocked {
+            let why = crate::target::analytical_blocked_reason(st.id)
+                .unwrap_or("no reason is recorded, which is itself the finding");
+            out.push_str(&format!("* `{}` — {why}\n", st.id));
+        }
+    }
+    out
+}
+
+fn median_of(v: &[f64]) -> Option<f64> {
+    if v.is_empty() {
+        return None;
+    }
+    let mut v = v.to_vec();
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    Some(v[v.len() / 2])
+}
+
+/// **Runs and spread for the contract rows**, which the four-column table above cannot carry.
+///
+/// A median without its spread cannot be acted on: on this host the same probe varies by tens
+/// of percent between invocations, and a reader comparing two commits needs to know which
+/// differences are larger than that.
+pub fn spread_table(samples: &[Sample]) -> String {
+    let mut out = String::new();
+    out.push_str("### Runs and spread\n\n");
+    out.push_str("| Workload | Target | Runs | Median | MAD | MAD as % of median |\n");
+    out.push_str("|---|---|---|---|---|---|\n");
+    for row in contract() {
+        for target in ["postgres", "nilestream"] {
+            let rows: Vec<&Sample> = samples
+                .iter()
+                .filter(|s| s.workload == row.workload && s.target == target)
+                .collect();
+            let series = ops_series(&rows);
+            let (m, d) = (median_of(&series), mad(&series));
+            let pct = match (m, d) {
+                (Some(m), Some(d)) if m > 0.0 => format!("{:.1}%", d / m * 100.0),
+                _ => "—".into(),
+            };
+            out.push_str(&format!(
+                "| {} | {} | {} | {} | {} | {} |\n",
+                row.workload,
+                target,
+                series.len(),
+                m.map(|x| format!("{x:.1} ops/s")).unwrap_or("—".into()),
+                d.map(|x| format!("{x:.1}")).unwrap_or("—".into()),
+                pct
+            ));
         }
     }
     out

@@ -24,10 +24,17 @@ pg_ctlcluster 16 main start            # or: initdb -D … && pg_ctl -D … star
 
 # Calibrate, run both targets on all four workloads, and render — in one process.
 cargo run --release -p bank-bench --bin bench -- \
-      --calibrate --run --render \
+      --calibrate --run --render --publish \
       --pg-port 5432 --host-nls \
       --accounts 10000 --operations 500 --runs 5
 ```
+
+**`--publish` is what overwrites the committed `results/E16-wallclock.md`.** Without it a run
+writes its document and CSVs under `--out` and leaves the repository alone. It used to write
+the committed file on every run whatever `--out` said, so an exploratory run — an audit's, a
+bisect's, a CI job's — left the working tree dirty with a table measured under whatever flags
+that run happened to use. `publish::destinations` holds the rule and
+`an_unpublished_run_writes_nothing_a_repository_tracks` fails the build if it is lost.
 
 **Those are the parameters the committed results were produced with**, and they are read back
 out of `results/E16-wallclock.md`'s own "How it was run" section by
@@ -224,16 +231,42 @@ support and the stronger claim it cannot.
 
 ### What the analytical row compares
 
-Three of PostgreSQL's five analytical statements are outside Nilestream's lowered fragment,
-so the row compares five statements against three:
+**A common set, paired by operation.** The row used to be five PostgreSQL statements against
+three Nilestream ones, round-robined into a single composite sample — so the reported ratio
+put PostgreSQL's *cheapest* statement (`count(*)`, 1.4 ms) on one side of a comparison and
+not the other, and paired `group by acct order by sum(amt) desc limit 10` against a plain
+`group by acct` as though the two were one statement. The gap it reported was real; the
+number was not the gap.
+
+`workloads::ANALYTICAL_STATEMENTS` now holds one entry per statement with both dialects. The
+composite ratio is computed from the entries both targets run and from nothing else; the rest
+are still executed on PostgreSQL, so their cost is on the record, and are excluded from the
+ratio. `the_common_set_is_the_same_operation_on_both_sides` fails the build on a pair whose
+two dialects are different operations.
+
+The coverage difference is printed under the results table, derived from the same list:
 
 | construct | why it is outside the fragment |
 |---|---|
 | `count(*)` | `*` is not a column, and the aggregate lowering resolves its argument as one (NL0502) |
 | `count(distinct acct)` | `distinct` is a stage in this fragment, not an aggregate modifier |
-| `order by sum(amt) desc` | `order by` resolves against the input schema — the choice that lets it name a column the query does not select |
 
 Widening the fragment during a benchmark would be tuning the artifact to the measurement.
+Averaging over a statement one side cannot express is worse, because it looks like a
+comparison.
+
+### Both targets start each run from the same base
+
+PostgreSQL is re-prepared between runs; the hosted Nilestream engine is **re-seeded** between
+runs, on a fresh segment. It was not, and the asymmetry was worth about six percent per run
+and compounding: each Nilestream run began with the previous run's `oltp` and `durable`
+appends — 500×2 + 125×2 = 1,250 legs — still in its ledger, so the analytical row declined
+monotonically across the five runs and the committed median was the median of that drift.
+
+`Target::base_marker` is read at the start of every run and compared against that target's
+first run — rows for PostgreSQL, epochs for Nilestream, never compared across targets. A
+difference **aborts the run** rather than being noted, because two runs of one target that
+started from different bases are not two measurements of one thing.
 
 ## How to read the verdicts
 
@@ -253,13 +286,16 @@ one that exists.
 
 The `point` row reads `PARITY` and it **is** an engine result: served by
 `nilestream-server::rev_engine`, a partial view over an immutable hash-chained ledger,
-answering an anchored read and reconstructing on a miss. The measured runs sit at 8–14%
-misses, each a real upquery touching real base rows, and the latency holds across them.
+answering an anchored read. **Its measured miss rate is 1.00**, and that is not a tuning
+choice: the wire path evaluates the compiled circuit over a source scan through the anchor
+index and does not consult the partially materialised view at all (item 5 below), so every
+point read is an anchored reconstruction.
 
-That combination is the claim worth having. A parity result at a 0% miss rate would only say a
-warm cache is fast; at 9% it says *reconstruction* is, which is what the thesis argues. The
-miss rate is printed with every run for exactly this reason, and a result quoted without it
-should be treated as incomplete.
+That is a stronger claim than the one this paragraph used to make and a different one. It
+said "the measured runs sit at 8–14% misses"; they did not — the figure was typed into prose
+while the harness ran a residency budget larger than the key space, under which nothing is
+ever evicted and the true rate was zero. The rate is now a column of every CSV row, and a
+parity result quoted without it should be treated as incomplete.
 
 Two things it does not establish:
 
@@ -272,6 +308,9 @@ Two things it does not establish:
   *a REV serves a point lookup as fast as an indexed aggregate*, which is a narrower and more
   useful statement.
 
-The three `NOT RUN` rows are findings about the engine's surface: `nilestreamd` exposes no
-write path over the wire, and its read surface serves per-key balances rather than scans. Those
-are the next things to build, not caveats to argue away.
+**There are no `NOT RUN` rows in this table**, and the sentence that used to stand here said
+there were three — "`nilestreamd` exposes no write path over the wire, and its read surface
+serves per-key balances rather than scans". Both statements had stopped being true. A row that
+cannot be run is still reported with its reason rather than omitted, and a run that produces
+one now exits non-zero, so a script driving this harness can tell a complete measurement from
+a partial one.

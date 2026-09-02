@@ -94,6 +94,11 @@ impl Sample {
     }
 
     /// One CSV line. The schema is fixed in `render.rs` and asserted by a test there.
+    ///
+    /// `not_run` is a sentence and sentences contain commas, so it is escaped here. The
+    /// reader splits on a fixed field count, and one comma inside a reason silently shifted
+    /// the `protocol_path` and `miss_rate` columns of every row that carried one — which is
+    /// exactly the row a reader most wants to trust.
     pub fn to_csv(&self) -> String {
         format!(
             "{},{},{},{},{:.3},{:.1},{:.1},{:.1},{},{},{},{}",
@@ -106,7 +111,11 @@ impl Sample {
             self.p99.as_nanos() as f64 / 1000.0,
             self.ops_per_second(),
             self.durable,
-            self.not_run.as_deref().unwrap_or(""),
+            self.not_run
+                .as_deref()
+                .unwrap_or("")
+                .replace(',', ";")
+                .replace('\n', " "),
             self.protocol_path,
             self.miss_rate
                 .map(|m| format!("{m:.4}"))
@@ -283,54 +292,145 @@ pub fn oltp(
     })
 }
 
+/// **One analytical statement, in each target's dialect.**
+///
+/// A table rather than two arrays, and that is the whole of the repair. The two arrays were
+/// five statements against three, round-robined into *one composite sample*, so the reported
+/// ratio compared a PostgreSQL set containing its cheapest statement (`count(*)`, 1.4ms)
+/// against a Nilestream set that does not contain it. The gap was real; the number was not
+/// the gap.
+///
+/// Pairing the dialects by *operation* makes the composite a like-for-like comparison and
+/// leaves the coverage difference where it belongs: a statement Nilestream cannot express is
+/// `nls: None`, is still run on PostgreSQL so its cost is on the record, and is excluded from
+/// the ratio.
+pub struct AnalyticalStatement {
+    /// A stable identifier, used as the CSV's workload column (`analytical:<id>`) and as the
+    /// key of `target::ANALYTICAL_BLOCKED`.
+    pub id: &'static str,
+    pub pg: &'static str,
+    /// `None` when the construct is outside Nilestream's lowered fragment. The reason is in
+    /// `target::ANALYTICAL_BLOCKED` under the same `id`, so a reader is never told only that
+    /// something is missing.
+    pub nls: Option<&'static str>,
+}
+
+/// The analytical statement set, paired by operation.
+///
+/// `group_by_acct` is the pairing that used to be absent: PostgreSQL ran
+/// `group by acct order by sum(amt) desc limit 10` and Nilestream ran a plain `group by
+/// acct`, and the two were averaged into one row as though they were the same statement.
+/// They are now two entries — the plain grouping, which both targets run, and the ordered
+/// top-ten, which is its own entry.
+pub const ANALYTICAL_STATEMENTS: &[AnalyticalStatement] = &[
+    AnalyticalStatement {
+        id: "count_star",
+        pg: "select count(*) from postings",
+        nls: None,
+    },
+    AnalyticalStatement {
+        id: "group_by_cur",
+        pg: "select cur, sum(amt) from postings group by cur",
+        nls: Some("select cur, sum(amt) from postings group by cur"),
+    },
+    AnalyticalStatement {
+        id: "group_by_acct",
+        pg: "select acct, sum(amt) from postings group by acct",
+        nls: Some("select acct, sum(amt) from postings group by acct"),
+    },
+    AnalyticalStatement {
+        id: "top_ten_by_sum",
+        pg: "select acct, sum(amt) from postings group by acct order by sum(amt) desc limit 10",
+        nls: None,
+    },
+    AnalyticalStatement {
+        id: "count_distinct_acct",
+        pg: "select count(distinct acct) from postings",
+        nls: None,
+    },
+    AnalyticalStatement {
+        id: "sum_negative",
+        pg: "select sum(amt) from postings where amt < 0",
+        nls: Some("select sum(amt) from postings where amt < 0"),
+    },
+];
+
+/// The statements both targets run — **the only ones the composite ratio is computed from**.
+pub fn analytical_common() -> Vec<&'static AnalyticalStatement> {
+    ANALYTICAL_STATEMENTS
+        .iter()
+        .filter(|s| s.nls.is_some())
+        .collect()
+}
+
 /// **Analytical.** Scans and grouped roll-ups over the whole posting table.
 ///
-/// The workload the contract claims an order of magnitude on, and — per the roadmap's own
-/// honesty note — the one where the win comes mostly from storage layout rather than from
-/// execution. Reported so that the attribution can be checked rather than assumed.
+/// Returns one sample per statement — `analytical:<id>`, so a composite gap can be attributed
+/// to an operator rather than guessed at — followed by the composite `analytical` row, which
+/// covers **only the statements both targets run**. A target's statements outside the common
+/// set are measured and reported and do not enter the ratio.
 pub fn analytical(
     t: &mut dyn Target,
     _accounts: i64,
     operations: u64,
     run: u32,
-) -> Result<Sample, WireError> {
+) -> Result<Vec<Sample>, WireError> {
     if let Some(reason) = t.unsupported("analytical") {
-        return Ok(skipped("analytical", t.name(), run, reason));
+        return Ok(vec![skipped("analytical", t.name(), run, reason)]);
     }
-    // **Per target, because the two speak different dialects of the same operation.**
-    // Three of PostgreSQL's five statements use constructs outside Nilestream's lowered
-    // fragment — `count(*)`, `count(distinct …)` and `order by <aggregate>` — and each is
-    // named in `target::ANALYTICAL_BLOCKED` with the reason. Widening the fragment during a
-    // benchmark would be tuning the artifact to the measurement; substituting a different
-    // query and calling it the same row would be worse.
-    let pg = [
-        "select count(*) from postings",
-        "select cur, sum(amt) from postings group by cur",
-        "select acct, sum(amt) from postings group by acct order by sum(amt) desc limit 10",
-        "select count(distinct acct) from postings",
-        "select sum(amt) from postings where amt < 0",
-    ];
-    let nls = [
-        "select cur, sum(amt) from postings group by cur",
-        "select acct, sum(amt) from postings group by acct",
-        "select sum(amt) from postings where amt < 0",
-    ];
-    let queries: &[&str] = if t.name() == "postgres" { &pg } else { &nls };
-    let mut latencies = Vec::new();
-    let started = Instant::now();
-    for i in 0..operations {
-        let sql = queries[(i as usize) % queries.len()];
-        let at = Instant::now();
-        t.run(sql)?;
-        latencies.push(at.elapsed());
+    let is_pg = t.name() == "postgres";
+    let common = analytical_common();
+    // `operations` counts executions **of the common set**, so both targets run each common
+    // statement the same number of times whatever else they can express.
+    let rounds = (operations / common.len().max(1) as u64).max(1);
+
+    let mut per_statement: Vec<(&AnalyticalStatement, Vec<Duration>)> = Vec::new();
+    for st in ANALYTICAL_STATEMENTS {
+        let sql = if is_pg { Some(st.pg) } else { st.nls };
+        let Some(sql) = sql else { continue };
+        let mut lat = Vec::with_capacity(rounds as usize);
+        for _ in 0..rounds {
+            let at = Instant::now();
+            t.run(sql)?;
+            lat.push(at.elapsed());
+        }
+        per_statement.push((st, lat));
     }
-    let wall = started.elapsed();
-    let (p50, p99) = percentiles(latencies);
-    Ok(Sample {
+
+    let mut out = Vec::new();
+    for (st, lat) in &per_statement {
+        let wall: Duration = lat.iter().sum();
+        let (p50, p99) = percentiles(lat.clone());
+        out.push(Sample {
+            workload: format!("analytical:{}", st.id),
+            target: t.name().into(),
+            run,
+            operations: lat.len() as u64,
+            wall,
+            p50,
+            p99,
+            durable: false,
+            not_run: None,
+            protocol_path: PROTOCOL_PATH,
+            miss_rate: None,
+        });
+    }
+
+    // The composite: the common set only, and its wall clock is the sum of those statements'
+    // latencies rather than the elapsed time of the whole loop — otherwise a target that can
+    // express more statements would be charged for them in a ratio they are excluded from.
+    let common_lat: Vec<Duration> = per_statement
+        .iter()
+        .filter(|(st, _)| st.nls.is_some())
+        .flat_map(|(_, l)| l.iter().copied())
+        .collect();
+    let wall: Duration = common_lat.iter().sum();
+    let (p50, p99) = percentiles(common_lat.clone());
+    out.push(Sample {
         workload: "analytical".into(),
         target: t.name().into(),
         run,
-        operations,
+        operations: common_lat.len() as u64,
         wall,
         p50,
         p99,
@@ -338,7 +438,8 @@ pub fn analytical(
         not_run: None,
         protocol_path: PROTOCOL_PATH,
         miss_rate: None,
-    })
+    });
+    Ok(out)
 }
 
 /// **Durable commit.** The `fsync` cost, measured rather than assumed.

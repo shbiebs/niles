@@ -78,6 +78,14 @@ struct Args {
     host_nls: bool,
     nls_rounds: u32,
     nls_budget: usize,
+    /// Overwrite the **committed** `results/E16-wallclock.md`.
+    ///
+    /// Off by default, and that is the repair. `write_all` wrote the committed document on
+    /// every `--run` whatever `--out` said, so any exploratory run — an audit's, a bisect's,
+    /// a CI job's — left the working tree dirty with a results file measured under whatever
+    /// flags that run happened to use. A benchmark must not touch a committed artifact
+    /// unless it was asked to publish one.
+    publish: bool,
 }
 
 impl Args {
@@ -105,6 +113,7 @@ impl Args {
             // space forces the miss path to run, which is the path the phase diagram is
             // about. Override with `--nls-budget`.
             nls_budget: 2_500,
+            publish: false,
         };
         let mut i = 1;
         while i < argv.len() {
@@ -149,6 +158,7 @@ impl Args {
                     i += 1;
                 }
                 "--host-nls" => a.host_nls = true,
+                "--publish" => a.publish = true,
                 "--nls-rounds" => {
                     a.nls_rounds = argv[i + 1].parse().unwrap_or(a.nls_rounds);
                     i += 1;
@@ -304,6 +314,12 @@ fn run(args: &Args) -> i32 {
     let mut config: Vec<(String, Vec<(String, String)>)> = Vec::new();
     config.push(("postgres".into(), pg.configuration()));
 
+    // The base each run starts from, per target. Compared against that target's first run and
+    // **fatal on a difference**: a target carrying the previous run's writes into the next
+    // run's scan is not being asked the same question twice, and the median of a drifting
+    // series is a number with no referent.
+    let mut base_of: BTreeMap<String, u64> = BTreeMap::new();
+
     eprintln!("== postgres ==");
     for run_no in 1..=args.runs {
         // Re-prepare between runs so each starts from the same table: an OLTP run that
@@ -313,14 +329,12 @@ fn run(args: &Args) -> i32 {
             eprintln!("bench: prepare failed on run {run_no}: {e}");
             return 5;
         }
+        if let Err(why) = same_base(&mut pg, &mut base_of, run_no) {
+            eprintln!("bench: {why}");
+            return 9;
+        }
         for s in run_all(&mut pg, args, run_no) {
-            eprintln!(
-                "  {} run {} — {:.0} ops/s, p99 {:.0}µs",
-                s.workload,
-                s.run,
-                s.ops_per_second(),
-                s.p99.as_nanos() as f64 / 1000.0
-            );
+            report(&s);
             samples.push(s);
         }
     }
@@ -328,7 +342,8 @@ fn run(args: &Args) -> i32 {
     eprintln!("== nilestream ==");
     // Host the daemon on a thread of this process when asked to, so one command reproduces
     // the whole result and no run can silently measure a stale server holding the port.
-    let hosted = if args.host_nls {
+    let mut hosted: Option<Hosted> = None;
+    let bound = if args.host_nls {
         match std::net::TcpListener::bind(("127.0.0.1", args.nls_port)) {
             Ok(listener) => {
                 eprintln!(
@@ -380,6 +395,13 @@ fn run(args: &Args) -> i32 {
                     use nilestream_server::session::Serving;
                     eprintln!("  ledger frontier #{}", engine.lock().unwrap().frontier());
                 }
+                hosted = Some(Hosted {
+                    engine: std::sync::Arc::clone(&engine),
+                    seg,
+                    accounts: args.accounts,
+                    rounds: args.nls_rounds,
+                    budget: args.nls_budget,
+                });
                 let schema = nilestream_server::daemon::DEFAULT_SCHEMA.to_string();
                 std::thread::spawn(move || {
                     nilestream_server::daemon::accept_loop(listener, schema, engine);
@@ -394,43 +416,30 @@ fn run(args: &Args) -> i32 {
     } else {
         false
     };
-    let _ = hosted;
+    let _ = bound;
 
-    match NilestreamTarget::connect("127.0.0.1", args.nls_port) {
-        Ok(mut nls) => {
-            config.push(("nilestream".into(), nls.configuration()));
-            if let Err(e) = nls.prepare(args.accounts) {
-                eprintln!("  unavailable: {e}");
-                for run_no in 1..=args.runs {
-                    for w in ["oltp", "analytical", "point", "durable"] {
-                        samples.push(workloads::skipped(w, "nilestream", run_no, format!("{e}")));
-                    }
-                }
-            } else {
-                for run_no in 1..=args.runs {
-                    for s in run_all(&mut nls, args, run_no) {
-                        match &s.not_run {
-                            Some(why) => {
-                                eprintln!("  {} run {} — NOT RUN: {why}", s.workload, s.run)
-                            }
-                            None => eprintln!(
-                                "  {} run {} — {:.0} ops/s, p99 {:.0}µs",
-                                s.workload,
-                                s.run,
-                                s.ops_per_second(),
-                                s.p99.as_nanos() as f64 / 1000.0
-                            ),
-                        }
-                        samples.push(s);
-                    }
-                }
+    let mut described = false;
+    for run_no in 1..=args.runs {
+        // **A fresh engine per run**, mirroring PostgreSQL's `prepare`. Without it every
+        // Nilestream run began with the previous run's `oltp` and `durable` appends still in
+        // the base — about 1,250 legs, six percent, compounding — while PostgreSQL started
+        // from a rebuilt table. The analytical row fell monotonically across the five runs and
+        // the committed median was the median of that drift.
+        if let Some(h) = &hosted {
+            if let Err(e) = h.reseed() {
+                eprintln!("bench: could not re-seed the hosted engine for run {run_no}: {e}");
+                return 5;
             }
         }
-        Err(e) => {
-            // Recorded as `NOT RUN` with the reason, not omitted. A missing row invites a
-            // reader to assume the number was unremarkable.
-            eprintln!("  unreachable on 127.0.0.1:{}: {e}", args.nls_port);
-            for run_no in 1..=args.runs {
+        // A fresh connection too: a session tracks the anchor it has observed, and a session
+        // that outlived a re-seeded ledger would be reading at an anchor from a history that
+        // no longer exists.
+        let mut nls = match NilestreamTarget::connect("127.0.0.1", args.nls_port) {
+            Ok(t) => t,
+            Err(e) => {
+                // Recorded as `NOT RUN` with the reason, not omitted. A missing row invites a
+                // reader to assume the number was unremarkable.
+                eprintln!("  unreachable on 127.0.0.1:{}: {e}", args.nls_port);
                 for w in ["oltp", "analytical", "point", "durable"] {
                     samples.push(workloads::skipped(
                         w,
@@ -442,7 +451,27 @@ fn run(args: &Args) -> i32 {
                         ),
                     ));
                 }
+                continue;
             }
+        };
+        if !described {
+            config.push(("nilestream".into(), nls.configuration()));
+            described = true;
+        }
+        if let Err(e) = nls.prepare(args.accounts) {
+            eprintln!("  unavailable: {e}");
+            for w in ["oltp", "analytical", "point", "durable"] {
+                samples.push(workloads::skipped(w, "nilestream", run_no, format!("{e}")));
+            }
+            continue;
+        }
+        if let Err(why) = same_base(&mut nls, &mut base_of, run_no) {
+            eprintln!("bench: {why}");
+            return 9;
+        }
+        for s in run_all(&mut nls, args, run_no) {
+            report(&s);
+            samples.push(s);
         }
     }
 
@@ -451,30 +480,141 @@ fn run(args: &Args) -> i32 {
         eprintln!("bench: writing results failed: {e}");
         return 6;
     }
+    // **A `NOT RUN` row is a failed run, and the process says so.** It used to exit 0: a CI
+    // job or a script driving this harness could not tell a complete measurement from one
+    // where a target was unreachable for every run.
+    let missing = samples.iter().filter(|s| s.not_run.is_some()).count();
+    if missing > 0 {
+        eprintln!(
+            "\nbench: {missing} of {} rows are NOT RUN; the reasons are in the CSVs and in the \
+             rendered table",
+            samples.len()
+        );
+        return 8;
+    }
     0
+}
+
+/// A hosted daemon, and the pieces needed to put its engine back the way it started.
+struct Hosted {
+    engine: std::sync::Arc<std::sync::Mutex<nilestream_server::rev_engine::RevEngine>>,
+    seg: std::path::PathBuf,
+    accounts: i64,
+    rounds: u32,
+    budget: usize,
+}
+
+impl Hosted {
+    /// Replace the engine with a freshly seeded one on a fresh segment.
+    fn reseed(&self) -> Result<(), String> {
+        use nilestream_server::rev_engine::RevEngine;
+        let mut guard = self.engine.lock().map_err(|e| e.to_string())?;
+        // Drop the old engine — and with it the file its durable sink holds — *before*
+        // removing the segment and opening a new one. Two sequencers over one path would
+        // recover each other's records and the second run would start from the first's
+        // history, which is the drift this method exists to remove.
+        *guard = RevEngine::seeded(
+            1,
+            1,
+            1,
+            proto_engine::ViewMode::Demand,
+            proto_engine::EvictionPolicy::Lru,
+        );
+        let _ = std::fs::remove_file(&self.seg);
+        *guard = RevEngine::seeded(
+            self.accounts,
+            self.rounds,
+            self.budget,
+            proto_engine::ViewMode::Demand,
+            proto_engine::EvictionPolicy::Lru,
+        )
+        .with_durable(&self.seg)
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+}
+
+/// Check that this run starts from the same base as this target's first run.
+fn same_base(
+    t: &mut dyn Target,
+    seen: &mut BTreeMap<String, u64>,
+    run_no: u32,
+) -> Result<(), String> {
+    let Some(now) = t.base_marker() else {
+        return Ok(());
+    };
+    let name = t.name().to_string();
+    match seen.get(&name) {
+        None => {
+            eprintln!("  {name}: base marker {now} at run {run_no}");
+            seen.insert(name, now);
+            Ok(())
+        }
+        Some(first) => match bank_bench::publish::base_drift(&name, *first, now, run_no) {
+            None => Ok(()),
+            Some(why) => Err(why),
+        },
+    }
+}
+
+fn report(s: &Sample) {
+    match &s.not_run {
+        Some(why) => eprintln!("  {} run {} — NOT RUN: {why}", s.workload, s.run),
+        None => eprintln!(
+            "  {} run {} — {:.0} ops/s, p99 {:.0}µs",
+            s.workload,
+            s.run,
+            s.ops_per_second(),
+            s.p99.as_nanos() as f64 / 1000.0
+        ),
+    }
 }
 
 fn run_all(t: &mut dyn Target, args: &Args, run_no: u32) -> Vec<Sample> {
     let seed = 0xB0A7 ^ (run_no as u64);
+    let name = t.name().to_string();
     let mut out = Vec::new();
-    for r in [
-        workloads::point(t, args.accounts, args.operations, run_no, seed),
-        workloads::analytical(t, args.accounts, (args.operations / 20).max(5), run_no),
-        workloads::oltp(t, args.accounts, args.operations, run_no, seed),
-        workloads::durable(
-            t,
-            args.accounts,
-            (args.operations / 4).max(50),
-            run_no,
-            seed,
-        ),
-    ] {
-        match r {
-            Ok(s) => out.push(s),
-            Err(e) => eprintln!("  a workload failed: {e}"),
-        }
-    }
+    // **A workload that fails is a `NOT RUN` row, not a line on stderr.** It used to be
+    // `eprintln!("  a workload failed: {e}")` and a dropped result: the row simply vanished
+    // from the CSV, the renderer had one fewer run to take a median over, and the table said
+    // nothing at all about the failure. A benchmark that can lose a measurement silently is
+    // a benchmark whose completeness a reader cannot check.
+    let point = workloads::point(t, args.accounts, args.operations, run_no, seed);
+    push(&mut out, "point", &name, run_no, point.map(|s| vec![s]));
+
+    let analytical = workloads::analytical(t, args.accounts, (args.operations / 20).max(6), run_no);
+    push(&mut out, "analytical", &name, run_no, analytical);
+
+    let oltp = workloads::oltp(t, args.accounts, args.operations, run_no, seed);
+    push(&mut out, "oltp", &name, run_no, oltp.map(|s| vec![s]));
+
+    let durable = workloads::durable(
+        t,
+        args.accounts,
+        (args.operations / 4).max(50),
+        run_no,
+        seed,
+    );
+    push(&mut out, "durable", &name, run_no, durable.map(|s| vec![s]));
     out
+}
+
+fn push(
+    out: &mut Vec<Sample>,
+    workload: &str,
+    target: &str,
+    run_no: u32,
+    r: Result<Vec<Sample>, bank_bench::wire::WireError>,
+) {
+    match r {
+        Ok(s) => out.extend(s),
+        Err(e) => out.push(workloads::skipped(
+            workload,
+            target,
+            run_no,
+            format!("the workload failed part-way through: {e}"),
+        )),
+    }
 }
 
 fn write_all(
@@ -483,11 +623,17 @@ fn write_all(
     config: &[(String, Vec<(String, String)>)],
 ) -> std::io::Result<()> {
     std::fs::create_dir_all(&args.out)?;
-    let mut by_workload: BTreeMap<&str, Vec<&Sample>> = BTreeMap::new();
+    // One file per contract workload, and one for the per-statement rows: a workload column
+    // of `analytical:group_by_acct` must not become a file name with a colon in it.
+    let mut by_file: BTreeMap<&str, Vec<&Sample>> = BTreeMap::new();
     for s in samples {
-        by_workload.entry(s.workload.as_str()).or_default().push(s);
+        let file = match s.workload.as_str() {
+            "oltp" | "analytical" | "point" | "durable" => s.workload.as_str(),
+            _ => "analytical-statements",
+        };
+        by_file.entry(file).or_default().push(s);
     }
-    for (w, rows) in &by_workload {
+    for (w, rows) in &by_file {
         let mut f = std::fs::File::create(format!("{}/{w}.csv", args.out))?;
         writeln!(f, "{CSV_HEADER}")?;
         for s in rows {
@@ -495,19 +641,34 @@ fn write_all(
         }
     }
 
+    let doc = document(samples, config, args);
+    let where_to = bank_bench::publish::destinations(std::path::Path::new(&args.out), args.publish);
+    for path in &where_to {
+        std::fs::write(path, &doc)?;
+    }
+    eprintln!(
+        "\nwrote {} and {}/*.csv{}",
+        where_to
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", "),
+        args.out,
+        if args.publish {
+            ""
+        } else {
+            " — pass `--publish` to overwrite the committed results/E16-wallclock.md"
+        }
+    );
+    Ok(())
+}
+
+fn document(samples: &[Sample], config: &[(String, Vec<(String, String)>)], args: &Args) -> String {
     let gaps: BTreeMap<String, String> = ["oltp", "analytical", "point", "durable"]
         .iter()
         .filter_map(|w| nilestream_gap(w).map(|r| (w.to_string(), r)))
         .collect();
-
-    let table = render::contract_table(samples, &gaps);
-    let mut f = std::fs::File::create("results/E16-wallclock.md")?;
-    write!(f, "{}", document(&table, config, args))?;
-    eprintln!("\nwrote results/E16-wallclock.md and {}/*.csv", args.out);
-    Ok(())
-}
-
-fn document(table: &str, config: &[(String, Vec<(String, String)>)], args: &Args) -> String {
+    let table = &render::contract_table(samples, &gaps);
     let mut s = String::new();
     s.push_str("# E16 — The performance contract, measured\n\n");
     s.push_str(
@@ -520,6 +681,10 @@ fn document(table: &str, config: &[(String, Vec<(String, String)>)], args: &Args
          specification names.\n\n",
     );
     s.push_str(table);
+    s.push('\n');
+    s.push_str(&render::spread_table(samples));
+    s.push('\n');
+    s.push_str(&render::statement_table(samples));
     s.push_str("\n## How it was run\n\n");
     s.push_str(&format!(
         "* Accounts: {}\n* Operations per run: {}\n* Runs per workload: {} (medians reported)\n\
@@ -600,11 +765,17 @@ fn document(table: &str, config: &[(String, Vec<(String, String)>)], args: &Args
          establish what the comparison is against. A row that cannot be run is reported with \
          the reason rather than omitted, and filling one by measuring something else under \
          the same name is the specific failure this file exists to avoid.\n\n\
-         Three of PostgreSQL's five analytical statements are outside Nilestream's lowered \
-         fragment — `count(*)`, `count(distinct …)` and `order by <aggregate>` — so the \
-         analytical row compares five statements against three. Each missing construct is \
-         named with its reason in `target::ANALYTICAL_BLOCKED`. Widening the fragment during \
-         a benchmark would be tuning the artifact to the measurement.\n",
+         **The analytical row is a common-set ratio.** It used to compare five PostgreSQL \
+         statements against three Nilestream ones, round-robined into one composite: \
+         PostgreSQL's set contained its cheapest statement (`count(*)`) and Nilestream's did \
+         not, and one pair — `group by acct order by sum(amt) desc limit 10` against a plain \
+         `group by acct` — was two different operations averaged as though it were one. The \
+         statement set is now paired by operation in `workloads::ANALYTICAL_STATEMENTS`; the \
+         ratio is computed from the statements both targets run, the rest are still measured \
+         on PostgreSQL so their cost is on the record, and the per-statement table above says \
+         which operator the distance is in. Widening the fragment during a benchmark would \
+         be tuning the artifact to the measurement; averaging over a statement one side \
+         cannot express is worse, because it looks like a comparison.\n",
     );
     s
 }
@@ -623,11 +794,24 @@ fn render_only(args: &Args) -> i32 {
             }
         }
     }
+    // The per-statement rows are optional: a CSV set produced before the statement table
+    // existed still renders its contract table, and says nothing it cannot support.
+    if let Ok(text) = std::fs::read_to_string(format!("{}/analytical-statements.csv", args.out)) {
+        for line in text.lines().skip(1) {
+            if let Some(s) = parse_csv_line(line) {
+                samples.push(s);
+            }
+        }
+    }
     let gaps: BTreeMap<String, String> = ["oltp", "analytical", "point", "durable"]
         .iter()
         .filter_map(|w| nilestream_gap(w).map(|r| (w.to_string(), r)))
         .collect();
     print!("{}", render::contract_table(&samples, &gaps));
+    println!();
+    print!("{}", render::spread_table(&samples));
+    println!();
+    print!("{}", render::statement_table(&samples));
     0
 }
 

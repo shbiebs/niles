@@ -20,6 +20,7 @@
 
 pub mod analysis;
 pub mod generator;
+pub mod publish;
 pub mod render;
 pub mod scenarios;
 pub mod storage;

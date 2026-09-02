@@ -154,6 +154,56 @@ The experiment that would decide it: hold the rung fixed and vary whether a mult
 
 ---
 
+## J.16 The rung tax was an instrument artefact
+
+**Position A and B alike.** The price of a consistency rung falls on maintenance and is
+invisible on the read path: 66× fewer deltas applied at `bounded(k=64)` than at
+`strict(k=0)`, with misses varying by 0.3% and hit rate by 0.001 across rungs (§9.4.3 as
+it stood, Table 9.9).
+
+**Verdict: both wrong; refuted by correcting the instrument, not by a new experiment.**
+
+The measured figures, retained:
+
+| Rung | deltas applied | misses | hit rate |
+|---|---|---|---|
+| bounded(k = 64) | 55 | 19,714 | 0.455 |
+| bounded(k = 8) | 408 | 19,670 | 0.456 |
+| strict(k = 0) | 3,621 | 19,658 | 0.456 |
+
+The mechanism behind them. A bounded rung batches maintenance, and the harness implemented
+batching by applying only the epoch at the stride boundary and then marking the view
+current through it. The *k−1* epochs in between were never folded into any resident entry.
+So the 66× was not a saving but the count of deltas discarded, and the values the view
+served afterwards were **wrong rather than stale** — a fact no column in that table could
+show, because it had no oracle. Worse, the discarded entries were nevertheless marked
+current, so they registered as *hits*: the flat read columns that made the headline claim
+("the tax is not paid on the read path at all") were produced by the same defect.
+
+Corrected so that a maintenance pass folds every epoch in its window, and with a
+divergence column added:
+
+| Rung | deltas applied | maintenance passes | misses | base rows read | divergences |
+|---|---|---|---|---|---|
+| bounded(k = 64) | 2,171 | 61 | 26,644 | 102,624 | 0 |
+| bounded(k = 8) | 2,514 | 446 | 24,700 | 73,811 | 0 |
+| strict(k = 0) | 3,621 | 4,017 | 19,658 | 40,869 | 0 |
+
+Replacement claim, supported by the data: **a bounded rung buys fewer maintenance passes
+— the same deltas, in fewer and larger folds — and pays for them in reconstruction, at
+2.5× the base rows read.** The saving is real, it is a batching saving rather than a work
+saving, and it is not free on the read side.
+
+This is the fourth "both wrong" row in this appendix and the only one produced by reading
+an instrument rather than by running a new experiment. It is also the one that should
+worry a reader most: the refuted table was internally consistent, reproducible across five
+seeds, and had a plausible mechanism attached. What it lacked was a value check. §9.4.3's
+own account of how the figure was arrived at — a null, a diagnosis, a re-instrumentation —
+was offered as evidence of care, and the diagnosis was wrong: the null was real and the
+re-instrumentation measured the defect more precisely.
+
+---
+
 ## J.13 Naming
 
 **Position A.** Kaskata / KaskataFlow, after an earlier Upbasin / UpbasinFlow.
@@ -180,6 +230,8 @@ The experiment that would decide it: hold the rung fixed and vary whether a mult
 
 ## J.15 What the adjudication changed
 
-Of the positions examined: three were decided in favour of the later draft (J.1, J.6, and J.11's problem statement), three in favour of the earlier draft (J.2, J.3, J.5), four found **both** positions wrong and replaced them (J.4, J.7, J.9, J.10), one was sharpened with a caveat that changes what it may be used for (J.8), one remains open with its deciding experiment named (J.12), and one was settled by preference (J.13).
+Of the positions examined: three were decided in favour of the later draft (J.1, J.6, and J.11's problem statement), three in favour of the earlier draft (J.2, J.3, J.5), **five** found **both** positions wrong and replaced them (J.4, J.7, J.9, J.10, J.16), one was sharpened with a caveat that changes what it may be used for (J.8), one remains open with its deciding experiment named (J.12), and one was settled by preference (J.13).
 
-The four "both wrong" rows are the ones worth dwelling on. Two of them (J.9, J.10) were overturned by experiments run for this revision, and both had been asserted confidently in every prior draft. Neither would have survived a defence. That is the argument for building the prototype at all: not that it proved the thesis, but that it disproved parts of it early and cheaply, and in one case handed back the mechanism (checkpointing) that makes the claim true.
+The five "both wrong" rows are the ones worth dwelling on. Three of them (J.9, J.10, J.16) were overturned during this programme, and all three had been asserted confidently in every prior draft. None would have survived a defence. That is the argument for building the prototype at all: not that it proved the thesis, but that it disproved parts of it early and cheaply, and in one case handed back the mechanism (checkpointing) that makes the claim true.
+
+J.16 differs from the other four in a way worth naming. J.9 and J.10 were refuted by *running* an experiment. J.16 was refuted by *reading* one — the figures were reproducible across five seeds, internally consistent, and attached to a plausible mechanism, and they were measuring a defect in the harness. The difference between the two kinds of refutation is an oracle: an experiment that reports counted work without ever checking a value can be precise, reproducible and wrong, and this one was for two revisions.

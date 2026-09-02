@@ -30,7 +30,7 @@ use crate::absence::{Epoch, Slot};
 use niles_ir::circuit::{Circuit, NodeId};
 use niles_ir::operator::{Agg, Op};
 use niles_ir::{Consistency, Materialize, Retention};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// A view key. Concretely a small tuple of integers, which is what a `(acct, cur)` group
 /// key lowers to.
@@ -103,6 +103,13 @@ pub struct Stats {
     /// Deltas skipped because their entry was not resident — the saving partiality buys.
     pub deltas_skipped: u64,
     pub evictions: u64,
+    /// Maintenance passes: the number of times the view was dragged to a frontier.
+    ///
+    /// Distinct from `deltas_applied`, and the distinction is the point. A bounded rung
+    /// batches maintenance, so it does *fewer, larger* passes; it does not apply fewer
+    /// deltas, because the deltas it batched over still have to be folded in. Counting
+    /// only deltas made a lax rung look cheap by making it wrong.
+    pub maintenance_passes: u64,
     pub peak_resident: u64,
     /// The integral of residency over time: sum over epochs of the resident entry count.
     ///
@@ -136,18 +143,25 @@ impl Stats {
 pub struct Rev {
     pub node: NodeId,
     pub name: String,
-    slots: HashMap<Key, Slot<Value>>,
+    slots: BTreeMap<Key, Slot<Value>>,
     resident: u64,
     /// Resident-entry budget. `None` means full materialization.
     budget: Option<u64>,
     policy: Policy,
     /// The epoch through which deltas have been applied to this view as a whole.
     applied: Epoch,
+    /// Keys whose resident entry is **not** certified through `applied`, because it was
+    /// installed at an anchor below the frontier the view had already applied. Such an
+    /// entry has not seen the deltas between its own anchor and `applied`, so it may
+    /// serve only reads at or below its own stamp, and a delta must not be folded into
+    /// it — it is missing earlier ones, and adding a later one would compound the error
+    /// rather than correct it.
+    pinned: BTreeSet<Key>,
     /// Per-key read counts, for the cost-aware policy.
-    reads_of: HashMap<Key, u64>,
+    reads_of: BTreeMap<Key, u64>,
     /// Per-key last-read clock, for LRU.
     clock: u64,
-    last_read: HashMap<Key, u64>,
+    last_read: BTreeMap<Key, u64>,
     /// The rung this view promises, and the mode it was planned in. Both are read from the
     /// circuit's checked fields, so an engine that ignored them fails the IR audit.
     pub rung: Consistency,
@@ -176,8 +190,20 @@ impl Rev {
         // view-wide applied epoch: an entry that received no delta in an epoch is still
         // current through that epoch, and rewriting every resident entry's stamp on every
         // epoch would make maintenance O(resident) instead of O(deltas).
+        //
+        // The inheritance is sound only for an entry that was resident for every epoch in
+        // `(stamp, applied]` — that is, one whose stamp is at or after the frontier the
+        // view had already applied when the entry was installed. An entry installed at an
+        // *older* anchor than `applied` (a historical read, or a reconstruction that
+        // raced maintenance) has not seen the deltas in between, so promoting it to
+        // `applied` would serve a stale value under a fresh anchor. It keeps its own
+        // stamp, and a read above that stamp reconstructs.
         if let Some(Slot::Present(v, e)) = self.slots.get(key) {
-            let effective = (*e).max(self.applied);
+            let effective = if self.certified_through_applied(key, *e) {
+                (*e).max(self.applied)
+            } else {
+                *e
+            };
             if effective >= anchor {
                 self.stats.hits += 1;
                 return Anchored {
@@ -196,8 +222,24 @@ impl Rev {
         Anchored { value, anchor }
     }
 
+    /// Is this key's resident entry current through the view's `applied` frontier?
+    ///
+    /// True for an entry installed at or after the frontier the view had applied at the
+    /// time, and for one last written by `apply_epoch`; false for a historical read.
+    fn certified_through_applied(&self, key: &Key, _stamp: Epoch) -> bool {
+        !self.pinned.contains(key)
+    }
+
     fn install(&mut self, key: Key, value: Value, anchor: Epoch) {
         let was_resident = self.slots.get(&key).is_some_and(|s| s.is_resident());
+        // A reconstruction anchored below the view's applied frontier is a historical
+        // answer. It is worth keeping — it is what a dispute asks for — but it is not
+        // current, and must never inherit `applied`.
+        if anchor < self.applied {
+            self.pinned.insert(key.clone());
+        } else {
+            self.pinned.remove(&key);
+        }
         self.slots.insert(key, Slot::Present(value, anchor));
         if !was_resident {
             self.resident += 1;
@@ -217,6 +259,7 @@ impl Rev {
                 if s.evict() {
                     self.resident -= 1;
                     self.stats.evictions += 1;
+                    self.pinned.remove(&victim);
                 }
             }
         }
@@ -249,7 +292,21 @@ impl Rev {
     /// finding: instrumenting only the read path showed no difference between rungs at all.
     pub fn apply_epoch(&mut self, base: &mut dyn Base, e: Epoch) {
         for (key, delta) in base.deltas_at(e) {
+            // An entry pinned to a historical anchor is missing the deltas between that
+            // anchor and now; folding this one in would compound the gap rather than
+            // close it. Treated exactly like a non-resident key: skipped, and rebuilt by
+            // the next read that needs it fresh.
+            if self.pinned.contains(&key) {
+                self.stats.deltas_skipped += 1;
+                continue;
+            }
             match self.slots.get_mut(&key) {
+                // A delta at or below the entry's own stamp is already in the value —
+                // an entry reconstructed ahead of the applied frontier has it — and
+                // adding it again is the double-application anomaly.
+                Some(Slot::Present(_, stamp)) if *stamp >= e => {
+                    self.stats.deltas_skipped += 1;
+                }
                 Some(Slot::Present(v, stamp)) => {
                     *v += delta;
                     *stamp = e;
@@ -269,6 +326,7 @@ impl Rev {
     /// where the point is to prove the derived layer holds no information the base does not.
     pub fn wipe(&mut self) {
         self.slots.clear();
+        self.pinned.clear();
         self.resident = 0;
     }
 
@@ -369,14 +427,15 @@ impl Runtime {
             views.push(Rev {
                 node: id,
                 name,
-                slots: HashMap::new(),
+                slots: BTreeMap::new(),
                 resident: 0,
                 budget: effective_budget,
                 policy,
                 applied: 0,
-                reads_of: HashMap::new(),
+                pinned: BTreeSet::new(),
+                reads_of: BTreeMap::new(),
                 clock: 0,
-                last_read: HashMap::new(),
+                last_read: BTreeMap::new(),
                 rung: contract.consistency,
                 mode: contract.materialize,
                 stats: Stats::default(),
@@ -414,7 +473,16 @@ impl Runtime {
                 _ => 1,
             };
             if e.is_multiple_of(stride) {
-                v.apply_epoch(base, e);
+                // Every epoch since the last maintenance, in order. A bounded rung
+                // batches maintenance; it does not discard the deltas it batched over.
+                // Applying only `e` would leave the view certified through `e` while
+                // the `stride - 1` epochs before it had never been folded into anyone,
+                // which is a wrong answer rather than a stale one.
+                let from = v.applied.saturating_add(1);
+                for epoch in from..=e {
+                    v.apply_epoch(base, epoch);
+                }
+                v.stats.maintenance_passes += 1;
             } else {
                 // Still accrue the memory integral: the entries are resident whether or
                 // not this epoch touched them, and charging only maintained epochs would
@@ -436,6 +504,7 @@ impl Runtime {
             s.deltas_applied += v.stats.deltas_applied;
             s.deltas_skipped += v.stats.deltas_skipped;
             s.evictions += v.stats.evictions;
+            s.maintenance_passes += v.stats.maintenance_passes;
             s.peak_resident = s.peak_resident.max(v.stats.peak_resident);
             s.resident_entry_epochs += v.stats.resident_entry_epochs;
         }
@@ -449,6 +518,7 @@ mod tests {
     use niles_ir::circuit::internal_contract;
     use niles_ir::operator::Scalar;
     use niles_ir::{Lineage, ServeContract};
+    use std::collections::HashMap;
 
     /// A base whose whole history is in a vector. Deliberately unoptimised: it is a
     /// definition of the right answer, not an implementation of a fast one.
@@ -687,8 +757,21 @@ mod tests {
     }
 
     #[test]
-    fn a_lax_rung_is_maintained_less_often_and_that_is_where_its_cost_lives() {
-        // The measured finding, as a test: a rung's price falls on maintenance, not reads.
+    fn a_lax_rung_batches_maintenance_and_applies_exactly_the_same_deltas() {
+        // What a consistency rung actually costs, once maintenance stops dropping the
+        // deltas it batched over.
+        //
+        // The earlier version of this test asserted that a strict rung applies more than
+        // four times the deltas of a bounded one, and it passed — because `advance` was
+        // folding only the boundary epoch and discarding the `stride - 1` epochs before
+        // it. Those deltas were never applied to anyone, and the view was nevertheless
+        // certified through the boundary. The "66x rung tax" was the count of deltas
+        // thrown away.
+        //
+        // Corrected, the saving is real but it is a *batching* saving: the same deltas,
+        // in fewer passes. That is what a bounded-staleness contract buys — you may drag
+        // the view to the frontier less often — and it is a materially weaker claim than
+        // the one the thesis reported.
         let mut runs = Vec::new();
         for rung in [
             Consistency::Bounded {
@@ -716,13 +799,319 @@ mod tests {
         }
         let (lax, strict) = (runs[0], runs[1]);
         assert!(
-            strict.deltas_applied > lax.deltas_applied * 4,
-            "the strict rung must pay materially more maintenance: {lax:?} vs {strict:?}"
+            strict.maintenance_passes > lax.maintenance_passes * 4,
+            "the strict rung must be dragged to the frontier materially more often: \
+             {lax:?} vs {strict:?}"
+        );
+        assert_eq!(
+            lax.deltas_applied, strict.deltas_applied,
+            "and it must apply exactly the same deltas: a rung that applied fewer would \
+             be serving a value the ledger does not have"
         );
         assert_eq!(
             lax.reads, strict.reads,
             "and the read counts must be indistinguishable"
         );
+    }
+
+    // ── the certification invariant: the three defects, pinned ──────────────────────
+
+    /// An independent fold. Deliberately not the engine's own `reconstruct`: comparing a
+    /// value against the function that produced it proves nothing.
+    fn truth(base: &FoldBase, key: &Key, anchor: Epoch) -> Value {
+        base.rows
+            .iter()
+            .filter(|(e, k, _)| *e <= anchor && k == key)
+            .map(|(_, _, d)| d)
+            .sum()
+    }
+
+    #[test]
+    fn f01_stale_hit_is_not_promoted() {
+        // A historical read installs an entry anchored below the applied frontier. It is
+        // a correct answer *at that anchor* and must never be served for a later one:
+        // promoting it to `applied` returns a value the ledger does not have, as a hit.
+        let mut base = FoldBase::new(0);
+        base.seal(vec![1], 10);
+        base.seal(vec![1], 20);
+        let mut rt = Runtime::install(
+            circuit(Materialize::Demand, Consistency::Snapshot),
+            None,
+            Policy::Lru,
+        )
+        .unwrap();
+        rt.advance(&mut base, 1);
+        rt.advance(&mut base, 2);
+        let v = rt.view_mut("balance").unwrap();
+
+        let historical = v.read(&mut base, &vec![1], 1);
+        assert_eq!(historical.value, truth(&base, &vec![1], 1));
+        assert_eq!(historical.anchor, 1);
+
+        let current = v.read(&mut base, &vec![1], 2);
+        assert_eq!(
+            current.value,
+            truth(&base, &vec![1], 2),
+            "a read at the head must not be answered from an entry anchored below it"
+        );
+        assert_eq!(current.anchor, 2);
+    }
+
+    #[test]
+    fn f02_delta_is_applied_once() {
+        // An entry reconstructed *ahead* of the applied frontier already carries the
+        // deltas of the epochs the view has not yet folded. Folding them in again is the
+        // double-application anomaly the thesis says is dissolved by construction.
+        let mut base = FoldBase::new(0);
+        base.seal(vec![1], 10);
+        base.seal(vec![1], 20);
+        let mut rt = Runtime::install(
+            circuit(Materialize::Demand, Consistency::Snapshot),
+            None,
+            Policy::Lru,
+        )
+        .unwrap();
+        {
+            let v = rt.view_mut("balance").unwrap();
+            let ahead = v.read(&mut base, &vec![1], 2);
+            assert_eq!(ahead.value, truth(&base, &vec![1], 2));
+        }
+        rt.advance(&mut base, 1);
+        rt.advance(&mut base, 2);
+        let v = rt.view_mut("balance").unwrap();
+        let after = v.read(&mut base, &vec![1], 2);
+        assert_eq!(
+            after.value,
+            truth(&base, &vec![1], 2),
+            "the deltas were already in the value; applying them again doubles the money"
+        );
+    }
+
+    #[test]
+    fn f03_bounded_rung_applies_every_delta() {
+        // A bounded rung batches maintenance. Batching is not discarding: every epoch in
+        // the window still has to be folded, or the view is certified through a frontier
+        // whose deltas nobody applied.
+        let mut base = FoldBase::new(0);
+        for _ in 0..16 {
+            base.seal(vec![1], 1);
+        }
+        let mut rt = Runtime::install(
+            circuit(
+                Materialize::Demand,
+                Consistency::Bounded {
+                    epochs: 8,
+                    millis: 0,
+                },
+            ),
+            None,
+            Policy::Lru,
+        )
+        .unwrap();
+        {
+            let v = rt.view_mut("balance").unwrap();
+            v.read(&mut base, &vec![1], 0);
+        }
+        for e in 1..=16 {
+            rt.advance(&mut base, e);
+        }
+        let v = rt.view_mut("balance").unwrap();
+        let got = v.read(&mut base, &vec![1], 16);
+        assert_eq!(
+            got.value,
+            truth(&base, &vec![1], 16),
+            "16 epochs of +1 is 16, not the 2 a stride that folds only its boundary gives"
+        );
+    }
+
+    #[test]
+    fn cert_holds_under_interleaved_reads_evictions_and_batched_maintenance() {
+        // The certification invariant as a property: every value served as a hit equals
+        // an independent fold at the anchor it was served with, under every rung, with
+        // reads at arbitrary anchors interleaved with eviction and batched maintenance.
+        for rung in [
+            Consistency::Bounded {
+                epochs: 8,
+                millis: 0,
+            },
+            Consistency::Snapshot,
+            Consistency::LedgerConsistent,
+        ] {
+            for seed in [1u64, 7, 42, 100, 2024] {
+                let mut lcg = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let mut next = || {
+                    lcg = lcg
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    (lcg >> 33) as i64
+                };
+                let mut base = FoldBase::new(0);
+                for i in 0..120 {
+                    base.seal(vec![i % 6], ((i % 5) - 2) as i128);
+                }
+                // A budget that binds: six keys, three slots, so eviction is continuous.
+                let mut rt =
+                    Runtime::install(circuit(Materialize::Demand, rung), Some(3), Policy::Lru)
+                        .unwrap();
+                let mut checked = 0u64;
+                for e in 1..=120u64 {
+                    rt.advance(&mut base, e);
+                    let v = rt.view_mut("balance").unwrap();
+                    for _ in 0..3 {
+                        let k = vec![next().rem_euclid(6)];
+                        // Anchors anywhere in the retained history, not only at the head.
+                        let anchor = (next().rem_euclid(e as i64 + 1)) as Epoch;
+                        let got = v.read(&mut base, &k, anchor);
+                        assert!(
+                            got.anchor >= anchor,
+                            "an answer must not be older than the anchor it was asked for"
+                        );
+                        assert_eq!(
+                            got.value,
+                            truth(&base, &k, got.anchor),
+                            "rung {rung:?} seed {seed}: served value disagrees with the \
+                             fold at the anchor it was served with"
+                        );
+                        checked += 1;
+                    }
+                }
+                assert!(checked >= 300);
+            }
+        }
+    }
+
+    #[test]
+    fn the_five_partial_state_anomalies_are_each_absent() {
+        // Thesis section 4.2 tabulates five anomalies that partial-state dataflow over a
+        // mutable base must exclude by protocol, and argues each is dissolved here by
+        // construction. A table is not a test; this is.
+        let mut base = FoldBase::new(0);
+        for _ in 0..4 {
+            base.seal(vec![1], 5);
+        }
+        let mk = || {
+            Runtime::install(
+                circuit(Materialize::Demand, Consistency::Snapshot),
+                Some(1),
+                Policy::Lru,
+            )
+            .unwrap()
+        };
+
+        // 1. Double application — a delta already in the value is not folded again.
+        {
+            let mut rt = mk();
+            {
+                let v = rt.view_mut("balance").unwrap();
+                v.read(&mut base, &vec![1], 4);
+            }
+            for e in 1..=4 {
+                rt.advance(&mut base, e);
+            }
+            let v = rt.view_mut("balance").unwrap();
+            assert_eq!(v.read(&mut base, &vec![1], 4).value, 20);
+        }
+        // 2. Skipped deltas — reconstruction is anchored, so a delta at or below the
+        //    anchor is included whether or not the resident state ever saw it.
+        {
+            let mut rt = mk();
+            for e in 1..=4 {
+                rt.advance(&mut base, e);
+            }
+            let v = rt.view_mut("balance").unwrap();
+            assert_eq!(v.read(&mut base, &vec![1], 4).value, 20);
+        }
+        // 3. Upquery races — two reconstructions at different anchors are mutually
+        //    consistent: each answer is exact at the anchor it is *returned* with, and
+        //    the higher anchor wins by monotone anchoring.
+        //
+        //    Note what this does and does not say. `read(key, anchor)` means "at least as
+        //    fresh as `anchor`", so once the entry sits at epoch 4 a request for epoch 2
+        //    is answered at 4 — correctly, and with 4 in the anchor. That is a hit rule
+        //    for a freshness contract, and it is the wrong rule for an as-of read, which
+        //    is why `nilestream-server::rev_engine` reconstructs historical reads instead
+        //    of consulting the view. The distinction is a seam, and it is recorded here
+        //    rather than hidden behind an assertion that reads as if it were not.
+        {
+            let mut rt = mk();
+            let v = rt.view_mut("balance").unwrap();
+            let lo = v.read(&mut base, &vec![1], 2);
+            let hi = v.read(&mut base, &vec![1], 4);
+            assert_eq!((lo.anchor, lo.value), (2, 10));
+            assert_eq!((hi.anchor, hi.value), (4, 20));
+            let again = v.read(&mut base, &vec![1], 2);
+            assert!(again.anchor >= 2);
+            assert_eq!(
+                again.value,
+                truth(&base, &vec![1], again.anchor),
+                "every answer is exact at the anchor it carries"
+            );
+        }
+        // 4. Lost deltas — a delta addressed to an evicted key is discarded with no
+        //    downstream notice, and the next read still answers correctly.
+        {
+            let mut rt = mk();
+            {
+                let v = rt.view_mut("balance").unwrap();
+                v.read(&mut base, &vec![1], 0);
+                v.read(&mut base, &vec![2], 0); // evicts key 1: the budget is one slot
+            }
+            for e in 1..=4 {
+                rt.advance(&mut base, e);
+            }
+            let v = rt.view_mut("balance").unwrap();
+            assert!(v.stats.deltas_skipped > 0, "the saving must be real");
+            assert_eq!(v.read(&mut base, &vec![1], 4).value, 20);
+        }
+        // 5. Upquery deadlock — reconstruction is a pull over an immutable prefix and
+        //    never waits on the update path, so a read during maintenance terminates.
+        {
+            let mut rt = mk();
+            for e in 1..=4 {
+                rt.advance(&mut base, e);
+                let v = rt.view_mut("balance").unwrap();
+                v.read(&mut base, &vec![1], e);
+            }
+        }
+    }
+
+    #[test]
+    fn eviction_is_reproducible_from_the_seed_for_every_policy() {
+        // The thesis states that a seed is a reproducibility guarantee rather than a
+        // hope. It was not: victims were chosen by iterating a hash map, so three runs
+        // of one seed gave three different resident sets.
+        for policy in [Policy::Lru, Policy::Random, Policy::CostAware] {
+            let run = || {
+                let mut base = FoldBase::new(0);
+                for i in 0..80 {
+                    base.seal(vec![i % 8], 1);
+                }
+                let mut rt = Runtime::install(
+                    circuit(Materialize::Demand, Consistency::Snapshot),
+                    Some(3),
+                    policy,
+                )
+                .unwrap();
+                for e in 1..=80u64 {
+                    rt.advance(&mut base, e);
+                    let v = rt.view_mut("balance").unwrap();
+                    v.read(&mut base, &vec![(e as i64 * 7) % 8], e);
+                }
+                let v = rt.view("balance").unwrap();
+                let resident: Vec<Key> = v
+                    .slots
+                    .iter()
+                    .filter(|(_, s)| s.is_resident())
+                    .map(|(k, _)| k.clone())
+                    .collect();
+                (rt.stats(), resident)
+            };
+            let a = run();
+            let b = run();
+            let c = run();
+            assert_eq!(a, b, "{policy:?} is not reproducible");
+            assert_eq!(b, c, "{policy:?} is not reproducible");
+        }
     }
 
     #[test]

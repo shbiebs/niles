@@ -22,6 +22,7 @@ dependencies = [
 name = "experiments"
 version = "0.1.0"
 dependencies = [
+ "conservation-suite",
  "niles-interp",
  "niles-lang",
  "nilestream-ledger",
@@ -55,6 +56,7 @@ version = "0.1.0"
 name = "nilesc"
 version = "0.1.0"
 dependencies = [
+ "niles-interp",
  "niles-ir",
  "niles-lang",
  "nilestream-optimizer",
@@ -81,6 +83,7 @@ dependencies = [
 name = "nilestream-core"
 version = "0.1.0"
 dependencies = [
+ "conservation-suite",
  "niles-ir",
  "nilestream-ledger",
 ]
@@ -123,5 +126,6 @@ dependencies = [
 name = "proto-engine"
 version = "0.1.0"
 dependencies = [
+ "conservation-suite",
  "nilestream-ledger",
 ]

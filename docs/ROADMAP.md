@@ -245,12 +245,28 @@ Budgeting zero surprises here would be the least credible line in this document.
 
 ### Phase 8 — GBS on the engine
 
-**Build.** Run the eleven implemented product lines against Nilestream rather than against
-the in-memory harness, and add the remaining eighteen.
+**Build.** Run the twenty-nine implemented product lines against Nilestream rather than
+against the in-memory harness. *(This said "eleven … and add the remaining eighteen" while
+GBS's own `implemented_rows()` listed twenty-nine. The count was stale, not the plan.)*
 
 **Gate.** The conservation suite MUST pass under continuous eviction, over the wire, with
 durability on. Then the core-banking benchmark against PostgreSQL, reporting per workload
 class — and reporting parity where parity is the honest result.
+
+**Status: the first clause of the gate is met; the second is not run.**
+
+`gbs/Makefile`'s `g3` target runs it and writes `gbs/results/G3-verdict.md`. Every matrix row
+is driven through a `Session<EvictingLedger>` — GBS's own session type over a durable
+Nilestream segment at `SyncPolicy::Always`, with balances served by a REV whose budget is a
+quarter of the key space and which is wiped before every anchor sweep. The result is
+**23 product-evidenced + 6 generic-path-only of 29, 0 failures**, with replay and
+crash-recovery verdicts per row. Two shapes — `transfer` and `drawdown` — cross the
+PostgreSQL wire into the daemon, driven by `psql`; the other twenty-seven are in-process and
+the verdict table says so.
+
+The gate's second sentence — the core-banking benchmark against PostgreSQL — is **not run by
+this target**, and no parity claim about GBS on Nilestream is made anywhere. `bank-bench`
+measures the engines directly; see `docs/BENCHMARK.md` and `results/`.
 
 ---
 

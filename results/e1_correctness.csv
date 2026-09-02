@@ -1,6 +1,6 @@
-seed,transfers,upqueries,evictions,view_oracle_divergences,conservation_ok,chain_ok,rebuild_mismatches,miss_not_zero_ok,idempotent_rejects
-1,10000,2763,2746,0,true,true,0,true,103
-7,10000,2720,2703,0,true,true,0,true,103
-42,10000,2692,2675,0,true,true,0,true,103
-100,10000,2705,2688,0,true,true,0,true,103
-2024,10000,2705,2688,0,true,true,0,true,103
+seed,transfers,upqueries,evictions,view_oracle_divergences,conservation_ok,chain_ok,rebuild_mismatches,miss_not_zero_ok,idempotent_rejects,hit_path_comparisons,miss_path_comparisons,historical_anchor_reads
+1,10000,3018,2712,0,true,true,0,true,103,357,2977,3332
+7,10000,3023,2698,0,true,true,0,true,103,352,2982,3333
+42,10000,3007,2686,0,true,true,0,true,103,368,2966,3328
+100,10000,2990,2662,0,true,true,0,true,103,385,2949,3331
+2024,10000,3017,2703,0,true,true,0,true,103,358,2976,3332

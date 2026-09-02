@@ -9,7 +9,7 @@
 //!     delayed-hit factor, i.e. ranking by expected aggregate delay rather than by reuse
 //!     probability alone.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use crate::view::{policy_meta::Meta, Slot};
 use crate::{Acct, Cur};
@@ -24,10 +24,14 @@ pub enum EvictionPolicy {
 impl EvictionPolicy {
     pub fn choose_victim(
         &self,
-        slots: &HashMap<(Acct, Cur), Slot>,
-        meta: &HashMap<(Acct, Cur), Meta>,
+        slots: &BTreeMap<(Acct, Cur), Slot>,
+        meta: &BTreeMap<(Acct, Cur), Meta>,
         clock: u64,
     ) -> Option<(Acct, Cur)> {
+        // Sorted, because it comes from a `BTreeMap`. This is what makes the claim two
+        // lines below — that `Random` is reproducible from a seed — true: with hash
+        // iteration the seeded index selected from a differently-ordered list on every
+        // run, and three runs of one seed produced three different resident sets.
         let present: Vec<(Acct, Cur)> = slots
             .iter()
             .filter(|(_, s)| matches!(s, Slot::Present(_, _)))
@@ -53,7 +57,10 @@ impl EvictionPolicy {
             EvictionPolicy::CostAware => present.into_iter().min_by(|a, b| {
                 let ca = meta.get(a).map(|m| m.credit).unwrap_or(0.0);
                 let cb = meta.get(b).map(|m| m.credit).unwrap_or(0.0);
-                ca.partial_cmp(&cb).unwrap_or(std::cmp::Ordering::Equal)
+                // `total_cmp`, not `partial_cmp(..).unwrap_or(Equal)`: a NaN credit is a
+                // defect in the cost model, and collapsing it to "equal to everything"
+                // makes the victim depend on iteration order rather than on the score.
+                ca.total_cmp(&cb)
             }),
         }
     }

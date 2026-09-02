@@ -40,17 +40,26 @@ Five seeds throughout (1, 7, 42, 100, 2024), fixed in advance. Medians are repor
 
 ### 9.2.1 Reconstruction equivalence, conservation, and the absence discipline
 
-The core correctness experiment runs 10,000 balanced transfers over a closed book of 40 accounts with a deliberately punishing memory budget of 8 resident entries, so that eviction and reconstruction are exercised continuously rather than incidentally. Interleaved with the transfers are reads (each of which may trigger an upquery), forced evictions, and idempotent replays of previously used keys. After every read the value served by the partial view is compared against an independent fold of the ledger at the same anchor.
+The core correctness experiment runs 10,000 balanced transfers over a closed book of 40 accounts with a deliberately punishing memory budget of 8 resident entries, so that eviction and reconstruction are exercised continuously rather than incidentally. Interleaved with the transfers are reads (each of which may trigger an upquery), forced evictions, and idempotent replays of previously used keys. After every read the value served by the partial view is compared against an independent fold at the anchor the answer carries.
 
-| Seed | Transfers | Upqueries | Evictions | View-vs-oracle divergences | Conservation | Chain | Rebuild mismatches | Miss ≠ 0 | Idempotent rejects |
-|---|---|---|---|---|---|---|---|---|---|
-| 1 | 10,000 | 2,763 | 2,746 | **0** | OK | OK | **0** | OK | 103 |
-| 7 | 10,000 | 2,720 | 2,703 | **0** | OK | OK | **0** | OK | 103 |
-| 42 | 10,000 | 2,692 | 2,675 | **0** | OK | OK | **0** | OK | 103 |
-| 100 | 10,000 | 2,705 | 2,688 | **0** | OK | OK | **0** | OK | 103 |
-| 2024 | 10,000 | 2,705 | 2,688 | **0** | OK | OK | **0** | OK | 103 |
+Two things about that comparison were wrong in the previous revision and are worth stating, because they decide how much the zero in the divergence column is worth. The "independent fold" was the ledger's own `reconstruct_balance` — the same function the view had just called on a miss — so most of the reported comparisons were a value against itself. And every read was taken at the head, so Theorem 4.1's quantification over *every* anchor was tested at one. The oracle is now `crates/conservation-suite`, which shares no code with the engine and is written under Appendix F's rule that it is never optimised, and anchors are drawn from the whole retained history: about 3,330 of the roughly 3,340 reads per seed are at an anchor below the head. The result is unchanged and the evidence for it is not.
 
-*Table 9.1 — Correctness under adversarial interleaving of commit, read, evict, upquery and replay. Every check passed on every seed.*
+<!-- BEGIN:E1-correctness results/E1-correctness.md#table -->
+
+*Generated from `results/E1-correctness.md`. Do not edit by hand.*
+
+| Seed | Transfers | Upqueries | Evictions | Historical-anchor reads | Divergences | Conservation | Chain | Rebuild mismatches | Miss != 0 | Idempotent rejects |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 10000 | 3018 | 2712 | 3332 | **0** | OK | OK | **0** | OK | 103 |
+| 7 | 10000 | 3023 | 2698 | 3333 | **0** | OK | OK | **0** | OK | 103 |
+| 42 | 10000 | 3007 | 2686 | 3328 | **0** | OK | OK | **0** | OK | 103 |
+| 100 | 10000 | 2990 | 2662 | 3331 | **0** | OK | OK | **0** | OK | 103 |
+| 2024 | 10000 | 3017 | 2703 | 3332 | **0** | OK | OK | **0** | OK | 103 |
+
+<!-- END:E1-correctness -->
+
+*Table 9.1 — Correctness under adversarial interleaving of commit, read, evict, upquery and
+replay. Every check passed on every seed.*
 
 Each column corresponds to a named guarantee. **Divergences = 0** is the executable form of the reconstruction theorem (SC1): across roughly 13,600 reconstructions, no reconstructed value ever differed from the independent fold at the same anchor. **Conservation = OK** is the per-currency system total remaining exactly zero at the end of every run, which is the conservation corollary under continuous eviction and refill. **Rebuild mismatches = 0** is the reconstruction-equivalence property of F4: the entire derived layer was wiped and rebuilt from the retained base alone, and all 40 balances matched their pre-wipe values exactly. **Miss ≠ 0 = OK** is the absence-lattice discipline: after a total wipe, reading a funded account returned its correct non-zero balance *via reconstruction*, not a silent zero from an empty slot. **Idempotent rejects = 103** confirms that every replayed key was refused rather than double-posted.
 
@@ -282,23 +291,65 @@ Three policies compared on identical workloads (10,000 accounts, *s* = 0.9, budg
 
 Three observations, including one that qualifies the thesis's own claim. First, the gap between randomized eviction and LRU is large — 2.2× in base rows read — which is a measured argument that replacing randomized eviction is worth doing at all. Second, the cost-aware policy improves on LRU substantially on reconstruction work (**31% fewer base rows** at service_time 0) and on misses. Third, and against expectation, its advantage on *aggregate delay* is modest: 4.1% better than LRU at service_time 4. The delayed-hit weighting changes which entries it keeps, and that trade costs it some of its base-row advantage (28,123 → 34,260). The honest conclusion is that cost-awareness is clearly worth it for reconstruction work and only marginally so for latency in this configuration, and the thesis should not claim more.
 
-### 9.4.3 What each consistency rung costs
+### 9.4.3 What each consistency rung costs — a measurement that was measuring its own defect
 
-Identical workload; the rung sets both the anchor a read demands and how far maintenance may be batched.
+Identical workload; the rung sets both the anchor a read demands and how far maintenance
+may be batched.
 
-| Rung | Misses | Base rows read | Deltas applied | Apply invocations | Hit rate |
+<!-- BEGIN:E8-rungs results/E8-rungs.md#table -->
+
+*Generated from `results/E8-rungs.md`. Do not edit by hand.*
+
+| rung | deltas applied | maintenance passes | misses | base rows read | divergences |
 |---|---|---|---|---|---|
-| bounded (k = 64) | 19,714 | 40,084 | **55** | **61** | 0.455 |
-| bounded (k = 8) | 19,670 | 40,803 | 408 | 446 | 0.456 |
-| strict (k = 0) | 19,658 | 40,869 | **3,621** | **4,017** | 0.456 |
+| bounded(k=64) | 2171 | 61 | 26644 | 102624 | 0 |
+| bounded(k=8) | 2514 | 446 | 24700 | 73811 | 0 |
+| strict(k=0) | 3621 | 4017 | 19658 | 40869 | 0 |
 
-*Table 9.9 — The rung's price lands on maintenance, not on reads. Medians over five seeds.*
+<!-- END:E8-rungs -->
 
-The read-side columns are indistinguishable across rungs — misses vary by 0.3%, hit rate by 0.001. The maintenance columns differ by **66×** between the loosest and strictest rung, and scale as roughly 1/k in the staleness allowance.
+*Table 9.9 — Medians over five seeds. `divergences` compares every served value against an
+independent fold at the anchor it was served with.*
 
-This refines the cost law usefully. The tax for demanding freshness is not paid on the read path at all; it is paid on how often the derived layer must be dragged to the head of the log. That is a more actionable statement than "strict serializability is expensive", because it tells an operator exactly which resource to provision — and it means a view that tolerates staleness is cheap in a way that a hit-rate measurement would never reveal.
+**The previous version of this table was an artefact, and the artefact was the finding.**
+It reported deltas applied of 55, 408 and 3,621 — a **66×** spread — with misses varying
+by 0.3% and hit rate by 0.001 across rungs, and concluded that the price of freshness "is
+not paid on the read path at all". Three of those statements do not survive a correct
+instrument.
 
-The first attempt at this experiment measured only misses and hit rate and found no difference at all between rungs. That null was reported, investigated, and traced to instrumenting the wrong path; the corrected instrumentation is what Table 9.9 shows. It is recorded here because the sequence — null, diagnosis, re-instrumentation — is the part of an evaluation that is usually invisible and is often where the actual finding is.
+The mechanism was this. A bounded rung batches maintenance, and the harness implemented
+batching by applying only the epoch at the stride boundary and then certifying the view
+through it. The *k−1* epochs in between were never folded into any resident entry. The
+66× was therefore not a saving; it was the count of deltas thrown away, and the entries
+the view then served were wrong rather than stale. Because they were nevertheless marked
+current, they registered as hits — which is why the read columns looked identical.
+
+Corrected, so that a pass folds every epoch in its window:
+
+* **The ratio in deltas applied is 1.67×, not 66×.** A bounded rung folds essentially the
+  same deltas as a strict one, because the epochs it batched over still have to be applied.
+* **What remains ~66× is maintenance *passes*** (61 against 4,017). That is a real saving
+  and a materially weaker claim: the same work in fewer, larger passes, which amortizes
+  per-pass overhead and lets an operator schedule maintenance rather than run it
+  continuously.
+* **The read path is where the cost moved, not where it is absent.** A lax rung now reads
+  **2.5× more base rows** (102,624 against 40,869) and misses 26,644 times against 19,658;
+  its hit rate is 0.259, not the 0.455 previously reported. Its entries are genuinely less
+  current, so more reads reconstruct.
+
+The honest statement, which is less convenient than the one it replaces: **a bounded rung
+buys fewer maintenance passes and pays for them in reconstruction.** The trade is visible
+on both sides rather than free on one, and an operator provisioning for it must size the
+reconstruction path as well as the maintenance path.
+
+The first attempt at this experiment measured only misses and hit rate and found no
+difference at all between rungs. That null was reported, investigated, and attributed to
+instrumenting the wrong path. The attribution was itself wrong: the null was real, and it
+was the *false certification* that made the read columns identical. Adding maintenance
+counters found a difference in the right place for the wrong reason, and the sequence —
+null, misattributed diagnosis, confident table, refutation — is recorded because it is a
+more useful cautionary tale than the one this section used to tell. Appendix J.16 keeps
+the refuted figures.
 
 ### 9.4.4 Write path: what the mechanisms cost (wall-clock, heavily caveated)
 
@@ -338,7 +389,7 @@ Two rules are fixed in advance. Vendor performance claims without published meth
 
 * Ledger write path with durability: throughput within a small constant factor of a purpose-built baseline. *Source:* the write path performs the same work plus hash chaining, whose cost is now measured at ≈30% (§9.4.4). *Refuted by:* a gap larger than one order of magnitude.
 * Reconstruction latency under load stays inside an authorization budget in the winning region of the phase diagram. *Source:* Table 9.7's bounded per-reconstruction work under checkpointing.
-* Bounded-staleness views cost ~1/k in maintenance. *Source:* Table 9.9, to be confirmed with concurrency and real coordination.
+* Bounded-staleness views cost ~1/k in maintenance **passes**, and pay for it in reconstruction. *Source:* Table 9.9 as corrected in §9.4.3; the earlier "~1/k in deltas applied" was an instrument artefact and is retained in Appendix J.16. To be confirmed with concurrency and real coordination.
 
 ## 9.6 Correctness Evaluation Beyond Conservation
 
@@ -393,14 +444,14 @@ Constructive tests, unchanged: the banking portfolio implemented in the domain l
 
 | Claim | Status after this chapter |
 |---|---|
-| SC1 reconstruction equivalence | **Corroborated** — 0 divergences, 0 rebuild mismatches, 5 seeds (§9.2.1) |
+| SC1 reconstruction equivalence | **Corroborated** — 0 divergences against an *independent* oracle at ~3,330 historical anchors per seed, 0 rebuild mismatches, 5 seeds (§9.2.1) |
 | Conservation under eviction/refill | **Corroborated** — per-currency total exactly 0, 5 seeds (§9.2.1) |
 | F2 stream–relation duality | **Corroborated** — 1,000 epochs, 0 mismatches (§9.2.3) |
 | Absence discipline (miss ≠ 0) | **Corroborated** (§9.2.1) |
 | SC2 frontier exists | **Corroborated and located** — crossover between memory prices 0.0005 and 0.002 (§9.3.3) |
 | H0/S1 "partiality pays on skew" | **Refuted as stated**; restated as a memory-price condition with an interior optimum (§9.3.4) |
 | SC3 cost is workload- not history-shaped | **Refuted as stated; restored under checkpointing** with constant C/2 + 1 (§9.4.1) |
-| Consistency rung cost | **Measured** — falls on maintenance (~1/k), not reads (§9.4.3) |
+| Consistency rung cost | **Refuted as stated; re-measured.** The reported 66× in deltas applied was the count of deltas a defective batching loop discarded. Corrected: ~66× in maintenance *passes*, 1.67× in deltas, and **2.5× more base rows read** on the lax rung — the tax is not absent from the read path (§9.4.3, Appendix J.16) |
 | Cost-aware eviction beats LRU | **Partly corroborated** — 31% on reconstruction work, 4% on aggregate delay (§9.4.2) |
 | Hot-account contention | **Not measured**; instrument cannot (§9.4.4, §9.9) |
 | Strict serializability | **Not tested**; conservation is strictly weaker (§9.2.2) |

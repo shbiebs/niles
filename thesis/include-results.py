@@ -59,6 +59,7 @@ def table_after(text: str, heading: str) -> str:
 EXTRACTORS = {
     "contract": lambda t: first_table(t),
     "curve": lambda t: table_after(t, "### The curve"),
+    "table": lambda t: table_after(t, "### The table"),
 }
 
 MARKER = re.compile(

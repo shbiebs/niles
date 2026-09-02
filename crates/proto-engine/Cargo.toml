@@ -7,3 +7,8 @@ authors.workspace = true
 
 [dependencies]
 nilestream-ledger = { path = "../nilestream-ledger" }
+
+[dev-dependencies]
+# The reference oracle, as a *test* dependency: the engine must never be able to
+# reach the definition of correctness it is checked against.
+conservation-suite = { path = "../conservation-suite" }

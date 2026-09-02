@@ -1,5 +1,5 @@
 =======================================================================
- Kaskata research prototype — experiment suite
+ Niles research prototype — experiment suite
  Seeds: [1, 7, 42, 100, 2024]
  All primary metrics are counted work units (machine-independent).
 =======================================================================
@@ -8,19 +8,19 @@
 
   Write path (in-memory, single-threaded, NO durability — mechanism cost only)
      config          hot_share   postings/sec (median)
-     chained              0.0                1526384
-     chained              0.5                1739657
-     chained              0.9                1686866
-     no-chain             0.0                2243577
-     no-chain             0.5                2107468
-     no-chain             0.9                2222726
+     chained              0.0                1124592
+     chained              0.5                1149794
+     chained              0.9                1161794
+     no-chain             0.0                3354389
+     no-chain             0.5                3533334
+     no-chain             0.9                3717167
 
 [E8] Consistency rungs
 
   Cost per consistency rung (skew s=0.9, budget=5%, identical workload)
-     rung                    misses(median)   rows_touched(median)   hit-rate(median)
-     bounded(k=64)                    19714                  40084              0.455
-     bounded(k=8)                     19670                  40803              0.456
-     strict(k=0)                      19658                  40869              0.456
+     rung                misses(med)  rows_read(med)  deltas_applied(med)  apply_calls(med)  hit-rate
+     bounded(k=64)             26644          102624                 2171                61     0.259
+     bounded(k=8)              24700           73811                 2514               446     0.315
+     strict(k=0)               19658           40869                 3621              4017     0.456
 
 All CSV artifacts written to results/.

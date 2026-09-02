@@ -42,14 +42,14 @@ It is not Nilestream. It is the smallest artifact that makes Nilestream's mechan
 
 | ID | Question | Primary output |
 |---|---|---|
-| E1 | Does evict-then-reconstruct equal never-evict, under adversarial interleaving? | Divergences, conservation, rebuild mismatches, miss≠0, idempotency, tamper |
+| E1 | Does evict-then-reconstruct equal never-evict, under adversarial interleaving? | Divergences **against an independent oracle, at historical anchors**, conservation, rebuild mismatches, miss≠0, idempotency, tamper |
 | E2 | Are integration and differentiation mutually inverse on epoch-indexed Z-sets? | Epoch-by-epoch canonical Z-set comparisons |
 | E3 | How does resident state compare, partial vs full, across skew? | Resident ratio, hit rate |
 | E4 | Where is the break-even between partial and full? | Cost ratio over (skew × budget), swept over memory price |
 | E5 | Does reconstruction cost depend on history length? | Base rows per reconstruction vs. ledger length; indexed vs. unindexed |
 | E6 | Which eviction policy wins under reconstruction latency? | Misses, base rows, aggregate delay for three policies |
 | E7 | What do the commit rule and hash chain cost? | Postings/sec, chained vs unchained (wall-clock) |
-| E8 | What does each consistency rung cost? | Misses, base rows, deltas applied, apply invocations |
+| E8 | What does each consistency rung cost? | Misses, base rows, deltas applied, maintenance passes, **divergences** |
 | E9 | Does growing the key space restore history-independence? | Cost vs. history at fixed per-key ratio |
 | E10 | Do per-key checkpoints bound reconstruction cost? | Cost vs. history for checkpoint intervals 256/64/16 |
 
@@ -77,17 +77,23 @@ Artifacts land in `results/` as CSV, one per experiment, plus console transcript
 
 **Counting reconstruction work.** The ledger increments a `rows_touched` counter by exactly the number of base rows a reconstruction reads, including the checkpoint row when one is used. The view attributes that delta to the read that caused it.
 
+**The oracle, and what it replaced.** Every value check in E1 and E8 compares against `crates/conservation-suite`, an independent fold that shares no code with the engine and is written under Appendix F's rule that it is never optimised. The previous version of E1 compared the ledger's own `reconstruct_balance` against itself and reported the agreement as a divergence count; a check whose expected value comes from the system under test agrees however wrong that system is. E1 also now draws anchors from the whole retained history rather than fixing them at the head — roughly 3,330 of about 3,340 reads per seed are historical — because Theorem 4.1 quantifies over every anchor.
+
 **Resident-entry-epochs, not peak residency.** The memory term accumulates the resident count once per applied epoch, giving the integral of residency over time. An earlier version charged *peak* residency for the whole run, which overstated the cost of a strategy whose footprint grows gradually — that is, of full materialization — and produced a phase diagram in which partial materialization won every cell. The correction is described in §9.3.1 and is recorded here because a cost model that encodes its own conclusion is easy to write and hard to notice.
 
 **Deriving anchors rather than rewriting them.** Applying an epoch touches only entries that receive a delta; a resident entry that receives none is certified through the view's applied frontier by construction, and its effective anchor is computed on read. Rewriting every resident entry per epoch would have made maintenance proportional to residency and would have measured the harness rather than the design.
 
-**The E8 null.** The first version of the consistency-rung experiment measured only misses and hit rate, and found no difference between rungs at all. The null was traced to instrumenting the read path when the rung's cost falls on the maintenance path; adding the applied-delta and apply-invocation counters revealed a 66× difference. §9.4.3 reports both the null and the diagnosis, because the sequence is where the finding actually came from.
+**The E8 null, and why the diagnosis was wrong.** The first version of the consistency-rung experiment measured only misses and hit rate, and found no difference between rungs at all. The null was attributed to instrumenting the read path when the rung's cost falls on maintenance; adding applied-delta and apply-invocation counters produced a 66× difference, and that was reported as the finding.
+
+The attribution was mistaken and the 66× was an artefact. The harness batched maintenance by applying only the epoch at a stride boundary and then certifying the view through it, so the epochs in between were discarded rather than deferred. The 66× was the count of deltas thrown away; the entries the view served afterwards were wrong rather than stale; and because they were marked current they registered as hits, which is precisely why the read columns were flat. The null was real, and the re-instrumentation measured the defect more sharply instead of finding the cause.
+
+What closed it was not another counter but an **oracle column**: every served value compared against an independent fold at the anchor it carries. With maintenance folding every epoch in its window, the ratio in deltas applied is 1.67×, the ~66× is in maintenance *passes*, and the lax rung reads 2.5× more base rows. §9.4.3 reports the corrected table and Appendix J.16 retains the refuted one. The methodological lesson is stated there rather than here: a counted-work experiment with no value check can be precise, reproducible across five seeds, and measuring its own defect.
 
 ## K.7 Honest gaps in the instrument
 
 * **Contention is unmeasurable here.** Single-threaded execution means the hot-share sweep in §9.4.4 varies a parameter that cannot affect the outcome. Reported as a non-result rather than as evidence of an absence of contention.
 * **The delayed-hit term is analytic.** E6 charges each reconstruction for the requests expected to queue behind it, computed from a service time and an arrival rate; it does not simulate a queue. Labelled as a model, not a measurement.
 * **Only two view shapes.** Per-key sums and grouped rollups. Upquery paths for joins — where the partial-state literature's hardest problems live — are not exercised.
-* **No fault injection against durable state**, because there is no durable state.
+* **No fault injection against durable state**, because there is no durable state. Fault *campaigns* over the derived layer — crash, eviction storm, duplicate delivery, read reordering — do exist, in `crates/conservation-suite/src/faults.rs`, and both engines are run under them against the oracle; recovery in this architecture is a large eviction, which is what lets one mechanism serve both.
 
 Each gap maps to an experiment in §9.9 and to a phase of the programme in Chapter 8.

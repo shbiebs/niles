@@ -631,6 +631,232 @@ intent should be stated rather than inherited from a default. Now explicit.
 `niles` 600/0/3 → 600/0/3. Format: 1,274 diffs → 0. Clippy: ~55 warnings + 1 deny-level
 error → 0.
 
+### [T-02] 2026-09-02T02:25Z LC-1 The effective anchor of a cold-but-resident key
+
+*Question.* Where does a cold-but-resident key's effective anchor come from at a stride
+boundary, and what is rewritten per epoch?
+
+*Answer.* **From the view's `applied`, inherited on read; nothing per entry is rewritten
+in an epoch that carried no delta for it.**
+
+The view holds one `applied: Epoch`. A resident entry holds its own `stamp`, written only
+when a delta actually touched it. A read computes the effective anchor as
+`max(stamp, applied)` and the certification invariant is that this value is honest: every
+delta in `(stamp, applied]` has either been applied to the entry or did not exist for that
+key. Maintenance therefore stays O(deltas) rather than O(resident) — the alternative,
+stamping every resident entry on every epoch, would measure the harness instead of the
+design, which Appendix K.6 already records as an instrumentation decision.
+
+The reason this has to be written down before the code is that the bug it prevents is
+invisible until a cold key is read at a lax rung. A per-entry frontier updated only on
+touch would leave a key that received no delta for a thousand epochs still claiming its
+thousand-epoch-old anchor, and `BS(K,T)` would fail for exactly the keys that are cheapest
+to serve. Inheritance is what makes "no delta means the value is unchanged" a property of
+the view rather than a hope about each entry.
+
+The converse obligation is the one T-02 is closing: inheritance is only sound if `applied`
+never runs ahead of the deltas actually folded in. F-03 is precisely that failure — a
+stride boundary that advanced `applied` past epochs whose deltas were never applied to
+anyone — so `advance` must fold every epoch in `(applied, e]`, not only `e`.
+
+### [T-02] 2026-09-02T03:05Z RESULT The three defects reproduced, and what fixing them cost the thesis
+
+All three pointers reproduced exactly as described. Each is now a named test that fails
+without its fix — verified by reverting the fix and watching `f01_`, `f02_` and the CERT
+property test go red, which is the only thing that makes them regression tests rather
+than assertions about current behaviour.
+
+**F-01.** `install` wrote `Present(v, anchor)` for any anchor and `read` served
+`max(stamp, applied)`, so an entry installed by a *historical* read was promoted to the
+view's applied frontier and served, as a hit, for a later anchor. The fix is a `pinned`
+set: an entry installed below the applied frontier keeps its own stamp, is never
+promoted, and receives no delta (it is missing earlier ones, so folding a later one
+compounds the gap rather than closing it).
+
+**F-02.** `apply_epoch` folded a delta into any resident entry regardless of its stamp,
+so an entry reconstructed *ahead* of the frontier received epochs it already carried.
+A delta at or below an entry's own stamp is now skipped.
+
+**F-03.** `advance` applied only the boundary epoch at a stride and then set
+`applied = e`, so the `stride - 1` epochs in between were never folded into anyone while
+the view was nevertheless certified through the boundary. `advance` and the E8 loop now
+fold every epoch in `(applied, e]`.
+
+**An epoch-zero hazard the fix exposed.** `applied: Epoch` starting at 0 cannot
+distinguish "nothing folded yet" from "epoch 0 folded", and `proto-engine` numbers epochs
+from zero. Folding "everything after `applied`" therefore skipped the ledger's first
+epoch — the one that funds every account. `PartialView::apply_through` carries an
+explicit `applied_any` flag, and `the_first_maintenance_pass_folds_epoch_zero` pins it.
+
+### [T-02] 2026-09-02T03:05Z RESULT E8 re-run: the rung tax is not what was reported
+
+`cargo run --release -p experiments -- e8`, commit on `review/F-01-F-06`, workload
+parameters unchanged (10,000 accounts, 40,000 ops, budget 5%, skew 0.9, five seeds).
+**Divergences: 0** across every row — the oracle column this experiment did not have.
+
+| Rung | deltas applied | apply calls | misses | base rows read | hit rate |
+|---|---|---|---|---|---|
+| bounded(k=64) | 2,171 | 61 | 26,644 | 102,624 | 0.259 |
+| bounded(k=8) | 2,514 | 446 | 24,700 | 73,811 | 0.315 |
+| strict(k=0) | 3,621 | 4,017 | 19,658 | 40,869 | 0.456 |
+
+Thesis Table 9.9 reports, for the same workload: deltas applied **55 / 408 / 3,621**,
+misses 19,714 / 19,670 / 19,658, hit rate 0.455 / 0.456 / 0.456 — and concludes that the
+rung's price is a **66x** difference in maintenance that is **invisible on the read path**.
+
+Three claims in that sentence do not survive the correction.
+
+1. **The 66x was the count of deltas thrown away.** Corrected, the ratio in deltas
+   applied is **1.67x**, not 66x. What is still ~66x is *apply calls* — maintenance
+   passes — which is a batching saving and a materially weaker claim: the same deltas,
+   in fewer, larger passes.
+2. **The read path is not indistinguishable across rungs; it is where the cost moved.**
+   A lax rung now reads **2.5x more base rows** (102,624 vs 40,869) and misses far more
+   often (26,644 vs 19,658). This is not a new cost: it is the cost that was previously
+   hidden, because entries were being *falsely certified* through a frontier whose
+   deltas had never been applied, so they registered as hits.
+3. **The high hit rate of a lax rung was an artefact of the same defect.** 0.259 rather
+   than 0.455.
+
+The honest summary the thesis will have to carry: a bounded rung buys fewer maintenance
+passes and pays for them in reconstruction, and the trade is visible on both sides of the
+ledger rather than free on one. §9.4.3's "the tax for demanding freshness is not paid on
+the read path at all" is refuted. Carried to T-05, which rewrites §9.4.3, §9.5.2, §9.12
+and Appendix K.6 from these figures and adds Appendix J.16.
+
+### [T-02] 2026-09-02T03:05Z TESTS niles 600/0/3 -> 613/0/3
+`proto-engine` had no tests at all before this commit and now has 7; `nilestream-core`
+goes 24 -> 37. Gate green.
+
+### [T-03] 2026-09-02T03:35Z RESULT Checkpoints were not what Definition 3.9 defines
+
+Reproduced. A checkpoint was recorded mid-epoch, at the running value after a particular
+posting, while reconstruction resumes at the first row with `epoch > cp_epoch`. Every
+later posting on that key *within the same epoch* was therefore skipped. Three postings of
++5 on one account in one epoch, at C = 2: indexed 10, full fold 15.
+
+Definition 3.9 says a checkpoint is `(e, V*(e)[k])` — the value at the **end** of epoch e.
+Recording now happens once per key per epoch, after every row of the epoch has been
+folded, and only when the posting count crossed a multiple of the interval during it.
+
+**Why no experiment could see it.** E10 and E11 both run one posting per key per epoch,
+where mid-epoch and end-of-epoch coincide. E1, the only experiment that checks *values*,
+runs with `Ledger::new()` — no checkpoints at all. So the mechanism SC7 rests on had its
+cost measured and its correctness never checked. Theorem 3.7 clause (ii) was tested;
+clause (i), that checkpointing changes cost and not value, was not.
+
+Re-running E10 after the fix gives the same figures as before — 6.8 / 8.3 / 8.0 / 8.5 at
+C = 16 across a 64x history increase — which is the expected result and worth stating:
+**SC7's cost claim is unaffected**, because the defect was invisible to that workload. The
+correction is to the mechanism's correctness, not to the measurement.
+
+**One test of mine was wrong before the code was.** The first version of the bound test
+read always at `head` and reported C = 64 missing its bound at 41 rows against 33.
+Theorem 3.7(ii) is an expectation over an anchor falling *uniformly* between checkpoints;
+reading at the head samples one fixed offset, which at 1,000 postings and C = 64 is 40
+rather than the mean 32. The test now samples anchors across the history, which is what
+the theorem says. Recorded because the failure looked exactly like a bound violation.
+
+### [T-03] 2026-09-02T03:35Z TESTS niles 613/0/3 -> 616/0/3
+
+### [T-04] 2026-09-02T04:15Z RESULT The oracle is now the oracle
+
+`conservation-suite` was a 543-line fold with seventeen unit tests, declared as a
+dependency of `bank-bench` and referenced by nothing; `faults.rs` and `properties.rs` were
+one-line stubs. Thesis §3.11 ("all testing in Chapter 9 is differential testing against
+𝒪"), §5.2 and Appendix F ("the one component of this project that already runs") were
+therefore describing a plan.
+
+`properties.rs` is now the harness — a `Schedule` of the transitions §3.11 names, an
+`Observable` trait one anchored read wide, and a `differential` runner — and `faults.rs`
+is the campaign builder: crash, eviction storm, duplicate delivery, read reordering. Both
+`proto-engine` and `nilestream-core` have differential suites over them, each with its own
+negative control that answers zero for a miss and must be caught.
+
+**A defect in the harness, worth recording because it looked exactly like an engine bug.**
+The first `Observable` returned a bare value, and the runner compared it against the
+oracle at the *requested* anchor. That reported 2,009 units of divergence on the first
+run. The engine was right: `read(key, anchor)` means "at least as fresh as `anchor`", so a
+fresher entry may legitimately answer and says so in its returned anchor. The trait now
+returns `Answer { value, anchor }` and the runner checks two separate obligations — the
+answer is not older than the anchor asked for, and its value is exact at the anchor it
+carries. Conflating them tests something no engine promises.
+
+**The oracle could not answer its own headline question.** `rows_upto` did
+`anchor as usize + 1`, so `u64::MAX` — "everything retained" — panicked. Now saturating:
+the definition of correctness does not get to abort.
+
+### [T-04] 2026-09-02T04:15Z RESULT E1 re-run against a real oracle
+
+`cargo run --release -p experiments -- e1`. Two changes to what it measures:
+
+* the expected value comes from `conservation-suite`, not from `Ledger::reconstruct_balance`
+  compared with itself;
+* anchors are drawn from the whole retained history rather than fixed at the head.
+
+| seed | upqueries | evictions | divergences | rebuild mismatches | hit-path | miss-path | historical-anchor reads |
+|---|---|---|---|---|---|---|---|
+| 1 | 3,018 | 2,712 | 0 | 0 | 357 | 2,977 | 3,332 |
+| 7 | 3,023 | 2,698 | 0 | 0 | 352 | 2,982 | 3,333 |
+| 42 | 3,007 | 2,686 | 0 | 0 | 368 | 2,966 | 3,328 |
+| 100 | 2,990 | 2,662 | 0 | 0 | 385 | 2,949 | 3,331 |
+| 2024 | 3,017 | 2,703 | 0 | 0 | 358 | 2,976 | 3,332 |
+
+Still zero divergences, and now the claim is worth more: Table 9.1 previously reported
+~13,600 reconstructions agreeing with an oracle that was the same function, at a single
+anchor. The corrected run compares against an independent fold at ~3,330 *historical*
+anchors per seed. The rebuild-from-base check likewise now compares against the oracle
+rather than against the engine's own reconstruction.
+
+The hit-path column is small (~360 of ~3,330) and honestly so: with eight slots for forty
+accounts and anchors spread over the history, a read at a historical anchor pins its entry
+and the next read at a different anchor misses. Reported rather than tuned away.
+
+### [T-04] 2026-09-02T04:15Z TESTS niles 616/0/3 -> 638/0/3
+
+### [T-05] 2026-09-02T04:45Z RESULT Chapter 9 rewritten from the corrected instrument
+
+Tables 9.1 and 9.9 are now generated blocks, filled by `thesis/include-results.py` from
+`results/E1-correctness.md` and `results/E8-rungs.md`, both written by the harness itself
+rather than by a script run beside it. `thesis_drift.rs` gains two tests: the blocks must
+stay generated, and Appendix J must keep the refuted figures.
+
+**§9.4.3 is rewritten and its headline claim withdrawn.** "The tax for demanding freshness
+is not paid on the read path at all" is refuted. The corrected measurement:
+
+| Rung | deltas applied | maintenance passes | misses | base rows read | divergences |
+|---|---|---|---|---|---|
+| bounded(k=64) | 2,171 | 61 | 26,644 | 102,624 | 0 |
+| bounded(k=8) | 2,514 | 446 | 24,700 | 73,811 | 0 |
+| strict(k=0) | 3,621 | 4,017 | 19,658 | 40,869 | 0 |
+
+Replacement claim, written into §9.4.3, §9.5.2 and §9.12: a bounded rung buys fewer
+maintenance *passes* — the same deltas, folded less often — and pays for them in
+reconstruction, at 2.5x the base rows read.
+
+**Appendix J.16** retains the refuted table (55 / 408 / 3,621 deltas; misses varying by
+0.3%) with the mechanism that produced it, and J.15's count of "both wrong" rows goes from
+four to five. J.16 is the first row in that appendix refuted by *reading* an experiment
+rather than running one, and the appendix now says so: an experiment that reports counted
+work and never checks a value can be precise, reproducible across five seeds, and
+measuring its own defect.
+
+**Appendix K.6's "E8 null" narrative is corrected.** It presented the sequence
+null → diagnosis → re-instrumentation as evidence of care. The diagnosis was wrong: the
+null was real, and the re-instrumentation measured the defect more sharply. What closed it
+was an oracle column, not another counter.
+
+**§9.2.1 and K.3** now state what the E1 oracle is. The prose no longer claims an
+independent fold where there was a self-comparison, and the anchor discipline is named:
+about 3,330 of roughly 3,340 reads per seed are at a historical anchor.
+
+**Old names.** `results/e4.log`, `e56.log`, `e78.log`, `e9.log`, `e10.log` were stale
+captured transcripts carrying a "Kaskata research prototype" banner; the program has said
+"Niles" for some time. Regenerated from real runs. `grep -rli "kaskata\|upbasin"` over
+`results/`, `crates/` and `docs/` is now empty.
+
+### [T-05] 2026-09-02T04:45Z TESTS niles 638/0/3 -> 640/0/3
+
 ### [T-06] 2026-09-02T05:20Z RESULT Six durability holes, and the one that erased history
 
 All of F-28 and F-29 reproduced. The worst is not the one that looks worst.
@@ -1209,6 +1435,126 @@ that produced it. `--render` re-derives the table *from* the committed CSVs, whi
 that must not drift, and the durable run's own reproduction recipe is in `BENCHMARK.md`.
 
 `cd niles && make reproduce` → **exit 0** on a clean tree.
+
+### [T-18] 2026-09-02T14:30Z DECISION `txn` is evaluated; `hold`, `resolve` and `fx` are not
+
+F-25's agreement half is that conformance compared *renderings*. Fixing it needs a Niles
+function to be executable, and executing one needs a dynamic semantics for `txn`, `debit`,
+`credit` and `post`.
+
+They are **builtins**, not language features: entries in the interpreter's free-function table
+alongside `print` and `len`, with no change to the grammar and none to `niles-lang`. The forms
+were already Niles forms, checked statically by the effect calculus; what was missing was an
+evaluator, and an evaluator is what an interpreter is. Adding syntax here would have meant the
+language the interpreter runs is not the language the compiler checks.
+
+`hold`, `resolve`, `fx` and `fixpoint` stay refused by name, and a test asserts it, so that
+opening `txn` did not quietly open the others.
+
+### [T-18] 2026-09-02T14:35Z DECISION two tests inverted, and both inversions are the finding
+
+`the_relational_tier_is_refused_by_name_and_never_approximated` asserted that `txn` was
+refused, for the stated reason that *"a program could appear to conserve money while nothing
+checked it"*. That was the right worry and refusing the form was the wrong answer to it: a form
+nobody can execute is a form nobody can compare against a second implementation, which is how a
+conformance suite ends up comparing renderings. The worry is now answered by the seal — an
+unbalanced set is refused by currency with its residual named — and the test asserts that
+property instead of the refusal of the syntax.
+
+`bootstrap_stages.rs`'s version now checks the second half by **running** the bootstrap lexer
+and asserting it sealed nothing. The grep it replaced would have called the sample program
+inside a string literal in `bootstrap/lexer.niles` a breach.
+
+### [T-18] 2026-09-02T14:40Z MISMATCH-T-18-normalised-fields the contract said two fields, the languages need three
+
+*Work order §5, T-18, interface contract, verbatim:*
+
+> `// conformance.rs: NORMALISED_FIELDS: &[&str] = &["stamp.system_epoch", "entry_id"]  — the
+> only fields removed before comparison; any other difference is a failure.`
+
+*What the code needs:*
+
+> `pub const NORMALISED_FIELDS: &[&str] = &["entry.id", "entry.stamp.system_epoch",
+> "entry.narrative"];`
+
+*Proposed replacement, and why.* `entry.narrative` is a per-leg free-text annotation.
+`gbs-products` sets one on most legs — `"drawdown under fac-1"`, `"novation of t1 to the
+clearing house"` — and **the schema has no syntax for one at all.** With two normalised fields
+the comparison fails on every narrated product for a reason that is not about money.
+
+The alternative was to invent a narrative form in Niles so that a test would pass, which is a
+language change made to satisfy an assertion and is the class of move this review exists to
+catch. It is normalised instead, listed in the constant, written into the fixture files so a
+fixture generated under a different normalisation is refused, and stated in `ARCHITECTURE.md`
+§7. It remains a gap: two implementations that agree on every posting and disagree about what
+the posting *says* are not the same document, and a hash chain covering the narrative would
+diverge.
+
+### [T-18] 2026-09-02T15:10Z RESULT Every transaction in `gbs.niles` had one identity
+
+The finding, and the reason for the whole task. Seven of the nine functions hard-coded a
+constant idempotency key:
+
+```
+txn idem("draw-gbs-1", window: 30.days)      // syndicated_drawdown
+txn idem("close-gbs-1", window: 30.days)     // close_offering
+txn idem("novate-gbs-1", window: 30.days)    // novate
+```
+
+The Rust products derive theirs from the business event: `draw-fac-1-req-1` names the facility
+and the request, `close-ipo-1` names the offering, `novate-t1` names the trade.
+
+**Idempotency is the ledger's, and a constant key destroys it.** A second drawdown under any
+facility carries the identity of the first and is refused as a duplicate — the transaction is
+correct, conserves, passes every static obligation, and cannot be committed. The failure mode
+is worse than losing money: it is silently refusing a legitimate one and telling the caller it
+has already happened.
+
+Nothing had noticed because nothing could look. The shape comparison this replaces reported
+legs — direction, account, amount — and the transaction identity is not a leg. The legs matched
+**byte for byte in all seven**; the whole divergence was in the field the old comparison had no
+way to read.
+
+The seven now take the identity as a parameter (`request: str`), which `nilesc check` accepts
+and proves conservation over unchanged: 12 functions, 11 obligations proved statically, 0
+discharged to the runtime.
+
+### [T-18] 2026-09-02T15:20Z RESULT 7 of 9 conform by execution; the two that do not
+
+`the_two_implementations_seal_the_same_document` runs each transaction on both sides and
+compares the canonical encoding. Seven agree byte for byte. Two diverge, each on one named
+field, and both are gaps in what the schema can say rather than defects in the products:
+
+* **`MISMATCH-T-18-close_offering` — `entry 0.consumes`.** Rust:
+  `Some("hold:sub-ipo-1-anchor")`. Niles: `None`. `Offering::close` consumes three subscription
+  holds, which is what makes a closing atomic against the encumbrances it releases; the
+  schema's `close_offering` moves the money and resolves nothing, so it declares a closing
+  after which three subscribers are still encumbered. **Proposed replacement:** the schema's
+  `close_offering` resolves each subscription hold inside the `txn`. That needs `resolve`,
+  which the interpreter refuses by name, so applying the fix converts this entry into
+  `BLOCKED-T-18-close_offering` naming `resolve` rather than into agreement. Not applied here:
+  it is a change to the schema's semantics, and T-18's scope is the comparison.
+* **`MISMATCH-T-18-position_account` — `entry 0.value_date`.** Rust: `35`. Niles: `0`. The
+  cash-management run stamps a value date; `liquidity.rs`'s own comment says *when the balance
+  was read* is the entire difference between cash management and a sweep. **Niles has no form
+  for a per-leg value date inside a `txn`**, so the one thing distinguishing this product line
+  is the one thing the schema cannot declare. **Proposed replacement:** a value-date form on a
+  leg — `credit(funding, amount) valid @day` or similar — is a language addition and belongs in
+  Appendix B, not in a conformance fix.
+
+Both are pinned in `KNOWN_DIVERGENCES` with their exact field. That list is not a suppression
+list and a test enforces it: an unexpected divergence fails, a recorded one on a different
+field fails, and a recorded one that *disappears* fails — so the good news cannot land
+silently either.
+
+### [T-18] 2026-09-02T15:25Z TESTS niles 615/0/4 -> 634/0/4; `-p nilesc --test run` 8 new
+
+`cargo test -p nilesc --test run` → 8 passed, one per exit path.
+`cargo test -p niles-interp` → 71 passed (41 lib + 16 + 14).
+`cd gbs && NILES_ROOT=../niles cargo test -p gbs-products --test conformance` → 7 passed,
+printing `7 of 9 conform by execution; 2 diverge as recorded`.
+
+### [T-18] 2026-09-02T15:26Z DONE F-25 (agreement half) closed — the commit below, and the GBS side on `review/F-11-F-13` there
 
 ### [T-17] 2026-09-02T15:10Z MISMATCH-F-07 Theorem 4.3′ rests on a premise its own §4.8 refutes
 

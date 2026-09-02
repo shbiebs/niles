@@ -196,9 +196,12 @@ impl Oracle {
     }
 
     fn rows_upto(&self, anchor: u64) -> impl Iterator<Item = &Row> {
+        // `saturating_add`: an anchor of `u64::MAX` means "everything retained", and
+        // panicking on it would make the oracle refuse the one question it exists to
+        // answer. The oracle is the definition of correctness; it does not get to abort.
         self.epochs
             .iter()
-            .take(anchor as usize + 1)
+            .take((anchor as usize).saturating_add(1))
             .flat_map(|e| &e.rows)
     }
 

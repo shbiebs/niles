@@ -11,12 +11,22 @@
 //! nilesc verify  FILE     run the IR verifier over the lowered circuit
 //! nilesc effects FILE     the inferred effect row of every function
 //! nilesc postings FILE FN the legs a function declares, in source order
+//! nilesc run     FILE FN  *execute* FN and print the canonical bytes it posts
 //! nilesc plan    FILE     the materialization plan the optimizer would choose
 //! ```
+//!
+//! `postings` and `run` are the two halves of conformance and the difference between them is
+//! the whole of finding F-25. `postings` reports the shape a function *declares* — a rendering
+//! — and two implementations can agree on a rendering while producing different documents.
+//! `run` executes the function over an in-memory ledger and prints the canonical encoding of
+//! the set it sealed, which is the artefact a hash chain would cover. Agreement on that is
+//! agreement.
 //!
 //! Exit code 0 iff no errors. Warnings do not fail the build; that is what makes the
 //! missing-contract warning usable during migration rather than a wall.
 
+use niles_interp::ledger;
+use niles_interp::{Error as InterpError, Interp, Value};
 use niles_ir::{upquery_path, verify};
 use niles_lang::{lower, parser, resolve, typecheck};
 use std::process::ExitCode;
@@ -199,6 +209,22 @@ fn main() -> ExitCode {
                 }
             }
         }
+        // Execute a function and print the canonical bytes of the set it posted.
+        //
+        // Exit 2 on `NotInSubset`, naming the construct, because the caller's next move
+        // depends on which it was: a language gap is a `BLOCKED-T-18-<function>` in a build
+        // log, and a wrong answer is a defect. Exit 1 on any other refusal.
+        "run" => {
+            if failed {
+                eprintln!("nilesc: {path} does not check; refusing to run it");
+                return ExitCode::from(1);
+            }
+            let Some(function) = args.get(3) else {
+                eprintln!("nilesc: `run` needs a function name\n{USAGE}");
+                return ExitCode::from(2);
+            };
+            return run_function(&prog, path, function, &args);
+        }
         other => {
             eprintln!("nilesc: unknown command `{other}`\n{USAGE}");
             return ExitCode::from(2);
@@ -223,6 +249,8 @@ USAGE:
     nilesc verify  FILE        run the IR verifier
     nilesc effects FILE        inferred effect rows
     nilesc postings FILE [FN]  the legs a function declares, for conformance
+    nilesc run     FILE FN     execute FN; print the canonical encoding of its posting set
+                               [--ledger FIXTURE] [--args FIXTURE]
 ";
 
 fn describe_item(i: &niles_lang::ast::Item) -> String {
@@ -283,4 +311,205 @@ fn describe_item(i: &niles_lang::ast::Item) -> String {
         Item::Error(_) => "<parse error>".into(),
         _ => "item".into(),
     }
+}
+
+// ── `nilesc run`: executing conformance ─────────────────────────────────────────────
+
+/// Execute `function` over an in-memory ledger and print the canonical encoding of the
+/// posting set it sealed, as lower-case hex, on one line.
+///
+/// # Why one line of hex on stdout
+///
+/// The consumer is a test in another repository that has just built the same transaction with
+/// a different implementation and encoded it with a different encoder. What it needs is a
+/// value it can compare for equality and print in a failure message. Hex on stdout is a value
+/// a shell, a test harness and a person can each handle; a binary stream is none of those, and
+/// a structured format would be a third thing to keep in agreement.
+///
+/// # Exit codes, and why `NotInSubset` gets its own
+///
+/// * `0` — the function ran and its set is on stdout.
+/// * `1` — the function ran and was refused (the set does not conserve), or the file does not
+///   check.
+/// * `2` — the function could not be run: no such function, a bad fixture, or a construct
+///   outside the interpretable subset. The last is printed as `NotInSubset: <form>` so a
+///   caller can distinguish "this language cannot express the run" from "this run was wrong" —
+///   the first is a gap to record, the second is a defect to fix, and a single exit code for
+///   both would let a gap be reported as a failure and a failure as a gap.
+fn run_function(
+    prog: &niles_lang::ast::Program,
+    path: &str,
+    function: &str,
+    args: &[String],
+) -> ExitCode {
+    let mut it = Interp::new();
+    it.load(prog);
+    if !it.function_names().iter().any(|n| n == function) {
+        // Distinguished from a function that posts nothing, which succeeds and prints the
+        // encoding of an empty set. A test that could not tell the two apart would pass
+        // against a typo in the function name.
+        eprintln!("nilesc: {path} declares no function `{function}`");
+        return ExitCode::from(2);
+    }
+
+    if let Some(f) = flag(args, "--ledger") {
+        match std::fs::read_to_string(&f) {
+            Ok(text) => {
+                if let Err(e) = seed_ledger(&mut it, &text) {
+                    eprintln!("nilesc: {f}: {e}");
+                    return ExitCode::from(2);
+                }
+            }
+            Err(e) => {
+                eprintln!("nilesc: cannot read {f}: {e}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+
+    let call_args = match flag(args, "--args") {
+        None => Vec::new(),
+        Some(f) => match std::fs::read_to_string(&f) {
+            Ok(text) => match parse_args(&text) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("nilesc: {f}: {e}");
+                    return ExitCode::from(2);
+                }
+            },
+            Err(e) => {
+                eprintln!("nilesc: cannot read {f}: {e}");
+                return ExitCode::from(2);
+            }
+        },
+    };
+
+    match it.call(function, call_args) {
+        Ok(_) => {}
+        Err(InterpError::NotInSubset { form, .. }) => {
+            eprintln!("nilesc: NotInSubset: {form}");
+            return ExitCode::from(2);
+        }
+        Err(e) => {
+            eprintln!("nilesc: {function}: {}", e.message());
+            return ExitCode::from(1);
+        }
+    }
+
+    let sealed = &it.ledger.sealed;
+    if sealed.len() != 1 {
+        // A conformance fixture compares *one* posting set. A function that sealed none or
+        // several is not a failure of the function — `main` legitimately seals several — but
+        // it is a question this command cannot answer, and answering it with the first or the
+        // last would be a silent choice.
+        eprintln!(
+            "nilesc: {function} sealed {} posting sets; `run` compares one",
+            sealed.len()
+        );
+        return ExitCode::from(2);
+    }
+    let set = &sealed[0];
+    println!("{}", ledger::hex(&ledger::encode(&set.txn, &set.legs)));
+    if it.ignored_windows() > 0 {
+        // Not a warning that changes the answer, and said out loud anyway: the window is part
+        // of what the schema declares and nothing here honoured it.
+        eprintln!(
+            "nilesc: note: {} `idem` window(s) were not honoured; this interpreter has no \
+             idempotency store, and the identity is what the encoding carries",
+            it.ignored_windows()
+        );
+    }
+    ExitCode::SUCCESS
+}
+
+/// The value after a `--flag`.
+fn flag(args: &[String], name: &str) -> Option<String> {
+    let i = args.iter().position(|a| a == name)?;
+    args.get(i + 1).cloned()
+}
+
+/// Seed the ledger from a fixture.
+///
+/// The format is one directive per line; `#` starts a comment and blank lines are ignored:
+///
+/// ```text
+/// account <name> <currency> <scale>
+/// open    <name> <currency> <minor>
+/// ```
+///
+/// Deliberately not a general-purpose format. It exists so a run can start from a stated
+/// world rather than from nothing, and every field it carries is a field a posting set needs.
+fn seed_ledger(it: &mut Interp, text: &str) -> Result<(), String> {
+    for (n, line) in text.lines().enumerate() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let f: Vec<&str> = line.split_whitespace().collect();
+        let at = n + 1;
+        match f.as_slice() {
+            ["account", name, currency, scale] => {
+                let scale: u32 = scale
+                    .parse()
+                    .map_err(|_| format!("line {at}: `{scale}` is not a scale"))?;
+                if !it.ledger.declare(name, currency, scale) {
+                    return Err(format!(
+                        "line {at}: {name} was already declared with a different currency or scale"
+                    ));
+                }
+            }
+            ["open", name, currency, minor] => {
+                let minor: i128 = minor
+                    .parse()
+                    .map_err(|_| format!("line {at}: `{minor}` is not an amount in minor units"))?;
+                it.ledger.open_balance(name, currency, minor);
+            }
+            _ => return Err(format!("line {at}: `{line}` is not a directive")),
+        }
+    }
+    Ok(())
+}
+
+/// Parse the argument fixture into interpreter values.
+///
+/// One argument per line, tagged with its type, in the order the function declares them:
+///
+/// ```text
+/// acct  loan.fac-1.agent      # an Id<Account>: carried as its name
+/// money -25000 USD 2          # signed minor units, currency, scale
+/// int   7
+/// str   hello
+/// ```
+///
+/// Tagged rather than inferred. An untagged `100` could be an integer or an amount, and an
+/// interpreter that guessed would produce a posting set that balanced by coincidence.
+fn parse_args(text: &str) -> Result<Vec<Value>, String> {
+    let mut out = Vec::new();
+    for (n, line) in text.lines().enumerate() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let f: Vec<&str> = line.split_whitespace().collect();
+        let at = n + 1;
+        let v = match f.as_slice() {
+            ["acct", name] | ["str", name] => Value::Str(std::rc::Rc::new((*name).to_string())),
+            ["int", i] => Value::Int(
+                i.parse()
+                    .map_err(|_| format!("line {at}: `{i}` is not an integer"))?,
+            ),
+            ["money", minor, currency, scale] => Value::Money {
+                minor: minor
+                    .parse()
+                    .map_err(|_| format!("line {at}: `{minor}` is not minor units"))?,
+                scale: scale
+                    .parse()
+                    .map_err(|_| format!("line {at}: `{scale}` is not a scale"))?,
+                currency: (*currency).to_string(),
+            },
+            _ => return Err(format!("line {at}: `{line}` is not an argument")),
+        };
+        out.push(v);
+    }
+    Ok(out)
 }

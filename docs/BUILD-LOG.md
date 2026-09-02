@@ -1907,3 +1907,42 @@ heading, and the generated Part V states both numbers.
 | V-18 | **7 of 9 conform by execution**; the two divergences named with their fields |
 | V-19 | `make reproduce` exit 0 |
 | V-Σ | counts above, in both build logs |
+
+### [T-17] 2026-09-02T18:35Z LC-4 Does the served answer depend on anything but the circuit, the parameters and the anchor?
+
+*Question.* Does the served answer depend on anything other than the verified circuit, the
+parameters and the anchor?
+
+**Answer: No; `pick_view` and `extract_keys` no longer exist.**
+
+Both are gone from `crates/nilestream-server/src/`, and the only occurrences of either name in
+the repository are two comments recording what they did — `pick_view` returned the constant
+`"__wire_result"` and `extract_keys` scraped digit runs out of the query *text*, so two
+different questions about one account returned the same number and the compiler was a
+decoration on a fixed answer.
+
+`Session::query` now takes `(&Circuit, output_name, anchor)` and nothing else, and
+`RevEngine::query` evaluates that circuit over the base at that anchor. The remaining
+question-shaped dependence is the anchor-index **predicate pushdown**, which narrows the source
+scan when it can read an `acct = k` restriction out of the circuit — and it is a narrowing of
+the *input*, not a choice of answer, which is why it carries two obligations:
+`the_pushdown_and_the_full_scan_agree` and
+`a_predicate_the_pushdown_does_not_understand_abandons_the_restriction`. A pushdown that
+guessed would be `pick_view` in a better disguise.
+
+### [T-17] 2026-09-02T18:40Z LC-5 Every Part 0 row: module, column, protocol path, attribution
+
+*Question.* For each Part 0 row, which workload module and which CSV column produced the
+Measured value, over which protocol path, and to which limitations-list item is any NOT MET
+attributed?
+
+| Part 0 row | Workload module | CSV column | Protocol path | Verdict → attribution |
+|---|---|---|---|---|
+| **OLTP, durable, strictly serializable** (5–10×) | `bank-bench::workloads::oltp` → `results/E16-wallclock/oltp.csv` | `ops_per_sec`, median of 5 runs | `simple` (column `protocol_path`, one value per run pair) | **NOT MET** at 0.93× → `BENCHMARK.md` limitation **3** (the simple path compiles every statement afresh) and **6** (two cores against a 48-core baseline figure), plus the global lock recorded as limitation **1** and now stated in thesis §9.14.1 |
+| **Scan-heavy analytical** (10–12×) | `bank-bench::workloads::analytical` → `analytical.csv` | `ops_per_sec`, median of 5 | `simple` | **NOT MET** at 0.13× → limitation **4** (an unkeyed `group by` materialises the whole base per query) and the three named constructs outside the lowered fragment, which make the row five PostgreSQL statements against three |
+| **Point lookup by primary key** (parity) | `bank-bench::workloads::point` → `point.csv` | `p99_us`, median of 5; `miss_rate` alongside | `simple` | **PARITY** at 0.93×, with `miss_rate = 1.00` — every read an anchored reconstruction, which is a stronger result than parity with a warm cache and is stated as such |
+| **Durable single-commit latency** (parity) | `bank-bench::workloads::durable` → `durable.csv` | `ops_per_sec`, median of 5; `durable` column asserted true by asking the server `select nilestream_durability` | `simple` | **PARITY** at 0.82×, `synchronous_commit = on` against `SyncPolicy::Always` on the same device |
+
+No blank cell. The four Part 0 rows this table covers are the four the harness runs; the other
+five rows of `SPEC-ENGINE.md`'s Part 0 table are marked *not available* there and no measured
+value is claimed for any of them.

@@ -630,3 +630,31 @@ intent should be stated rather than inherited from a default. Now explicit.
 
 `niles` 600/0/3 → 600/0/3. Format: 1,274 diffs → 0. Clippy: ~55 warnings + 1 deny-level
 error → 0.
+
+### [T-02] 2026-09-02T02:25Z LC-1 The effective anchor of a cold-but-resident key
+
+*Question.* Where does a cold-but-resident key's effective anchor come from at a stride
+boundary, and what is rewritten per epoch?
+
+*Answer.* **From the view's `applied`, inherited on read; nothing per entry is rewritten
+in an epoch that carried no delta for it.**
+
+The view holds one `applied: Epoch`. A resident entry holds its own `stamp`, written only
+when a delta actually touched it. A read computes the effective anchor as
+`max(stamp, applied)` and the certification invariant is that this value is honest: every
+delta in `(stamp, applied]` has either been applied to the entry or did not exist for that
+key. Maintenance therefore stays O(deltas) rather than O(resident) — the alternative,
+stamping every resident entry on every epoch, would measure the harness instead of the
+design, which Appendix K.6 already records as an instrumentation decision.
+
+The reason this has to be written down before the code is that the bug it prevents is
+invisible until a cold key is read at a lax rung. A per-entry frontier updated only on
+touch would leave a key that received no delta for a thousand epochs still claiming its
+thousand-epoch-old anchor, and `BS(K,T)` would fail for exactly the keys that are cheapest
+to serve. Inheritance is what makes "no delta means the value is unchanged" a property of
+the view rather than a hope about each entry.
+
+The converse obligation is the one T-02 is closing: inheritance is only sound if `applied`
+never runs ahead of the deltas actually folded in. F-03 is precisely that failure — a
+stride boundary that advanced `applied` past epochs whose deltas were never applied to
+anyone — so `advance` must fold every epoch in `(applied, e]`, not only `e`.

@@ -178,13 +178,100 @@ independent oracle rather than against itself; that the unnested form removes a 
 measured, with the constant-factor regime where it does not; and that the verifier now
 refuses both a dependent join on a served path and a semi-join wide enough to duplicate.
 
-**Does not establish.** That a correlated subquery is *reachable from the language*. The
-surface syntax has no `exists` form and `lower.rs` produces no `Apply`; the corpus builds
-its circuits directly. That is the next step and it is a language-surface task, not an
-optimizer one. Until it is done, L-15 remains partial: the rewrite exists and is verified,
-and nothing a user can write reaches it.
+**Establishes, as of the surface round below.** That a query a user can write reaches the
+rewrite: `select k from t where exists (select 1 from u where u.k = t.k)` lowers to an
+`Apply` with the correlation extracted, and `unnest` turns it into a semi-join.
+
+**Does not establish.** That a *scalar* subquery is reachable from the surface. The rewrite
+is built and in the corpus; the projection path in `lower.rs` does not yet emit an `Apply`
+for one, so that form is verified but unreachable. Nor are subqueries in `having`, nor
+`in` over a row constructor, which is refused by name (NL0502) rather than approximated.
 
 **Does not establish.** Anything about wall-clock. Counted work is the right unit for a
 *rewrite* gate — a rewrite either does less work or it does not, and that is a property of
 the plan rather than of the machine — but it is not a substitute for E16's wall-clock
 measurement, and the two answer different questions.
+
+
+---
+
+# Round 2 — the surface, and two defects found on the way to it
+
+The rewrite above was measured against circuits built by hand, because nothing a user
+could write reached it: the AST had no `exists`, and `lower.rs` produced no `Apply`. Round
+2 closes that path — and found, in the first five minutes, a defect that had nothing to do
+with subqueries and was considerably worse than the feature being added.
+
+## The path
+
+`Expr::Exists { query }` in the AST, parsed by `exists (select …)`. `not exists` needs no
+variant: it parses as `Unary { Not, Exists }`, because `not` is an ordinary prefix operator
+and a fused node would put two spellings of one thing in the tree. `x in (select …)` and
+`x not in (select …)` already parsed, as `Binary { In | NotIn, rhs: Expr::Select }`.
+
+Lowering splits a `where` clause into subquery predicates and a residual. Only **top-level
+conjuncts** are lifted: a subquery under an `or` stays where it is and is then refused,
+because an `Apply` is a pipeline node and cannot be one arm of a disjunction without first
+becoming a semi-join and a union — a different rewrite, not implemented. Refusing loudly
+beats lowering something that is not the query that was written.
+
+The correlation is read out of the subquery's own `where`: an equality whose two sides
+belong to different relations is a correlation pair, and everything else stays as a filter
+on the inner side.
+
+## Defect 3 — the qualifier has to decide
+
+The first version of that split asked "which schema does this name resolve in". For the
+commonest correlated predicate there is — `where u.k = t.k` — the answer is *both*, since
+both relations have a column called `k`. The rule gave up and left the equality as a filter
+on the inner side, where it lowered to `k = k`: always true, so the subquery matched every
+row and the `exists` became a no-op that returned the whole outer relation.
+
+The fix reads the qualifier and uses the relation it names, falling back to resolution only
+when there is no qualifier to read. `the_qualifier_decides_which_side_a_correlation_column_is_on`
+pins both halves: the correlation is found, *and* no leftover filter is left behind
+restating it as a tautology.
+
+## Defect 4 — `=` in a `where` clause, and the silent `true`
+
+`select k from t where t.z = 1` lowered to `Filter { predicate: LitBool(true) }`. The view
+returned every row. Two independent faults compounded:
+
+1. **The parse.** Niles's two ancestries disagree about one character. In Rust `a = b`
+   assigns; in SQL's `where` clause it compares, and SQL has no assignment expression at
+   all. The parser took the Rust reading everywhere, so the predicate became an `Assign`
+   node — a form no `where` clause can contain.
+2. **The lowering.** All three predicate sites read
+   `self.scalar(..).unwrap_or(Scalar::LitBool(true))`. A predicate with no lowering became
+   the constant `true`, so the clause was discarded silently.
+
+Either alone is a bug; together they are the `Err(_) => 0` defect of §1.1.1 at plan level.
+The query looked correct, the plan verified, and no answer-level test could catch it,
+because every row it returned was a real row. Only reading the circuit found it.
+
+The parser now carries a `sql_depth` counter — inside a SQL statement `=` is equality —
+and `Lx::predicate` replaces the fallback with a diagnostic (NL0501). There is deliberately
+no safe default: `true` returns rows that should have been filtered out and `false` hides
+rows that exist, so the only honest behaviour is to refuse the view and name the predicate.
+`an_unlowerable_predicate_is_an_error_and_not_a_default` pins that, including that the
+specific message *replaces* the generic "this view has no lowering" rather than joining it.
+
+This is the third time in this programme that a "reasonable default" for an absence has
+turned out to be a wrong answer wearing a plausible shape — after `Err(_) => 0` in the
+kernel and `sum` of an empty group. The pattern is worth naming in §11.5.
+
+## Results — round 2
+
+| Check | Result |
+|---|---|
+| `exists`, `not exists`, `in (select)`, `not in (select)` parse | **pass** |
+| Each lowers to an `Apply` with the correlation extracted | **pass**, 4 forms |
+| A local subquery predicate stays a filter on the inner side | **pass** |
+| A conjunct beside a subquery keeps its column index across the apply | **pass** |
+| A subquery under an `or` is refused (NL0501) | **pass** |
+| A multi-column `in` is refused by name (NL0502) | **pass** |
+| `=` in a `where` clause is a comparison; assignment survives outside SQL | **pass** |
+| A `where` clause reaches the circuit as a predicate, never as `true` | **pass** |
+| All four surface forms reach their rewrite end to end | **pass** |
+
+`crates/niles-lang/tests/subqueries.rs`, 15 tests.

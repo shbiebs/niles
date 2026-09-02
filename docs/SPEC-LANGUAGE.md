@@ -253,7 +253,7 @@ optimizer investment MUST be the unnesting rules.**
 
 *Acceptance test.* A correlated `exists` subquery MUST lower to a semi-join, not to a nested
 loop with a per-tuple subplan. A benchmark comparing the two forms MUST show the ratio.
-**Status: Partial** — the rewrite is built and verified; the surface is not.
+**Status: Built**, with one form still unreachable.
 
 `nilestream-optimizer::unnest` implements five rewrites (`exists`, `not exists`, `in`,
 `not in`, correlated scalar), checked over a 24-case corpus **denotationally** — nested and
@@ -267,10 +267,21 @@ a representation at all — and it is *not incremental*, so `verify` refuses it 
 path), `niles-ir::value` (the IR had no null, so `not in` was unstatable), and a single
 shared reference evaluator.
 
-What is **not** done is the surface: there is no `exists` expression in the AST and
-`lower.rs` produces no `Apply`, so nothing a user can write reaches the rewrite. The corpus
-builds circuits directly. Until that is closed, this requirement is partial and saying
-otherwise would be claiming a language feature on the strength of an optimizer one.
+The surface reaches it: `exists`, `not exists`, `in (select …)` and `not in (select …)` in
+a `where` clause parse, lower to an `Apply` with the correlation extracted from the
+subquery's own predicate, and unnest. `crates/niles-lang/tests/subqueries.rs` checks the
+path end to end.
+
+Still unreachable: a **scalar** subquery in a projection — the rewrite is built and in the
+corpus, the projection path does not yet emit an `Apply` for one. Also refused by name
+rather than approximated: a subquery under an `or` (NL0501) and a multi-column `in`
+(NL0502).
+
+Closing this path found two defects that had nothing to do with subqueries. `=` in a SQL
+`where` clause parsed as an *assignment*, and lowering then replaced the unlowerable
+predicate with `LitBool(true)` — so `select k from t where t.z = 1` returned every row,
+from a query that looked correct and a plan that verified. Both are fixed, both are pinned,
+and `results/E17-unnesting.md` round 2 records them.
 
 ---
 
@@ -406,7 +417,7 @@ Stated because a specification that named no limits would be marketing.
 | Part | Requirements | Built | Partial | Specified | Adopt |
 |---|---|---|---|---|---|
 | Execution model | L-1, L-2, L-6, L-16, L-17, L-13, L-22 | 1 | 1 | 4 | 1 |
-| Query semantics | L-5, L-8, L-9, L-10, L-11, L-15, L-18, L-19, L-23 | 3 | 2 | 3 | 1 |
+| Query semantics | L-5, L-8, L-9, L-10, L-11, L-15, L-18, L-19, L-23 | 4 | 1 | 3 | 1 |
 | Correctness | L-3, L-4, L-7, L-12, L-14, L-20, L-21, L-24 | 6 | 1 | 1 | 0 |
 
 **Ten of twenty-four built with passing tests. Three partial. Nine specified. Two adopt.**

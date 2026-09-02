@@ -81,10 +81,17 @@ counted work over a purpose-built corpus as a function of scale. What can be sai
 the ratio is unbounded in `k` rather than a constant, which is the property the phase was
 after; a wall-clock comparison waits on the surface syntax below.
 
-**Still open.** A correlated subquery is not reachable *from the language*. The surface has
-no `exists` form and `lower.rs` produces no `Apply`; the corpus builds circuits directly.
-L-15 is therefore partial: the rewrite exists and is verified, and nothing a user can write
-reaches it. That is a language-surface task, not an optimizer one.
+**The surface, and two more defects.** `exists`, `not exists`, `in (select …)` and
+`not in (select …)` now parse and lower to an `Apply` with the correlation extracted, so a
+query a user can write reaches the rewrite (`crates/niles-lang/tests/subqueries.rs`).
+Closing that path turned up two defects that had nothing to do with subqueries: a
+correlation whose two columns shared a name was left behind as the tautology `k = k`,
+making `exists` a no-op; and `=` in a SQL `where` clause parsed as an *assignment*, which
+lowering then replaced with `LitBool(true)` — so `where t.z = 1` returned every row. Both
+fixed and pinned; `results/E17-unnesting.md` round 2.
+
+**Still open.** A **scalar** subquery in a projection: the rewrite is built and in the
+corpus, the projection path does not yet emit an `Apply` for one.
 
 ---
 

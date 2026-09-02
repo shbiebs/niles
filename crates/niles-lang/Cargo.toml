@@ -7,3 +7,9 @@ authors.workspace = true
 
 [dependencies]
 niles-ir = { path = "../niles-ir" }
+
+[dev-dependencies]
+# The end-to-end subquery test asserts that a query a user can write reaches the
+# optimizer's unnesting rewrite. That claim spans two crates, so the test does too. Not a
+# cycle: the optimizer depends on `niles-ir`, not on this crate.
+nilestream-optimizer = { path = "../nilestream-optimizer" }

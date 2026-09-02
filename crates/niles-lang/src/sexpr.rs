@@ -462,6 +462,7 @@ pub fn expr(e: &Expr) -> String {
         Reproduce { .. } => unsupported("reproduce"),
         Impact { .. } => unsupported("impact"),
         Sql { .. } => unsupported("sql"),
+        Exists { .. } => unsupported("exists"),
         Select(_) => unsupported("select"),
     }
 }

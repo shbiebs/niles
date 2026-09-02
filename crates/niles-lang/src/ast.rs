@@ -502,6 +502,12 @@ pub enum Expr {
     Impact { target: Box<Expr>, span: Span },
     /// `sql { select .. }` — the SQL surface, lowering to the same IR.
     Sql { inner: Box<Expr>, span: Span },
+    /// `exists (select ..)` — a subquery in predicate position.
+    ///
+    /// `not exists (..)` has no variant of its own: it parses as `Unary { Not, Exists }`,
+    /// because `not` is an ordinary prefix operator and giving the pair a fused node would
+    /// mean two spellings of one thing in the tree. Lowering matches on the pair.
+    Exists { query: Box<SelectStmt>, span: Span },
     /// A SQL `select` as written, before it is rewritten into a pipeline.
     Select(Box<SelectStmt>),
 
@@ -757,6 +763,7 @@ impl Expr {
             | Reproduce { span, .. }
             | Impact { span, .. }
             | Sql { span, .. } => *span,
+            Exists { span, .. } => *span,
             Path(p) => p.span,
             Block(b) => b.span,
             Select(s) => s.span,

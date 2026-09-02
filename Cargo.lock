@@ -44,6 +44,7 @@ name = "niles-lang"
 version = "0.1.0"
 dependencies = [
  "niles-ir",
+ "nilestream-optimizer",
 ]
 
 [[package]]

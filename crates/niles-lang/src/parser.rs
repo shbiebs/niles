@@ -45,12 +45,23 @@ pub struct Parser<'a> {
     /// introduces an *alias*, not a cast. Both readings are legal Niles elsewhere, and the
     /// ambiguity is genuinely local: only SQL clause position disambiguates them.
     no_alias_depth: u32,
+    /// Non-zero while parsing inside a SQL statement, where **`=` is equality**.
+    ///
+    /// Niles has two ancestries and they disagree about one character. In Rust `a = b` is
+    /// an assignment; in SQL's `where` clause it is a comparison, and SQL has no
+    /// assignment expression at all. Before this counter existed, `select k from t where
+    /// t.z = 1` parsed as an `Assign`, lowering had no case for it, and the predicate
+    /// became `LitBool(true)` — a `where` clause silently discarded, returning every row
+    /// from a query that looked correct. That is the same shape as the `Err(_) => 0`
+    /// defect of §1.1.1, one level up, and it is the reason both this counter and the
+    /// diagnostic that replaced the `true` fallback exist.
+    sql_depth: u32,
 }
 
 /// Parse a whole file. Always returns a program; the diagnostics say whether it is sound.
 pub fn parse_program(src: &str) -> (Program, Diagnostics) {
     let (toks, lex_errors) = lex(src);
-    let mut p = Parser { toks, pos: 0, src, diags: Diagnostics::new(), fuel: 100_000, no_struct_depth: 0, no_alias_depth: 0 };
+    let mut p = Parser { toks, pos: 0, src, diags: Diagnostics::new(), fuel: 100_000, no_struct_depth: 0, no_alias_depth: 0, sql_depth: 0 };
     for e in lex_errors {
         p.diags.push(Diagnostic::error(e.code, e.msg).primary(e.span, "here"));
     }
@@ -61,7 +72,7 @@ pub fn parse_program(src: &str) -> (Program, Diagnostics) {
 /// Parse a single expression, for tests and for the REPL.
 pub fn parse_expr(src: &str) -> (Expr, Diagnostics) {
     let (toks, _) = lex(src);
-    let mut p = Parser { toks, pos: 0, src, diags: Diagnostics::new(), fuel: 100_000, no_struct_depth: 0, no_alias_depth: 0 };
+    let mut p = Parser { toks, pos: 0, src, diags: Diagnostics::new(), fuel: 100_000, no_struct_depth: 0, no_alias_depth: 0, sql_depth: 0 };
     let e = p.expr();
     (e, p.diags)
 }
@@ -1312,7 +1323,8 @@ impl<'a> Parser<'a> {
             if self.burn() {
                 return lhs;
             }
-            // Assignment is right-associative and lowest; handled outside the table.
+            // Assignment is right-associative and lowest; handled outside the table — and
+            // does not exist at all inside a SQL statement, where `=` is equality.
             //
             // The right-hand side is parsed at binding power **0**, not 1. At 1 the inner
             // call cannot take an assignment of its own — the guard above is `min_bp == 0`
@@ -1321,7 +1333,7 @@ impl<'a> Parser<'a> {
             // because no test asked, and it was found when a second implementation of the
             // same grammar (`bootstrap/parser.niles`) was written against Appendix B.10.1 and
             // the two disagreed. That is the whole argument for having two.
-            if min_bp == 0 && self.at(&Tok::Eq) {
+            if min_bp == 0 && self.sql_depth == 0 && self.at(&Tok::Eq) {
                 self.bump();
                 let value = self.expr_bp(0);
                 let span = lhs.span().to(value.span());
@@ -1344,6 +1356,9 @@ impl<'a> Parser<'a> {
 
     fn peek_binop(&self) -> Option<BinOp> {
         Some(match self.cur() {
+            // SQL's `=`. Outside a SQL statement this token never reaches here, because
+            // `expr_bp` takes it as an assignment first.
+            Tok::Eq if self.sql_depth > 0 => BinOp::Eq,
             Tok::Plus => BinOp::Add,
             Tok::Minus => BinOp::Sub,
             Tok::Star => BinOp::Mul,
@@ -1763,6 +1778,16 @@ impl<'a> Parser<'a> {
                 Expr::Sql { inner, span: start.to(end) }
             }
             Tok::Kw(Kw::Select) | Tok::Kw(Kw::With) => self.select_stmt(),
+            // `exists (select ..)`. The parentheses are required: without them the
+            // subquery's `from` clause and the enclosing one would be ambiguous to a
+            // reader, whatever the grammar could be made to accept.
+            Tok::Kw(Kw::Exists) => {
+                self.bump();
+                self.expect(Tok::LParen, "to open an `exists` subquery");
+                let inner = self.select_inner(start);
+                let end = self.expect(Tok::RParen, "to close an `exists` subquery").unwrap_or(start);
+                Expr::Exists { query: Box::new(inner), span: start.to(end) }
+            }
             Tok::Ident | Tok::Kw(_) => {
                 let path = self.path();
                 // A struct literal, but only where a `{` cannot be a block — which is why
@@ -1882,6 +1907,13 @@ impl<'a> Parser<'a> {
     }
 
     fn select_inner(&mut self, start: Span) -> SelectStmt {
+        self.sql_depth += 1;
+        let s = self.select_inner_body(start);
+        self.sql_depth -= 1;
+        s
+    }
+
+    fn select_inner_body(&mut self, start: Span) -> SelectStmt {
         // `with t as (..) select ..` — the CTE is parsed and, at lowering, inlined.
         if self.eat_kw(Kw::With) {
             self.eat_kw(Kw::Recursive);

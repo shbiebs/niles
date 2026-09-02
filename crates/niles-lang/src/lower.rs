@@ -19,7 +19,7 @@ use crate::diagnostics::{Diagnostic, Diagnostics};
 use crate::effects::Rung;
 use crate::resolve::{Catalog, RelationInfo};
 use niles_ir::circuit::{Circuit, NodeId};
-use niles_ir::operator::{Agg, ColIdx, JoinKind as IrJoin, Op, Scalar, ScalarOp};
+use niles_ir::operator::{Agg, ApplyKind, ColIdx, JoinKind as IrJoin, Op, Scalar, ScalarOp};
 use niles_ir::{Consistency, Lineage, Materialize, Retention, ServeContract};
 use std::collections::HashMap;
 
@@ -65,7 +65,13 @@ impl<'a> Lx<'a> {
 
     fn view(&mut self, v: &ViewDecl) {
         let contract = self.contract_of(&v.name.text);
+        let before = self.d.items.len();
         let Some(id) = self.expr(&v.body, contract) else {
+            if self.d.items.len() > before {
+                // Something more specific already said why. A second, vaguer message about
+                // the same view is noise that pushes the useful one off the screen.
+                return;
+            }
             self.d.push(
                 Diagnostic::error("NL0500", format!("view `{}` has no lowering", v.name.text))
                     .primary(v.body.span(), "this expression is not a pipeline over a declared relation")
@@ -401,6 +407,39 @@ impl<'a> Lx<'a> {
         })
     }
 
+    /// Lower an expression that is being used as a **predicate**.
+    ///
+    /// Separate from [`Lx::scalar`] for one reason, and it is a correctness reason rather
+    /// than a tidiness one. These three call sites used to read
+    /// `self.scalar(cur, f).unwrap_or(Scalar::LitBool(true))`: a predicate the lowering
+    /// could not express became the constant `true`, so the `where` clause was silently
+    /// discarded and the view returned every row. The query looked correct, the plan
+    /// verified, and no answer-level test could catch it, because every row it returned
+    /// was a real row.
+    ///
+    /// That is the `Err(_) => 0` defect of §1.1.1 at plan level, and it was found by
+    /// writing `where t.z = 1` and reading the circuit. There is no safe default here:
+    /// `true` returns rows that should have been filtered out and `false` hides rows that
+    /// exist, so the only honest behaviour is to refuse to lower the view and say which
+    /// predicate could not be expressed.
+    fn predicate(&mut self, input: NodeId, e: &Expr, clause: &str) -> Option<Scalar> {
+        match self.scalar(input, e) {
+            Some(p) => Some(p),
+            None => {
+                self.d.push(
+                    Diagnostic::error("NL0501", format!("this `{clause}` predicate has no lowering"))
+                        .primary(e.span(), "cannot be expressed in the circuit")
+                        .note(
+                            "a predicate that cannot be lowered is not defaulted to `true` or \
+                             `false`: one would return rows that should have been filtered out \
+                             and the other would hide rows that exist",
+                        ),
+                );
+                None
+            }
+        }
+    }
+
     fn scalar_list(&mut self, input: NodeId, e: &Expr) -> Vec<Scalar> {
         match e {
             Expr::Closure { body, .. } => self.scalar_list(input, body),
@@ -421,10 +460,20 @@ impl<'a> Lx<'a> {
     fn select(&mut self, s: &SelectStmt, c: ServeContract) -> Option<NodeId> {
         let mut cur = self.table_ref(s.from.first()?, c)?;
         if let Some(f) = &s.filter {
-            let p = self.scalar(cur, f).unwrap_or(Scalar::LitBool(true));
-            let id = self.circuit.add(Op::Filter { predicate: p }, vec![cur], c, "where");
-            self.schemas.insert(id, self.schema_of(cur).to_vec());
-            cur = id;
+            // Subquery predicates become `Apply` nodes in the pipeline; whatever is left
+            // becomes the `where` filter. Splitting first is what lets a correlated
+            // `exists` reach the optimizer's unnesting rules at all.
+            let mut subqueries = Vec::new();
+            let residual = split_subqueries(f, &mut subqueries);
+            for sq in subqueries {
+                cur = self.apply(cur, &sq, c)?;
+            }
+            if let Some(r) = residual {
+                let p = self.predicate(cur, &r, "where")?;
+                let id = self.circuit.add(Op::Filter { predicate: p }, vec![cur], c, "where");
+                self.schemas.insert(id, self.schema_of(cur).to_vec());
+                cur = id;
+            }
         }
         if !s.group_by.is_empty() {
             let in_schema = self.schema_of(cur).to_vec();
@@ -461,7 +510,7 @@ impl<'a> Lx<'a> {
             cur = id;
         }
         if let Some(h) = &s.having {
-            let p = self.scalar(cur, h).unwrap_or(Scalar::LitBool(true));
+            let p = self.predicate(cur, h, "having")?;
             let id = self.circuit.add(Op::Filter { predicate: p }, vec![cur], c, "having");
             self.schemas.insert(id, self.schema_of(cur).to_vec());
             cur = id;
@@ -493,6 +542,123 @@ impl<'a> Lx<'a> {
         Some(cur)
     }
 
+    /// Lower one subquery predicate into an [`Op::Apply`] over `outer`.
+    ///
+    /// The correlation is read out of the subquery's own `where` clause: an equality whose
+    /// two sides resolve, one in the outer schema and one in the inner, is a correlation
+    /// pair; everything else stays as a filter on the inner side. That split is what makes
+    /// the operator's `correlation` field meaningful, and it is deliberately *syntactic* —
+    /// a semantic notion of "depends on the outer row" would need a solver.
+    fn apply(&mut self, outer: NodeId, sq: &Subquery, c: ServeContract) -> Option<NodeId> {
+        let inner_from = sq.query.from.first()?;
+        let mut inner = self.table_ref(inner_from, c)?;
+
+        let mut correlation = Vec::new();
+        let mut local = Vec::new();
+        if let Some(w) = &sq.query.filter {
+            for conj in conjuncts(w) {
+                match self.as_correlation(outer, inner, conj) {
+                    Some(pair) => correlation.push(pair),
+                    None => local.push(conj),
+                }
+            }
+        }
+        for l in local {
+            let p = self.predicate(inner, l, "subquery where")?;
+            let id = self.circuit.add(Op::Filter { predicate: p }, vec![inner], c, "subquery where");
+            self.schemas.insert(id, self.schema_of(inner).to_vec());
+            inner = id;
+        }
+
+        let kind = match &sq.kind {
+            SubqueryKind::Exists => ApplyKind::Exists,
+            SubqueryKind::NotExists => ApplyKind::NotExists,
+            SubqueryKind::In(probe) | SubqueryKind::NotIn(probe) => {
+                let p = self.col_of(outer, probe)?;
+                // The subquery's single projection is the column being probed against. A
+                // subquery projecting more than one column is a different construct (a row
+                // comparison) and is refused rather than approximated.
+                if sq.query.projections.len() != 1 {
+                    self.d.push(
+                        Diagnostic::error("NL0502", "an `in` subquery must project exactly one column")
+                            .primary(sq.query.span, format!("this projects {}", sq.query.projections.len()))
+                            .note("a multi-column `in` is a row comparison, which is a different construct"),
+                    );
+                    return None;
+                }
+                let icol = self.col_of(inner, &sq.query.projections[0].0)?;
+                if matches!(sq.kind, SubqueryKind::In(_)) {
+                    ApplyKind::In { probe: p, inner: icol }
+                } else {
+                    ApplyKind::NotIn { probe: p, inner: icol }
+                }
+            }
+        };
+
+        let label = format!("{} subquery", kind.name());
+        let id = self.circuit.add(Op::Apply { kind, correlation }, vec![outer, inner], c, label);
+        // An `Apply` in these four kinds preserves the outer row exactly, so it preserves
+        // the outer schema. A scalar subquery would widen it; that surface form is not
+        // reachable yet and would need this line to change with it.
+        self.schemas.insert(id, self.schema_of(outer).to_vec());
+        Some(id)
+    }
+
+    /// A correlation pair, if `e` is `outer.a = inner.b` (in either order).
+    ///
+    /// The qualifier decides, and it has to. `where u.k = t.k` is the commonest correlated
+    /// predicate there is, and both sides are called `k`: an unqualified rule that asked
+    /// "which schema does this name resolve in" would find it resolves in both, give up,
+    /// and leave the equality as a *filter on the inner side* — where it lowers to
+    /// `k = k`, which is always true. The subquery would then match every row and the
+    /// `exists` would be a no-op. So the relation name is read off the side it belongs to,
+    /// and the unqualified rule is only the fallback for when there is no qualifier to read.
+    fn as_correlation(&self, outer: NodeId, inner: NodeId, e: &Expr) -> Option<(ColIdx, ColIdx)> {
+        let Expr::Binary { op: BinOp::Eq, lhs, rhs, .. } = e else { return None };
+        let (ln, rn) = (leaf_name(lhs)?, leaf_name(rhs)?);
+        let inner_rel = self.relation_of(inner);
+
+        if let (Some(lq), Some(rq)) = (qualifier(lhs), qualifier(rhs)) {
+            if Some(&lq) == inner_rel.as_ref() && Some(&rq) != inner_rel.as_ref() {
+                return Some((self.col_index(outer, &rn)?, self.col_index(inner, &ln)?));
+            }
+            if Some(&rq) == inner_rel.as_ref() && Some(&lq) != inner_rel.as_ref() {
+                return Some((self.col_index(outer, &ln)?, self.col_index(inner, &rn)?));
+            }
+            // Both sides name the same relation: a local predicate, not a correlation.
+            return None;
+        }
+
+        // No qualifier on one or both sides. Fall back to resolution: each side must
+        // resolve on exactly one of the two schemas, or "which relation did you mean" is a
+        // question the lowering would be guessing the answer to.
+        let (lo, li) = (self.col_index(outer, &ln), self.col_index(inner, &ln));
+        let (ro, ri) = (self.col_index(outer, &rn), self.col_index(inner, &rn));
+        match (lo, li, ro, ri) {
+            (Some(o), None, None, Some(i)) => Some((o, i)),
+            (None, Some(i), Some(o), None) => Some((o, i)),
+            _ => None,
+        }
+    }
+
+    /// The base relation a node reads from, following single-input operators down to the
+    /// first `Source`. `None` for a join or a union, where "the relation" is not a
+    /// question with one answer.
+    fn relation_of(&self, mut id: NodeId) -> Option<String> {
+        loop {
+            let n = self.circuit.node(id);
+            match &n.op {
+                Op::Source { relation, .. } => return Some(relation.clone()),
+                _ if n.inputs.len() == 1 => id = n.inputs[0],
+                _ => return None,
+            }
+        }
+    }
+
+    fn col_of(&self, id: NodeId, e: &Expr) -> Option<ColIdx> {
+        self.col_index(id, &leaf_name(e)?)
+    }
+
     fn table_ref(&mut self, t: &TableRef, c: ServeContract) -> Option<NodeId> {
         match t {
             TableRef::Named { name, .. } => self.source(&name.text, c),
@@ -516,6 +682,105 @@ impl<'a> Lx<'a> {
                 Some(id)
             }
         }
+    }
+}
+
+/// A subquery predicate lifted out of a `where` clause.
+struct Subquery {
+    kind: SubqueryKind,
+    query: SelectStmt,
+}
+
+enum SubqueryKind {
+    Exists,
+    NotExists,
+    /// The probe expression from the outer row.
+    In(Expr),
+    NotIn(Expr),
+}
+
+/// The conjuncts of an `and`-chain, left to right.
+fn conjuncts(e: &Expr) -> Vec<&Expr> {
+    match e {
+        Expr::Binary { op: BinOp::And, lhs, rhs, .. } => {
+            let mut v = conjuncts(lhs);
+            v.extend(conjuncts(rhs));
+            v
+        }
+        other => vec![other],
+    }
+}
+
+/// Split a `where` clause into subquery predicates and whatever is left.
+///
+/// Only **top-level conjuncts** are lifted. A subquery under an `or` or under a `not` that
+/// is not `not exists` stays where it is, and will then fail to lower with NL0501 naming
+/// it — which is the right outcome: an `Apply` is a pipeline node and cannot be one arm of
+/// a disjunction without first being turned into a semi-join and a union, which is a
+/// different rewrite and is not implemented. Refusing loudly beats lowering something that
+/// is not the query that was written.
+fn split_subqueries(e: &Expr, out: &mut Vec<Subquery>) -> Option<Expr> {
+    let mut residual: Option<Expr> = None;
+    for conj in conjuncts(e) {
+        match conj {
+            Expr::Exists { query, .. } => {
+                out.push(Subquery { kind: SubqueryKind::Exists, query: (**query).clone() })
+            }
+            Expr::Unary { op: UnOp::Not, operand, .. } => match &**operand {
+                Expr::Exists { query, .. } => {
+                    out.push(Subquery { kind: SubqueryKind::NotExists, query: (**query).clone() })
+                }
+                _ => residual = Some(and_with(residual, conj)),
+            },
+            Expr::Binary { op: op @ (BinOp::In | BinOp::NotIn), lhs, rhs, .. } => match &**rhs {
+                Expr::Select(q) => {
+                    let probe = (**lhs).clone();
+                    let kind = if *op == BinOp::In {
+                        SubqueryKind::In(probe)
+                    } else {
+                        SubqueryKind::NotIn(probe)
+                    };
+                    out.push(Subquery { kind, query: (**q).clone() });
+                }
+                // `x in (1, 2, 3)` is a list membership test, not a subquery, and lowers
+                // as an ordinary scalar.
+                _ => residual = Some(and_with(residual, conj)),
+            },
+            other => residual = Some(and_with(residual, other)),
+        }
+    }
+    residual
+}
+
+fn and_with(acc: Option<Expr>, e: &Expr) -> Expr {
+    match acc {
+        None => e.clone(),
+        Some(a) => Expr::Binary {
+            op: BinOp::And,
+            span: a.span().to(e.span()),
+            lhs: Box::new(a),
+            rhs: Box::new(e.clone()),
+        },
+    }
+}
+
+/// The relation a qualified field names: `t.k` gives `t`, and a bare `k` gives nothing.
+fn qualifier(e: &Expr) -> Option<String> {
+    match e {
+        Expr::Field { base, .. } => match &**base {
+            Expr::Path(p) if p.segments.len() == 1 => Some(p.segments[0].text.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The name a path or field expression ends in: `t.k` and `k` both give `k`.
+fn leaf_name(e: &Expr) -> Option<String> {
+    match e {
+        Expr::Field { name, .. } => Some(name.text.clone()),
+        Expr::Path(p) => Some(p.last().text.clone()),
+        _ => None,
     }
 }
 

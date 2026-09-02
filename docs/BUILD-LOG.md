@@ -1829,3 +1829,81 @@ runnable* and *out of scope* are three different statements rather than three sh
 `make gate` → exit 0 in both repositories.
 
 ### [T-17] 2026-09-02T17:56Z DONE the nine outputs of `BLOCKED-T-17-remainder` are closed
+
+### [T-17] 2026-09-02T18:20Z RESULT §6's validation protocol, run in full — and two things it found
+
+Every V item run. Two of them found something, and both were real.
+
+**V-02c (GC-12, no `HashMap` in the partial-state path).** `nilestream-core/src/rev.rs`'s test
+module used `HashMap` for the reference base's checkpoints and read counts. They are never
+iterated, so the answers were unaffected — and the reference base a determinism test is checked
+*against* must not be the one thing in the experiment whose order depends on a hash seed. A rule
+with an exception for the parts a reader is least likely to check is not a rule. `BTreeMap` now,
+with the reasoning at the type.
+
+**V-15d (the benchmark recipe).** `docs/BENCHMARK.md`'s one command read
+`--operations 2000 --runs 10`, and the committed `results/E16-wallclock.md` was produced with
+**500 and 5**. The single command a reader would type was not the command that produced the
+numbers underneath it, which is the whole of what a reproduction recipe is for. The recipe is
+corrected and `the_benchmark_recipe_reproduces_the_committed_numbers` reads the parameters back
+out of the results file, so the two cannot drift again.
+
+**Three §6 greps are stale rather than red**, and each is recorded here rather than worked
+around:
+
+* **V-09a / V-11b.** `grep -n "unwrap_or(0)"`, `grep -n "unwrap_or(Scalar::"` and
+  `grep -n "_ => true"` all match — **inside comments explaining that the defect was removed**.
+  The code is clean; the greps are not comment-aware. Re-run against non-comment lines they are
+  empty, and that is the check that was meant.
+* **V-11c.** The command names `mutants/auth_forged.niles`; the corpus file is
+  `auth_forged_from_a_literal.niles` (there is a `_from_a_string` sibling, which is the point of
+  the pair). `nilesc check` on the real path exits **1**.
+* **V-15c.** The command reads column 10 of the E16 CSVs as the protocol path. T-15 added
+  `miss_rate` and `protocol_path` after §6 was written, so column 10 is now `not_run` and the
+  protocol path is column 11. Read correctly: one value, `simple`, across all four workloads,
+  with `not_run` empty everywhere.
+
+**One acceptance criterion is not met as literally written, by choice.** V-17e asks for 24
+`### L-` headings, "combined sections split". There are **20 sections covering 24 requirement
+identifiers**: `L-5 / L-23`, `L-8 / L-9`, `L-11 / L-18` and `L-16 / L-22` are each one section
+because each pair is one design, and splitting them would produce four pairs of near-duplicate
+prose to make a count come out. The property the criterion is after is enforced instead, by
+`every_requirement_the_summary_counts_has_a_section`: each of L-1…L-24 appears in exactly one
+heading, and the generated Part V states both numbers.
+
+### [T-17] 2026-09-02T18:25Z RESULT the V table, in full
+
+| ID | Result |
+|---|---|
+| V-0 | niles 729/0/5 · gbs 432/0/1 · adapter 38/0/0 — all ≥ floors, 0 failed |
+| V-0b | pass; `layering.rs` diff empty |
+| V-0c | `make gate` exit 0 in both |
+| V-01 | both `channel = "1.95.0"` |
+| V-02a/b/d | pass |
+| V-02c | pass after the `BTreeMap` change above |
+| V-03 | pass |
+| V-04a/b/c | pass; `hit_path_comparisons` present |
+| V-05a/b | pass; no stale banners |
+| V-06a/b/c | pass |
+| V-07a/b/c | pass; no `pub fn record_entries`; `fdatasync` observed |
+| V-08 | pass |
+| V-09a/b | pass (see the comment-grep note) |
+| V-10 | 10 layering tests, 11 negative controls |
+| V-11a/b/c | pass (see the corpus-name note) |
+| V-12 | 15 pass |
+| V-13a/b | pass |
+| V-14a/b/c/d | pass; `extended::` referenced from `session.rs`; MySQL "codec, with no listener" in both places |
+| V-15a | `fsync off` present in the OLTP baseline cell |
+| V-15b | `E16-wallclock.md` reproduces; 0 `NOT RUN` |
+| V-15c | one protocol path (`simple`) per run pair, at column 11 |
+| V-15d | hardware, `pg_settings`, one command, runs, medians, limitations, NOT MET — all present |
+| V-15e | `z` / `miss_rate` present in all three |
+| V-15f | `E16-band.md`'s commit is an ancestor of the durable CSV's |
+| V-16a | `make g3` → 29 rows, 0 failures |
+| V-16b | pass; §7 reads "23 product-evidenced + 6 generic-path-only of 29" |
+| V-17a/b/c/d | pass; 5 `MISMATCH-F-0[789]` mentions |
+| V-17e | 20 sections / 24 ids — deviation recorded above |
+| V-17f | `thesis/build.sh` exit 0; **101,216 words** |
+| V-18 | **7 of 9 conform by execution**; the two divergences named with their fields |
+| V-19 | `make reproduce` exit 0 |
+| V-Σ | counts above, in both build logs |

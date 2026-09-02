@@ -319,3 +319,42 @@ fn appendix_b_keywords_match_registry() {
         "these keywords exist in the registry and appear nowhere in Appendix B: {missing:?}"
     );
 }
+
+/// `BENCHMARK.md`'s one command is the command that produced the committed numbers.
+///
+/// A reproduction recipe whose parameters differ from the run it documents reproduces
+/// something else. This one said `--operations 2000 --runs 10` beside a results file produced
+/// with 500 and 5.
+#[test]
+fn the_benchmark_recipe_reproduces_the_committed_numbers() {
+    let root = repo_root();
+    let doc = std::fs::read_to_string(root.join("docs/BENCHMARK.md")).expect("readable");
+    let results = std::fs::read_to_string(root.join("results/E16-wallclock.md")).expect("readable");
+
+    let field = |text: &str, prefix: &str| -> String {
+        text.lines()
+            .find_map(|l| l.trim().strip_prefix(prefix).map(str::to_string))
+            .unwrap_or_else(|| panic!("no line starting `{prefix}` in the results file"))
+            .split_whitespace()
+            .next()
+            .expect("a value")
+            .to_string()
+    };
+    let accounts = field(&results, "* Accounts:");
+    let operations = field(&results, "* Operations per run:");
+    let runs = field(&results, "* Runs per workload:");
+
+    for (flag, want) in [
+        ("--accounts", &accounts),
+        ("--operations", &operations),
+        ("--runs", &runs),
+    ] {
+        let needle = format!("{flag} {want}");
+        assert!(
+            doc.contains(&needle),
+            "docs/BENCHMARK.md's recipe does not carry `{needle}`, which is what the committed \
+             `results/E16-wallclock.md` was produced with. A recipe whose parameters differ \
+             from the run it documents reproduces something else."
+        );
+    }
+}

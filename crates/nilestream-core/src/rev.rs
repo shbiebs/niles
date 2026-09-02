@@ -518,10 +518,14 @@ mod tests {
     use niles_ir::circuit::internal_contract;
     use niles_ir::operator::Scalar;
     use niles_ir::{Lineage, ServeContract};
-    use std::collections::HashMap;
-
     /// A base whose whole history is in a vector. Deliberately unoptimised: it is a
     /// definition of the right answer, not an implementation of a fast one.
+    ///
+    /// **`BTreeMap`, in a test.** These two maps are never iterated, so a hash map would give
+    /// the same answers — and they are ordered anyway, because the reference base a
+    /// determinism test is checked against must not be the one thing in the experiment whose
+    /// order depends on a hash seed. GC-12's rule is "no `HashMap` in this file", and a rule
+    /// with an exception for the parts a reader is least likely to check is not a rule.
     #[derive(Default)]
     struct FoldBase {
         /// (epoch, key, delta)
@@ -530,8 +534,8 @@ mod tests {
         /// Per-key running balances every `interval` rows, which is the mechanism SC7 is
         /// about: reconstruction folds only the suffix after the newest checkpoint.
         interval: usize,
-        checkpoints: HashMap<Key, Vec<(Epoch, Value)>>,
-        counts: HashMap<Key, usize>,
+        checkpoints: BTreeMap<Key, Vec<(Epoch, Value)>>,
+        counts: BTreeMap<Key, usize>,
     }
 
     impl FoldBase {
@@ -639,7 +643,7 @@ mod tests {
         let anchor = base.frontier();
         let v = rt.view_mut("balance").unwrap();
 
-        let mut first = HashMap::new();
+        let mut first = BTreeMap::new();
         for k in 0..5i64 {
             first.insert(k, v.read(&mut base, &vec![k], anchor).value);
         }

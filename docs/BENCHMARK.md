@@ -26,8 +26,15 @@ pg_ctlcluster 16 main start            # or: initdb -D … && pg_ctl -D … star
 cargo run --release -p bank-bench --bin bench -- \
       --calibrate --run --render \
       --pg-port 5432 --host-nls \
-      --accounts 10000 --operations 2000 --runs 10
+      --accounts 10000 --operations 500 --runs 5
 ```
+
+**Those are the parameters the committed results were produced with**, and they are read back
+out of `results/E16-wallclock.md`'s own "How it was run" section by
+`the_benchmark_recipe_reproduces_the_committed_numbers` in `crates/bank-bench/tests/thesis_drift.rs`.
+This line said `--operations 2000 --runs 10` while the committed table came from 500 and 5, so
+the one command a reader would type was not the command that produced the numbers underneath
+it — which is the whole of what a reproduction recipe is for.
 
 `--host-nls` starts `nilestreamd` on a thread of the same process and drives it over TCP with
 the same client, with a durable sink at `results/E16-wallclock/nilestream-bench.seg` under

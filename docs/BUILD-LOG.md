@@ -2188,7 +2188,7 @@ is true at, which a caller must read rather than assume.**
 
 # Cycle: Work Order 2 (the Fable audit)
 
-`review/thesis` @ `8f56b98`, `review/F-18` @ `9f451ba`. niles 757/0/5 (from 730/0/5); gbs
+`review/thesis` @ `27eb990`, `review/F-18` @ `9f451ba`. niles 757/0/5 (from 730/0/5); gbs
 443/0/1 and adapter 40/0 (from 432/0/1 and 38/0). Both gates green, `make reproduce` clean.
 The full account is `docs/WORK-ORDER-2-REPORT.md`; this entry is the short version and the
 things worth remembering.

@@ -114,7 +114,11 @@ impl Scope {
     /// Bindings flow in because a `txn` block sees the `let`s above it; the row does not,
     /// because the obligation belongs to the transaction.
     fn child_conserving(&self) -> Scope {
-        Scope { conserving: true, bindings: self.bindings.clone(), ..Default::default() }
+        Scope {
+            conserving: true,
+            bindings: self.bindings.clone(),
+            ..Default::default()
+        }
     }
 
     /// A scope for one arm of a branch.
@@ -191,7 +195,12 @@ fn merge_branches(
         }
         // Judge this arm on its own, before the join loses the evidence. See the doc comment.
         for v in rows::check_conservation(&arm.row) {
-            if let rows::Verdict::Violates { currency, residue, span } = v {
+            if let rows::Verdict::Violates {
+                currency,
+                residue,
+                span,
+            } = v
+            {
                 // Downgraded: the arithmetic is definitely wrong, and whether this arm runs is
                 // not something the checker can decide, so it is an alarm rather than a proof.
                 let alarm = rows::Verdict::MayViolate {
@@ -263,7 +272,8 @@ impl<'a> Cx<'a> {
                     Some(c) => Cur::Known(c),
                     None => self.unifier.fresh(),
                 };
-                sc.bindings.insert(name, Shape::Money(c, Amount::symbol(sym)));
+                sc.bindings
+                    .insert(name, Shape::Money(c, Amount::symbol(sym)));
             }
         }
         // Capabilities a function holds are the `Auth<E>` parameters it takes. They cannot
@@ -272,7 +282,12 @@ impl<'a> Cx<'a> {
         for p in &f.params {
             if let Ty::Path { path, args, .. } = &p.ty {
                 if path.last().text == "Auth" {
-                    if let Some(Ty::Path { path: e, args: eargs, .. }) = args.first() {
+                    if let Some(Ty::Path {
+                        path: e,
+                        args: eargs,
+                        ..
+                    }) = args.first()
+                    {
                         let names: Vec<String> = eargs
                             .iter()
                             .filter_map(|t| match t {
@@ -293,7 +308,9 @@ impl<'a> Cx<'a> {
         // W14: the inferred row must be permitted by the declared one.
         if let Some(declared) = &f.effects {
             let declared_row = to_eff_row(declared);
-            for diag in effects::check_declaration(&f.name.text, &sc.effects, &declared_row, decl_span) {
+            for diag in
+                effects::check_declaration(&f.name.text, &sc.effects, &declared_row, decl_span)
+            {
                 self.d.push(diag);
             }
         } else {
@@ -333,7 +350,9 @@ impl<'a> Cx<'a> {
         for diag in effects::check_linearity(&sc.linear) {
             self.d.push(diag);
         }
-        self.report.inferred_effects.insert(f.name.text.clone(), sc.effects);
+        self.report
+            .inferred_effects
+            .insert(f.name.text.clone(), sc.effects);
     }
 
     // ---------------- views ----------------
@@ -341,7 +360,9 @@ impl<'a> Cx<'a> {
     fn view(&mut self, v: &ViewDecl) {
         let mut sc = Scope::default();
         self.expr(&v.body, &mut sc);
-        let Some(info) = self.cat.views.get(&v.name.text) else { return };
+        let Some(info) = self.cat.views.get(&v.name.text) else {
+            return;
+        };
         // Rung monotonicity: the judgement that makes "two derived views of one ledger
         // disagreeing at the moment a decision is made" unspellable.
         for diag in effects::check_rung_monotonicity(
@@ -353,7 +374,9 @@ impl<'a> Cx<'a> {
         ) {
             self.d.push(diag);
         }
-        self.report.view_rungs.insert(v.name.text.clone(), sc.effects.weakest_read());
+        self.report
+            .view_rungs
+            .insert(v.name.text.clone(), sc.effects.weakest_read());
     }
 
     // ---------------- statements ----------------
@@ -370,7 +393,10 @@ impl<'a> Cx<'a> {
     fn stmt(&mut self, s: &Stmt, sc: &mut Scope) {
         match s {
             Stmt::Let { pat, ty, init, .. } => {
-                let mut shape = init.as_ref().map(|e| self.expr(e, sc)).unwrap_or(Shape::Opaque);
+                let mut shape = init
+                    .as_ref()
+                    .map(|e| self.expr(e, sc))
+                    .unwrap_or(Shape::Opaque);
                 // An explicit annotation wins over inference: `let x: Money<jpy> = f();`
                 // is the programmer telling the checker something it could not see.
                 if let Some(Some(cur)) = ty.as_ref().map(money_currency_of) {
@@ -419,7 +445,11 @@ impl<'a> Cx<'a> {
         if let Some((name, span, verb)) = mutation {
             if let Some(rel) = self.cat.relations.get(&name.text) {
                 if rel.is_base() {
-                    let kind = if rel.kind == RelKind::Ledger { "ledger" } else { "base" };
+                    let kind = if rel.kind == RelKind::Ledger {
+                        "ledger"
+                    } else {
+                        "base"
+                    };
                     let alt = if verb == "insert" {
                         "append to it inside a `txn { .. }`"
                     } else {
@@ -434,7 +464,14 @@ impl<'a> Cx<'a> {
                     );
                 }
             }
-            sc.effects.add(if verb == "insert" { Effect::Append } else { Effect::Mutate }, span);
+            sc.effects.add(
+                if verb == "insert" {
+                    Effect::Append
+                } else {
+                    Effect::Mutate
+                },
+                span,
+            );
         }
         match dml {
             Dml::Grant { span, .. } | Dml::Revoke { span, .. } | Dml::Backfill { span, .. } => {
@@ -450,7 +487,12 @@ impl<'a> Cx<'a> {
     fn expr(&mut self, e: &Expr, sc: &mut Scope) -> Shape {
         match e {
             // ---- money ----
-            Expr::Money { minor, scale, currency, span } => {
+            Expr::Money {
+                minor,
+                scale,
+                currency,
+                span,
+            } => {
                 // W6: the literal's own scale must equal the currency's declared scale.
                 if let Some(info) = self.cat.currencies.get(&currency.text) {
                     if info.scale != *scale {
@@ -466,9 +508,12 @@ impl<'a> Cx<'a> {
                     }
                 } else {
                     self.d.push(
-                        Diagnostic::error("NL0241", format!("currency `{}` is not declared", currency.text))
-                            .primary(*span, "unknown currency")
-                            .note("declare it with its minor-unit scale: `currency xyz { scale: 2 }`"),
+                        Diagnostic::error(
+                            "NL0241",
+                            format!("currency `{}` is not declared", currency.text),
+                        )
+                        .primary(*span, "unknown currency")
+                        .note("declare it with its minor-unit scale: `currency xyz { scale: 2 }`"),
                     );
                 }
                 Shape::Money(Cur::Known(currency.text.clone()), Amount::constant(*minor))
@@ -538,7 +583,11 @@ impl<'a> Cx<'a> {
                 Shape::Linear(LinearKind::Hold)
             }
 
-            Expr::Resolve { hold, outcome, span } => {
+            Expr::Resolve {
+                hold,
+                outcome,
+                span,
+            } => {
                 self.consume_linear(hold, sc, *span);
                 if let ResolveOutcome::Post(a) = outcome {
                     self.expr(a, sc);
@@ -573,7 +622,13 @@ impl<'a> Cx<'a> {
             }
 
             // ---- reads ----
-            Expr::Stage { recv, kind, args, span, .. } => {
+            Expr::Stage {
+                recv,
+                kind,
+                args,
+                span,
+                ..
+            } => {
                 self.expr(recv, sc);
                 if let Expr::Path(p) = &**recv {
                     if let Some(rung) = self.cat.source_rung(&p.last().text) {
@@ -586,7 +641,10 @@ impl<'a> Cx<'a> {
                 // W17: a confidential column may not appear in a predicate, a key or an
                 // aggregate — the engine cannot compute on ciphertext, so a filter over an
                 // encrypted column would either leak through timing or silently not filter.
-                if matches!(kind, StageKind::Where | StageKind::GroupBy | StageKind::Sum | StageKind::Having) {
+                if matches!(
+                    kind,
+                    StageKind::Where | StageKind::GroupBy | StageKind::Sum | StageKind::Having
+                ) {
                     self.check_confidential_use(recv, args, *span);
                 }
                 Shape::Opaque
@@ -600,7 +658,12 @@ impl<'a> Cx<'a> {
                 sc.bindings.get(name).cloned().unwrap_or(Shape::Opaque)
             }
 
-            Expr::Fixpoint { recv, step, measure, .. } => {
+            Expr::Fixpoint {
+                recv,
+                step,
+                measure,
+                ..
+            } => {
                 self.expr(recv, sc);
                 self.expr(step, sc);
                 self.expr(measure, sc);
@@ -626,7 +689,12 @@ impl<'a> Cx<'a> {
                 self.block(b, sc);
                 Shape::Opaque
             }
-            Expr::If { cond, then, els, span } => {
+            Expr::If {
+                cond,
+                then,
+                els,
+                span,
+            } => {
                 self.expr(cond, sc);
                 let mut arms = Vec::new();
                 let mut a = sc.branch();
@@ -672,7 +740,11 @@ impl<'a> Cx<'a> {
                 }
                 Shape::Opaque
             }
-            Expr::Match { scrutinee, arms, span } => {
+            Expr::Match {
+                scrutinee,
+                arms,
+                span,
+            } => {
                 self.expr(scrutinee, sc);
                 let mut branches = Vec::new();
                 for a in arms {
@@ -711,7 +783,9 @@ impl<'a> Cx<'a> {
                 self.close_loop(sc, b, *span);
                 Shape::Opaque
             }
-            Expr::For { iter, body, span, .. } => {
+            Expr::For {
+                iter, body, span, ..
+            } => {
                 self.expr(iter, sc);
                 let mut b = sc.branch();
                 self.block(body, &mut b);
@@ -821,7 +895,9 @@ impl<'a> Cx<'a> {
                     sc.effects.add(Effect::Read(r), name.span);
                 }
             }
-            TableRef::Join { left, right, on, .. } => {
+            TableRef::Join {
+                left, right, on, ..
+            } => {
                 self.table_ref(left, sc);
                 self.table_ref(right, sc);
                 if let Some(o) = on {
@@ -837,7 +913,14 @@ impl<'a> Cx<'a> {
 
     /// The library calls the checker knows the meaning of. Everything else is opaque, and
     /// contributes an undecided symbol rather than an assumption.
-    fn call(&mut self, name: &str, shapes: &[Shape], args: &[Arg], span: Span, sc: &mut Scope) -> Shape {
+    fn call(
+        &mut self,
+        name: &str,
+        shapes: &[Shape],
+        args: &[Arg],
+        span: Span,
+        sc: &mut Scope,
+    ) -> Shape {
         let money = shapes.iter().find_map(|s| match s {
             Shape::Money(c, a) => Some((c.clone(), a.clone())),
             _ => None,
@@ -852,12 +935,20 @@ impl<'a> Cx<'a> {
                         (self.unifier.fresh(), Amount::symbol(s))
                     }
                 };
-                let eff = if is_debit { Effect::Debit(c.to_string()) } else { Effect::Credit(c.to_string()) };
+                let eff = if is_debit {
+                    Effect::Debit(c.to_string())
+                } else {
+                    Effect::Credit(c.to_string())
+                };
                 sc.effects.add(eff, span);
                 if sc.conserving {
                     sc.row.movement(c, if is_debit { a.neg() } else { a }, span);
                 }
-                Shape::Linear(if is_debit { LinearKind::Debit } else { LinearKind::Credit })
+                Shape::Linear(if is_debit {
+                    LinearKind::Debit
+                } else {
+                    LinearKind::Credit
+                })
             }
             "post" => {
                 // `post` is what consumes the linear halves.
@@ -890,7 +981,11 @@ impl<'a> Cx<'a> {
                 // mismatch currencies" clause, decided by unification.
                 match self.unifier.unify(ca, cb) {
                     Ok(c) => {
-                        let amt = if op == BinOp::Add { aa.add(ab) } else { aa.add(&ab.neg()) };
+                        let amt = if op == BinOp::Add {
+                            aa.add(ab)
+                        } else {
+                            aa.add(&ab.neg())
+                        };
                         Shape::Money(c, amt)
                     }
                     Err((x, y)) => {
@@ -978,14 +1073,24 @@ impl<'a> Cx<'a> {
                 Verdict::MayViolate { currency, .. } => {
                     self.report.runtime_obligations += 1;
                     self.report.may_violate += 1;
-                    let scale = self.cat.currencies.get(currency).map(|c| c.scale).unwrap_or(2);
+                    let scale = self
+                        .cat
+                        .currencies
+                        .get(currency)
+                        .map(|c| c.scale)
+                        .unwrap_or(2);
                     if let Some(d) = rows::diagnose(&v, scale) {
                         self.d.push(d);
                     }
                 }
                 Verdict::Violates { currency, .. } => {
                     self.report.violates += 1;
-                    let scale = self.cat.currencies.get(currency).map(|c| c.scale).unwrap_or(2);
+                    let scale = self
+                        .cat
+                        .currencies
+                        .get(currency)
+                        .map(|c| c.scale)
+                        .unwrap_or(2);
                     if let Some(mut d) = rows::diagnose_with(&v, scale, prov) {
                         if let Some(name) = leg {
                             d = d.secondary(span, format!("in leg `{name}` of this `fx` form"));
@@ -996,9 +1101,17 @@ impl<'a> Cx<'a> {
                         // The warrant, attached conditionally: it yields to a
                         // machine-applicable fix, because a resolution is what the reader
                         // wants and a rule declaration three files away is not.
-                        if let Some(rel) = self.cat.relations.values().find(|r| r.conserve_span.is_some()) {
+                        if let Some(rel) = self
+                            .cat
+                            .relations
+                            .values()
+                            .find(|r| r.conserve_span.is_some())
+                        {
                             if let Some(cs) = rel.conserve_span {
-                                d = d.warrant(cs, format!("`conserve per (..)` declared on `{}` here", rel.name));
+                                d = d.warrant(
+                                    cs,
+                                    format!("`conserve per (..)` declared on `{}` here", rel.name),
+                                );
                             }
                         }
                         self.d.push(d);
@@ -1009,7 +1122,9 @@ impl<'a> Cx<'a> {
     }
 
     fn check_confidential_use(&mut self, recv: &Expr, args: &[Arg], span: Span) {
-        let Some(rel) = self.root_relation(recv) else { return };
+        let Some(rel) = self.root_relation(recv) else {
+            return;
+        };
         let confidential: Vec<(String, String, Span)> = rel
             .columns
             .iter()
@@ -1054,8 +1169,12 @@ fn collect_fields(e: &Expr, out: &mut Vec<(String, Span)>) {
             collect_fields(rhs, out);
         }
         Expr::Unary { operand, .. } => collect_fields(operand, out),
-        Expr::Tuple { elems, .. } | Expr::Array { elems, .. } => elems.iter().for_each(|x| collect_fields(x, out)),
-        Expr::Call { args, .. } | Expr::Stage { args, .. } => args.iter().for_each(|a| collect_fields(&a.value, out)),
+        Expr::Tuple { elems, .. } | Expr::Array { elems, .. } => {
+            elems.iter().for_each(|x| collect_fields(x, out))
+        }
+        Expr::Call { args, .. } | Expr::Stage { args, .. } => {
+            args.iter().for_each(|a| collect_fields(&a.value, out))
+        }
         _ => {}
     }
 }
@@ -1080,7 +1199,9 @@ fn to_eff_row(row: &EffectRow) -> EffRow {
     let mut out = EffRow::new();
     for e in &row.effects {
         let args: Vec<String> = e.args.iter().map(|a| a.text.clone()).collect();
-        if let Some(eff) = Effect::parse(&e.name.text, e.at.as_ref().map(|a| a.text.as_str()), &args) {
+        if let Some(eff) =
+            Effect::parse(&e.name.text, e.at.as_ref().map(|a| a.text.as_str()), &args)
+        {
             out.add(eff, e.span);
         }
     }

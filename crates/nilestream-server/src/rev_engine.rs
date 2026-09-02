@@ -85,8 +85,20 @@ impl RevEngine {
                 // discovered as a wrong answer later.
                 let amt = 100 + (round as i128 * 7 + a as i128 % 13);
                 let rows = vec![
-                    Row::Post(Posting { txn, acct: a, cur: 0, amt, valid: round as i64 }),
-                    Row::Post(Posting { txn, acct: 0, cur: 0, amt: -amt, valid: round as i64 }),
+                    Row::Post(Posting {
+                        txn,
+                        acct: a,
+                        cur: 0,
+                        amt,
+                        valid: round as i64,
+                    }),
+                    Row::Post(Posting {
+                        txn,
+                        acct: 0,
+                        cur: 0,
+                        amt: -amt,
+                        valid: round as i64,
+                    }),
                 ];
                 let _ = ledger.submit(&format!("seed-{txn}"), rows);
             }
@@ -173,7 +185,8 @@ impl crate::session::Serving for RevEngine {
             self.ledger.reconstruct_balance(acct, self.currency, anchor)
         } else {
             let (v, _at, _hit) =
-                self.view.read(&mut self.ledger, acct, self.currency, anchor, 0.0, 0.0);
+                self.view
+                    .read(&mut self.ledger, acct, self.currency, anchor, 0.0, 0.0);
             v
         };
         Some(value)
@@ -197,8 +210,14 @@ mod tests {
     fn a_read_is_answered_by_the_partial_view_over_the_ledger() {
         let mut e = engine();
         // Epochs are zero-based, so 300 transfers put the head at 299.
-        assert_eq!(e.frontier(), 299, "one epoch per seeded transfer, zero-based");
-        let v = e.read("__wire_result", &[7], e.frontier()).expect("account 7 has postings");
+        assert_eq!(
+            e.frontier(),
+            299,
+            "one epoch per seeded transfer, zero-based"
+        );
+        let v = e
+            .read("__wire_result", &[7], e.frontier())
+            .expect("account 7 has postings");
         assert!(v > 0, "a real fold, not a placeholder: {v}");
         assert!(e.stats().reads > 0);
     }
@@ -232,17 +251,22 @@ mod tests {
         // The property Contribution 1 is about, exercised through the wire path: eviction
         // followed by reconstruction can neither create nor destroy money.
         let mut e = engine();
-        let warm: Vec<Option<i128>> =
-            (1..=20).map(|a| e.read("__wire_result", &[a], e.frontier())).collect();
+        let warm: Vec<Option<i128>> = (1..=20)
+            .map(|a| e.read("__wire_result", &[a], e.frontier()))
+            .collect();
         let hits_before = e.stats().hits;
 
         e.evict_all();
         assert_eq!(e.stats().resident, 0);
 
-        let cold: Vec<Option<i128>> =
-            (1..=20).map(|a| e.read("__wire_result", &[a], e.frontier())).collect();
+        let cold: Vec<Option<i128>> = (1..=20)
+            .map(|a| e.read("__wire_result", &[a], e.frontier()))
+            .collect();
         assert_eq!(warm, cold, "eviction changed an answer");
-        assert!(e.stats().misses > 0, "and the cold reads really did reconstruct");
+        assert!(
+            e.stats().misses > 0,
+            "and the cold reads really did reconstruct"
+        );
         assert!(e.stats().rows_touched > 0, "touching base rows to do it");
         assert!(e.stats().hits >= hits_before);
     }
@@ -272,15 +296,25 @@ mod tests {
         let warm = e.stats();
         assert_eq!(warm.misses, 50, "no new misses");
         assert_eq!(warm.hits, 50, "and fifty hits");
-        assert!((warm.miss_rate() - 0.5).abs() < 1e-9, "{}", warm.miss_rate());
+        assert!(
+            (warm.miss_rate() - 0.5).abs() < 1e-9,
+            "{}",
+            warm.miss_rate()
+        );
 
         // Eviction puts it back: the third pass reconstructs everything again.
         e.evict_all();
         pass(&mut e);
         let after = e.stats();
-        assert!(after.miss_rate() > warm.miss_rate(), "eviction raises the miss rate");
+        assert!(
+            after.miss_rate() > warm.miss_rate(),
+            "eviction raises the miss rate"
+        );
         assert_eq!(after.misses, 100);
-        assert!(after.rows_touched > cold.rows_touched, "and it paid for it in base rows");
+        assert!(
+            after.rows_touched > cold.rows_touched,
+            "and it paid for it in base rows"
+        );
         assert!((0.0..=1.0).contains(&after.miss_rate()));
     }
 
@@ -304,8 +338,15 @@ mod tests {
         // three months later.
         let mut e = RevEngine::seeded(3, 1, 100, ViewMode::Demand, EvictionPolicy::Lru);
         assert_eq!(e.frontier(), 2, "three transfers, epochs 0..=2");
-        assert!(e.read("__wire_result", &[1], 0).is_some(), "account 1 posted at epoch 0");
-        assert_eq!(e.read("__wire_result", &[2], 0), None, "account 2 has not yet");
+        assert!(
+            e.read("__wire_result", &[1], 0).is_some(),
+            "account 1 posted at epoch 0"
+        );
+        assert_eq!(
+            e.read("__wire_result", &[2], 0),
+            None,
+            "account 2 has not yet"
+        );
         assert!(e.read("__wire_result", &[2], 1).is_some());
     }
 
@@ -327,6 +368,10 @@ mod tests {
             Some(cold),
             "a warm view answered a historical query with a fresher value"
         );
-        assert_ne!(e.read("__wire_result", &[5], head), Some(cold), "and the head differs");
+        assert_ne!(
+            e.read("__wire_result", &[5], head),
+            Some(cold),
+            "and the head differs"
+        );
     }
 }

@@ -85,7 +85,10 @@ fn the_grammar_file_is_the_size_the_header_claims() {
         GRAMMAR.contains(&format!("that is {productions} productions")),
         "grammar header must state the real production count, which is {productions}"
     );
-    assert!(rules > 150, "the grammar is suspiciously small: {rules} rules");
+    assert!(
+        rules > 150,
+        "the grammar is suspiciously small: {rules} rules"
+    );
 }
 
 #[test]
@@ -116,12 +119,56 @@ fn every_grammar_terminal_is_a_registry_keyword_or_punctuation() {
         .iter()
         .copied()
         .chain([
-            "bool", "i8", "i16", "i32", "i64", "i128", "u8", "u16", "u32", "u64", "u128",
-            "f32", "f64", "Text", "Bytes", "Json", "Money", "Currency", "Id", "Epoch",
-            "Instant", "Date", "Duration", "Interval", "Signal", "Bitemporal", "Posting",
-            "Debit", "Credit", "Hold", "Auth", "Anchored", "IdemKey", "Lineage",
-            "millis", "ms", "seconds", "secs", "s", "minutes", "mins", "hours", "hrs",
-            "days", "epochs", "off", "fuel", "deterministic", "pure", "to",
+            "bool",
+            "i8",
+            "i16",
+            "i32",
+            "i64",
+            "i128",
+            "u8",
+            "u16",
+            "u32",
+            "u64",
+            "u128",
+            "f32",
+            "f64",
+            "Text",
+            "Bytes",
+            "Json",
+            "Money",
+            "Currency",
+            "Id",
+            "Epoch",
+            "Instant",
+            "Date",
+            "Duration",
+            "Interval",
+            "Signal",
+            "Bitemporal",
+            "Posting",
+            "Debit",
+            "Credit",
+            "Hold",
+            "Auth",
+            "Anchored",
+            "IdemKey",
+            "Lineage",
+            "millis",
+            "ms",
+            "seconds",
+            "secs",
+            "s",
+            "minutes",
+            "mins",
+            "hours",
+            "hrs",
+            "days",
+            "epochs",
+            "off",
+            "fuel",
+            "deterministic",
+            "pure",
+            "to",
         ])
         .collect();
     let unknown: Vec<String> = grammar_terminals()
@@ -142,7 +189,10 @@ fn the_stage_vocabulary_matches_the_compiler() {
     // stops being normative, quietly.
     let terminals = grammar_terminals();
     for s in StageKind::all_names() {
-        assert!(terminals.contains(*s), "stage `{s}` is missing from grammar section 12");
+        assert!(
+            terminals.contains(*s),
+            "stage `{s}` is missing from grammar section 12"
+        );
     }
 }
 
@@ -168,13 +218,25 @@ fn the_reserved_set_stays_small() {
         .filter(|k| matches!(k.category, Category::Reserved | Category::ReservedFuture))
         .filter(|k| k.category != Category::ReservedFuture)
         .count();
-    assert_eq!(novel_reserved, 0, "a novel keyword was reserved without justification");
+    assert_eq!(
+        novel_reserved, 0,
+        "a novel keyword was reserved without justification"
+    );
 
     // The figures the thesis quotes. Computed here, never typed into the prose by hand.
-    assert_eq!(total, 174, "keyword count changed; regenerate docs/keywords.md and update B.3");
+    assert_eq!(
+        total, 174,
+        "keyword count changed; regenerate docs/keywords.md and update B.3"
+    );
     assert_eq!(reserved, 59, "reserved count changed; update Appendix B.16");
-    let unreserved = KEYWORDS.iter().filter(|k| k.category == Category::Unreserved).count();
-    assert_eq!(unreserved, 95, "unreserved count changed; update Appendix B.16");
+    let unreserved = KEYWORDS
+        .iter()
+        .filter(|k| k.category == Category::Unreserved)
+        .count();
+    assert_eq!(
+        unreserved, 95,
+        "unreserved count changed; update Appendix B.16"
+    );
 }
 
 #[test]
@@ -186,7 +248,10 @@ fn the_three_origin_tables_partition_the_registry() {
     // The syntax-lineage rule is a claim about proportions: SQL first, Rust where SQL has
     // no equivalent, novel only for concepts neither language has. If the novel table ever
     // outgrew the SQL one, the "SQL-first" claim would be rhetoric.
-    assert!(sql >= novel, "SQL-derived ({sql}) must not be outnumbered by novel ({novel})");
+    assert!(
+        sql >= novel,
+        "SQL-derived ({sql}) must not be outnumbered by novel ({novel})"
+    );
 }
 
 #[test]
@@ -195,6 +260,9 @@ fn well_formedness_rules_are_all_numbered_and_present() {
     // a claim that some later phase enforces it; the test that each is enforced lives with
     // that phase. Here we only check the list is intact and contiguous.
     for i in 1..=20 {
-        assert!(GRAMMAR.contains(&format!("W{i} ")), "well-formedness rule W{i} is missing");
+        assert!(
+            GRAMMAR.contains(&format!("W{i} ")),
+            "well-formedness rule W{i} is missing"
+        );
     }
 }

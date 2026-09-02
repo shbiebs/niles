@@ -30,7 +30,10 @@ pub struct Rng(u64);
 
 impl Rng {
     pub fn new(seed: u64) -> Rng {
-        Rng(seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407) | 1)
+        Rng(seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407)
+            | 1)
     }
     pub fn next(&mut self) -> u64 {
         self.0 ^= self.0 << 13;
@@ -61,7 +64,10 @@ pub struct Network {
 
 impl Default for Network {
     fn default() -> Self {
-        Network { loss: 0, reorder: 0 }
+        Network {
+            loss: 0,
+            reorder: 0,
+        }
     }
 }
 
@@ -116,11 +122,17 @@ impl Cluster {
         self.partitioned.clear();
     }
     fn reachable(&self, a: NodeId, b: NodeId) -> bool {
-        !self.partitioned.iter().any(|(x, y)| (*x == a && *y == b) || (*x == b && *y == a))
+        !self
+            .partitioned
+            .iter()
+            .any(|(x, y)| (*x == a && *y == b) || (*x == b && *y == a))
     }
 
     pub fn leader(&self) -> Option<NodeId> {
-        self.nodes.iter().find(|n| n.role == Role::Leader).map(|n| n.id)
+        self.nodes
+            .iter()
+            .find(|n| n.role == Role::Leader)
+            .map(|n| n.id)
     }
 
     fn send(&mut self, from: NodeId, to: NodeId, msg: Msg) {
@@ -236,7 +248,11 @@ impl Cluster {
                     continue;
                 }
                 for ea in &a.log {
-                    if let Some(eb) = b.log.iter().find(|e| e.index == ea.index && e.term == ea.term) {
+                    if let Some(eb) = b
+                        .log
+                        .iter()
+                        .find(|e| e.index == ea.index && e.term == ea.term)
+                    {
                         assert_eq!(
                             ea, eb,
                             "LOG MATCHING VIOLATED at index {} term {}: nodes {} and {} disagree",
@@ -276,7 +292,12 @@ impl Cluster {
     /// The committed prefix every node agrees on.
     pub fn agreed_prefix(&self) -> Vec<Entry> {
         let min_commit = self.nodes.iter().map(|n| n.commit_index).min().unwrap_or(0);
-        self.nodes[0].log.iter().filter(|e| e.index <= min_commit).cloned().collect()
+        self.nodes[0]
+            .log
+            .iter()
+            .filter(|e| e.index <= min_commit)
+            .cloned()
+            .collect()
     }
 }
 
@@ -288,7 +309,11 @@ mod tests {
         let mut c = Cluster::new(n, seed);
         c.elect(0);
         c.run(200);
-        assert_eq!(c.leader(), Some(0), "node 0 should have won an uncontested election");
+        assert_eq!(
+            c.leader(),
+            Some(0),
+            "node 0 should have won an uncontested election"
+        );
         c
     }
 
@@ -305,7 +330,10 @@ mod tests {
         let idx = c.propose(b"epoch-1".to_vec()).expect("leader accepts");
         c.run(500);
         assert_eq!(idx, 1);
-        assert!(c.nodes[0].commit_index >= 1, "the leader must commit after a quorum acks");
+        assert!(
+            c.nodes[0].commit_index >= 1,
+            "the leader must commit after a quorum acks"
+        );
         // And the commit index is the frontier a strict read would anchor at.
         assert_eq!(c.nodes[0].frontier(), c.nodes[0].commit_index);
     }
@@ -330,7 +358,10 @@ mod tests {
         c.heal();
         c.heartbeat();
         c.run(1000);
-        assert!(c.nodes[3].commit_index >= 1, "a healed follower must catch up");
+        assert!(
+            c.nodes[3].commit_index >= 1,
+            "a healed follower must catch up"
+        );
         assert_eq!(c.nodes[3].log, c.nodes[0].log, "and end with the same log");
     }
 
@@ -350,7 +381,12 @@ mod tests {
         let msgs = c.nodes[2].start_election();
         c.dispatch(2, msgs);
         c.run(500);
-        assert_ne!(c.leader(), Some(2), "a behind candidate must not win: {:?}", c.leader());
+        assert_ne!(
+            c.leader(),
+            Some(2),
+            "a behind candidate must not win: {:?}",
+            c.leader()
+        );
     }
 
     #[test]
@@ -388,7 +424,10 @@ mod tests {
         // checked after every single message delivery inside `step`, so a violation is
         // caught at the step that caused it.
         for seed in 1..=25u64 {
-            let mut c = Cluster::new(5, seed).with_network(Network { loss: 20, reorder: 30 });
+            let mut c = Cluster::new(5, seed).with_network(Network {
+                loss: 20,
+                reorder: 30,
+            });
             c.elect(0);
             c.run(300);
             if c.leader().is_none() {
@@ -402,8 +441,11 @@ mod tests {
             }
             // Everything the leader believes committed is in every node's log that has it.
             let leader = c.leader().unwrap() as usize;
-            let committed: Vec<&Entry> =
-                c.nodes[leader].log.iter().filter(|e| e.index <= c.nodes[leader].commit_index).collect();
+            let committed: Vec<&Entry> = c.nodes[leader]
+                .log
+                .iter()
+                .filter(|e| e.index <= c.nodes[leader].commit_index)
+                .collect();
             for e in committed {
                 for n in &c.nodes {
                     if let Some(theirs) = n.log.iter().find(|x| x.index == e.index) {
@@ -422,7 +464,10 @@ mod tests {
     fn the_cluster_converges_after_a_partition_heals_across_many_seeds() {
         let mut converged = 0;
         for seed in 1..=20u64 {
-            let mut c = Cluster::new(5, seed).with_network(Network { loss: 10, reorder: 20 });
+            let mut c = Cluster::new(5, seed).with_network(Network {
+                loss: 10,
+                reorder: 20,
+            });
             c.elect(0);
             c.run(400);
             if c.leader().is_none() {
@@ -448,7 +493,10 @@ mod tests {
                 converged += 1;
             }
         }
-        assert!(converged >= 15, "only {converged}/20 seeds converged after healing");
+        assert!(
+            converged >= 15,
+            "only {converged}/20 seeds converged after healing"
+        );
     }
 
     #[test]
@@ -467,7 +515,12 @@ mod tests {
         c.nodes[0].match_index.insert(1, 1);
         c.nodes[0].match_index.insert(2, 1);
         let t = c.nodes[0].term;
-        c.nodes[0].handle(Msg::AppendOk { term: t, from: 1, to: 0, match_index: 1 });
+        c.nodes[0].handle(Msg::AppendOk {
+            term: t,
+            from: 1,
+            to: 0,
+            match_index: 1,
+        });
         assert_eq!(
             c.nodes[0].commit_index, before,
             "an entry from a previous term must not be committed on replica count alone"
@@ -480,8 +533,13 @@ mod tests {
         // the same.
         assert!(crate::NOT_BUILT.len() >= 5);
         for (name, why) in crate::NOT_BUILT {
-            assert!(!name.is_empty() && why.len() > 20, "`{name}` has no real explanation");
+            assert!(
+                !name.is_empty() && why.len() > 20,
+                "`{name}` has no real explanation"
+            );
         }
-        assert!(crate::NOT_BUILT.iter().any(|(n, _)| n.contains("cross-shard")));
+        assert!(crate::NOT_BUILT
+            .iter()
+            .any(|(n, _)| n.contains("cross-shard")));
     }
 }

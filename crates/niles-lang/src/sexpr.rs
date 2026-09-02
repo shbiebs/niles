@@ -66,7 +66,11 @@ fn name(n: &Name) -> String {
 }
 
 fn path(p: &Path) -> String {
-    p.segments.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join("::")
+    p.segments
+        .iter()
+        .map(|s| s.text.as_str())
+        .collect::<Vec<_>>()
+        .join("::")
 }
 
 /// The six escapes the lexer decodes, run backwards. Every other byte goes through as it
@@ -116,20 +120,31 @@ pub fn item(i: &Item) -> String {
             "(struct {} {} (generics{}) (fields{}))",
             vis(d.public),
             name(&d.name),
-            d.generics.iter().map(|g| format!(" {}", name(g))).collect::<String>(),
-            d.fields.iter().map(|f| format!(" {}", field_decl(f))).collect::<String>(),
+            d.generics
+                .iter()
+                .map(|g| format!(" {}", name(g)))
+                .collect::<String>(),
+            d.fields
+                .iter()
+                .map(|f| format!(" {}", field_decl(f)))
+                .collect::<String>(),
         ),
         Item::Enum(d) => format!(
             "(enum {} {} (generics{}) (variants{}))",
             vis(d.public),
             name(&d.name),
-            d.generics.iter().map(|g| format!(" {}", name(g))).collect::<String>(),
+            d.generics
+                .iter()
+                .map(|g| format!(" {}", name(g)))
+                .collect::<String>(),
             d.variants
                 .iter()
                 .map(|(n, tys)| format!(
                     " (variant {}{})",
                     name(n),
-                    tys.iter().map(|t| format!(" {}", ty(t))).collect::<String>()
+                    tys.iter()
+                        .map(|t| format!(" {}", ty(t)))
+                        .collect::<String>()
                 ))
                 .collect::<String>(),
         ),
@@ -151,7 +166,10 @@ fn fn_decl(f: &FnDecl) -> String {
         "(fn {} {} (generics{}) (params{}) {} {} {})",
         vis(f.public),
         name(&f.name),
-        f.generics.iter().map(|g| format!(" {}", name(g))).collect::<String>(),
+        f.generics
+            .iter()
+            .map(|g| format!(" {}", name(g)))
+            .collect::<String>(),
         f.params
             .iter()
             .map(|p| format!(" (param {} {})", pat(&p.pat), ty(&p.ty)))
@@ -167,7 +185,8 @@ fn fn_decl(f: &FnDecl) -> String {
 /// which are not in the subset; rendering them as an ordinary field would let a
 /// difference the Niles parser cannot see pass as agreement.
 fn field_decl(f: &FieldDecl) -> String {
-    if f.primary_key || f.unique || f.default.is_some() || f.check.is_some() || !f.attrs.is_empty() {
+    if f.primary_key || f.unique || f.default.is_some() || f.check.is_some() || !f.attrs.is_empty()
+    {
         return unsupported("field-modifier");
     }
     format!("(field {} {})", name(&f.name), ty(&f.ty))
@@ -182,7 +201,10 @@ fn effect_row(r: &EffectRow) -> String {
                 " (eff {} {} (args{}))",
                 name(&e.name),
                 opt(e.at.as_ref(), name),
-                e.args.iter().map(|a| format!(" {}", name(a))).collect::<String>()
+                e.args
+                    .iter()
+                    .map(|a| format!(" {}", name(a)))
+                    .collect::<String>()
             ))
             .collect::<String>()
     )
@@ -195,20 +217,37 @@ pub fn ty(t: &Ty) -> String {
         Ty::Path { path: p, args, .. } => format!(
             "(tp {}{})",
             path(p),
-            args.iter().map(|a| format!(" {}", ty(a))).collect::<String>()
+            args.iter()
+                .map(|a| format!(" {}", ty(a)))
+                .collect::<String>()
         ),
         Ty::Ref { inner, mutable, .. } => {
-            format!("(tref {} {})", if *mutable { "mut" } else { "imm" }, ty(inner))
+            format!(
+                "(tref {} {})",
+                if *mutable { "mut" } else { "imm" },
+                ty(inner)
+            )
         }
         Ty::Tuple { elems, .. } => format!(
             "(ttuple{})",
-            elems.iter().map(|e| format!(" {}", ty(e))).collect::<String>()
+            elems
+                .iter()
+                .map(|e| format!(" {}", ty(e)))
+                .collect::<String>()
         ),
         Ty::Slice { elem, .. } => format!("(tslice {})", ty(elem)),
         Ty::Array { elem, len, .. } => format!("(tarray {} {})", ty(elem), expr(len)),
-        Ty::Fn { params, ret, effects, .. } => format!(
+        Ty::Fn {
+            params,
+            ret,
+            effects,
+            ..
+        } => format!(
             "(tfn (params{}) {} {})",
-            params.iter().map(|p| format!(" {}", ty(p))).collect::<String>(),
+            params
+                .iter()
+                .map(|p| format!(" {}", ty(p)))
+                .collect::<String>(),
             ty(ret),
             effect_row(effects)
         ),
@@ -224,15 +263,28 @@ pub fn ty(t: &Ty) -> String {
 pub fn block(b: &Block) -> String {
     format!(
         "(block (stmts{}) {})",
-        b.stmts.iter().map(|s| format!(" {}", stmt(s))).collect::<String>(),
+        b.stmts
+            .iter()
+            .map(|s| format!(" {}", stmt(s)))
+            .collect::<String>(),
         opt(b.tail.as_deref(), expr),
     )
 }
 
 fn stmt(s: &Stmt) -> String {
     match s {
-        Stmt::Let { pat: p, ty: t, init, .. } => {
-            format!("(let {} {} {})", pat(p), opt(t.as_ref(), ty), opt(init.as_ref(), expr))
+        Stmt::Let {
+            pat: p,
+            ty: t,
+            init,
+            ..
+        } => {
+            format!(
+                "(let {} {} {})",
+                pat(p),
+                opt(t.as_ref(), ty),
+                opt(init.as_ref(), expr)
+            )
         }
         Stmt::Expr(e) => format!("(expr {})", expr(e)),
         Stmt::Semi(e) => format!("(semi {})", expr(e)),
@@ -245,7 +297,12 @@ fn stmt(s: &Stmt) -> String {
 pub fn pat(p: &Pat) -> String {
     match p {
         Pat::Wild(_) => "(pwild)".into(),
-        Pat::Bind { name: n, mutable, by_ref, .. } => format!(
+        Pat::Bind {
+            name: n,
+            mutable,
+            by_ref,
+            ..
+        } => format!(
             "(pbind {} {} {})",
             name(n),
             if *mutable { "mut" } else { "imm" },
@@ -253,14 +310,27 @@ pub fn pat(p: &Pat) -> String {
         ),
         Pat::Tuple { elems, .. } => format!(
             "(ptuple{})",
-            elems.iter().map(|e| format!(" {}", pat(e))).collect::<String>()
+            elems
+                .iter()
+                .map(|e| format!(" {}", pat(e)))
+                .collect::<String>()
         ),
-        Pat::TupleStruct { path: pa, elems, .. } => format!(
+        Pat::TupleStruct {
+            path: pa, elems, ..
+        } => format!(
             "(pctor {}{})",
             path(pa),
-            elems.iter().map(|e| format!(" {}", pat(e))).collect::<String>()
+            elems
+                .iter()
+                .map(|e| format!(" {}", pat(e)))
+                .collect::<String>()
         ),
-        Pat::Struct { path: pa, fields, rest, .. } => format!(
+        Pat::Struct {
+            path: pa,
+            fields,
+            rest,
+            ..
+        } => format!(
             "(pstruct {} (fields{}) {})",
             path(pa),
             fields
@@ -278,11 +348,18 @@ pub fn pat(p: &Pat) -> String {
 // ── expressions ──────────────────────────────────────────────────────────────────────
 
 fn arg(a: &Arg) -> String {
-    format!("(arg {} {})", opt(a.name.as_ref(), |n| format!("(n {})", name(n))), expr(&a.value))
+    format!(
+        "(arg {} {})",
+        opt(a.name.as_ref(), |n| format!("(n {})", name(n))),
+        expr(&a.value)
+    )
 }
 
 fn args(v: &[Arg]) -> String {
-    format!("(args{})", v.iter().map(|a| format!(" {}", arg(a))).collect::<String>())
+    format!(
+        "(args{})",
+        v.iter().map(|a| format!(" {}", arg(a))).collect::<String>()
+    )
 }
 
 fn unop(o: UnOp) -> &'static str {
@@ -374,7 +451,12 @@ pub fn expr(e: &Expr) -> String {
         Bool(v, _) => format!("(bool {v})"),
         Str(s, _) => format!("(str {})", quote(s)),
         Unit(_) => "(unit)".into(),
-        Money { minor, scale, currency, .. } => {
+        Money {
+            minor,
+            scale,
+            currency,
+            ..
+        } => {
             format!("(money {minor} {scale} {})", name(currency))
         }
         Epoch(v, _) => format!("(epoch {v})"),
@@ -383,13 +465,21 @@ pub fn expr(e: &Expr) -> String {
 
         Tuple { elems, .. } => format!(
             "(tuple{})",
-            elems.iter().map(|x| format!(" {}", expr(x))).collect::<String>()
+            elems
+                .iter()
+                .map(|x| format!(" {}", expr(x)))
+                .collect::<String>()
         ),
         Array { elems, .. } => format!(
             "(array{})",
-            elems.iter().map(|x| format!(" {}", expr(x))).collect::<String>()
+            elems
+                .iter()
+                .map(|x| format!(" {}", expr(x)))
+                .collect::<String>()
         ),
-        StructLit { path: p, fields, .. } => format!(
+        StructLit {
+            path: p, fields, ..
+        } => format!(
             "(structlit {} (fields{}))",
             path(p),
             fields
@@ -399,11 +489,30 @@ pub fn expr(e: &Expr) -> String {
         ),
         Field { base, name: n, .. } => format!("(field {} {})", expr(base), name(n)),
         Index { base, index, .. } => format!("(index {} {})", expr(base), expr(index)),
-        Call { callee, args: a, .. } => format!("(call {} {})", expr(callee), args(a)),
-        Stage { recv, kind, name: n, args: a, .. } => {
-            format!("(stage {} {} {} {})", expr(recv), stage_name(*kind), name(n), args(a))
+        Call {
+            callee, args: a, ..
+        } => format!("(call {} {})", expr(callee), args(a)),
+        Stage {
+            recv,
+            kind,
+            name: n,
+            args: a,
+            ..
+        } => {
+            format!(
+                "(stage {} {} {} {})",
+                expr(recv),
+                stage_name(*kind),
+                name(n),
+                args(a)
+            )
         }
-        Closure { params, body, is_move, .. } => format!(
+        Closure {
+            params,
+            body,
+            is_move,
+            ..
+        } => format!(
             "(closure {} (params{}) {})",
             if *is_move { "move" } else { "nomove" },
             params
@@ -417,14 +526,25 @@ pub fn expr(e: &Expr) -> String {
             format!("(binary {} {} {})", binop(*op), expr(lhs), expr(rhs))
         }
         Assign { target, value, .. } => format!("(assign {} {})", expr(target), expr(value)),
-        Cast { expr: inner, ty: t, .. } => format!("(cast {} {})", expr(inner), ty(t)),
+        Cast {
+            expr: inner, ty: t, ..
+        } => format!("(cast {} {})", expr(inner), ty(t)),
         Try { expr: inner, .. } => format!("(try {})", expr(inner)),
 
         Block(b) => block(b),
-        If { cond, then, els, .. } => {
-            format!("(if {} {} {})", expr(cond), block(then), opt(els.as_deref(), expr))
+        If {
+            cond, then, els, ..
+        } => {
+            format!(
+                "(if {} {} {})",
+                expr(cond),
+                block(then),
+                opt(els.as_deref(), expr)
+            )
         }
-        Match { scrutinee, arms, .. } => format!(
+        Match {
+            scrutinee, arms, ..
+        } => format!(
             "(match {} (arms{}))",
             expr(scrutinee),
             arms.iter()
@@ -438,7 +558,9 @@ pub fn expr(e: &Expr) -> String {
         ),
         While { cond, body, .. } => format!("(while {} {})", expr(cond), block(body)),
         Loop { body, .. } => format!("(loop {})", block(body)),
-        For { pat: p, iter, body, .. } => {
+        For {
+            pat: p, iter, body, ..
+        } => {
             format!("(for {} {} {})", pat(p), expr(iter), block(body))
         }
         Return { value, .. } => format!("(return {})", opt(value.as_deref(), expr)),
@@ -483,8 +605,14 @@ mod tests {
         // "no initialiser". Both spellings must be three-slot.
         let no_ty = r("fn f() { let x = 1; }");
         let no_init = r("fn f() { let x: i64; }");
-        assert!(no_ty.contains("(let (pbind x imm val) (none) (int 1))"), "{no_ty}");
-        assert!(no_init.contains("(let (pbind x imm val) (tp i64) (none))"), "{no_init}");
+        assert!(
+            no_ty.contains("(let (pbind x imm val) (none) (int 1))"),
+            "{no_ty}"
+        );
+        assert!(
+            no_init.contains("(let (pbind x imm val) (tp i64) (none))"),
+            "{no_init}"
+        );
     }
 
     #[test]
@@ -497,7 +625,10 @@ mod tests {
             "{s}"
         );
         let m = r("fn f() { a + b * c }");
-        assert!(m.contains("(binary add (path a) (binary mul (path b) (path c)))"), "{m}");
+        assert!(
+            m.contains("(binary add (path a) (binary mul (path b) (path c)))"),
+            "{m}"
+        );
     }
 
     #[test]

@@ -69,7 +69,12 @@ fn percentiles(mut v: Vec<Duration>) -> (Duration, Duration) {
 }
 
 /// Run the point workload and return `(ops_per_second, p50, p99)`.
-fn point_workload(port: u16, accounts: i64, operations: u64, seed: u64) -> (f64, Duration, Duration) {
+fn point_workload(
+    port: u16,
+    accounts: i64,
+    operations: u64,
+    seed: u64,
+) -> (f64, Duration, Duration) {
     let mut c = Client::connect("127.0.0.1", port, "bench", "bank").expect("connect");
     let mut rng = bank_bench::workloads::Rng::seeded(seed);
     let mut latencies = Vec::with_capacity(operations as usize);
@@ -112,9 +117,17 @@ fn the_read_path_answers_over_the_wire_from_a_partial_view() {
     let missing = c
         .simple("select acct, sum(amt) from postings where acct = 999999 group by acct")
         .expect("query");
-    assert_eq!(missing.rows.len(), 1, "the key is answered, not silently dropped");
+    assert_eq!(
+        missing.rows.len(),
+        1,
+        "the key is answered, not silently dropped"
+    );
     assert_eq!(missing.rows[0][1], None, "and the answer is NULL, not 0");
-    assert_eq!(missing.by_name("value"), None, "which the client reads as no value");
+    assert_eq!(
+        missing.by_name("value"),
+        None,
+        "which the client reads as no value"
+    );
 }
 
 #[test]
@@ -122,13 +135,15 @@ fn eviction_does_not_change_an_answer_served_over_the_wire() {
     // Contribution 1, exercised end to end: eviction followed by anchored reconstruction can
     // neither create nor destroy money. Checked through the protocol rather than in-process,
     // because that is where a caching layer would hide the difference.
-    let (port, _, _) = host(500, 2, 50);  // a budget far below the key count, so eviction bites
+    let (port, _, _) = host(500, 2, 50); // a budget far below the key count, so eviction bites
     let mut c = Client::connect("127.0.0.1", port, "bench", "bank").expect("connect");
 
     let read = |c: &mut Client, a: i64| -> Option<i128> {
-        c.simple(&format!("select acct, sum(amt) from postings where acct = {a} group by acct"))
-            .expect("query")
-            .by_name("value")
+        c.simple(&format!(
+            "select acct, sum(amt) from postings where acct = {a} group by acct"
+        ))
+        .expect("query")
+        .by_name("value")
     };
 
     let first: Vec<Option<i128>> = (1..=200).map(|a| read(&mut c, a)).collect();
@@ -137,7 +152,10 @@ fn eviction_does_not_change_an_answer_served_over_the_wire() {
         read(&mut c, a);
     }
     let second: Vec<Option<i128>> = (1..=200).map(|a| read(&mut c, a)).collect();
-    assert_eq!(first, second, "eviction and reconstruction changed an answer");
+    assert_eq!(
+        first, second,
+        "eviction and reconstruction changed an answer"
+    );
 }
 
 /// The measurement itself. Writes `results/E16-wallclock/point.csv` rows for Nilestream.
@@ -202,9 +220,8 @@ fn e16_point_workload_against_the_rev_runtime() {
         .to_path_buf();
     let path = root.join("results/E16-wallclock/point.csv");
     let path = path.as_path();
-    let existing = std::fs::read_to_string(path).unwrap_or_else(|_| {
-        format!("{}\n", bank_bench::render::CSV_HEADER)
-    });
+    let existing = std::fs::read_to_string(path)
+        .unwrap_or_else(|_| format!("{}\n", bank_bench::render::CSV_HEADER));
     let mut out = String::new();
     for line in existing.lines() {
         if !line.starts_with("point,nilestream,") {
@@ -220,5 +237,9 @@ fn e16_point_workload_against_the_rev_runtime() {
         let _ = std::fs::create_dir_all(dir);
     }
     std::fs::write(path, out).expect("write point.csv");
-    eprintln!("wrote {} Nilestream rows to {}", lines.len(), path.display());
+    eprintln!(
+        "wrote {} Nilestream rows to {}",
+        lines.len(),
+        path.display()
+    );
 }

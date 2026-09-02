@@ -87,7 +87,9 @@ impl Rewrite {
             Rewrite::ExistsToSemiJoin { .. } => "exists-to-semi-join",
             Rewrite::NotExistsToAntiJoin { .. } => "not-exists-to-anti-join",
             Rewrite::InToSemiJoin { .. } => "in-to-semi-join",
-            Rewrite::NotInToAntiJoinWithNullWitness { .. } => "not-in-to-anti-join-with-null-witness",
+            Rewrite::NotInToAntiJoinWithNullWitness { .. } => {
+                "not-in-to-anti-join-with-null-witness"
+            }
             Rewrite::ScalarToOuterJoinWithAggregate { .. } => "scalar-to-outer-join-with-aggregate",
         }
     }
@@ -149,29 +151,30 @@ pub fn unnest(c: &Circuit) -> (Circuit, Report) {
         let inputs: Vec<NodeId> = n.inputs.iter().map(|i| remap[*i as usize]).collect();
         let contract = n.contract.peek().clone();
         let new_id = match &n.op {
-            Op::Apply { kind, correlation } => {
-                match refuse(c, n.id, kind, correlation) {
-                    Some(reason) => {
-                        report.refused.push(Refusal { apply: n.id, reason });
-                        out.add(n.op.clone(), inputs, contract, n.label.clone())
-                    }
-                    None => {
-                        let outer_arity = c.nodes[n.inputs[0] as usize].arity;
-                        let id = rewrite(
-                            &mut out,
-                            kind,
-                            correlation,
-                            inputs[0],
-                            inputs[1],
-                            outer_arity,
-                            &contract,
-                            &n.label,
-                        );
-                        report.fired.push(fired_for(kind, n.id));
-                        id
-                    }
+            Op::Apply { kind, correlation } => match refuse(c, n.id, kind, correlation) {
+                Some(reason) => {
+                    report.refused.push(Refusal {
+                        apply: n.id,
+                        reason,
+                    });
+                    out.add(n.op.clone(), inputs, contract, n.label.clone())
                 }
-            }
+                None => {
+                    let outer_arity = c.nodes[n.inputs[0] as usize].arity;
+                    let id = rewrite(
+                        &mut out,
+                        kind,
+                        correlation,
+                        inputs[0],
+                        inputs[1],
+                        outer_arity,
+                        &contract,
+                        &n.label,
+                    );
+                    report.fired.push(fired_for(kind, n.id));
+                    id
+                }
+            },
             other => out.add(other.clone(), inputs, contract, n.label.clone()),
         };
         remap[n.id as usize] = new_id;
@@ -207,10 +210,14 @@ fn refuse(
     // `limit` or an `order_by` those are different queries: "the three cheapest matching
     // rows *for this account*" is not "three rows of the join". Refuse rather than change
     // the answer.
-    if let Some(bad) = find_below(c, inner, &|op| matches!(op, Op::Limit { .. } | Op::OrderBy { .. })) {
+    if let Some(bad) = find_below(c, inner, &|op| {
+        matches!(op, Op::Limit { .. } | Op::OrderBy { .. })
+    }) {
         let _ = bad;
-        return Some("the subquery is under a `limit` or `order_by`, where per-outer-row and \
-                     set-at-a-time evaluation are different queries");
+        return Some(
+            "the subquery is under a `limit` or `order_by`, where per-outer-row and \
+                     set-at-a-time evaluation are different queries",
+        );
     }
 
     // An uncertified UDF may not be deterministic, and unnesting changes how many times it
@@ -223,16 +230,20 @@ fn refuse(
     })
     .is_some()
     {
-        return Some("the subquery calls a UDF the loader has not certified deterministic, and \
-                     unnesting changes how many times it is called");
+        return Some(
+            "the subquery calls a UDF the loader has not certified deterministic, and \
+                     unnesting changes how many times it is called",
+        );
     }
 
     // A scalar subquery must produce exactly one value per outer row. With no correlation
     // it produces one value for *all* of them, which is a legal query but a different
     // rewrite (a cross join against a one-row relation), and this module does not do it.
     if matches!(kind, ApplyKind::Scalar { .. }) && correlation.is_empty() {
-        return Some("an uncorrelated scalar subquery needs a cross join against a one-row \
-                     relation, which is a different rewrite");
+        return Some(
+            "an uncorrelated scalar subquery needs a cross join against a one-row \
+                     relation, which is a different rewrite",
+        );
     }
     None
 }
@@ -255,7 +266,11 @@ fn find_below(c: &Circuit, id: NodeId, p: &dyn Fn(&Op) -> bool) -> Option<NodeId
 }
 
 fn eq(a: Scalar, b: Scalar) -> Scalar {
-    Scalar::Binary { op: ScalarOp::Eq, lhs: Box::new(a), rhs: Box::new(b) }
+    Scalar::Binary {
+        op: ScalarOp::Eq,
+        lhs: Box::new(a),
+        rhs: Box::new(b),
+    }
 }
 
 /// Emit the unnested form and return the node that now produces the apply's output.
@@ -275,13 +290,23 @@ fn rewrite(
 
     match kind {
         ApplyKind::Exists => out.add(
-            Op::Join { kind: JoinKind::Semi, left_key: lk, right_key: rk, residual: None },
+            Op::Join {
+                kind: JoinKind::Semi,
+                left_key: lk,
+                right_key: rk,
+                residual: None,
+            },
             vec![outer, inner],
             contract.clone(),
             format!("{label} (exists → semi)"),
         ),
         ApplyKind::NotExists => out.add(
-            Op::Join { kind: JoinKind::Anti, left_key: lk, right_key: rk, residual: None },
+            Op::Join {
+                kind: JoinKind::Anti,
+                left_key: lk,
+                right_key: rk,
+                residual: None,
+            },
             vec![outer, inner],
             contract.clone(),
             format!("{label} (not exists → anti)"),
@@ -295,7 +320,12 @@ fn rewrite(
             lk.push(*probe);
             rk.push(*icol);
             out.add(
-                Op::Join { kind: JoinKind::Semi, left_key: lk, right_key: rk, residual: None },
+                Op::Join {
+                    kind: JoinKind::Semi,
+                    left_key: lk,
+                    right_key: rk,
+                    residual: None,
+                },
                 vec![outer, inner],
                 contract.clone(),
                 format!("{label} (in → semi)"),
@@ -307,7 +337,9 @@ fn rewrite(
             //    would *keep* a null probe that matched nothing.
             let not_null = Scalar::Not(Box::new(Scalar::IsNull(Box::new(Scalar::Column(*probe)))));
             let probed = out.add(
-                Op::Filter { predicate: not_null },
+                Op::Filter {
+                    predicate: not_null,
+                },
                 vec![outer],
                 contract.clone(),
                 format!("{label} (probe is not null)"),
@@ -319,7 +351,12 @@ fn rewrite(
             alk.push(*probe);
             ark.push(*icol);
             let unmatched = out.add(
-                Op::Join { kind: JoinKind::Anti, left_key: alk, right_key: ark, residual: None },
+                Op::Join {
+                    kind: JoinKind::Anti,
+                    left_key: alk,
+                    right_key: ark,
+                    residual: None,
+                },
                 vec![probed, inner],
                 contract.clone(),
                 format!("{label} (not in → anti)"),
@@ -331,7 +368,9 @@ fn rewrite(
             //    left side is dropped iff the witness is non-empty — which is exactly the
             //    uncorrelated rule, without a special case for it.
             let nulls = out.add(
-                Op::Filter { predicate: Scalar::IsNull(Box::new(Scalar::Column(*icol))) },
+                Op::Filter {
+                    predicate: Scalar::IsNull(Box::new(Scalar::Column(*icol))),
+                },
                 vec![inner],
                 contract.clone(),
                 format!("{label} (null witness)"),
@@ -344,7 +383,9 @@ fn rewrite(
                 rk.iter().map(|c| Scalar::Column(*c)).collect()
             };
             let projected = out.add(
-                Op::Map { exprs: witness_cols },
+                Op::Map {
+                    exprs: witness_cols,
+                },
                 vec![nulls],
                 contract.clone(),
                 format!("{label} (witness key)"),
@@ -375,7 +416,10 @@ fn rewrite(
             // silently drop those rows — the same class of defect as `Err(_) => 0`, one
             // level up.
             let grouped = out.add(
-                Op::Aggregate { group_key: rk.clone(), aggs: vec![(*agg, expr.clone())] },
+                Op::Aggregate {
+                    group_key: rk.clone(),
+                    aggs: vec![(*agg, expr.clone())],
+                },
                 vec![inner],
                 contract.clone(),
                 format!("{label} (subquery aggregate)"),
@@ -397,7 +441,9 @@ fn rewrite(
             // denotational one does not.
             let keep: Vec<Scalar> = (0..outer_arity)
                 .map(Scalar::Column)
-                .chain(std::iter::once(Scalar::Column(outer_arity + rk.len() as u16)))
+                .chain(std::iter::once(Scalar::Column(
+                    outer_arity + rk.len() as u16,
+                )))
                 .collect();
             out.add(
                 Op::Map { exprs: keep },

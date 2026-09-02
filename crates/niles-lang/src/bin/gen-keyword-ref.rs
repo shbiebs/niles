@@ -15,7 +15,9 @@ use std::fmt::Write;
 #[allow(dead_code)]
 fn main() {
     let out = render();
-    let path = std::env::args().nth(1).unwrap_or_else(|| "docs/keywords.md".to_string());
+    let path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "docs/keywords.md".to_string());
     std::fs::create_dir_all(std::path::Path::new(&path).parent().unwrap()).ok();
     std::fs::write(&path, out).expect("write keyword reference");
     eprintln!("wrote {path} ({} keywords)", KEYWORDS.len());
@@ -28,7 +30,10 @@ pub fn render() -> String {
         .iter()
         .filter(|k| matches!(k.category, Category::Reserved | Category::ReservedFuture))
         .count();
-    let unreserved = KEYWORDS.iter().filter(|k| k.category == Category::Unreserved).count();
+    let unreserved = KEYWORDS
+        .iter()
+        .filter(|k| k.category == Category::Unreserved)
+        .count();
 
     s.push_str("# The Niles Keyword Reference\n\n");
     s.push_str(
@@ -94,7 +99,9 @@ this reference is unreserved, and a test enforces it.\n\n",
              them is unreserved.",
         ),
     ] {
-        let n = by_origin(origin).filter(|k| k.category != Category::ReservedFuture).count();
+        let n = by_origin(origin)
+            .filter(|k| k.category != Category::ReservedFuture)
+            .count();
         let _ = writeln!(s, "## {title} ({n})\n");
         let _ = writeln!(s, "{blurb}\n");
         s.push_str("| Keyword | Category | Label | Since | Description | Example |\n");
@@ -105,8 +112,10 @@ this reference is unreserved, and a test enforces it.\n\n",
         s.push('\n');
     }
 
-    let future: Vec<&Keyword> =
-        KEYWORDS.iter().filter(|k| k.category == Category::ReservedFuture).collect();
+    let future: Vec<&Keyword> = KEYWORDS
+        .iter()
+        .filter(|k| k.category == Category::ReservedFuture)
+        .collect();
     let _ = writeln!(s, "## Reserved for future use ({})\n", future.len());
     s.push_str(
         "Reserved with no meaning assigned in this edition. Using one is a hard error that \
@@ -124,7 +133,11 @@ this reference is unreserved, and a test enforces it.\n\n",
         .map(|k| k.word)
         .collect();
     reserved_words.sort_unstable();
-    let _ = writeln!(s, "{} words. All require `r#` to be used as identifiers.\n", reserved_words.len());
+    let _ = writeln!(
+        s,
+        "{} words. All require `r#` to be used as identifiers.\n",
+        reserved_words.len()
+    );
     let _ = writeln!(s, "```\n{}\n```\n", reserved_words.join(" "));
 
     s.push_str("## Words that are *not* reserved, and why that matters\n\n");

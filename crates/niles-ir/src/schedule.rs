@@ -115,12 +115,21 @@ pub enum ScheduleError {
     /// The step names a node that does not exist.
     NoSuchNode { step: &'static str, node: NodeId },
     /// The step names a node of the wrong kind — `commute-join` on an aggregate, say.
-    WrongOperator { step: &'static str, node: NodeId, found: &'static str, wanted: &'static str },
+    WrongOperator {
+        step: &'static str,
+        node: NodeId,
+        found: &'static str,
+        wanted: &'static str,
+    },
     /// The operator is right but its side condition does not hold.
     ///
     /// The interesting refusal, and the one that carries the argument: it names the condition
     /// rather than reporting that something was wrong.
-    SideCondition { step: &'static str, node: NodeId, condition: String },
+    SideCondition {
+        step: &'static str,
+        node: NodeId,
+        condition: String,
+    },
     /// A step outside the catalogue.
     ///
     /// Cannot arise from a [`Step`] value — the enum is the catalogue — and exists for a
@@ -135,11 +144,20 @@ impl std::fmt::Display for ScheduleError {
             ScheduleError::NoSuchNode { step, node } => {
                 write!(f, "`{step}` names node {node}, which does not exist")
             }
-            ScheduleError::WrongOperator { step, node, found, wanted } => write!(
+            ScheduleError::WrongOperator {
+                step,
+                node,
+                found,
+                wanted,
+            } => write!(
                 f,
                 "`{step}` applies to a {wanted}; node {node} is a {found}"
             ),
-            ScheduleError::SideCondition { step, node, condition } => write!(
+            ScheduleError::SideCondition {
+                step,
+                node,
+                condition,
+            } => write!(
                 f,
                 "`{step}` cannot be applied at node {node}: {condition}. The rewrite is only \
                  equivalence-preserving when that holds, so it is refused rather than performed"
@@ -252,9 +270,12 @@ fn commute_join(circuit: &Circuit, id: NodeId) -> Result<Circuit, ScheduleError>
     const STEP: &str = "commute-join";
     let i = node_at(circuit, id, STEP)?;
     let (kind, lk, rk, residual) = match &circuit.nodes[i].op {
-        Op::Join { kind, left_key, right_key, residual } => {
-            (*kind, left_key.clone(), right_key.clone(), residual.clone())
-        }
+        Op::Join {
+            kind,
+            left_key,
+            right_key,
+            residual,
+        } => (*kind, left_key.clone(), right_key.clone(), residual.clone()),
         other => {
             return Err(ScheduleError::WrongOperator {
                 step: STEP,
@@ -293,7 +314,10 @@ fn commute_join(circuit: &Circuit, id: NodeId) -> Result<Circuit, ScheduleError>
         return Err(ScheduleError::SideCondition {
             step: STEP,
             node: id,
-            condition: format!("a join has two inputs; this one has {}", circuit.nodes[i].inputs.len()),
+            condition: format!(
+                "a join has two inputs; this one has {}",
+                circuit.nodes[i].inputs.len()
+            ),
         });
     }
 
@@ -333,7 +357,11 @@ fn commute_join(circuit: &Circuit, id: NodeId) -> Result<Circuit, ScheduleError>
 }
 
 fn push_filter(circuit: &Circuit, id: NodeId, into_left: bool) -> Result<Circuit, ScheduleError> {
-    let step: &'static str = if into_left { "push-filter-into-left" } else { "push-filter-into-right" };
+    let step: &'static str = if into_left {
+        "push-filter-into-left"
+    } else {
+        "push-filter-into-right"
+    };
     let i = node_at(circuit, id, step)?;
     let predicate = match &circuit.nodes[i].op {
         Op::Filter { predicate } => predicate.clone(),
@@ -430,7 +458,9 @@ fn push_filter(circuit: &Circuit, id: NodeId, into_left: bool) -> Result<Circuit
     // Insert the filter above `target`, and remove the original above the join.
     let pushed = out.nodes[i].clone_shell(
         next_id(&out),
-        Op::Filter { predicate: rewritten },
+        Op::Filter {
+            predicate: rewritten,
+        },
         vec![target],
         arity_of(circuit, target),
         format!("pushed below join {join_id}"),
@@ -527,8 +557,12 @@ fn elide_double_negate(circuit: &Circuit, id: NodeId) -> Result<Circuit, Schedul
     let mut out = circuit.clone();
     rewire_consumers(&mut out, id, grandparent);
     // The inner negate stays only if something else reads it.
-    let inner_still_used = out.nodes.iter().any(|n| n.id != id && n.inputs.contains(&inner_id));
-    out.nodes.retain(|n| n.id != id && (inner_still_used || n.id != inner_id));
+    let inner_still_used = out
+        .nodes
+        .iter()
+        .any(|n| n.id != id && n.inputs.contains(&inner_id));
+    out.nodes
+        .retain(|n| n.id != id && (inner_still_used || n.id != inner_id));
     for (name, target) in out.outputs.iter_mut() {
         let _ = name;
         if *target == id {
@@ -539,11 +573,22 @@ fn elide_double_negate(circuit: &Circuit, id: NodeId) -> Result<Circuit, Schedul
 }
 
 fn arity_of(circuit: &Circuit, id: NodeId) -> ColIdx {
-    circuit.nodes.iter().find(|n| n.id == id).map(|n| n.arity).unwrap_or(0)
+    circuit
+        .nodes
+        .iter()
+        .find(|n| n.id == id)
+        .map(|n| n.arity)
+        .unwrap_or(0)
 }
 
 fn next_id(circuit: &Circuit) -> NodeId {
-    circuit.nodes.iter().map(|n| n.id).max().map(|m| m + 1).unwrap_or(0)
+    circuit
+        .nodes
+        .iter()
+        .map(|n| n.id)
+        .max()
+        .map(|m| m + 1)
+        .unwrap_or(0)
 }
 
 fn rewire_consumers(circuit: &mut Circuit, from: NodeId, to: NodeId) {
@@ -600,7 +645,9 @@ pub fn step_from_name(name: &str, node: NodeId) -> Result<Step, ScheduleError> {
         "push-filter-into-right" => Ok(Step::PushFilterIntoRight { filter: node }),
         "commute-union" => Ok(Step::CommuteUnion { union: node }),
         "elide-double-negate" => Ok(Step::ElideDoubleNegate { negate: node }),
-        other => Err(ScheduleError::NotInCatalogue { named: other.to_string() }),
+        other => Err(ScheduleError::NotInCatalogue {
+            named: other.to_string(),
+        }),
     }
 }
 
@@ -665,7 +712,11 @@ mod tests {
     fn source(id: NodeId, name: &str, arity: u16) -> Node {
         node(
             id,
-            Op::Source { relation: name.into(), is_base: true, anchor_key: vec![0] },
+            Op::Source {
+                relation: name.into(),
+                is_base: true,
+                anchor_key: vec![0],
+            },
             vec![],
             arity,
         )
@@ -678,7 +729,12 @@ mod tests {
         c.nodes.push(source(1, "r", 2));
         c.nodes.push(node(
             2,
-            Op::Join { kind, left_key: vec![0], right_key: vec![0], residual },
+            Op::Join {
+                kind,
+                left_key: vec![0],
+                right_key: vec![0],
+                residual,
+            },
             vec![0, 1],
             4,
         ));
@@ -696,7 +752,9 @@ mod tests {
     fn inputs(seed: u64) -> BTreeMap<String, ZSet> {
         let mut rng = seed;
         let mut next = || {
-            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            rng = rng
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             ((rng >> 33) % 7) as i128
         };
         let mut l = ZSet::new();
@@ -762,7 +820,12 @@ mod tests {
 
     #[test]
     fn an_outer_join_does_not_commute_and_the_refusal_says_why() {
-        for kind in [JoinKind::LeftOuter, JoinKind::RightOuter, JoinKind::Anti, JoinKind::Semi] {
+        for kind in [
+            JoinKind::LeftOuter,
+            JoinKind::RightOuter,
+            JoinKind::Anti,
+            JoinKind::Semi,
+        ] {
             let c = join_circuit(kind, Scalar::LitBool(true), None);
             let e = apply(&c, &Step::CommuteJoin { join: 2 }).unwrap_err();
             match e {
@@ -797,7 +860,10 @@ mod tests {
         let before = join_circuit(JoinKind::Inner, p, None);
         let after = apply(&before, &Step::PushFilterIntoLeft { filter: 3 }).expect("pushes");
         denotation_holds(&before, &after, 1_000);
-        assert!(after.nodes.iter().all(|n| n.id != 3), "the original filter was elided");
+        assert!(
+            after.nodes.iter().all(|n| n.id != 3),
+            "the original filter was elided"
+        );
     }
 
     #[test]
@@ -839,7 +905,10 @@ mod tests {
             rhs: Box::new(Scalar::Column(3)),
         };
         let c = join_circuit(JoinKind::Inner, p, None);
-        for step in [Step::PushFilterIntoLeft { filter: 3 }, Step::PushFilterIntoRight { filter: 3 }] {
+        for step in [
+            Step::PushFilterIntoLeft { filter: 3 },
+            Step::PushFilterIntoRight { filter: 3 },
+        ] {
             let e = apply(&c, &step).unwrap_err();
             match e {
                 ScheduleError::SideCondition { condition, .. } => {
@@ -864,7 +933,10 @@ mod tests {
 
     #[test]
     fn a_predicate_calling_a_udf_is_not_pushed_because_the_call_count_would_change() {
-        let p = Scalar::Udf { id: 7, args: vec![Scalar::Column(1)] };
+        let p = Scalar::Udf {
+            id: 7,
+            args: vec![Scalar::Column(1)],
+        };
         let c = join_circuit(JoinKind::Inner, p, None);
         let e = apply(&c, &Step::PushFilterIntoLeft { filter: 3 }).unwrap_err();
         assert!(e.to_string().contains("user function"), "{e}");
@@ -909,7 +981,11 @@ mod tests {
         single.nodes.push(node(1, Op::Negate, vec![0], 2));
         single.outputs.insert("out".into(), 1);
         let e = apply(&single, &Step::ElideDoubleNegate { negate: 1 }).unwrap_err();
-        assert!(e.to_string().contains("single negation is not the identity"), "{e}");
+        assert!(
+            e.to_string()
+                .contains("single negation is not the identity"),
+            "{e}"
+        );
     }
 
     // ── the checker's own properties ────────────────────────────────────────────────
@@ -924,7 +1000,10 @@ mod tests {
         let once = apply(&before, &Step::CommuteJoin { join: 2 }).unwrap();
         let twice = apply(&once, &Step::CommuteJoin { join: 2 }).expect("still legal");
         denotation_holds(&before, &twice, 500);
-        assert!(twice.nodes.len() > before.nodes.len(), "and it really is a worse plan");
+        assert!(
+            twice.nodes.len() > before.nodes.len(),
+            "and it really is a worse plan"
+        );
     }
 
     #[test]
@@ -935,8 +1014,17 @@ mod tests {
         // design replaces.
         let variants = [
             ScheduleError::NoSuchNode { step: "s", node: 0 },
-            ScheduleError::WrongOperator { step: "s", node: 0, found: "a", wanted: "b" },
-            ScheduleError::SideCondition { step: "s", node: 0, condition: "c".into() },
+            ScheduleError::WrongOperator {
+                step: "s",
+                node: 0,
+                found: "a",
+                wanted: "b",
+            },
+            ScheduleError::SideCondition {
+                step: "s",
+                node: 0,
+                condition: "c".into(),
+            },
             ScheduleError::NotInCatalogue { named: "n".into() },
         ];
         for v in &variants {
@@ -957,7 +1045,10 @@ mod tests {
         assert!(step_from_name("commute-join", 4).is_ok());
         assert_eq!(catalogue().len(), 5);
         for name in catalogue() {
-            assert!(step_from_name(name, 0).is_ok(), "{name} is named but not parseable");
+            assert!(
+                step_from_name(name, 0).is_ok(),
+                "{name} is named but not parseable"
+            );
         }
     }
 
@@ -1013,7 +1104,11 @@ mod tests {
         let mut z = crate::eval::zset(&[(&[1, 1], 2), (&[2, 2], -3)]);
         assert_eq!(z.get(&cells(&[2, 2])), Some(&-3));
         add(&mut z, cells(&[1, 1]), -2);
-        assert_eq!(z.get(&cells(&[1, 1])), None, "a zero weight is not a member");
+        assert_eq!(
+            z.get(&cells(&[1, 1])),
+            None,
+            "a zero weight is not a member"
+        );
 
         let src = inputs(3);
         assert!(

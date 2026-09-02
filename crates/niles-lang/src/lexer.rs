@@ -38,10 +38,16 @@ pub struct Span {
 
 impl Span {
     pub fn new(start: usize, end: usize) -> Self {
-        Span { start: start as u32, end: end as u32 }
+        Span {
+            start: start as u32,
+            end: end as u32,
+        }
     }
     pub fn to(self, other: Span) -> Span {
-        Span { start: self.start.min(other.start), end: self.end.max(other.end) }
+        Span {
+            start: self.start.min(other.start),
+            end: self.end.max(other.end),
+        }
     }
     pub fn len(self) -> usize {
         (self.end - self.start) as usize
@@ -73,7 +79,11 @@ pub enum Tok {
     Float(f64),
     /// `10.00 usd` — value in minor units at the literal's own scale, plus that scale and
     /// the currency word. The type checker reconciles the scale with the declaration.
-    Money { minor: i128, scale: u32, currency: String },
+    Money {
+        minor: i128,
+        scale: u32,
+        currency: String,
+    },
     /// `#4200`
     EpochLit(u64),
     /// `@2026-03-01`, system axis.
@@ -81,18 +91,54 @@ pub enum Tok {
     /// `v@2026-03-01`, valid-time axis.
     ValidInstant(String),
     /// `7.days`
-    Duration { value: i128, unit: TimeUnit },
+    Duration {
+        value: i128,
+        unit: TimeUnit,
+    },
     /// A string literal with escapes already processed.
     Str(String),
     /// A byte-string literal.
     Bytes(Vec<u8>),
     Bool(bool),
     // --- punctuation ---
-    LParen, RParen, LBrace, RBrace, LBracket, RBracket,
-    Comma, Semi, Colon, ColonColon, Dot, DotDot, Arrow, FatArrow,
-    Pipe, PipePipe, PipeGt, Amp, AmpAmp, Bang, Question, At, Hash, HashBracket,
-    Plus, Minus, Star, Slash, Percent, Caret,
-    Eq, EqEq, Ne, Lt, Le, Gt, Ge, Underscore,
+    LParen,
+    RParen,
+    LBrace,
+    RBrace,
+    LBracket,
+    RBracket,
+    Comma,
+    Semi,
+    Colon,
+    ColonColon,
+    Dot,
+    DotDot,
+    Arrow,
+    FatArrow,
+    Pipe,
+    PipePipe,
+    PipeGt,
+    Amp,
+    AmpAmp,
+    Bang,
+    Question,
+    At,
+    Hash,
+    HashBracket,
+    Plus,
+    Minus,
+    Star,
+    Slash,
+    Percent,
+    Caret,
+    Eq,
+    EqEq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    Underscore,
     /// End of input. Always present, so the parser never indexes past the end.
     Eof,
     /// A byte the lexer could not classify. Never silently dropped: it becomes a token so
@@ -213,7 +259,13 @@ pub struct Lexer<'a> {
 
 impl<'a> Lexer<'a> {
     pub fn new(src: &'a str) -> Self {
-        Lexer { src, bytes: src.as_bytes(), pos: 0, trivia: Vec::new(), errors: Vec::new() }
+        Lexer {
+            src,
+            bytes: src.as_bytes(),
+            pos: 0,
+            trivia: Vec::new(),
+            errors: Vec::new(),
+        }
     }
 
     /// Lex the whole input. Always returns a stream ending in [`Tok::Eof`]; errors are
@@ -224,11 +276,17 @@ impl<'a> Lexer<'a> {
             self.skip_trivia();
             let start = self.pos;
             if self.pos >= self.bytes.len() {
-                out.push(Token { tok: Tok::Eof, span: Span::new(start, start) });
+                out.push(Token {
+                    tok: Tok::Eof,
+                    span: Span::new(start, start),
+                });
                 break;
             }
             let tok = self.next_token();
-            out.push(Token { tok, span: Span::new(start, self.pos) });
+            out.push(Token {
+                tok,
+                span: Span::new(start, self.pos),
+            });
         }
         (out, self.trivia, self.errors)
     }
@@ -253,7 +311,11 @@ impl<'a> Lexer<'a> {
         }
     }
     fn err(&mut self, start: usize, code: &'static str, msg: impl Into<String>) {
-        self.errors.push(LexError { span: Span::new(start, self.pos), msg: msg.into(), code });
+        self.errors.push(LexError {
+            span: Span::new(start, self.pos),
+            msg: msg.into(),
+            code,
+        });
     }
 
     fn skip_trivia(&mut self) {
@@ -264,21 +326,27 @@ impl<'a> Lexer<'a> {
                     while self.peek().map_or(false, |c| c.is_whitespace()) {
                         self.bump();
                     }
-                    self.trivia.push((Trivia::Whitespace, Span::new(start, self.pos)));
+                    self.trivia
+                        .push((Trivia::Whitespace, Span::new(start, self.pos)));
                 }
                 Some('-') if self.peek_at(1) == Some('-') => {
                     // SQL line comment. Kept because Niles must accept pasted SQL.
                     while self.peek().map_or(false, |c| c != '\n') {
                         self.bump();
                     }
-                    self.trivia.push((Trivia::LineComment, Span::new(start, self.pos)));
+                    self.trivia
+                        .push((Trivia::LineComment, Span::new(start, self.pos)));
                 }
                 Some('/') if self.peek_at(1) == Some('/') => {
                     let doc = self.peek_at(2) == Some('/');
                     while self.peek().map_or(false, |c| c != '\n') {
                         self.bump();
                     }
-                    let kind = if doc { Trivia::DocComment } else { Trivia::LineComment };
+                    let kind = if doc {
+                        Trivia::DocComment
+                    } else {
+                        Trivia::LineComment
+                    };
                     self.trivia.push((kind, Span::new(start, self.pos)));
                 }
                 Some('/') if self.peek_at(1) == Some('*') => {
@@ -304,7 +372,8 @@ impl<'a> Lexer<'a> {
                             _ => {}
                         }
                     }
-                    self.trivia.push((Trivia::BlockComment, Span::new(start, self.pos)));
+                    self.trivia
+                        .push((Trivia::BlockComment, Span::new(start, self.pos)));
                 }
                 _ => return,
             }
@@ -316,14 +385,20 @@ impl<'a> Lexer<'a> {
         let c = self.peek().unwrap();
 
         // --- valid-time instant: v@... , before the identifier rule claims the `v` ---
-        if c == 'v' && self.peek_at(1) == Some('@') && self.peek_at(2).map_or(false, |c| c.is_ascii_digit()) {
+        if c == 'v'
+            && self.peek_at(1) == Some('@')
+            && self.peek_at(2).map_or(false, |c| c.is_ascii_digit())
+        {
             self.bump();
             self.bump();
             let s = self.lex_datetime_body();
             return Tok::ValidInstant(s);
         }
         // --- raw identifier: r#ledger ---
-        if c == 'r' && self.peek_at(1) == Some('#') && self.peek_at(2).map_or(false, raw::is_ident_start) {
+        if c == 'r'
+            && self.peek_at(1) == Some('#')
+            && self.peek_at(2).map_or(false, raw::is_ident_start)
+        {
             self.bump();
             self.bump();
             let b = self.pos;
@@ -370,11 +445,16 @@ impl<'a> Lexer<'a> {
                 }
                 if self.peek().map_or(false, |c| c.is_ascii_digit()) {
                     let b = self.pos;
-                    while self.peek().map_or(false, |c| c.is_ascii_digit() || c == '_') {
+                    while self
+                        .peek()
+                        .map_or(false, |c| c.is_ascii_digit() || c == '_')
+                    {
                         self.bump();
                     }
-                    let raw_digits: String =
-                        self.src[b..self.pos].chars().filter(|c| *c != '_').collect();
+                    let raw_digits: String = self.src[b..self.pos]
+                        .chars()
+                        .filter(|c| *c != '_')
+                        .collect();
                     return match raw_digits.parse::<u64>() {
                         Ok(v) => Tok::EpochLit(v),
                         Err(_) => {
@@ -414,10 +494,16 @@ impl<'a> Lexer<'a> {
     fn lex_number(&mut self) -> Tok {
         let start = self.pos;
         let int_b = self.pos;
-        while self.peek().map_or(false, |c| c.is_ascii_digit() || c == '_') {
+        while self
+            .peek()
+            .map_or(false, |c| c.is_ascii_digit() || c == '_')
+        {
             self.bump();
         }
-        let int_part: String = self.src[int_b..self.pos].chars().filter(|c| *c != '_').collect();
+        let int_part: String = self.src[int_b..self.pos]
+            .chars()
+            .filter(|c| *c != '_')
+            .collect();
 
         // `7.days` — a number, a dot, a time unit. Checked before the fraction rule,
         // because `7.days` must not lex as `7.` followed by `days`.
@@ -440,10 +526,16 @@ impl<'a> Lexer<'a> {
         if self.peek() == Some('.') && self.peek_at(1).map_or(false, |c| c.is_ascii_digit()) {
             self.bump();
             let fb = self.pos;
-            while self.peek().map_or(false, |c| c.is_ascii_digit() || c == '_') {
+            while self
+                .peek()
+                .map_or(false, |c| c.is_ascii_digit() || c == '_')
+            {
                 self.bump();
             }
-            frac = self.src[fb..self.pos].chars().filter(|c| *c != '_').collect();
+            frac = self.src[fb..self.pos]
+                .chars()
+                .filter(|c| *c != '_')
+                .collect();
         }
 
         // Money: a decimal immediately followed (after at most one space) by a currency
@@ -471,10 +563,22 @@ impl<'a> Lexer<'a> {
                 let scale = frac.len() as u32;
                 let combined = format!("{int_part}{frac}");
                 return match combined.parse::<i128>() {
-                    Ok(minor) => Tok::Money { minor, scale, currency: word.to_string() },
+                    Ok(minor) => Tok::Money {
+                        minor,
+                        scale,
+                        currency: word.to_string(),
+                    },
                     Err(_) => {
-                        self.err(start, "NL0103", "money literal does not fit in i128 minor units");
-                        Tok::Money { minor: 0, scale, currency: word.to_string() }
+                        self.err(
+                            start,
+                            "NL0103",
+                            "money literal does not fit in i128 minor units",
+                        );
+                        Tok::Money {
+                            minor: 0,
+                            scale,
+                            currency: word.to_string(),
+                        }
                     }
                 };
             }
@@ -534,10 +638,9 @@ impl<'a> Lexer<'a> {
     /// time rather than here. The lexer's job is to delimit it, not to know the calendar.
     fn lex_datetime_body(&mut self) -> String {
         let b = self.pos;
-        while self
-            .peek()
-            .map_or(false, |c| c.is_ascii_alphanumeric() || matches!(c, '-' | ':' | 'T' | 'Z' | '+' | '.'))
-        {
+        while self.peek().map_or(false, |c| {
+            c.is_ascii_alphanumeric() || matches!(c, '-' | ':' | 'T' | 'Z' | '+' | '.')
+        }) {
             self.bump();
         }
         if self.pos == b {
@@ -558,9 +661,27 @@ impl<'a> Lexer<'a> {
             ']' => Tok::RBracket,
             ',' => Tok::Comma,
             ';' => Tok::Semi,
-            ':' => if self.eat(':') { Tok::ColonColon } else { Tok::Colon },
-            '.' => if self.eat('.') { Tok::DotDot } else { Tok::Dot },
-            '-' => if self.eat('>') { Tok::Arrow } else { Tok::Minus },
+            ':' => {
+                if self.eat(':') {
+                    Tok::ColonColon
+                } else {
+                    Tok::Colon
+                }
+            }
+            '.' => {
+                if self.eat('.') {
+                    Tok::DotDot
+                } else {
+                    Tok::Dot
+                }
+            }
+            '-' => {
+                if self.eat('>') {
+                    Tok::Arrow
+                } else {
+                    Tok::Minus
+                }
+            }
             '=' => {
                 if self.eat('=') {
                     Tok::EqEq
@@ -579,10 +700,34 @@ impl<'a> Lexer<'a> {
                     Tok::Pipe
                 }
             }
-            '&' => if self.eat('&') { Tok::AmpAmp } else { Tok::Amp },
-            '!' => if self.eat('=') { Tok::Ne } else { Tok::Bang },
-            '<' => if self.eat('=') { Tok::Le } else { Tok::Lt },
-            '>' => if self.eat('=') { Tok::Ge } else { Tok::Gt },
+            '&' => {
+                if self.eat('&') {
+                    Tok::AmpAmp
+                } else {
+                    Tok::Amp
+                }
+            }
+            '!' => {
+                if self.eat('=') {
+                    Tok::Ne
+                } else {
+                    Tok::Bang
+                }
+            }
+            '<' => {
+                if self.eat('=') {
+                    Tok::Le
+                } else {
+                    Tok::Lt
+                }
+            }
+            '>' => {
+                if self.eat('=') {
+                    Tok::Ge
+                } else {
+                    Tok::Gt
+                }
+            }
             '?' => Tok::Question,
             '+' => Tok::Plus,
             '*' => Tok::Star,
@@ -631,22 +776,37 @@ mod tests {
                 covered[i] = true;
             }
         }
-        assert!(covered.iter().all(|b| *b), "some byte was dropped by the lexer");
+        assert!(
+            covered.iter().all(|b| *b),
+            "some byte was dropped by the lexer"
+        );
     }
 
     #[test]
     fn money_literal_carries_its_own_scale() {
         assert_eq!(
             kinds("10.00 usd")[0],
-            Tok::Money { minor: 1000, scale: 2, currency: "usd".into() }
+            Tok::Money {
+                minor: 1000,
+                scale: 2,
+                currency: "usd".into()
+            }
         );
         assert_eq!(
             kinds("100 jpy")[0],
-            Tok::Money { minor: 100, scale: 0, currency: "jpy".into() }
+            Tok::Money {
+                minor: 100,
+                scale: 0,
+                currency: "jpy".into()
+            }
         );
         assert_eq!(
             kinds("1_250.750 bhd")[0],
-            Tok::Money { minor: 1250750, scale: 3, currency: "bhd".into() }
+            Tok::Money {
+                minor: 1250750,
+                scale: 3,
+                currency: "bhd".into()
+            }
         );
     }
 
@@ -667,13 +827,28 @@ mod tests {
     #[test]
     fn both_time_axes_are_lexically_distinct() {
         assert_eq!(kinds("@2026-03-01")[0], Tok::Instant("2026-03-01".into()));
-        assert_eq!(kinds("v@2026-03-01")[0], Tok::ValidInstant("2026-03-01".into()));
+        assert_eq!(
+            kinds("v@2026-03-01")[0],
+            Tok::ValidInstant("2026-03-01".into())
+        );
     }
 
     #[test]
     fn durations_beat_field_access() {
-        assert_eq!(kinds("7.days")[0], Tok::Duration { value: 7, unit: TimeUnit::Days });
-        assert_eq!(kinds("200.millis")[0], Tok::Duration { value: 200, unit: TimeUnit::Millis });
+        assert_eq!(
+            kinds("7.days")[0],
+            Tok::Duration {
+                value: 7,
+                unit: TimeUnit::Days
+            }
+        );
+        assert_eq!(
+            kinds("200.millis")[0],
+            Tok::Duration {
+                value: 200,
+                unit: TimeUnit::Millis
+            }
+        );
         // ... but a real fraction still lexes as a float.
         assert_eq!(kinds("7.5")[0], Tok::Float(7.5));
     }
@@ -696,14 +871,24 @@ mod tests {
         let (toks, trivia, errs) = Lexer::new("-- sql\n// rust\n/* /* nested */ */ x").tokenize();
         assert!(errs.is_empty());
         assert_eq!(toks[0].tok, Tok::Ident);
-        assert_eq!(trivia.iter().filter(|(t, _)| *t != Trivia::Whitespace).count(), 3);
+        assert_eq!(
+            trivia
+                .iter()
+                .filter(|(t, _)| *t != Trivia::Whitespace)
+                .count(),
+            3
+        );
     }
 
     #[test]
     fn errors_do_not_stop_the_stream() {
         let (toks, errs) = lex("let x = `;");
         assert!(!errs.is_empty());
-        assert_eq!(toks.last().unwrap().tok, Tok::Eof, "lexing must always reach EOF");
+        assert_eq!(
+            toks.last().unwrap().tok,
+            Tok::Eof,
+            "lexing must always reach EOF"
+        );
     }
 
     #[test]

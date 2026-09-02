@@ -78,7 +78,11 @@ pub enum Refusal {
 impl fmt::Display for Refusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Refusal::UnboundedNestedLoop { outer, inner, estimated_tuples } => write!(
+            Refusal::UnboundedNestedLoop {
+                outer,
+                inner,
+                estimated_tuples,
+            } => write!(
                 f,
                 "refused: nested loop joining `{outer}` against unindexed `{inner}` \
                  (~{estimated_tuples} tuple comparisons). A nested loop over an unindexed \
@@ -174,7 +178,9 @@ impl Physical {
 
     /// Every join is a hash join. The safe default, and what the planner falls back to.
     pub fn all_hash(joins: usize) -> Self {
-        Physical { methods: vec![Method::Hash; joins] }
+        Physical {
+            methods: vec![Method::Hash; joins],
+        }
     }
 }
 
@@ -213,7 +219,11 @@ fn walk(
             walk(left, physical, rels, policy, join_index, out);
             walk(right, physical, rels, policy, join_index, out);
 
-            let method = physical.methods.get(*join_index).cloned().unwrap_or(Method::Hash);
+            let method = physical
+                .methods
+                .get(*join_index)
+                .cloned()
+                .unwrap_or(Method::Hash);
             *join_index += 1;
 
             if policy.forbid_unbounded_nested_loop {
@@ -223,8 +233,7 @@ fn walk(
                         out.push(Refusal::UnboundedNestedLoop {
                             outer: describe(left, rels),
                             inner: describe(right, rels),
-                            estimated_tuples: subtree_rows(left, rels) as u128
-                                * inner_rows as u128,
+                            estimated_tuples: subtree_rows(left, rels) as u128 * inner_rows as u128,
                         });
                     }
                 }
@@ -269,7 +278,10 @@ fn subtree_rows(p: &Plan, rels: &[Relation]) -> u64 {
 
 fn describe(p: &Plan, rels: &[Relation]) -> String {
     match p {
-        Plan::Scan(i) => rels.get(*i).map(|r| r.name.clone()).unwrap_or_else(|| format!("#{i}")),
+        Plan::Scan(i) => rels
+            .get(*i)
+            .map(|r| r.name.clone())
+            .unwrap_or_else(|| format!("#{i}")),
         Plan::Join { left, right, .. } => {
             format!("({} ⋈ {})", describe(left, rels), describe(right, rels))
         }
@@ -332,7 +344,11 @@ mod tests {
 
         assert_eq!(e.len(), 1);
         match &e[0] {
-            Refusal::UnboundedNestedLoop { outer, inner, estimated_tuples } => {
+            Refusal::UnboundedNestedLoop {
+                outer,
+                inner,
+                estimated_tuples,
+            } => {
                 assert_eq!(outer, "postings");
                 assert_eq!(inner, "accounts");
                 assert_eq!(*estimated_tuples, 10_000_000u128 * 50_000);
@@ -372,11 +388,23 @@ mod tests {
         let phys = Physical::new(vec![Method::NestedLoop(InnerAccess::Scan)]);
 
         // accounts has 50,000 rows.
-        let below = Policy { small_inner_threshold: 50_000, ..Policy::default() };
-        assert!(check(&plan, &phys, &rels(), &below).is_ok(), "at the threshold, permitted");
+        let below = Policy {
+            small_inner_threshold: 50_000,
+            ..Policy::default()
+        };
+        assert!(
+            check(&plan, &phys, &rels(), &below).is_ok(),
+            "at the threshold, permitted"
+        );
 
-        let above = Policy { small_inner_threshold: 49_999, ..Policy::default() };
-        assert!(check(&plan, &phys, &rels(), &above).is_err(), "just above it, refused");
+        let above = Policy {
+            small_inner_threshold: 49_999,
+            ..Policy::default()
+        };
+        assert!(
+            check(&plan, &phys, &rels(), &above).is_err(),
+            "just above it, refused"
+        );
     }
 
     #[test]
@@ -421,7 +449,7 @@ mod tests {
         // legitimately below the threshold — so it reported one refusal, correctly, and the
         // test was wrong rather than the code.
         let plan = Plan::Join {
-            left: Box::new(two_way(2, 0)), // currencies ⋈ postings — inner is 10M
+            left: Box::new(two_way(2, 0)),  // currencies ⋈ postings — inner is 10M
             right: Box::new(Plan::Scan(1)), // ⋈ accounts — inner is 50k
             on: Edge::new(0, 0, 1, 0),
         };
@@ -471,9 +499,13 @@ mod tests {
         let edges = vec![Edge::new(0, 0, 1, 0), Edge::new(1, 0, 2, 0)];
         let planned = JoinPlanner::new(rels.clone(), edges).plan().unwrap();
         let joins = count_joins(&planned.plan);
-        assert!(
-            check(&planned.plan, &Physical::all_hash(joins), &rels, &Policy::default()).is_ok()
-        );
+        assert!(check(
+            &planned.plan,
+            &Physical::all_hash(joins),
+            &rels,
+            &Policy::default()
+        )
+        .is_ok());
     }
 
     #[test]
@@ -481,9 +513,17 @@ mod tests {
         // The planner emits `Cross` only when the graph is genuinely disconnected, so this
         // arm is a backstop rather than a common path. It is here because a bug in
         // `edges_between` would otherwise produce a silently quadratic plan.
-        let plan = Plan::Cross { left: Box::new(Plan::Scan(0)), right: Box::new(Plan::Scan(1)) };
-        let e = check(&plan, &Physical::new(vec![Method::Hash]), &rels(), &Policy::default())
-            .unwrap_err();
+        let plan = Plan::Cross {
+            left: Box::new(Plan::Scan(0)),
+            right: Box::new(Plan::Scan(1)),
+        };
+        let e = check(
+            &plan,
+            &Physical::new(vec![Method::Hash]),
+            &rels(),
+            &Policy::default(),
+        )
+        .unwrap_err();
         assert!(matches!(e[0], Refusal::AvoidableCrossProduct { .. }));
         assert!(e[0].to_string().contains("disconnected graph is permitted"));
     }

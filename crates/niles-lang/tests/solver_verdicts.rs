@@ -163,7 +163,11 @@ fn the_corpus_is_large_enough_to_measure_anything() {
     names.sort_unstable();
     let before = names.len();
     names.dedup();
-    assert_eq!(before, names.len(), "duplicate function names in the corpus");
+    assert_eq!(
+        before,
+        names.len(),
+        "duplicate function names in the corpus"
+    );
 }
 
 #[test]
@@ -263,9 +267,18 @@ fn a_straight_line_defect_is_an_accusation_and_a_branched_one_is_an_alarm() {
     // A checker that accused a program it could not follow would teach its users to switch it
     // off, which is the failure mode this test exists to prevent.
     let (_, defective) = run_corpus();
-    let by = |name: &str| defective.iter().find(|o| o.name == name).unwrap_or_else(|| panic!("{name}"));
+    let by = |name: &str| {
+        defective
+            .iter()
+            .find(|o| o.name == name)
+            .unwrap_or_else(|| panic!("{name}"))
+    };
 
-    for straight_line in ["transfer_with_lost_cent", "syndicated_residue", "doubled_credit"] {
+    for straight_line in [
+        "transfer_with_lost_cent",
+        "syndicated_residue",
+        "doubled_credit",
+    ] {
         let o = by(straight_line);
         assert!(
             o.violates > 0,
@@ -327,9 +340,8 @@ fn e18_verdict_distribution() {
             *n as f64 / sound.len() as f64 * 100.0
         ));
     }
-    let undecided_share = sound_counts.get("Undecided").copied().unwrap_or(0) as f64
-        / sound.len() as f64
-        * 100.0;
+    let undecided_share =
+        sound_counts.get("Undecided").copied().unwrap_or(0) as f64 / sound.len() as f64 * 100.0;
     doc.push_str(&format!(
         "\n**{undecided_share:.0}% of correct functions are `Undecided`.**\n\n"
     ));
@@ -350,14 +362,27 @@ fn e18_verdict_distribution() {
     doc.push_str("\n## The five deliberate defects — the negative control\n\n");
     doc.push_str("| Function | Verdict | The defect |\n|---|---|---|\n");
     let described = [
-        ("transfer_with_lost_cent", "three legs, off by one minor unit"),
+        (
+            "transfer_with_lost_cent",
+            "three legs, off by one minor unit",
+        ),
         ("syndicated_residue", "33.33 three ways against 100.00"),
-        ("currency_mix", "sums to zero only if the currency is ignored"),
+        (
+            "currency_mix",
+            "sums to zero only if the currency is ignored",
+        ),
         ("doubled_credit", "a copy-pasted leg"),
-        ("unbalanced_on_one_branch", "the `else` branch does not balance"),
+        (
+            "unbalanced_on_one_branch",
+            "the `else` branch does not balance",
+        ),
     ];
     for o in &defective {
-        let why = described.iter().find(|(n, _)| *n == o.name).map(|(_, w)| *w).unwrap_or("");
+        let why = described
+            .iter()
+            .find(|(n, _)| *n == o.name)
+            .map(|(_, w)| *w)
+            .unwrap_or("");
         doc.push_str(&format!("| `{}` | {} | {why} |\n", o.name, o.verdict()));
     }
     doc.push_str(
@@ -401,7 +426,8 @@ fn e18_verdict_distribution() {
          and never an accusation, since which path executes is not decidable there. That is the \
          case `Verdict::MayViolate` was designed for and, until this corpus existed, the case \
          it never saw.\n\n\
-         ## Reading this\n\n");
+         ## Reading this\n\n",
+    );
     doc.push_str(&format!(
         "The corpus is grouped by the *shape* of the arithmetic rather than by banking \
          product, so a verdict is attributable to a construct. Straight-line transfers, \

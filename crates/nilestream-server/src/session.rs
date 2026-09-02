@@ -97,7 +97,10 @@ impl Session {
                     Backend::ReadyForQuery(self.status()),
                 ]
             }
-            Frontend::Password(_) => vec![Backend::AuthenticationOk, Backend::ReadyForQuery(self.status())],
+            Frontend::Password(_) => vec![
+                Backend::AuthenticationOk,
+                Backend::ReadyForQuery(self.status()),
+            ],
             Frontend::Unknown(t) => {
                 self.failed = true;
                 vec![
@@ -164,7 +167,10 @@ impl Session {
             let f = engine.frontier();
             self.observe(f);
             return vec![
-                Backend::RowDescription(vec![Field::int8("frontier"), Field::int8("session_anchor")]),
+                Backend::RowDescription(vec![
+                    Field::int8("frontier"),
+                    Field::int8("session_anchor"),
+                ]),
                 Backend::DataRow(vec![Some(f.to_string()), Some(self.anchor.to_string())]),
                 Backend::CommandComplete("SELECT 1".into()),
             ];
@@ -186,13 +192,21 @@ impl Session {
                 .find(|d| d.severity == Severity::Error)
                 .expect("has_errors implies one exists");
             let detail = first.notes.first().cloned();
-            return vec![pg_wire::diagnostic_error(first.code, &first.msg, detail.as_deref())];
+            return vec![pg_wire::diagnostic_error(
+                first.code,
+                &first.msg,
+                detail.as_deref(),
+            )];
         }
 
         let (lowered, ld) = niles_lang::lower::lower_program(&prog, &cat);
         if ld.has_errors() {
             self.failed = true;
-            return vec![pg_wire::diagnostic_error("NL0500", "this query has no lowering", None)];
+            return vec![pg_wire::diagnostic_error(
+                "NL0500",
+                "this query has no lowering",
+                None,
+            )];
         }
         // The verifier stands between the compiler and the engine on this path too. A
         // client cannot be given a way around it, or the trusted base has a hole in it
@@ -200,8 +214,16 @@ impl Session {
         let vr = niles_ir::verify::verify(&lowered.circuit);
         if !vr.is_ok() {
             self.failed = true;
-            let first = vr.violations.first().map(|v| v.msg.clone()).unwrap_or_default();
-            return vec![pg_wire::diagnostic_error("IR000", "the compiled circuit did not verify", Some(&first))];
+            let first = vr
+                .violations
+                .first()
+                .map(|v| v.msg.clone())
+                .unwrap_or_default();
+            return vec![pg_wire::diagnostic_error(
+                "IR000",
+                "the compiled circuit did not verify",
+                Some(&first),
+            )];
         }
 
         // Serve it. The anchor is the session's, advanced to the frontier first, so a
@@ -209,7 +231,11 @@ impl Session {
         let anchor = self.observe(engine.frontier());
         let Some(view) = pick_view(&lowered.circuit, &cat) else {
             self.failed = true;
-            return vec![pg_wire::diagnostic_error("NL0501", "this query does not name a servable view", None)];
+            return vec![pg_wire::diagnostic_error(
+                "NL0501",
+                "this query does not name a servable view",
+                None,
+            )];
         };
 
         // The executable fragment is one keyed aggregate, so a query is answered per key.
@@ -251,7 +277,11 @@ impl Session {
                 // A view with no entry for this key is a NULL, not a zero. The absence
                 // lattice's distinction reaches the client intact.
                 None => {
-                    out.push(Backend::DataRow(vec![Some(k.to_string()), None, Some(anchor.to_string())]));
+                    out.push(Backend::DataRow(vec![
+                        Some(k.to_string()),
+                        None,
+                        Some(anchor.to_string()),
+                    ]));
                     n += 1;
                 }
             }
@@ -261,7 +291,10 @@ impl Session {
     }
 }
 
-fn pick_view(circuit: &niles_ir::circuit::Circuit, cat: &niles_lang::resolve::Catalog) -> Option<String> {
+fn pick_view(
+    circuit: &niles_ir::circuit::Circuit,
+    cat: &niles_lang::resolve::Catalog,
+) -> Option<String> {
     if circuit.outputs.contains_key("__wire_result") {
         return Some("__wire_result".into());
     }
@@ -278,7 +311,9 @@ fn pick_view(circuit: &niles_ir::circuit::Circuit, cat: &niles_lang::resolve::Ca
 /// for an engine that does not exist yet.
 fn extract_keys(sql: &str) -> Vec<i64> {
     let lower = sql.to_ascii_lowercase();
-    let Some(w) = lower.find(" where ") else { return Vec::new() };
+    let Some(w) = lower.find(" where ") else {
+        return Vec::new();
+    };
     let tail = &lower[w + 7..];
     let mut keys = Vec::new();
     let mut num = String::new();
@@ -334,7 +369,11 @@ schema bank {
     fn engine() -> MemoryEngine {
         let mut data = HashMap::new();
         data.insert(("__wire_result".to_string(), 1001i64), 85000i128);
-        MemoryEngine { frontier: 4200, data, views: vec![("ledger_balance".into(), 2)] }
+        MemoryEngine {
+            frontier: 4200,
+            data,
+            views: vec![("ledger_balance".into(), 2)],
+        }
     }
 
     fn session() -> Session {
@@ -345,7 +384,9 @@ schema bank {
     fn a_query_compiles_through_the_same_front_end_as_any_other() {
         let (mut s, mut e) = (session(), engine());
         let out = s.handle(
-            Frontend::Query("select acct, sum(amt) from postings where acct = 1001 group by acct".into()),
+            Frontend::Query(
+                "select acct, sum(amt) from postings where acct = 1001 group by acct".into(),
+            ),
             &mut e,
         );
         assert!(matches!(out[0], Backend::RowDescription(_)), "{out:?}");
@@ -358,10 +399,22 @@ schema bank {
         // The point of not having a compatibility layer: the client gets the real
         // diagnostic, not a generic syntax error that says the wrong thing.
         let (mut s, mut e) = (session(), engine());
-        let out = s.handle(Frontend::Query("select nope from nonexistent_table".into()), &mut e);
-        let Some(Backend::ErrorResponse { message, .. }) = out.first() else { panic!("{out:?}") };
-        assert!(message.starts_with("[NL"), "the NL code must survive to the wire: {message}");
-        assert_eq!(s.status(), b'E', "and the session must enter the failed state");
+        let out = s.handle(
+            Frontend::Query("select nope from nonexistent_table".into()),
+            &mut e,
+        );
+        let Some(Backend::ErrorResponse { message, .. }) = out.first() else {
+            panic!("{out:?}")
+        };
+        assert!(
+            message.starts_with("[NL"),
+            "the NL code must survive to the wire: {message}"
+        );
+        assert_eq!(
+            s.status(),
+            b'E',
+            "and the session must enter the failed state"
+        );
     }
 
     #[test]
@@ -370,7 +423,11 @@ schema bank {
         // time would give a weaker guarantee for the same work.
         let mut s = session();
         assert_eq!(s.observe(100), 100);
-        assert_eq!(s.observe(50), 100, "a lower frontier must not move the session back");
+        assert_eq!(
+            s.observe(50),
+            100,
+            "a lower frontier must not move the session back"
+        );
         assert_eq!(s.observe(200), 200);
     }
 
@@ -381,7 +438,9 @@ schema bank {
         // undo the distinction the whole engine maintains.
         let (mut s, mut e) = (session(), engine());
         let out = s.handle(
-            Frontend::Query("select acct, sum(amt) from postings where acct = 9999 group by acct".into()),
+            Frontend::Query(
+                "select acct, sum(amt) from postings where acct = 9999 group by acct".into(),
+            ),
             &mut e,
         );
         let row = out.iter().find_map(|m| match m {
@@ -395,11 +454,18 @@ schema bank {
     fn every_answer_carries_the_anchor_it_was_true_at() {
         let (mut s, mut e) = (session(), engine());
         let out = s.handle(
-            Frontend::Query("select acct, sum(amt) from postings where acct = 1001 group by acct".into()),
+            Frontend::Query(
+                "select acct, sum(amt) from postings where acct = 1001 group by acct".into(),
+            ),
             &mut e,
         );
-        let Some(Backend::RowDescription(fields)) = out.first() else { panic!() };
-        assert_eq!(fields[2].name, "anchor", "the anchor is a column, not a footnote");
+        let Some(Backend::RowDescription(fields)) = out.first() else {
+            panic!()
+        };
+        assert_eq!(
+            fields[2].name, "anchor",
+            "the anchor is a column, not a footnote"
+        );
         let row = out.iter().find_map(|m| match m {
             Backend::DataRow(c) => Some(c.clone()),
             _ => None,
@@ -411,11 +477,18 @@ schema bank {
     fn money_is_described_as_numeric_on_this_path_too() {
         let (mut s, mut e) = (session(), engine());
         let out = s.handle(
-            Frontend::Query("select acct, sum(amt) from postings where acct = 1001 group by acct".into()),
+            Frontend::Query(
+                "select acct, sum(amt) from postings where acct = 1001 group by acct".into(),
+            ),
             &mut e,
         );
-        let Some(Backend::RowDescription(fields)) = out.first() else { panic!() };
-        assert_eq!(fields[1].type_oid, 1700, "the money column must be numeric, not float8");
+        let Some(Backend::RowDescription(fields)) = out.first() else {
+            panic!()
+        };
+        assert_eq!(
+            fields[1].type_oid, 1700,
+            "the money column must be numeric, not float8"
+        );
     }
 
     #[test]
@@ -423,7 +496,10 @@ schema bank {
         // The engine can scan, but scanning defeats the mechanism being measured, so the
         // refusal says what to add rather than returning a slow answer.
         let (mut s, mut e) = (session(), engine());
-        let out = s.handle(Frontend::Query("select acct, sum(amt) from postings group by acct".into()), &mut e);
+        let out = s.handle(
+            Frontend::Query("select acct, sum(amt) from postings group by acct".into()),
+            &mut e,
+        );
         assert!(out.iter().any(|m| matches!(m, Backend::NoticeResponse { message } if message.contains("key predicate"))), "{out:?}");
     }
 
@@ -431,9 +507,14 @@ schema bank {
     fn the_extended_protocol_is_refused_with_the_open_design_question_named() {
         let (mut s, mut e) = (session(), engine());
         let out = s.handle(Frontend::Extended(b'P'), &mut e);
-        let Some(Backend::ErrorResponse { detail, code, .. }) = out.first() else { panic!("{out:?}") };
+        let Some(Backend::ErrorResponse { detail, code, .. }) = out.first() else {
+            panic!("{out:?}")
+        };
         assert_eq!(code, "0A000");
-        assert!(detail.as_ref().unwrap().contains("visibility frontier"), "the refusal must name the reason");
+        assert!(
+            detail.as_ref().unwrap().contains("visibility frontier"),
+            "the refusal must name the reason"
+        );
     }
 
     #[test]
@@ -458,8 +539,14 @@ schema bank {
 
     #[test]
     fn key_extraction_reads_equality_and_in_lists() {
-        assert_eq!(extract_keys("select x from t where acct = 1001"), vec![1001]);
-        assert_eq!(extract_keys("select x from t where acct in (1, 2, 3)"), vec![1, 2, 3]);
+        assert_eq!(
+            extract_keys("select x from t where acct = 1001"),
+            vec![1001]
+        );
+        assert_eq!(
+            extract_keys("select x from t where acct in (1, 2, 3)"),
+            vec![1, 2, 3]
+        );
         assert!(extract_keys("select x from t").is_empty());
     }
 }

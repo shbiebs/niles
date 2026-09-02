@@ -176,7 +176,10 @@ mod tests {
         // The asymmetry the whole `not in` story rests on. Unknown is discard, not "maybe".
         assert!(Tri::True.keeps());
         assert!(!Tri::False.keeps());
-        assert!(!Tri::Unknown.keeps(), "unknown must not survive a predicate");
+        assert!(
+            !Tri::Unknown.keeps(),
+            "unknown must not survive a predicate"
+        );
     }
 
     #[test]
@@ -198,16 +201,31 @@ mod tests {
     fn a_null_comparison_is_unknown_not_false() {
         // The mistake that makes `not in` wrong: treating `x = null` as false would make
         // `x != null` true, and the whole three-valued story collapses into two.
-        assert_eq!(compare(Value::Int(1), Value::Null, |a, b| a == b), Tri::Unknown);
-        assert_eq!(compare(Value::Null, Value::Null, |a, b| a == b), Tri::Unknown);
-        assert_eq!(compare(Value::Int(1), Value::Int(1), |a, b| a == b), Tri::True);
-        assert_ne!(compare(Value::Int(1), Value::Null, |a, b| a == b), Tri::False);
+        assert_eq!(
+            compare(Value::Int(1), Value::Null, |a, b| a == b),
+            Tri::Unknown
+        );
+        assert_eq!(
+            compare(Value::Null, Value::Null, |a, b| a == b),
+            Tri::Unknown
+        );
+        assert_eq!(
+            compare(Value::Int(1), Value::Int(1), |a, b| a == b),
+            Tri::True
+        );
+        assert_ne!(
+            compare(Value::Int(1), Value::Null, |a, b| a == b),
+            Tri::False
+        );
     }
 
     #[test]
     fn null_propagates_through_arithmetic() {
         assert_eq!(arith(Value::Null, Value::Int(1), |a, b| a + b), Value::Null);
-        assert_eq!(arith(Value::Int(2), Value::Int(3), |a, b| a + b), Value::Int(5));
+        assert_eq!(
+            arith(Value::Int(2), Value::Int(3), |a, b| a + b),
+            Value::Int(5)
+        );
     }
 
     #[test]

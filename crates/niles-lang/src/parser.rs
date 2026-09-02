@@ -61,9 +61,19 @@ pub struct Parser<'a> {
 /// Parse a whole file. Always returns a program; the diagnostics say whether it is sound.
 pub fn parse_program(src: &str) -> (Program, Diagnostics) {
     let (toks, lex_errors) = lex(src);
-    let mut p = Parser { toks, pos: 0, src, diags: Diagnostics::new(), fuel: 100_000, no_struct_depth: 0, no_alias_depth: 0, sql_depth: 0 };
+    let mut p = Parser {
+        toks,
+        pos: 0,
+        src,
+        diags: Diagnostics::new(),
+        fuel: 100_000,
+        no_struct_depth: 0,
+        no_alias_depth: 0,
+        sql_depth: 0,
+    };
     for e in lex_errors {
-        p.diags.push(Diagnostic::error(e.code, e.msg).primary(e.span, "here"));
+        p.diags
+            .push(Diagnostic::error(e.code, e.msg).primary(e.span, "here"));
     }
     let prog = p.program();
     (prog, p.diags)
@@ -72,7 +82,16 @@ pub fn parse_program(src: &str) -> (Program, Diagnostics) {
 /// Parse a single expression, for tests and for the REPL.
 pub fn parse_expr(src: &str) -> (Expr, Diagnostics) {
     let (toks, _) = lex(src);
-    let mut p = Parser { toks, pos: 0, src, diags: Diagnostics::new(), fuel: 100_000, no_struct_depth: 0, no_alias_depth: 0, sql_depth: 0 };
+    let mut p = Parser {
+        toks,
+        pos: 0,
+        src,
+        diags: Diagnostics::new(),
+        fuel: 100_000,
+        no_struct_depth: 0,
+        no_alias_depth: 0,
+        sql_depth: 0,
+    };
     let e = p.expr();
     (e, p.diags)
 }
@@ -127,7 +146,8 @@ impl<'a> Parser<'a> {
 
     fn err(&mut self, code: &'static str, msg: impl Into<String>, label: impl Into<String>) {
         let span = self.cur_span();
-        self.diags.push(Diagnostic::error(code, msg).primary(span, label));
+        self.diags
+            .push(Diagnostic::error(code, msg).primary(span, label));
     }
 
     /// Expect a token. On failure, report and do **not** consume, so the caller's recovery
@@ -176,10 +196,21 @@ impl<'a> Parser<'a> {
                     let span = self.cur_span();
                     let w = word.map(|w| w.word).unwrap_or("?");
                     self.diags.push(
-                        Diagnostic::error("NL0002", format!("`{w}` is a reserved word and cannot be used as {ctx}"))
-                            .primary(span, "reserved word")
-                            .note(format!("`{w}` is {}", word.map(|x| x.category.as_str()).unwrap_or("reserved")))
-                            .suggest(span, format!("r#{w}"), "escape it to use it as an identifier", Applicability::MachineApplicable),
+                        Diagnostic::error(
+                            "NL0002",
+                            format!("`{w}` is a reserved word and cannot be used as {ctx}"),
+                        )
+                        .primary(span, "reserved word")
+                        .note(format!(
+                            "`{w}` is {}",
+                            word.map(|x| x.category.as_str()).unwrap_or("reserved")
+                        ))
+                        .suggest(
+                            span,
+                            format!("r#{w}"),
+                            "escape it to use it as an identifier",
+                            Applicability::MachineApplicable,
+                        ),
                     );
                     self.bump();
                     Name::new(w, span)
@@ -188,7 +219,11 @@ impl<'a> Parser<'a> {
             _ => {
                 let found = self.describe_cur();
                 let span = self.cur_span();
-                self.err("NL0003", format!("expected {ctx}, found {found}"), "expected a name");
+                self.err(
+                    "NL0003",
+                    format!("expected {ctx}, found {found}"),
+                    "expected a name",
+                );
                 Name::new("<error>", span)
             }
         }
@@ -206,7 +241,11 @@ impl<'a> Parser<'a> {
                 Name::new(self.text(s).trim_start_matches("r#"), s)
             }
             Tok::Kw(k) => {
-                let w = keywords::KEYWORDS.iter().find(|kw| kw.token == k).map(|w| w.word).unwrap_or("?");
+                let w = keywords::KEYWORDS
+                    .iter()
+                    .find(|kw| kw.token == k)
+                    .map(|w| w.word)
+                    .unwrap_or("?");
                 let s = self.bump();
                 Name::new(w, s)
             }
@@ -270,15 +309,30 @@ impl<'a> Parser<'a> {
             last = self.pos;
         }
         let end = self.cur_span();
-        Program { items, span: start.to(end) }
+        Program {
+            items,
+            span: start.to(end),
+        }
     }
 
     /// The item-level synchronising set: the keywords that can begin an item. Recovery
     /// stops here because these are the points at which the parser is certain again.
     fn item_sync() -> Vec<Tok> {
         [
-            Kw::Schema, Kw::Fn, Kw::Struct, Kw::Enum, Kw::Trait, Kw::Impl, Kw::Mod, Kw::Use,
-            Kw::Const, Kw::Static, Kw::Type, Kw::View, Kw::Pub, Kw::Capability,
+            Kw::Schema,
+            Kw::Fn,
+            Kw::Struct,
+            Kw::Enum,
+            Kw::Trait,
+            Kw::Impl,
+            Kw::Mod,
+            Kw::Use,
+            Kw::Const,
+            Kw::Static,
+            Kw::Type,
+            Kw::View,
+            Kw::Pub,
+            Kw::Capability,
         ]
         .into_iter()
         .map(Tok::Kw)
@@ -308,7 +362,11 @@ impl<'a> Parser<'a> {
                 self.expect(Tok::Colon, "in a capability declaration");
                 let ty = self.ty();
                 self.eat(&Tok::Semi);
-                Item::Capability { name, ty, span: start.to(self.cur_span()) }
+                Item::Capability {
+                    name,
+                    ty,
+                    span: start.to(self.cur_span()),
+                }
             }
             Tok::Kw(Kw::Mod) => {
                 self.bump();
@@ -325,14 +383,23 @@ impl<'a> Parser<'a> {
                         self.bump();
                     }
                 }
-                let end = self.expect(Tok::RBrace, "to close a module").unwrap_or(self.cur_span());
-                Item::Mod { name, items, span: start.to(end) }
+                let end = self
+                    .expect(Tok::RBrace, "to close a module")
+                    .unwrap_or(self.cur_span());
+                Item::Mod {
+                    name,
+                    items,
+                    span: start.to(end),
+                }
             }
             Tok::Kw(Kw::Use) => {
                 self.bump();
                 let path = self.path();
                 let end = self.expect(Tok::Semi, "after a `use`").unwrap_or(path.span);
-                Item::Use { path, span: start.to(end) }
+                Item::Use {
+                    path,
+                    span: start.to(end),
+                }
             }
             Tok::Kw(k @ (Kw::Const | Kw::Static)) => {
                 self.bump();
@@ -341,16 +408,30 @@ impl<'a> Parser<'a> {
                 let ty = self.ty();
                 self.expect(Tok::Eq, "in a constant declaration");
                 let value = self.expr();
-                let end = self.expect(Tok::Semi, "after a constant").unwrap_or(value.span());
-                Item::Const { name, ty, value, is_static: k == Kw::Static, span: start.to(end) }
+                let end = self
+                    .expect(Tok::Semi, "after a constant")
+                    .unwrap_or(value.span());
+                Item::Const {
+                    name,
+                    ty,
+                    value,
+                    is_static: k == Kw::Static,
+                    span: start.to(end),
+                }
             }
             Tok::Kw(Kw::Type) => {
                 self.bump();
                 let name = self.ident("a type name");
                 self.expect(Tok::Eq, "in a type alias");
                 let ty = self.ty();
-                let end = self.expect(Tok::Semi, "after a type alias").unwrap_or(ty.span());
-                Item::TypeAlias { name, ty, span: start.to(end) }
+                let end = self
+                    .expect(Tok::Semi, "after a type alias")
+                    .unwrap_or(ty.span());
+                Item::TypeAlias {
+                    name,
+                    ty,
+                    span: start.to(end),
+                }
             }
             _ => {
                 let found = self.describe_cur();
@@ -372,14 +453,26 @@ impl<'a> Parser<'a> {
                 let start = self.bump();
                 let name = self.ident("an attribute name");
                 let args = self.attr_args();
-                let end = self.expect(Tok::RBracket, "to close an attribute").unwrap_or(name.span);
-                out.push(Attr { name, args, at_style: false, span: start.to(end) });
+                let end = self
+                    .expect(Tok::RBracket, "to close an attribute")
+                    .unwrap_or(name.span);
+                out.push(Attr {
+                    name,
+                    args,
+                    at_style: false,
+                    span: start.to(end),
+                });
             } else if self.at(&Tok::At) {
                 let start = self.bump();
                 let name = self.ident("an attribute name");
                 let args = self.attr_args();
                 let end = args.last().map(|_| self.cur_span()).unwrap_or(name.span);
-                out.push(Attr { name, args, at_style: true, span: start.to(end) });
+                out.push(Attr {
+                    name,
+                    args,
+                    at_style: true,
+                    span: start.to(end),
+                });
             } else {
                 return out;
             }
@@ -425,8 +518,15 @@ impl<'a> Parser<'a> {
                 self.bump();
             }
         }
-        let end = self.expect(Tok::RBrace, "to close a schema").unwrap_or(self.cur_span());
-        SchemaDecl { name, items, attrs, span: start.to(end) }
+        let end = self
+            .expect(Tok::RBrace, "to close a schema")
+            .unwrap_or(self.cur_span());
+        SchemaDecl {
+            name,
+            items,
+            attrs,
+            span: start.to(end),
+        }
     }
 
     fn schema_item(&mut self) -> SchemaItem {
@@ -468,7 +568,12 @@ impl<'a> Parser<'a> {
                     self.expect(Tok::RBrace, "to close a currency declaration");
                 }
                 self.eat(&Tok::Semi);
-                SchemaItem::Currency(CurrencyDecl { name, scale, scale_span, span: start.to(self.cur_span()) })
+                SchemaItem::Currency(CurrencyDecl {
+                    name,
+                    scale,
+                    scale_span,
+                    span: start.to(self.cur_span()),
+                })
             }
             Tok::Kw(k @ (Kw::Table | Kw::Base | Kw::Ledger)) => {
                 let kind = match k {
@@ -494,8 +599,16 @@ impl<'a> Parser<'a> {
                 }
                 self.expect(Tok::RParen, "to close the index columns");
                 let anchor = self.eat_kw(Kw::Anchor);
-                let end = self.expect(Tok::Semi, "after an index").unwrap_or(self.cur_span());
-                SchemaItem::Index(IndexDecl { name, on, cols, anchor, span: start.to(end) })
+                let end = self
+                    .expect(Tok::Semi, "after an index")
+                    .unwrap_or(self.cur_span());
+                SchemaItem::Index(IndexDecl {
+                    name,
+                    on,
+                    cols,
+                    anchor,
+                    span: start.to(end),
+                })
             }
             _ => {
                 let found = self.describe_cur();
@@ -505,8 +618,13 @@ impl<'a> Parser<'a> {
                         .note("schema items are: currency, table, base, ledger, view, index"),
                 );
                 let span = self.recover_to(&[
-                    Tok::Kw(Kw::Currency), Tok::Kw(Kw::Table), Tok::Kw(Kw::Base),
-                    Tok::Kw(Kw::Ledger), Tok::Kw(Kw::View), Tok::Kw(Kw::Index), Tok::RBrace,
+                    Tok::Kw(Kw::Currency),
+                    Tok::Kw(Kw::Table),
+                    Tok::Kw(Kw::Base),
+                    Tok::Kw(Kw::Ledger),
+                    Tok::Kw(Kw::View),
+                    Tok::Kw(Kw::Index),
+                    Tok::RBrace,
                 ]);
                 SchemaItem::Error(start.to(span))
             }
@@ -537,14 +655,24 @@ impl<'a> Parser<'a> {
                         }
                     }
                     self.expect(Tok::RParen, "to close the conservation key");
-                    let end = self.expect(Tok::Semi, "after a conservation rule").unwrap_or(s);
-                    rules.push(RelRule::Conserve { keys, span: s.to(end) });
+                    let end = self
+                        .expect(Tok::Semi, "after a conservation rule")
+                        .unwrap_or(s);
+                    rules.push(RelRule::Conserve {
+                        keys,
+                        span: s.to(end),
+                    });
                 }
                 Tok::Kw(Kw::Retain) => {
                     let s = self.bump();
                     let mode = self.ident("a retention mode");
-                    let end = self.expect(Tok::Semi, "after a retention clause").unwrap_or(s);
-                    rules.push(RelRule::Retain { mode, span: s.to(end) });
+                    let end = self
+                        .expect(Tok::Semi, "after a retention clause")
+                        .unwrap_or(s);
+                    rules.push(RelRule::Retain {
+                        mode,
+                        span: s.to(end),
+                    });
                 }
                 Tok::Kw(Kw::Bitemporal) => {
                     let s = self.bump();
@@ -559,14 +687,22 @@ impl<'a> Parser<'a> {
                     let target = self.ident("the referenced relation");
                     let target_cols = self.paren_names();
                     let end = self.expect(Tok::Semi, "after a foreign key").unwrap_or(s);
-                    rules.push(RelRule::ForeignKey { cols, target, target_cols, span: s.to(end) });
+                    rules.push(RelRule::ForeignKey {
+                        cols,
+                        target,
+                        target_cols,
+                        span: s.to(end),
+                    });
                 }
                 Tok::Kw(Kw::Primary) if matches!(self.nth(2), Tok::LParen) => {
                     let s = self.bump();
                     self.expect_kw(Kw::Key, "in a primary key");
                     let cols = self.paren_names();
                     let end = self.expect(Tok::Semi, "after a primary key").unwrap_or(s);
-                    rules.push(RelRule::PrimaryKey { cols, span: s.to(end) });
+                    rules.push(RelRule::PrimaryKey {
+                        cols,
+                        span: s.to(end),
+                    });
                 }
                 _ => fields.push(self.field_decl()),
             }
@@ -575,15 +711,22 @@ impl<'a> Parser<'a> {
             }
             self.eat(&Tok::Comma);
         }
-        let mut end = self.expect(Tok::RBrace, "to close a relation body").unwrap_or(self.cur_span());
+        let mut end = self
+            .expect(Tok::RBrace, "to close a relation body")
+            .unwrap_or(self.cur_span());
         // Trailing clauses after the body: `ledger p { .. } retain forever;`
         loop {
             match self.cur().clone() {
                 Tok::Kw(Kw::Retain) => {
                     let s = self.bump();
                     let mode = self.ident("a retention mode");
-                    end = self.expect(Tok::Semi, "after a retention clause").unwrap_or(s);
-                    rules.push(RelRule::Retain { mode, span: s.to(end) });
+                    end = self
+                        .expect(Tok::Semi, "after a retention clause")
+                        .unwrap_or(s);
+                    rules.push(RelRule::Retain {
+                        mode,
+                        span: s.to(end),
+                    });
                 }
                 Tok::Kw(Kw::Bitemporal) => {
                     let s = self.bump();
@@ -596,7 +739,14 @@ impl<'a> Parser<'a> {
                 _ => break,
             }
         }
-        RelDecl { kind, name, fields, rules, attrs, span: start.to(end) }
+        RelDecl {
+            kind,
+            name,
+            fields,
+            rules,
+            attrs,
+            span: start.to(end),
+        }
     }
 
     fn paren_names(&mut self) -> Vec<Name> {
@@ -673,8 +823,14 @@ impl<'a> Parser<'a> {
         let name = self.ident("a view name");
         self.expect(Tok::Eq, "in a view declaration");
         let body = self.expr();
-        let contract = if self.at_kw(Kw::Serve) { Some(self.serve_contract()) } else { None };
-        let end = self.expect(Tok::Semi, "after a view declaration").unwrap_or(body.span());
+        let contract = if self.at_kw(Kw::Serve) {
+            Some(self.serve_contract())
+        } else {
+            None
+        };
+        let end = self
+            .expect(Tok::Semi, "after a view declaration")
+            .unwrap_or(body.span());
         if contract.is_none() {
             self.diags.push(
                 Diagnostic::warning("NL0100", format!("view `{}` has no serve contract", name.text))
@@ -683,7 +839,14 @@ impl<'a> Parser<'a> {
                     .suggest(end, " serve { consistency: snapshot, materialize: auto }", "add a contract", Applicability::MaybeIncorrect),
             );
         }
-        ViewDecl { name, body, contract, public, attrs, span: start.to(end) }
+        ViewDecl {
+            name,
+            body,
+            contract,
+            public,
+            attrs,
+            span: start.to(end),
+        }
     }
 
     fn serve_contract(&mut self) -> ServeContract {
@@ -707,8 +870,13 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
-        let end = self.expect(Tok::RBrace, "to close a serve contract").unwrap_or(start);
-        ServeContract { entries, span: start.to(end) }
+        let end = self
+            .expect(Tok::RBrace, "to close a serve contract")
+            .unwrap_or(start);
+        ServeContract {
+            entries,
+            span: start.to(end),
+        }
     }
 
     fn contract_value(&mut self) -> ContractValue {
@@ -716,7 +884,11 @@ impl<'a> Parser<'a> {
             Tok::Int(n) => ContractValue::Int(n, self.bump()),
             Tok::Duration { value, unit } => {
                 let s = self.bump();
-                ContractValue::Duration { value, unit, span: s }
+                ContractValue::Duration {
+                    value,
+                    unit,
+                    span: s,
+                }
             }
             Tok::Ident | Tok::Kw(_) => {
                 let name = self.member_name("a contract value");
@@ -736,15 +908,25 @@ impl<'a> Parser<'a> {
                             break;
                         }
                     }
-                    let end = self.expect(Tok::RParen, "to close contract arguments").unwrap_or(start);
-                    ContractValue::Call { name, args, span: start.to(end) }
+                    let end = self
+                        .expect(Tok::RParen, "to close contract arguments")
+                        .unwrap_or(start);
+                    ContractValue::Call {
+                        name,
+                        args,
+                        span: start.to(end),
+                    }
                 } else {
                     ContractValue::Word(name)
                 }
             }
             _ => {
                 let found = self.describe_cur();
-                self.err("NL0006", format!("expected a contract value, found {found}"), "here");
+                self.err(
+                    "NL0006",
+                    format!("expected a contract value, found {found}"),
+                    "here",
+                );
                 ContractValue::Error(self.bump())
             }
         }
@@ -757,7 +939,10 @@ impl<'a> Parser<'a> {
         let name = self.ident("a function name");
         let generics = self.generics();
         let mut params = Vec::new();
-        if self.expect(Tok::LParen, "to open the parameter list").is_some() {
+        if self
+            .expect(Tok::LParen, "to open the parameter list")
+            .is_some()
+        {
             while !self.at(&Tok::RParen) && !self.at_eof() {
                 if self.burn() {
                     break;
@@ -768,14 +953,24 @@ impl<'a> Parser<'a> {
                     self.bump();
                     let s = self.bump();
                     params.push(Param {
-                        pat: Pat::Bind { name: Name::new("self", s), mutable: false, by_ref: true, span: s },
+                        pat: Pat::Bind {
+                            name: Name::new("self", s),
+                            mutable: false,
+                            by_ref: true,
+                            span: s,
+                        },
                         ty: Ty::Infer(s),
                         span: s,
                     });
                 } else if self.at_kw(Kw::SelfValue) {
                     let s = self.bump();
                     params.push(Param {
-                        pat: Pat::Bind { name: Name::new("self", s), mutable: false, by_ref: false, span: s },
+                        pat: Pat::Bind {
+                            name: Name::new("self", s),
+                            mutable: false,
+                            by_ref: false,
+                            span: s,
+                        },
                         ty: Ty::Infer(s),
                         span: s,
                     });
@@ -783,7 +978,11 @@ impl<'a> Parser<'a> {
                     let pat = self.pat();
                     self.expect(Tok::Colon, "between a parameter and its type");
                     let ty = self.ty();
-                    params.push(Param { pat, ty, span: p_start.to(self.cur_span()) });
+                    params.push(Param {
+                        pat,
+                        ty,
+                        span: p_start.to(self.cur_span()),
+                    });
                 }
                 if !self.eat(&Tok::Comma) {
                     break;
@@ -791,8 +990,16 @@ impl<'a> Parser<'a> {
             }
             self.expect(Tok::RParen, "to close the parameter list");
         }
-        let ret = if self.eat(&Tok::Arrow) { Some(self.ty()) } else { None };
-        let effects = if self.at(&Tok::Bang) { Some(self.effect_row()) } else { None };
+        let ret = if self.eat(&Tok::Arrow) {
+            Some(self.ty())
+        } else {
+            None
+        };
+        let effects = if self.at(&Tok::Bang) {
+            Some(self.effect_row())
+        } else {
+            None
+        };
         let body = if self.at(&Tok::LBrace) {
             Some(self.block())
         } else {
@@ -800,7 +1007,17 @@ impl<'a> Parser<'a> {
             None
         };
         let end = body.as_ref().map(|b| b.span).unwrap_or(self.cur_span());
-        FnDecl { name, generics, params, ret, effects, body, public, attrs, span: start.to(end) }
+        FnDecl {
+            name,
+            generics,
+            params,
+            ret,
+            effects,
+            body,
+            public,
+            attrs,
+            span: start.to(end),
+        }
     }
 
     /// `! { read@snapshot, append, debit<usd> }`
@@ -819,13 +1036,20 @@ impl<'a> Parser<'a> {
             }
             self.expect(Tok::RBrace, "to close an effect row");
         }
-        EffectRow { effects, span: start.to(self.cur_span()) }
+        EffectRow {
+            effects,
+            span: start.to(self.cur_span()),
+        }
     }
 
     fn effect(&mut self) -> Effect {
         let start = self.cur_span();
         let name = self.ident("an effect name");
-        let at = if self.eat(&Tok::At) { Some(self.ident("a consistency rung")) } else { None };
+        let at = if self.eat(&Tok::At) {
+            Some(self.ident("a consistency rung"))
+        } else {
+            None
+        };
         let mut args = Vec::new();
         if self.at(&Tok::Lt) {
             self.bump();
@@ -837,7 +1061,12 @@ impl<'a> Parser<'a> {
             }
             self.expect(Tok::Gt, "to close effect parameters");
         }
-        Effect { name, at, args, span: start.to(self.cur_span()) }
+        Effect {
+            name,
+            at,
+            args,
+            span: start.to(self.cur_span()),
+        }
     }
 
     fn generics(&mut self) -> Vec<Name> {
@@ -876,7 +1105,14 @@ impl<'a> Parser<'a> {
             }
             self.expect(Tok::RBrace, "to close a struct body");
         }
-        StructDecl { name, generics, fields, public, attrs, span: start.to(self.cur_span()) }
+        StructDecl {
+            name,
+            generics,
+            fields,
+            public,
+            attrs,
+            span: start.to(self.cur_span()),
+        }
     }
 
     fn enum_decl(&mut self, public: bool, start: Span) -> EnumDecl {
@@ -907,7 +1143,13 @@ impl<'a> Parser<'a> {
             }
             self.expect(Tok::RBrace, "to close an enum body");
         }
-        EnumDecl { name, generics, variants, public, span: start.to(self.cur_span()) }
+        EnumDecl {
+            name,
+            generics,
+            variants,
+            public,
+            span: start.to(self.cur_span()),
+        }
     }
 
     fn trait_decl(&mut self, start: Span) -> TraitDecl {
@@ -930,7 +1172,12 @@ impl<'a> Parser<'a> {
             }
             self.expect(Tok::RBrace, "to close a trait body");
         }
-        TraitDecl { name, generics, items, span: start.to(self.cur_span()) }
+        TraitDecl {
+            name,
+            generics,
+            items,
+            span: start.to(self.cur_span()),
+        }
     }
 
     fn impl_decl(&mut self, start: Span) -> ImplDecl {
@@ -963,7 +1210,12 @@ impl<'a> Parser<'a> {
             }
             self.expect(Tok::RBrace, "to close an impl body");
         }
-        ImplDecl { trait_, self_ty, items, span: start.to(self.cur_span()) }
+        ImplDecl {
+            trait_,
+            self_ty,
+            items,
+            span: start.to(self.cur_span()),
+        }
     }
 
     // ---------------- types ----------------
@@ -975,7 +1227,11 @@ impl<'a> Parser<'a> {
                 self.bump();
                 let mutable = self.eat_kw(Kw::Mut);
                 let inner = Box::new(self.ty());
-                Ty::Ref { inner, mutable, span: start.to(self.cur_span()) }
+                Ty::Ref {
+                    inner,
+                    mutable,
+                    span: start.to(self.cur_span()),
+                }
             }
             Tok::LParen => {
                 self.bump();
@@ -990,11 +1246,16 @@ impl<'a> Parser<'a> {
                     }
                     elems.push(self.ty());
                 }
-                let end = self.expect(Tok::RParen, "to close a tuple type").unwrap_or(start);
+                let end = self
+                    .expect(Tok::RParen, "to close a tuple type")
+                    .unwrap_or(start);
                 if elems.len() == 1 {
                     elems.pop().unwrap()
                 } else {
-                    Ty::Tuple { elems, span: start.to(end) }
+                    Ty::Tuple {
+                        elems,
+                        span: start.to(end),
+                    }
                 }
             }
             Tok::LBracket => {
@@ -1002,11 +1263,22 @@ impl<'a> Parser<'a> {
                 let elem = Box::new(self.ty());
                 if self.eat(&Tok::Semi) {
                     let len = Box::new(self.expr());
-                    let end = self.expect(Tok::RBracket, "to close an array type").unwrap_or(start);
-                    Ty::Array { elem, len, span: start.to(end) }
+                    let end = self
+                        .expect(Tok::RBracket, "to close an array type")
+                        .unwrap_or(start);
+                    Ty::Array {
+                        elem,
+                        len,
+                        span: start.to(end),
+                    }
                 } else {
-                    let end = self.expect(Tok::RBracket, "to close a slice type").unwrap_or(start);
-                    Ty::Slice { elem, span: start.to(end) }
+                    let end = self
+                        .expect(Tok::RBracket, "to close a slice type")
+                        .unwrap_or(start);
+                    Ty::Slice {
+                        elem,
+                        span: start.to(end),
+                    }
                 }
             }
             Tok::Underscore => Ty::Infer(self.bump()),
@@ -1027,9 +1299,22 @@ impl<'a> Parser<'a> {
                     }
                 }
                 self.expect(Tok::RParen, "to close a function type");
-                let ret = Box::new(if self.eat(&Tok::Arrow) { self.ty() } else { Ty::Unit(self.cur_span()) });
-                let effects = if self.at(&Tok::Bang) { self.effect_row() } else { EffectRow::default() };
-                Ty::Fn { params, ret, effects, span: start.to(self.cur_span()) }
+                let ret = Box::new(if self.eat(&Tok::Arrow) {
+                    self.ty()
+                } else {
+                    Ty::Unit(self.cur_span())
+                });
+                let effects = if self.at(&Tok::Bang) {
+                    self.effect_row()
+                } else {
+                    EffectRow::default()
+                };
+                Ty::Fn {
+                    params,
+                    ret,
+                    effects,
+                    span: start.to(self.cur_span()),
+                }
             }
             Tok::Ident | Tok::Kw(_) => {
                 let path = self.path();
@@ -1047,11 +1332,19 @@ impl<'a> Parser<'a> {
                     }
                     self.expect(Tok::Gt, "to close type arguments");
                 }
-                Ty::Path { span: start.to(self.cur_span()), path, args }
+                Ty::Path {
+                    span: start.to(self.cur_span()),
+                    path,
+                    args,
+                }
             }
             _ => {
                 let found = self.describe_cur();
-                self.err("NL0007", format!("expected a type, found {found}"), "expected a type");
+                self.err(
+                    "NL0007",
+                    format!("expected a type, found {found}"),
+                    "expected a type",
+                );
                 Ty::Error(self.bump())
             }
         }
@@ -1065,7 +1358,10 @@ impl<'a> Parser<'a> {
             segments.push(self.ident("a path segment"));
         }
         let end = segments.last().unwrap().span;
-        Path { segments, span: start.to(end) }
+        Path {
+            segments,
+            span: start.to(end),
+        }
     }
 
     // ---------------- patterns ----------------
@@ -1077,12 +1373,22 @@ impl<'a> Parser<'a> {
             Tok::Kw(Kw::Mut) => {
                 self.bump();
                 let name = self.ident("a binding name");
-                Pat::Bind { span: start.to(name.span), name, mutable: true, by_ref: false }
+                Pat::Bind {
+                    span: start.to(name.span),
+                    name,
+                    mutable: true,
+                    by_ref: false,
+                }
             }
             Tok::Kw(Kw::Ref) => {
                 self.bump();
                 let name = self.ident("a binding name");
-                Pat::Bind { span: start.to(name.span), name, mutable: false, by_ref: true }
+                Pat::Bind {
+                    span: start.to(name.span),
+                    name,
+                    mutable: false,
+                    by_ref: true,
+                }
             }
             Tok::LParen => {
                 self.bump();
@@ -1093,8 +1399,13 @@ impl<'a> Parser<'a> {
                         break;
                     }
                 }
-                let end = self.expect(Tok::RParen, "to close a tuple pattern").unwrap_or(start);
-                Pat::Tuple { elems, span: start.to(end) }
+                let end = self
+                    .expect(Tok::RParen, "to close a tuple pattern")
+                    .unwrap_or(start);
+                Pat::Tuple {
+                    elems,
+                    span: start.to(end),
+                }
             }
             Tok::Int(_) | Tok::Str(_) | Tok::Bool(_) | Tok::Money { .. } | Tok::EpochLit(_) => {
                 Pat::Lit(Box::new(self.primary()))
@@ -1110,8 +1421,14 @@ impl<'a> Parser<'a> {
                             break;
                         }
                     }
-                    let end = self.expect(Tok::RParen, "to close a pattern").unwrap_or(start);
-                    Pat::TupleStruct { path, elems, span: start.to(end) }
+                    let end = self
+                        .expect(Tok::RParen, "to close a pattern")
+                        .unwrap_or(start);
+                    Pat::TupleStruct {
+                        path,
+                        elems,
+                        span: start.to(end),
+                    }
                 } else if self.at(&Tok::LBrace) && path.segments.len() > 1 {
                     self.bump();
                     let mut fields = Vec::new();
@@ -1122,26 +1439,55 @@ impl<'a> Parser<'a> {
                             break;
                         }
                         let n = self.ident("a field name");
-                        let p = if self.eat(&Tok::Colon) { self.pat() } else { Pat::Bind { name: n.clone(), mutable: false, by_ref: false, span: n.span } };
+                        let p = if self.eat(&Tok::Colon) {
+                            self.pat()
+                        } else {
+                            Pat::Bind {
+                                name: n.clone(),
+                                mutable: false,
+                                by_ref: false,
+                                span: n.span,
+                            }
+                        };
                         fields.push((n, p));
                         if !self.eat(&Tok::Comma) {
                             break;
                         }
                     }
-                    let end = self.expect(Tok::RBrace, "to close a struct pattern").unwrap_or(start);
-                    Pat::Struct { path, fields, rest, span: start.to(end) }
+                    let end = self
+                        .expect(Tok::RBrace, "to close a struct pattern")
+                        .unwrap_or(start);
+                    Pat::Struct {
+                        path,
+                        fields,
+                        rest,
+                        span: start.to(end),
+                    }
                 } else if path.segments.len() == 1
-                    && path.segments[0].text.chars().next().map_or(false, |c| c.is_lowercase() || c == '_')
+                    && path.segments[0]
+                        .text
+                        .chars()
+                        .next()
+                        .map_or(false, |c| c.is_lowercase() || c == '_')
                 {
                     let n = path.segments.into_iter().next().unwrap();
-                    Pat::Bind { span: n.span, name: n, mutable: false, by_ref: false }
+                    Pat::Bind {
+                        span: n.span,
+                        name: n,
+                        mutable: false,
+                        by_ref: false,
+                    }
                 } else {
                     Pat::Path(path)
                 }
             }
             _ => {
                 let found = self.describe_cur();
-                self.err("NL0008", format!("expected a pattern, found {found}"), "expected a pattern");
+                self.err(
+                    "NL0008",
+                    format!("expected a pattern, found {found}"),
+                    "expected a pattern",
+                );
                 Pat::Error(self.bump())
             }
         }
@@ -1150,7 +1496,9 @@ impl<'a> Parser<'a> {
     // ---------------- statements ----------------
 
     fn block(&mut self) -> Block {
-        let start = self.expect(Tok::LBrace, "to open a block").unwrap_or(self.cur_span());
+        let start = self
+            .expect(Tok::LBrace, "to open a block")
+            .unwrap_or(self.cur_span());
         let mut stmts = Vec::new();
         let mut tail = None;
         while !self.at(&Tok::RBrace) && !self.at_eof() {
@@ -1167,8 +1515,14 @@ impl<'a> Parser<'a> {
                 self.bump();
             }
         }
-        let end = self.expect(Tok::RBrace, "to close a block").unwrap_or(start);
-        Block { stmts, tail, span: start.to(end) }
+        let end = self
+            .expect(Tok::RBrace, "to close a block")
+            .unwrap_or(start);
+        Block {
+            stmts,
+            tail,
+            span: start.to(end),
+        }
     }
 
     fn stmt(&mut self) -> Option<Stmt> {
@@ -1181,18 +1535,39 @@ impl<'a> Parser<'a> {
             Tok::Kw(Kw::Let) => {
                 self.bump();
                 let pat = self.pat();
-                let ty = if self.eat(&Tok::Colon) { Some(self.ty()) } else { None };
-                let init = if self.eat(&Tok::Eq) { Some(self.expr()) } else { None };
+                let ty = if self.eat(&Tok::Colon) {
+                    Some(self.ty())
+                } else {
+                    None
+                };
+                let init = if self.eat(&Tok::Eq) {
+                    Some(self.expr())
+                } else {
+                    None
+                };
                 let end = self.expect(Tok::Semi, "after a `let`").unwrap_or(start);
-                Some(Stmt::Let { pat, ty, init, span: start.to(end) })
+                Some(Stmt::Let {
+                    pat,
+                    ty,
+                    init,
+                    span: start.to(end),
+                })
             }
-            Tok::Kw(Kw::Insert | Kw::Update | Kw::Delete | Kw::Begin | Kw::Commit
-                | Kw::Rollback | Kw::Grant | Kw::Revoke | Kw::Backfill | Kw::Emit) => {
-                self.dml().map(Stmt::Dml)
-            }
-            Tok::Kw(Kw::Fn | Kw::Struct | Kw::Enum | Kw::Use | Kw::Const | Kw::Static | Kw::Schema) => {
-                Some(Stmt::Item(Box::new(self.item())))
-            }
+            Tok::Kw(
+                Kw::Insert
+                | Kw::Update
+                | Kw::Delete
+                | Kw::Begin
+                | Kw::Commit
+                | Kw::Rollback
+                | Kw::Grant
+                | Kw::Revoke
+                | Kw::Backfill
+                | Kw::Emit,
+            ) => self.dml().map(Stmt::Dml),
+            Tok::Kw(
+                Kw::Fn | Kw::Struct | Kw::Enum | Kw::Use | Kw::Const | Kw::Static | Kw::Schema,
+            ) => Some(Stmt::Item(Box::new(self.item()))),
             _ => {
                 let e = self.expr();
                 if self.eat(&Tok::Semi) {
@@ -1226,7 +1601,11 @@ impl<'a> Parser<'a> {
                 self.bump();
                 self.expect_kw(Kw::Into, "in an `insert`");
                 let table = self.ident("a table name");
-                let cols = if self.at(&Tok::LParen) { self.paren_names() } else { Vec::new() };
+                let cols = if self.at(&Tok::LParen) {
+                    self.paren_names()
+                } else {
+                    Vec::new()
+                };
                 self.expect_kw(Kw::Values, "in an `insert`");
                 let mut rows = Vec::new();
                 loop {
@@ -1245,7 +1624,12 @@ impl<'a> Parser<'a> {
                     }
                 }
                 let end = self.expect(Tok::Semi, "after an `insert`").unwrap_or(start);
-                Some(Dml::Insert { table, cols, rows, span: start.to(end) })
+                Some(Dml::Insert {
+                    table,
+                    cols,
+                    rows,
+                    span: start.to(end),
+                })
             }
             Tok::Kw(Kw::Update) => {
                 self.bump();
@@ -1260,17 +1644,34 @@ impl<'a> Parser<'a> {
                         break;
                     }
                 }
-                let filter = if self.eat_kw(Kw::Where) { Some(self.expr()) } else { None };
+                let filter = if self.eat_kw(Kw::Where) {
+                    Some(self.expr())
+                } else {
+                    None
+                };
                 let end = self.expect(Tok::Semi, "after an `update`").unwrap_or(start);
-                Some(Dml::Update { table, sets, filter, span: start.to(end) })
+                Some(Dml::Update {
+                    table,
+                    sets,
+                    filter,
+                    span: start.to(end),
+                })
             }
             Tok::Kw(Kw::Delete) => {
                 self.bump();
                 self.expect_kw(Kw::From, "in a `delete`");
                 let table = self.ident("a table name");
-                let filter = if self.eat_kw(Kw::Where) { Some(self.expr()) } else { None };
+                let filter = if self.eat_kw(Kw::Where) {
+                    Some(self.expr())
+                } else {
+                    None
+                };
                 let end = self.expect(Tok::Semi, "after a `delete`").unwrap_or(start);
-                Some(Dml::Delete { table, filter, span: start.to(end) })
+                Some(Dml::Delete {
+                    table,
+                    filter,
+                    span: start.to(end),
+                })
             }
             Tok::Kw(k @ (Kw::Grant | Kw::Revoke)) => {
                 self.bump();
@@ -1282,19 +1683,41 @@ impl<'a> Parser<'a> {
                 } else {
                     self.ident("the holder")
                 };
-                let end = self.expect(Tok::Semi, "after a grant or revoke").unwrap_or(start);
+                let end = self
+                    .expect(Tok::Semi, "after a grant or revoke")
+                    .unwrap_or(start);
                 Some(if k == Kw::Grant {
-                    Dml::Grant { effect, on, to: subject, span: start.to(end) }
+                    Dml::Grant {
+                        effect,
+                        on,
+                        to: subject,
+                        span: start.to(end),
+                    }
                 } else {
-                    Dml::Revoke { effect, on, from: subject, span: start.to(end) }
+                    Dml::Revoke {
+                        effect,
+                        on,
+                        from: subject,
+                        span: start.to(end),
+                    }
                 })
             }
             Tok::Kw(Kw::Backfill) => {
                 self.bump();
                 let view = self.ident("a view name");
-                let upto = if self.eat_kw(Kw::Upto) { Some(self.expr()) } else { None };
-                let end = self.expect(Tok::Semi, "after a `backfill`").unwrap_or(start);
-                Some(Dml::Backfill { view, upto, span: start.to(end) })
+                let upto = if self.eat_kw(Kw::Upto) {
+                    Some(self.expr())
+                } else {
+                    None
+                };
+                let end = self
+                    .expect(Tok::Semi, "after a `backfill`")
+                    .unwrap_or(start);
+                Some(Dml::Backfill {
+                    view,
+                    upto,
+                    span: start.to(end),
+                })
             }
             Tok::Kw(Kw::Emit) => {
                 self.bump();
@@ -1305,7 +1728,11 @@ impl<'a> Parser<'a> {
                     Name::new("<default>", start)
                 };
                 let end = self.expect(Tok::Semi, "after an `emit`").unwrap_or(start);
-                Some(Dml::Emit { view, to, span: start.to(end) })
+                Some(Dml::Emit {
+                    view,
+                    to,
+                    span: start.to(end),
+                })
             }
             _ => None,
         }
@@ -1337,7 +1764,11 @@ impl<'a> Parser<'a> {
                 self.bump();
                 let value = self.expr_bp(0);
                 let span = lhs.span().to(value.span());
-                lhs = Expr::Assign { target: Box::new(lhs), value: Box::new(value), span };
+                lhs = Expr::Assign {
+                    target: Box::new(lhs),
+                    value: Box::new(value),
+                    span,
+                };
                 continue;
             }
             let Some(op) = self.peek_binop() else { break };
@@ -1349,7 +1780,12 @@ impl<'a> Parser<'a> {
             // `between (a, b)` takes a tuple, so the parse is uniform.
             let rhs = self.expr_bp(bp + 1);
             let span = lhs.span().to(rhs.span());
-            lhs = Expr::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs), span };
+            lhs = Expr::Binary {
+                op,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+                span,
+            };
         }
         lhs
     }
@@ -1405,24 +1841,40 @@ impl<'a> Parser<'a> {
             Tok::Minus => {
                 self.bump();
                 let operand = Box::new(self.unary());
-                Expr::Unary { op: UnOp::Neg, span: start.to(operand.span()), operand }
+                Expr::Unary {
+                    op: UnOp::Neg,
+                    span: start.to(operand.span()),
+                    operand,
+                }
             }
             Tok::Bang | Tok::Kw(Kw::Not) => {
                 self.bump();
                 let operand = Box::new(self.unary());
-                Expr::Unary { op: UnOp::Not, span: start.to(operand.span()), operand }
+                Expr::Unary {
+                    op: UnOp::Not,
+                    span: start.to(operand.span()),
+                    operand,
+                }
             }
             Tok::Star => {
                 self.bump();
                 let operand = Box::new(self.unary());
-                Expr::Unary { op: UnOp::Deref, span: start.to(operand.span()), operand }
+                Expr::Unary {
+                    op: UnOp::Deref,
+                    span: start.to(operand.span()),
+                    operand,
+                }
             }
             Tok::Amp => {
                 self.bump();
                 let mutable = self.eat_kw(Kw::Mut);
                 let operand = Box::new(self.unary());
                 let op = if mutable { UnOp::RefMut } else { UnOp::Ref };
-                Expr::Unary { op, span: start.to(operand.span()), operand }
+                Expr::Unary {
+                    op,
+                    span: start.to(operand.span()),
+                    operand,
+                }
             }
             _ => self.primary(),
         };
@@ -1447,7 +1899,10 @@ impl<'a> Parser<'a> {
                         // stage, not an afterthought, because an unguarded fixpoint must
                         // have no spelling at all.
                         if kind == StageKind::Fixpoint {
-                            let step = args.into_iter().next().map(|a| a.value)
+                            let step = args
+                                .into_iter()
+                                .next()
+                                .map(|a| a.value)
                                 .unwrap_or(Expr::Error(span));
                             let measure = if self.eat_kw(Kw::Guard) {
                                 self.expect_kw(Kw::Measure, "after `guard`");
@@ -1472,21 +1927,43 @@ impl<'a> Parser<'a> {
                             };
                         } else {
                             if kind == StageKind::Unknown {
-                                if let Some(sugg) =
-                                    crate::diagnostics::closest(&name.text, StageKind::all_names().iter().copied())
-                                {
+                                if let Some(sugg) = crate::diagnostics::closest(
+                                    &name.text,
+                                    StageKind::all_names().iter().copied(),
+                                ) {
                                     self.diags.push(
-                                        Diagnostic::warning("NL0401", format!("`{}` is not a known pipeline stage", name.text))
-                                            .primary(name.span, "unknown stage")
-                                            .suggest(name.span, sugg, format!("did you mean `{sugg}`?"), Applicability::MaybeIncorrect),
+                                        Diagnostic::warning(
+                                            "NL0401",
+                                            format!(
+                                                "`{}` is not a known pipeline stage",
+                                                name.text
+                                            ),
+                                        )
+                                        .primary(name.span, "unknown stage")
+                                        .suggest(
+                                            name.span,
+                                            sugg,
+                                            format!("did you mean `{sugg}`?"),
+                                            Applicability::MaybeIncorrect,
+                                        ),
                                     );
                                 }
                             }
-                            e = Expr::Stage { recv: Box::new(e), kind, name, args, span };
+                            e = Expr::Stage {
+                                recv: Box::new(e),
+                                kind,
+                                name,
+                                args,
+                                span,
+                            };
                         }
                     } else {
                         let span = e.span().to(name.span);
-                        e = Expr::Field { base: Box::new(e), name, span };
+                        e = Expr::Field {
+                            base: Box::new(e),
+                            name,
+                            span,
+                        };
                     }
                 }
                 Tok::PipeGt => {
@@ -1496,30 +1973,53 @@ impl<'a> Parser<'a> {
                     let args = self.call_args();
                     let kind = StageKind::from_name(&name.text);
                     let span = e.span().to(self.cur_span());
-                    e = Expr::Stage { recv: Box::new(e), kind, name, args, span };
+                    e = Expr::Stage {
+                        recv: Box::new(e),
+                        kind,
+                        name,
+                        args,
+                        span,
+                    };
                 }
                 Tok::LParen => {
                     let args = self.call_args();
                     let span = e.span().to(self.cur_span());
-                    e = Expr::Call { callee: Box::new(e), args, span };
+                    e = Expr::Call {
+                        callee: Box::new(e),
+                        args,
+                        span,
+                    };
                 }
                 Tok::LBracket => {
                     self.bump();
                     let index = Box::new(self.expr());
-                    let end = self.expect(Tok::RBracket, "to close an index").unwrap_or(index.span());
+                    let end = self
+                        .expect(Tok::RBracket, "to close an index")
+                        .unwrap_or(index.span());
                     let span = e.span().to(end);
-                    e = Expr::Index { base: Box::new(e), index, span };
+                    e = Expr::Index {
+                        base: Box::new(e),
+                        index,
+                        span,
+                    };
                 }
                 Tok::Question => {
                     let end = self.bump();
                     let span = e.span().to(end);
-                    e = Expr::Try { expr: Box::new(e), span };
+                    e = Expr::Try {
+                        expr: Box::new(e),
+                        span,
+                    };
                 }
                 Tok::Kw(Kw::As) if self.no_alias_depth == 0 => {
                     self.bump();
                     let ty = self.ty();
                     let span = e.span().to(ty.span());
-                    e = Expr::Cast { expr: Box::new(e), ty, span };
+                    e = Expr::Cast {
+                        expr: Box::new(e),
+                        ty,
+                        span,
+                    };
                 }
                 _ => return e,
             }
@@ -1528,7 +2028,10 @@ impl<'a> Parser<'a> {
 
     fn call_args(&mut self) -> Vec<Arg> {
         let mut args = Vec::new();
-        if self.expect(Tok::LParen, "to open an argument list").is_none() {
+        if self
+            .expect(Tok::LParen, "to open an argument list")
+            .is_none()
+        {
             return args;
         }
         while !self.at(&Tok::RParen) && !self.at_eof() {
@@ -1549,7 +2052,11 @@ impl<'a> Parser<'a> {
                 None
             };
             let value = self.expr();
-            args.push(Arg { name, span: start.to(value.span()), value });
+            args.push(Arg {
+                name,
+                span: start.to(value.span()),
+                value,
+            });
             if !self.eat(&Tok::Comma) {
                 break;
             }
@@ -1567,25 +2074,49 @@ impl<'a> Parser<'a> {
             Tok::Str(s) => Expr::Str(s, self.bump()),
             Tok::Bytes(b) => Expr::Bytes(b, self.bump()),
             Tok::EpochLit(e) => Expr::Epoch(e, self.bump()),
-            Tok::Money { minor, scale, currency } => {
+            Tok::Money {
+                minor,
+                scale,
+                currency,
+            } => {
                 let s = self.bump();
-                Expr::Money { minor, scale, currency: Name::new(currency, s), span: s }
+                Expr::Money {
+                    minor,
+                    scale,
+                    currency: Name::new(currency, s),
+                    span: s,
+                }
             }
             Tok::Instant(t) => {
                 let s = self.bump();
-                Expr::Instant { text: t, valid_axis: false, span: s }
+                Expr::Instant {
+                    text: t,
+                    valid_axis: false,
+                    span: s,
+                }
             }
             Tok::ValidInstant(t) => {
                 let s = self.bump();
-                Expr::Instant { text: t, valid_axis: true, span: s }
+                Expr::Instant {
+                    text: t,
+                    valid_axis: true,
+                    span: s,
+                }
             }
             Tok::Duration { value, unit } => {
                 let s = self.bump();
-                Expr::Duration { value, unit, span: s }
+                Expr::Duration {
+                    value,
+                    unit,
+                    span: s,
+                }
             }
             Tok::Underscore => {
                 let s = self.bump();
-                Expr::Path(Path { segments: vec![Name::new("_", s)], span: s })
+                Expr::Path(Path {
+                    segments: vec![Name::new("_", s)],
+                    span: s,
+                })
             }
             Tok::LParen => {
                 self.bump();
@@ -1602,9 +2133,14 @@ impl<'a> Parser<'a> {
                     }
                     elems.push(self.expr());
                 }
-                let end = self.expect(Tok::RParen, "to close a parenthesised expression").unwrap_or(start);
+                let end = self
+                    .expect(Tok::RParen, "to close a parenthesised expression")
+                    .unwrap_or(start);
                 if is_tuple {
-                    Expr::Tuple { elems, span: start.to(end) }
+                    Expr::Tuple {
+                        elems,
+                        span: start.to(end),
+                    }
                 } else {
                     elems.pop().unwrap()
                 }
@@ -1618,8 +2154,13 @@ impl<'a> Parser<'a> {
                         break;
                     }
                 }
-                let end = self.expect(Tok::RBracket, "to close an array").unwrap_or(start);
-                Expr::Array { elems, span: start.to(end) }
+                let end = self
+                    .expect(Tok::RBracket, "to close an array")
+                    .unwrap_or(start);
+                Expr::Array {
+                    elems,
+                    span: start.to(end),
+                }
             }
             Tok::LBrace => Expr::Block(Box::new(self.block())),
             Tok::Pipe | Tok::PipePipe => self.closure(false),
@@ -1632,11 +2173,20 @@ impl<'a> Parser<'a> {
                 let cond = Box::new(self.expr_no_struct());
                 let then = Box::new(self.block());
                 let els = if self.eat_kw(Kw::Else) {
-                    Some(Box::new(if self.at_kw(Kw::If) { self.primary() } else { Expr::Block(Box::new(self.block())) }))
+                    Some(Box::new(if self.at_kw(Kw::If) {
+                        self.primary()
+                    } else {
+                        Expr::Block(Box::new(self.block()))
+                    }))
                 } else {
                     None
                 };
-                Expr::If { cond, then, els, span: start.to(self.cur_span()) }
+                Expr::If {
+                    cond,
+                    then,
+                    els,
+                    span: start.to(self.cur_span()),
+                }
             }
             Tok::Kw(Kw::Case) => self.case_expr(start),
             Tok::Kw(Kw::Match) => {
@@ -1650,25 +2200,47 @@ impl<'a> Parser<'a> {
                     }
                     let a_start = self.cur_span();
                     let pat = self.pat();
-                    let guard = if self.eat_kw(Kw::When) || self.eat_kw(Kw::If) { Some(self.expr()) } else { None };
+                    let guard = if self.eat_kw(Kw::When) || self.eat_kw(Kw::If) {
+                        Some(self.expr())
+                    } else {
+                        None
+                    };
                     self.expect(Tok::FatArrow, "in a match arm");
                     let body = self.expr();
-                    arms.push(MatchArm { pat, guard, span: a_start.to(body.span()), body });
+                    arms.push(MatchArm {
+                        pat,
+                        guard,
+                        span: a_start.to(body.span()),
+                        body,
+                    });
                     self.eat(&Tok::Comma);
                 }
-                let end = self.expect(Tok::RBrace, "to close match arms").unwrap_or(start);
-                Expr::Match { scrutinee, arms, span: start.to(end) }
+                let end = self
+                    .expect(Tok::RBrace, "to close match arms")
+                    .unwrap_or(start);
+                Expr::Match {
+                    scrutinee,
+                    arms,
+                    span: start.to(end),
+                }
             }
             Tok::Kw(Kw::While) => {
                 self.bump();
                 let cond = Box::new(self.expr_no_struct());
                 let body = Box::new(self.block());
-                Expr::While { cond, span: start.to(body.span), body }
+                Expr::While {
+                    cond,
+                    span: start.to(body.span),
+                    body,
+                }
             }
             Tok::Kw(Kw::Loop) => {
                 self.bump();
                 let body = Box::new(self.block());
-                Expr::Loop { span: start.to(body.span), body }
+                Expr::Loop {
+                    span: start.to(body.span),
+                    body,
+                }
             }
             Tok::Kw(Kw::For) => {
                 self.bump();
@@ -1676,12 +2248,24 @@ impl<'a> Parser<'a> {
                 self.expect_kw(Kw::In, "in a `for` loop");
                 let iter = Box::new(self.expr_no_struct());
                 let body = Box::new(self.block());
-                Expr::For { pat, iter, span: start.to(body.span), body }
+                Expr::For {
+                    pat,
+                    iter,
+                    span: start.to(body.span),
+                    body,
+                }
             }
             Tok::Kw(Kw::Return) => {
                 self.bump();
-                let value = if self.at(&Tok::Semi) || self.at(&Tok::RBrace) { None } else { Some(Box::new(self.expr())) };
-                Expr::Return { span: start.to(self.cur_span()), value }
+                let value = if self.at(&Tok::Semi) || self.at(&Tok::RBrace) {
+                    None
+                } else {
+                    Some(Box::new(self.expr()))
+                };
+                Expr::Return {
+                    span: start.to(self.cur_span()),
+                    value,
+                }
             }
             Tok::Kw(Kw::Break) => Expr::Break(self.bump()),
             Tok::Kw(Kw::Continue) => Expr::Continue(self.bump()),
@@ -1689,7 +2273,10 @@ impl<'a> Parser<'a> {
             Tok::Kw(Kw::Hold) => {
                 self.bump();
                 let args = self.call_args();
-                Expr::Hold { args, span: start.to(self.cur_span()) }
+                Expr::Hold {
+                    args,
+                    span: start.to(self.cur_span()),
+                }
             }
             Tok::Kw(Kw::Resolve) => {
                 self.bump();
@@ -1711,7 +2298,11 @@ impl<'a> Parser<'a> {
                         ResolveOutcome::Error(sp)
                     }
                 };
-                Expr::Resolve { hold, outcome, span: start.to(self.cur_span()) }
+                Expr::Resolve {
+                    hold,
+                    outcome,
+                    span: start.to(self.cur_span()),
+                }
             }
             Tok::Kw(Kw::Fx) => {
                 self.bump();
@@ -1739,43 +2330,74 @@ impl<'a> Parser<'a> {
                         break;
                     }
                 }
-                let end = self.expect(Tok::RBrace, "to close an `fx` form").unwrap_or(start);
-                Expr::Fx { legs, rate, span: start.to(end) }
+                let end = self
+                    .expect(Tok::RBrace, "to close an `fx` form")
+                    .unwrap_or(start);
+                Expr::Fx {
+                    legs,
+                    rate,
+                    span: start.to(end),
+                }
             }
             Tok::Kw(Kw::Authorize) => {
                 self.bump();
                 let args = self.call_args();
-                Expr::Authorize { args, span: start.to(self.cur_span()) }
+                Expr::Authorize {
+                    args,
+                    span: start.to(self.cur_span()),
+                }
             }
             Tok::Kw(Kw::Declassify) => {
                 self.bump();
                 let args = self.call_args();
-                Expr::Declassify { args, span: start.to(self.cur_span()) }
+                Expr::Declassify {
+                    args,
+                    span: start.to(self.cur_span()),
+                }
             }
             Tok::Kw(Kw::Explain) => {
                 self.bump();
                 self.eat_kw(Kw::Of);
                 let target = Box::new(self.expr());
-                Expr::Explain { span: start.to(target.span()), target }
+                Expr::Explain {
+                    span: start.to(target.span()),
+                    target,
+                }
             }
             Tok::Kw(Kw::Reproduce) => {
                 self.bump();
                 let target = Box::new(self.expr());
-                let at = if self.eat_kw(Kw::AsOf) || self.eat(&Tok::At) { Some(Box::new(self.expr())) } else { None };
-                Expr::Reproduce { span: start.to(self.cur_span()), target, at }
+                let at = if self.eat_kw(Kw::AsOf) || self.eat(&Tok::At) {
+                    Some(Box::new(self.expr()))
+                } else {
+                    None
+                };
+                Expr::Reproduce {
+                    span: start.to(self.cur_span()),
+                    target,
+                    at,
+                }
             }
             Tok::Kw(Kw::Impact) => {
                 self.bump();
                 self.eat_kw(Kw::Of);
                 let target = Box::new(self.expr());
-                Expr::Impact { span: start.to(target.span()), target }
+                Expr::Impact {
+                    span: start.to(target.span()),
+                    target,
+                }
             }
             Tok::Kw(Kw::Sql) => {
                 self.bump();
                 self.expect(Tok::LBrace, "to open a `sql` block");
                 let inner = Box::new(self.select_stmt());
-                let end = self.expect(Tok::RBrace, "to close a `sql` block").unwrap_or(start);
-                Expr::Sql { inner, span: start.to(end) }
+                let end = self
+                    .expect(Tok::RBrace, "to close a `sql` block")
+                    .unwrap_or(start);
+                Expr::Sql {
+                    inner,
+                    span: start.to(end),
+                }
             }
             Tok::Kw(Kw::Select) | Tok::Kw(Kw::With) => self.select_stmt(),
             // `exists (select ..)`. The parentheses are required: without them the
@@ -1785,8 +2407,13 @@ impl<'a> Parser<'a> {
                 self.bump();
                 self.expect(Tok::LParen, "to open an `exists` subquery");
                 let inner = self.select_inner(start);
-                let end = self.expect(Tok::RParen, "to close an `exists` subquery").unwrap_or(start);
-                Expr::Exists { query: Box::new(inner), span: start.to(end) }
+                let end = self
+                    .expect(Tok::RParen, "to close an `exists` subquery")
+                    .unwrap_or(start);
+                Expr::Exists {
+                    query: Box::new(inner),
+                    span: start.to(end),
+                }
             }
             Tok::Ident | Tok::Kw(_) => {
                 let path = self.path();
@@ -1797,21 +2424,38 @@ impl<'a> Parser<'a> {
                     let mut fields = Vec::new();
                     while !self.at(&Tok::RBrace) && !self.at_eof() {
                         let n = self.ident("a field name");
-                        let v = if self.eat(&Tok::Colon) { self.expr() } else { Expr::Path(Path { segments: vec![n.clone()], span: n.span }) };
+                        let v = if self.eat(&Tok::Colon) {
+                            self.expr()
+                        } else {
+                            Expr::Path(Path {
+                                segments: vec![n.clone()],
+                                span: n.span,
+                            })
+                        };
                         fields.push((n, v));
                         if !self.eat(&Tok::Comma) {
                             break;
                         }
                     }
-                    let end = self.expect(Tok::RBrace, "to close a struct literal").unwrap_or(start);
-                    Expr::StructLit { path, fields, span: start.to(end) }
+                    let end = self
+                        .expect(Tok::RBrace, "to close a struct literal")
+                        .unwrap_or(start);
+                    Expr::StructLit {
+                        path,
+                        fields,
+                        span: start.to(end),
+                    }
                 } else {
                     Expr::Path(path)
                 }
             }
             _ => {
                 let found = self.describe_cur();
-                self.err("NL0009", format!("expected an expression, found {found}"), "expected an expression");
+                self.err(
+                    "NL0009",
+                    format!("expected an expression, found {found}"),
+                    "expected an expression",
+                );
                 let sp = self.recover_to(&[Tok::Semi, Tok::RBrace, Tok::RParen, Tok::Comma]);
                 Expr::Error(start.to(sp))
             }
@@ -1843,7 +2487,11 @@ impl<'a> Parser<'a> {
                     break;
                 }
                 let p = self.pat();
-                let t = if self.eat(&Tok::Colon) { Some(self.ty()) } else { None };
+                let t = if self.eat(&Tok::Colon) {
+                    Some(self.ty())
+                } else {
+                    None
+                };
                 params.push((p, t));
                 if !self.eat(&Tok::Comma) {
                     break;
@@ -1852,7 +2500,12 @@ impl<'a> Parser<'a> {
             self.expect(Tok::Pipe, "to close closure parameters");
         }
         let body = Box::new(self.expr());
-        Expr::Closure { params, span: start.to(body.span()), body, is_move }
+        Expr::Closure {
+            params,
+            span: start.to(body.span()),
+            body,
+            is_move,
+        }
     }
 
     fn txn_expr(&mut self, start: Span) -> Expr {
@@ -1878,7 +2531,11 @@ impl<'a> Parser<'a> {
             None
         };
         let body = Box::new(self.block());
-        Expr::Txn { idem, span: start.to(body.span), body }
+        Expr::Txn {
+            idem,
+            span: start.to(body.span),
+            body,
+        }
     }
 
     fn case_expr(&mut self, start: Span) -> Expr {
@@ -1893,9 +2550,19 @@ impl<'a> Parser<'a> {
             let value = self.expr();
             arms.push((cond, value));
         }
-        let els = if self.eat_kw(Kw::Else) { Some(Box::new(self.expr())) } else { None };
-        let end = self.expect_kw(Kw::End, "to close a `case`").unwrap_or(start);
-        Expr::Case { arms, els, span: start.to(end) }
+        let els = if self.eat_kw(Kw::Else) {
+            Some(Box::new(self.expr()))
+        } else {
+            None
+        };
+        let end = self
+            .expect_kw(Kw::End, "to close a `case`")
+            .unwrap_or(start);
+        Expr::Case {
+            arms,
+            els,
+            span: start.to(end),
+        }
     }
 
     // ---------------- the SQL surface ----------------
@@ -1935,7 +2602,13 @@ impl<'a> Parser<'a> {
         loop {
             if self.at(&Tok::Star) {
                 let s = self.bump();
-                projections.push((Expr::Path(Path { segments: vec![Name::new("*", s)], span: s }), None));
+                projections.push((
+                    Expr::Path(Path {
+                        segments: vec![Name::new("*", s)],
+                        span: s,
+                    }),
+                    None,
+                ));
             } else {
                 self.no_alias_depth += 1;
                 let e = self.expr();
@@ -1964,7 +2637,11 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        let filter = if self.eat_kw(Kw::Where) { Some(self.expr()) } else { None };
+        let filter = if self.eat_kw(Kw::Where) {
+            Some(self.expr())
+        } else {
+            None
+        };
         let mut group_by = Vec::new();
         if self.eat_kw(Kw::Group) {
             self.expect_kw(Kw::By, "after `group`");
@@ -1975,22 +2652,39 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        let having = if self.eat_kw(Kw::Having) { Some(self.expr()) } else { None };
+        let having = if self.eat_kw(Kw::Having) {
+            Some(self.expr())
+        } else {
+            None
+        };
         let mut order_by = Vec::new();
         if self.eat_kw(Kw::Order) {
             self.expect_kw(Kw::By, "after `order`");
             loop {
                 let e = self.expr();
-                let asc = if self.eat_kw(Kw::Desc) { false } else { self.eat_kw(Kw::Asc) || true };
+                let asc = if self.eat_kw(Kw::Desc) {
+                    false
+                } else {
+                    self.eat_kw(Kw::Asc) || true
+                };
                 order_by.push((e, asc));
                 if !self.eat(&Tok::Comma) {
                     break;
                 }
             }
         }
-        let limit = if self.eat_kw(Kw::Limit) { Some(self.expr()) } else { None };
-        let offset = if self.eat_kw(Kw::Offset) { Some(self.expr()) } else { None };
-        let set_op = if self.at_kw(Kw::Union) || self.at_kw(Kw::Except) || self.at_kw(Kw::Intersect) {
+        let limit = if self.eat_kw(Kw::Limit) {
+            Some(self.expr())
+        } else {
+            None
+        };
+        let offset = if self.eat_kw(Kw::Offset) {
+            Some(self.expr())
+        } else {
+            None
+        };
+        let set_op = if self.at_kw(Kw::Union) || self.at_kw(Kw::Except) || self.at_kw(Kw::Intersect)
+        {
             let k = self.cur().clone();
             self.bump();
             let op = match k {
@@ -2010,8 +2704,17 @@ impl<'a> Parser<'a> {
             None
         };
         SelectStmt {
-            distinct, projections, from, filter, group_by, having, order_by, limit, offset,
-            set_op, span: start.to(self.cur_span()),
+            distinct,
+            projections,
+            from,
+            filter,
+            group_by,
+            having,
+            order_by,
+            limit,
+            offset,
+            set_op,
+            span: start.to(self.cur_span()),
         }
     }
 
@@ -2022,8 +2725,16 @@ impl<'a> Parser<'a> {
             let inner_start = self.cur_span();
             let q = Box::new(self.select_inner(inner_start));
             self.expect(Tok::RParen, "to close a subquery");
-            let alias = if self.eat_kw(Kw::As) { Some(self.ident("an alias")) } else { None };
-            TableRef::Sub { query: q, alias, span: start.to(self.cur_span()) }
+            let alias = if self.eat_kw(Kw::As) {
+                Some(self.ident("an alias"))
+            } else {
+                None
+            };
+            TableRef::Sub {
+                query: q,
+                alias,
+                span: start.to(self.cur_span()),
+            }
         } else {
             let name = self.ident("a relation name");
             let alias = if self.eat_kw(Kw::As) {
@@ -2033,7 +2744,11 @@ impl<'a> Parser<'a> {
             } else {
                 None
             };
-            TableRef::Named { span: start.to(self.cur_span()), name, alias }
+            TableRef::Named {
+                span: start.to(self.cur_span()),
+                name,
+                alias,
+            }
         };
         loop {
             let kind = match self.cur().clone() {
@@ -2049,8 +2764,18 @@ impl<'a> Parser<'a> {
             self.eat_kw(Kw::Outer);
             self.eat_kw(Kw::Join);
             let right = Box::new(self.table_ref());
-            let on = if self.eat_kw(Kw::On) { Some(self.expr()) } else { None };
-            left = TableRef::Join { left: Box::new(left), right, kind, on, span: start.to(self.cur_span()) };
+            let on = if self.eat_kw(Kw::On) {
+                Some(self.expr())
+            } else {
+                None
+            };
+            left = TableRef::Join {
+                left: Box::new(left),
+                right,
+                kind,
+                on,
+                span: start.to(self.cur_span()),
+            };
         }
     }
 }
@@ -2058,7 +2783,11 @@ impl<'a> Parser<'a> {
 fn describe(t: &Tok) -> String {
     match t {
         Tok::Kw(k) => {
-            let w = keywords::KEYWORDS.iter().find(|kw| kw.token == *k).map(|w| w.word).unwrap_or("?");
+            let w = keywords::KEYWORDS
+                .iter()
+                .find(|kw| kw.token == *k)
+                .map(|w| w.word)
+                .unwrap_or("?");
             format!("`{w}`")
         }
         Tok::Ident => "an identifier".into(),

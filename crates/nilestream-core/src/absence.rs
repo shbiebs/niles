@@ -125,10 +125,19 @@ mod tests {
 
     #[test]
     fn the_lattice_is_ordered() {
-        let rungs: [Slot<i64>; 4] =
-            [Slot::Bottom, Slot::Hole(1), Slot::Pending(1), Slot::Present(0, 1)];
+        let rungs: [Slot<i64>; 4] = [
+            Slot::Bottom,
+            Slot::Hole(1),
+            Slot::Pending(1),
+            Slot::Present(0, 1),
+        ];
         for w in rungs.windows(2) {
-            assert!(w[0].rank() < w[1].rank(), "{} must sit below {}", w[0], w[1]);
+            assert!(
+                w[0].rank() < w[1].rank(),
+                "{} must sit below {}",
+                w[0],
+                w[1]
+            );
         }
     }
 
@@ -161,13 +170,20 @@ mod tests {
         // the single worst: a key that has never been read is not a key with no postings.
         let unknown: Slot<i64> = Slot::Bottom;
         assert!(unknown.needs_reconstruction());
-        assert_eq!(unknown.value(), None, "there is no value to hand back, and no identity to invent");
+        assert_eq!(
+            unknown.value(),
+            None,
+            "there is no value to hand back, and no identity to invent"
+        );
     }
 
     #[test]
     fn eviction_is_idempotent_and_holes_do_not_evict() {
         let mut s: Slot<i64> = Slot::Hole(7);
-        assert!(!s.evict(), "evicting a hole is a no-op, not a version reset");
+        assert!(
+            !s.evict(),
+            "evicting a hole is a no-op, not a version reset"
+        );
         assert_eq!(s, Slot::Hole(7));
     }
 
@@ -193,7 +209,11 @@ mod tests {
     fn pending_prevents_a_second_upquery_for_the_same_key() {
         let s: Slot<i64> = Slot::Pending(11);
         assert!(s.needs_reconstruction());
-        assert_eq!(s.version(), Some(11), "a joiner learns which reconstruction it is joining");
+        assert_eq!(
+            s.version(),
+            Some(11),
+            "a joiner learns which reconstruction it is joining"
+        );
         assert!(!s.is_resident());
     }
 }

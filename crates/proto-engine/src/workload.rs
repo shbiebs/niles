@@ -24,7 +24,10 @@ impl Zipf {
         for v in w.iter_mut() {
             *v /= total;
         }
-        Self { cdf: w, rng: Lcg::new(seed) }
+        Self {
+            cdf: w,
+            rng: Lcg::new(seed),
+        }
     }
 
     /// Sample a 0-based key index.
@@ -48,10 +51,16 @@ pub struct Lcg(u64);
 
 impl Lcg {
     pub fn new(seed: u64) -> Self {
-        Self(seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407))
+        Self(
+            seed.wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407),
+        )
     }
     pub fn next_u64(&mut self) -> u64 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         self.0 >> 11
     }
     pub fn next_f64(&mut self) -> f64 {

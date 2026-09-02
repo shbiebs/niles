@@ -37,8 +37,8 @@
 //! anchors, the contracts or the provenance would leave those proofs talking about a
 //! different object.
 
-use crate::{Consistency, Lineage, Materialize, Retention, ServeContract};
 use crate::operator::{ColIdx, Op};
+use crate::{Consistency, Lineage, Materialize, Retention, ServeContract};
 use std::cell::Cell;
 use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as _;
@@ -78,13 +78,21 @@ pub struct Checked<T> {
 
 impl<T: Clone> Clone for Checked<T> {
     fn clone(&self) -> Self {
-        Checked { value: self.value.clone(), accessed: Cell::new(self.accessed.get()), name: self.name }
+        Checked {
+            value: self.value.clone(),
+            accessed: Cell::new(self.accessed.get()),
+            name: self.name,
+        }
     }
 }
 
 impl<T> Checked<T> {
     pub fn new(name: &'static str, value: T) -> Self {
-        Checked { value, accessed: Cell::new(false), name }
+        Checked {
+            value,
+            accessed: Cell::new(false),
+            name,
+        }
     }
     /// Read the field, recording that it was read.
     pub fn get(&self) -> &T {
@@ -140,7 +148,10 @@ impl Node {
         vec![
             (self.anchor.name(), self.anchor.was_accessed()),
             (self.contract.name(), self.contract.was_accessed()),
-            (self.conservation_transparent.name(), self.conservation_transparent.was_accessed()),
+            (
+                self.conservation_transparent.name(),
+                self.conservation_transparent.was_accessed(),
+            ),
             (self.lineage.name(), self.lineage.was_accessed()),
         ]
     }
@@ -219,16 +230,26 @@ impl Circuit {
     }
 
     /// Add a node, deriving its key from its inputs.
-    pub fn add(&mut self, op: Op, inputs: Vec<NodeId>, contract: ServeContract, label: impl Into<String>) -> NodeId {
+    pub fn add(
+        &mut self,
+        op: Op,
+        inputs: Vec<NodeId>,
+        contract: ServeContract,
+        label: impl Into<String>,
+    ) -> NodeId {
         let id = self.nodes.len() as NodeId;
-        let input_keys: Vec<Option<Vec<ColIdx>>> =
-            inputs.iter().map(|i| self.nodes[*i as usize].key.clone()).collect();
+        let input_keys: Vec<Option<Vec<ColIdx>>> = inputs
+            .iter()
+            .map(|i| self.nodes[*i as usize].key.clone())
+            .collect();
         let key = op.derive_key(&input_keys);
         // Conservation transparency composes: a path is transparent only if every node on
         // it is. Taking the conjunction here, at construction, is what makes the property
         // a *path* property rather than a per-node curiosity.
         let transparent = op.is_conservation_transparent()
-            && inputs.iter().all(|i| *self.nodes[*i as usize].conservation_transparent.peek());
+            && inputs
+                .iter()
+                .all(|i| *self.nodes[*i as usize].conservation_transparent.peek());
         let anchor = match &op {
             Op::AsOf { epoch: Some(e) } => Anchor::Pinned(*e),
             Op::Source { .. } => Anchor::Frontier,
@@ -252,9 +273,7 @@ impl Circuit {
                 _ => inputs.iter().map(width).sum(),
             },
             // An apply is the outer row, plus one column if a scalar subquery widened it.
-            Op::Apply { kind, .. } => {
-                inputs.first().map(width).unwrap_or(0) + kind.widens() as u16
-            }
+            Op::Apply { kind, .. } => inputs.first().map(width).unwrap_or(0) + kind.widens() as u16,
             _ => inputs.first().map(width).unwrap_or(0),
         };
         let lineage = contract.lineage;
@@ -295,7 +314,11 @@ impl Circuit {
                 *indegree.entry(n.id).or_insert(0) += 1;
             }
         }
-        let mut ready: Vec<NodeId> = indegree.iter().filter(|(_, d)| **d == 0).map(|(k, _)| *k).collect();
+        let mut ready: Vec<NodeId> = indegree
+            .iter()
+            .filter(|(_, d)| **d == 0)
+            .map(|(k, _)| *k)
+            .collect();
         ready.sort_unstable();
         let mut out = Vec::new();
         let mut seen = BTreeSet::new();
@@ -362,7 +385,10 @@ impl Circuit {
                 }
             }
         }
-        AccessReport { total_fields: total, unread }
+        AccessReport {
+            total_fields: total,
+            unread,
+        }
     }
 
     /// The hard form. Panics with a message naming every unread field.
@@ -403,7 +429,9 @@ impl Circuit {
     /// a plan a reader cannot see is a plan a reader cannot review.
     pub fn explain(&self) -> String {
         let mut s = String::new();
-        let order = self.topological_order().unwrap_or_else(|| (0..self.nodes.len() as NodeId).collect());
+        let order = self
+            .topological_order()
+            .unwrap_or_else(|| (0..self.nodes.len() as NodeId).collect());
         let live = self.live_nodes();
         for id in order {
             if !self.outputs.is_empty() && !live.contains(&id) {
@@ -420,7 +448,11 @@ impl Circuit {
                 n.anchor.peek(),
                 n.contract.peek().consistency,
                 n.conservation_transparent.peek(),
-                if n.label.is_empty() { String::new() } else { format!("// {}", n.label) }
+                if n.label.is_empty() {
+                    String::new()
+                } else {
+                    format!("// {}", n.label)
+                }
             );
         }
         for (name, id) in &self.outputs {
@@ -447,7 +479,11 @@ mod tests {
 
     fn source(c: &mut Circuit, name: &str, anchor_key: Vec<ColIdx>) -> NodeId {
         c.add(
-            Op::Source { relation: name.into(), is_base: true, anchor_key },
+            Op::Source {
+                relation: name.into(),
+                is_base: true,
+                anchor_key,
+            },
             vec![],
             internal_contract(),
             name,
@@ -458,7 +494,10 @@ mod tests {
         let mut c = Circuit::new();
         let src = source(&mut c, "postings", vec![0, 1]);
         let agg = c.add(
-            Op::Aggregate { group_key: vec![0, 1], aggs: vec![(Agg::Sum, Scalar::Column(2))] },
+            Op::Aggregate {
+                group_key: vec![0, 1],
+                aggs: vec![(Agg::Sum, Scalar::Column(2))],
+            },
             vec![src],
             ServeContract {
                 consistency: Consistency::LedgerConsistent,
@@ -502,7 +541,11 @@ mod tests {
         // deciding anything with it.
         let (c, _) = balance_circuit();
         let _ = c.explain();
-        assert_eq!(c.audit_access().unread.len(), 8, "explain must not mark fields as read");
+        assert_eq!(
+            c.audit_access().unread.len(),
+            8,
+            "explain must not mark fields as read"
+        );
     }
 
     #[test]
@@ -511,16 +554,24 @@ mod tests {
         let src = source(&mut c, "postings", vec![0, 1]);
         assert!(*c.node(src).conservation_transparent.peek());
         let filtered = c.add(
-            Op::Filter { predicate: Scalar::LitBool(true) },
+            Op::Filter {
+                predicate: Scalar::LitBool(true),
+            },
             vec![src],
             internal_contract(),
             "recent_only",
         );
-        assert!(!*c.node(filtered).conservation_transparent.peek(), "a filter breaks transparency");
+        assert!(
+            !*c.node(filtered).conservation_transparent.peek(),
+            "a filter breaks transparency"
+        );
         // ... and everything downstream of it inherits the break, which is the property
         // that makes this a path judgement rather than a per-node one.
         let agg = c.add(
-            Op::Aggregate { group_key: vec![0], aggs: vec![(Agg::Sum, Scalar::Column(2))] },
+            Op::Aggregate {
+                group_key: vec![0],
+                aggs: vec![(Agg::Sum, Scalar::Column(2))],
+            },
             vec![filtered],
             internal_contract(),
             "filtered_total",
@@ -535,9 +586,19 @@ mod tests {
     fn a_result_is_no_fresher_than_its_stalest_input() {
         let mut c = Circuit::new();
         let live = source(&mut c, "postings", vec![0]);
-        let pinned = c.add(Op::AsOf { epoch: Some(4200) }, vec![live], internal_contract(), "historic");
+        let pinned = c.add(
+            Op::AsOf { epoch: Some(4200) },
+            vec![live],
+            internal_contract(),
+            "historic",
+        );
         let joined = c.add(
-            Op::Join { kind: crate::operator::JoinKind::Inner, left_key: vec![0], right_key: vec![0], residual: None },
+            Op::Join {
+                kind: crate::operator::JoinKind::Inner,
+                left_key: vec![0],
+                right_key: vec![0],
+                residual: None,
+            },
             vec![live, pinned],
             internal_contract(),
             "mixed",
@@ -559,7 +620,14 @@ mod tests {
         // cannot be reconstructed per key — it would have to be rebuilt whole.
         let mut c2 = Circuit::new();
         let src = source(&mut c2, "postings", vec![]);
-        let f = c2.add(Op::Filter { predicate: Scalar::LitBool(true) }, vec![src], internal_contract(), "");
+        let f = c2.add(
+            Op::Filter {
+                predicate: Scalar::LitBool(true),
+            },
+            vec![src],
+            internal_contract(),
+            "",
+        );
         assert_eq!(c2.node(f).key, None);
     }
 
@@ -577,6 +645,9 @@ mod tests {
         assert!(e.contains("source(postings"), "{e}");
         assert!(e.contains("aggregate(by=[0, 1], sum)"), "{e}");
         assert!(e.contains("output ledger_balance"), "{e}");
-        assert!(e.contains("LedgerConsistent"), "the rung must be visible in explain:\n{e}");
+        assert!(
+            e.contains("LedgerConsistent"),
+            "the rung must be visible in explain:\n{e}"
+        );
     }
 }

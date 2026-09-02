@@ -43,7 +43,9 @@ impl EvictionPolicy {
             EvictionPolicy::Random => {
                 // Deterministic pseudo-random selection driven by the logical clock, so
                 // runs remain reproducible from a seed.
-                let i = (clock.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407)
+                let i = (clock
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407)
                     >> 33) as usize
                     % present.len();
                 Some(present[i])

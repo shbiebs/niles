@@ -103,7 +103,10 @@ pub fn feasible(contract: &ServeContract) -> (Vec<Materialize>, Vec<(Materialize
         // An author who wrote an explicit mode has made the decision; the planner's job
         // is then to honour it, not to second-guess it. Only `Auto` delegates.
         if contract.materialize != Materialize::Auto && contract.materialize != m {
-            out.push((m, "the view declares an explicit mode; only `auto` delegates"));
+            out.push((
+                m,
+                "the view declares an explicit mode; only `auto` delegates",
+            ));
             continue;
         }
         if !contract.permits(m) {
@@ -188,7 +191,8 @@ pub fn plan_view(circuit: &Circuit, node: NodeId, name: &str, obs: Observed) -> 
     let budget = match mode {
         Materialize::Full | Materialize::Spilled => None,
         _ => {
-            let marginal_saving = (obs.read_rate / obs.working_set.max(1.0)) * obs.reconstruction_rows;
+            let marginal_saving =
+                (obs.read_rate / obs.working_set.max(1.0)) * obs.reconstruction_rows;
             let marginal_cost = obs.residency_price * horizon;
             let fraction = if marginal_cost <= 0.0 {
                 1.0
@@ -237,15 +241,29 @@ pub fn plan_view(circuit: &Circuit, node: NodeId, name: &str, obs: Observed) -> 
         obs.residency_price,
     );
 
-    Plan { node, name: name.to_string(), mode, budget, decision, excluded, explanation }
+    Plan {
+        node,
+        name: name.to_string(),
+        mode,
+        budget,
+        decision,
+        excluded,
+        explanation,
+    }
 }
 
 /// Plan every named output of a circuit.
 pub fn plan(circuit: &Circuit, obs: Observed) -> Vec<Plan> {
-    let mut outputs: Vec<(String, NodeId)> =
-        circuit.outputs.iter().map(|(n, i)| (n.clone(), *i)).collect();
+    let mut outputs: Vec<(String, NodeId)> = circuit
+        .outputs
+        .iter()
+        .map(|(n, i)| (n.clone(), *i))
+        .collect();
     outputs.sort();
-    outputs.into_iter().map(|(name, id)| plan_view(circuit, id, &name, obs)).collect()
+    outputs
+        .into_iter()
+        .map(|(name, id)| plan_view(circuit, id, &name, obs))
+        .collect()
 }
 
 #[cfg(test)]
@@ -256,19 +274,31 @@ mod tests {
     use niles_ir::Lineage;
 
     fn contract(c: Consistency, m: Materialize, r: Retention) -> ServeContract {
-        ServeContract { consistency: c, materialize: m, retain: r, lineage: Lineage::Off }
+        ServeContract {
+            consistency: c,
+            materialize: m,
+            retain: r,
+            lineage: Lineage::Off,
+        }
     }
 
     fn one_view(ct: ServeContract) -> (Circuit, NodeId) {
         let mut c = Circuit::new();
         let src = c.add(
-            Op::Source { relation: "postings".into(), is_base: true, anchor_key: vec![0] },
+            Op::Source {
+                relation: "postings".into(),
+                is_base: true,
+                anchor_key: vec![0],
+            },
             vec![],
             internal_contract(),
             "postings",
         );
         let agg = c.add(
-            Op::Aggregate { group_key: vec![0], aggs: vec![(Agg::Sum, Scalar::Column(1))] },
+            Op::Aggregate {
+                group_key: vec![0],
+                aggs: vec![(Agg::Sum, Scalar::Column(1))],
+            },
             vec![src],
             ct,
             "balance",
@@ -291,10 +321,18 @@ mod tests {
     fn infeasible_modes_are_removed_before_any_cost_is_computed() {
         // Property 2, and the ordering is the property. A cheap-but-infeasible mode must
         // never be reachable, however good it looks.
-        let ct = contract(Consistency::LedgerConsistent, Materialize::Auto, Retention::Evictable);
+        let ct = contract(
+            Consistency::LedgerConsistent,
+            Materialize::Auto,
+            Retention::Evictable,
+        );
         let (feasible_modes, excluded) = feasible(&ct);
         assert!(!feasible_modes.contains(&Materialize::Spilled));
-        let why = excluded.iter().find(|(m, _)| *m == Materialize::Spilled).unwrap().1;
+        let why = excluded
+            .iter()
+            .find(|(m, _)| *m == Materialize::Spilled)
+            .unwrap()
+            .1;
         assert!(why.contains("I/O round trip"), "{why}");
     }
 
@@ -315,28 +353,45 @@ mod tests {
     #[test]
     fn an_explicit_mode_is_honoured_and_only_auto_delegates() {
         // The planner is not entitled to overrule an author who made the decision.
-        let ct = contract(Consistency::Snapshot, Materialize::Full, Retention::Evictable);
+        let ct = contract(
+            Consistency::Snapshot,
+            Materialize::Full,
+            Retention::Evictable,
+        );
         let (c, id) = one_view(ct);
         let p = plan_view(&c, id, "balance", obs(0.05));
         assert_eq!(p.mode, Materialize::Full, "{}", p.explanation);
-        assert!(p.excluded.iter().any(|(_, w)| w.contains("only `auto` delegates")));
+        assert!(p
+            .excluded
+            .iter()
+            .any(|(_, w)| w.contains("only `auto` delegates")));
     }
 
     #[test]
     fn the_budget_shrinks_as_memory_gets_more_expensive() {
         // The shape the phase diagram measured: the optimum is interior, and it moves
         // toward smaller budgets as the price of memory rises.
-        let ct = contract(Consistency::Snapshot, Materialize::Auto, Retention::Evictable);
+        let ct = contract(
+            Consistency::Snapshot,
+            Materialize::Auto,
+            Retention::Evictable,
+        );
         let (c, id) = one_view(ct);
         let mut last = u64::MAX;
         for price in [0.0001f64, 0.0005, 0.002, 0.01, 0.05] {
             c.reset_access();
             let p = plan_view(&c, id, "balance", obs(price));
             let b = p.budget.unwrap_or(u64::MAX);
-            assert!(b <= last, "budget rose from {last} to {b} as price rose to {price}");
+            assert!(
+                b <= last,
+                "budget rose from {last} to {b} as price rose to {price}"
+            );
             last = b;
         }
-        assert!(last < 10_000, "at the highest price the budget must be well under the working set: {last}");
+        assert!(
+            last < 10_000,
+            "at the highest price the budget must be well under the working set: {last}"
+        );
     }
 
     #[test]
@@ -346,7 +401,11 @@ mod tests {
         // `full` with no budget rather than `demand` with a budget of everything. Those
         // are the same residency and different maintenance, and `full` is the cheaper of
         // the two because it skips the eviction bookkeeping entirely.
-        let ct = contract(Consistency::Snapshot, Materialize::Auto, Retention::Evictable);
+        let ct = contract(
+            Consistency::Snapshot,
+            Materialize::Auto,
+            Retention::Evictable,
+        );
         let (c, id) = one_view(ct);
         let p = plan_view(&c, id, "balance", obs(0.0));
         assert_eq!(p.mode, Materialize::Full, "{}", p.explanation);
@@ -357,14 +416,26 @@ mod tests {
     fn a_stricter_rung_makes_misses_more_expensive_and_pushes_toward_residency() {
         // The cost law: a rung's multiplier enters the miss charge, so the same workload
         // at a stricter rung is worth more memory.
-        let lax = contract(Consistency::Bounded { epochs: 8, millis: 0 }, Materialize::Auto, Retention::Evictable);
-        let strict = contract(Consistency::LedgerConsistent, Materialize::Auto, Retention::Evictable);
+        let lax = contract(
+            Consistency::Bounded {
+                epochs: 8,
+                millis: 0,
+            },
+            Materialize::Auto,
+            Retention::Evictable,
+        );
+        let strict = contract(
+            Consistency::LedgerConsistent,
+            Materialize::Auto,
+            Retention::Evictable,
+        );
         let (c1, i1) = one_view(lax);
         let (c2, i2) = one_view(strict);
         let p1 = plan_view(&c1, i1, "balance", obs(0.01));
         let p2 = plan_view(&c2, i2, "balance", obs(0.01));
         assert!(
-            p2.decision.cumulative_reconstruction_spend > p1.decision.cumulative_reconstruction_spend,
+            p2.decision.cumulative_reconstruction_spend
+                > p1.decision.cumulative_reconstruction_spend,
             "the strict rung must charge more per miss: {} vs {}",
             p2.decision.cumulative_reconstruction_spend,
             p1.decision.cumulative_reconstruction_spend
@@ -375,27 +446,63 @@ mod tests {
     fn every_plan_explains_itself() {
         // §11.2 names optimizer opacity as a risk. A decision that cannot be interrogated
         // is one an operator cannot trust under load, which is exactly when it matters.
-        let ct = contract(Consistency::Snapshot, Materialize::Auto, Retention::Evictable);
+        let ct = contract(
+            Consistency::Snapshot,
+            Materialize::Auto,
+            Retention::Evictable,
+        );
         let (c, id) = one_view(ct);
         let p = plan_view(&c, id, "balance", obs(0.002));
-        for needle in ["modes feasible", "buy", "spend", "reads", "base rows per reconstruction"] {
-            assert!(p.explanation.contains(needle), "explanation is missing `{needle}`: {}", p.explanation);
+        for needle in [
+            "modes feasible",
+            "buy",
+            "spend",
+            "reads",
+            "base rows per reconstruction",
+        ] {
+            assert!(
+                p.explanation.contains(needle),
+                "explanation is missing `{needle}`: {}",
+                p.explanation
+            );
         }
         // And where the contract *does* rule something out, the plan must name it and say
         // why — a plan that only shows what was chosen cannot be argued with.
-        let strict = contract(Consistency::LedgerConsistent, Materialize::Auto, Retention::Evictable);
+        let strict = contract(
+            Consistency::LedgerConsistent,
+            Materialize::Auto,
+            Retention::Evictable,
+        );
         let (c2, id2) = one_view(strict);
         let p2 = plan_view(&c2, id2, "balance", obs(0.002));
-        assert!(!p2.excluded.is_empty(), "the strict rung rules out `spilled`, and the plan must say so");
-        assert!(p2.excluded.iter().all(|(_, why)| why.len() > 20), "every exclusion needs a real reason");
+        assert!(
+            !p2.excluded.is_empty(),
+            "the strict rung rules out `spilled`, and the plan must say so"
+        );
+        assert!(
+            p2.excluded.iter().all(|(_, why)| why.len() > 20),
+            "every exclusion needs a real reason"
+        );
     }
 
     #[test]
     fn the_planner_reads_every_checked_ir_field() {
-        let ct = contract(Consistency::Snapshot, Materialize::Auto, Retention::Evictable);
+        let ct = contract(
+            Consistency::Snapshot,
+            Materialize::Auto,
+            Retention::Evictable,
+        );
         let (c, id) = one_view(ct);
         let _ = plan_view(&c, id, "balance", obs(0.002));
-        let unread: Vec<_> = c.audit_access().unread.into_iter().filter(|(n, _)| *n == id).collect();
-        assert!(unread.is_empty(), "the planner ignored a semantic field: {unread:?}");
+        let unread: Vec<_> = c
+            .audit_access()
+            .unread
+            .into_iter()
+            .filter(|(n, _)| *n == id)
+            .collect();
+        assert!(
+            unread.is_empty(),
+            "the planner ignored a semantic field: {unread:?}"
+        );
     }
 }

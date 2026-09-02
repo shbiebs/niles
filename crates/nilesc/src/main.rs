@@ -169,7 +169,10 @@ fn main() -> ExitCode {
                         Ok(p) => {
                             println!("{}", p.render());
                             for h in &p.hops {
-                                println!("    {:<12} key={:?} reads={:?}", h.op_name, h.key, h.base_columns);
+                                println!(
+                                    "    {:<12} key={:?} reads={:?}",
+                                    h.op_name, h.key, h.base_columns
+                                );
                             }
                         }
                         Err(e) => {
@@ -213,17 +216,35 @@ fn describe_item(i: &niles_lang::ast::Item) -> String {
             let mut out = format!("schema {} ({} items)", s.name.text, s.items.len());
             for si in &s.items {
                 out.push_str(&match si {
-                    SchemaItem::Currency(c) => format!("\n  currency {} scale {}", c.name.text, c.scale),
+                    SchemaItem::Currency(c) => {
+                        format!("\n  currency {} scale {}", c.name.text, c.scale)
+                    }
                     SchemaItem::Table(r) | SchemaItem::Base(r) => {
-                        format!("\n  {:?} {} ({} cols, {} rules)", r.kind, r.name.text, r.fields.len(), r.rules.len())
+                        format!(
+                            "\n  {:?} {} ({} cols, {} rules)",
+                            r.kind,
+                            r.name.text,
+                            r.fields.len(),
+                            r.rules.len()
+                        )
                     }
                     SchemaItem::View(v) => format!(
                         "\n  view {} ({})",
                         v.name.text,
-                        v.contract.as_ref().map_or("no contract".into(), |c| format!("{} contract entries", c.entries.len()))
+                        v.contract
+                            .as_ref()
+                            .map_or("no contract".into(), |c| format!(
+                                "{} contract entries",
+                                c.entries.len()
+                            ))
                     ),
                     SchemaItem::Index(ix) => {
-                        format!("\n  index {} on {} {}", ix.name.text, ix.on.text, if ix.anchor { "(anchor)" } else { "" })
+                        format!(
+                            "\n  index {} on {} {}",
+                            ix.name.text,
+                            ix.on.text,
+                            if ix.anchor { "(anchor)" } else { "" }
+                        )
                     }
                     SchemaItem::Error(_) => "\n  <parse error>".into(),
                 });
@@ -234,7 +255,9 @@ fn describe_item(i: &niles_lang::ast::Item) -> String {
             "fn {}({}) {}",
             f.name.text,
             f.params.len(),
-            f.effects.as_ref().map_or(String::new(), |e| format!("! {} effects", e.effects.len()))
+            f.effects
+                .as_ref()
+                .map_or(String::new(), |e| format!("! {} effects", e.effects.len()))
         ),
         Item::View(v) => format!("view {}", v.name.text),
         Item::Struct(s) => format!("struct {}", s.name.text),

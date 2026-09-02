@@ -18,11 +18,11 @@
 //! cargo run -p bank-bench --bin bench -- --run
 //! ```
 
-pub mod generator;
-pub mod scenarios;
 pub mod analysis;
-pub mod wire;
-pub mod target;
-pub mod workloads;
+pub mod generator;
 pub mod render;
+pub mod scenarios;
 pub mod storage;
+pub mod target;
+pub mod wire;
+pub mod workloads;

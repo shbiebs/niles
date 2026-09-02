@@ -129,7 +129,10 @@ impl ClientMode {
 
     /// Whether the client will proceed in cleartext if the server answers `N`.
     pub fn falls_back_to_cleartext(&self) -> bool {
-        matches!(self, ClientMode::Disable | ClientMode::Allow | ClientMode::Prefer)
+        matches!(
+            self,
+            ClientMode::Disable | ClientMode::Allow | ClientMode::Prefer
+        )
     }
 
     /// **Whether this mode actually authenticates the server.**
@@ -258,7 +261,9 @@ impl Negotiated {
         match (self.client_claims_verification, self.client_cert_presented) {
             (true, true) => format!("{v}, mutually authenticated"),
             (true, false) => format!("{v}, server identity verified by client"),
-            (false, true) => format!("{v}, client authenticated, server identity unverified by client"),
+            (false, true) => {
+                format!("{v}, client authenticated, server identity unverified by client")
+            }
             (false, false) => {
                 format!("{v}, encrypted, server identity unverified by the client")
             }
@@ -308,7 +313,10 @@ pub struct TlsConfig {
 
 impl TlsConfig {
     pub fn insecure() -> Self {
-        TlsConfig { policy: Policy::Disabled, provider: Box::new(NoProvider) }
+        TlsConfig {
+            policy: Policy::Disabled,
+            provider: Box::new(NoProvider),
+        }
     }
 
     pub fn with_policy(policy: Policy, provider: Box<dyn TlsProvider>) -> Self {
@@ -573,7 +581,10 @@ mod tests {
         let c = require_with_tls();
         let n = MySqlNegotiation::new(&c);
         assert_eq!(n.decide(0), MySqlStep::Refuse(Refusal::CleartextRefused));
-        assert_eq!(n.decide(0xFFFF_F7FF), MySqlStep::Refuse(Refusal::CleartextRefused));
+        assert_eq!(
+            n.decide(0xFFFF_F7FF),
+            MySqlStep::Refuse(Refusal::CleartextRefused)
+        );
         assert_eq!(n.decide(MySqlNegotiation::CLIENT_SSL), MySqlStep::Upgrade);
     }
 
@@ -582,8 +593,14 @@ mod tests {
     #[test]
     fn prefer_serves_both_kinds_of_client() {
         let c = TlsConfig::with_policy(Policy::Prefer, Box::new(FakeTls { client_auth: false }));
-        assert_eq!(PgNegotiation::new(&c).decide(true), PgStep::Upgrade(SslReply::Willing));
-        assert_eq!(PgNegotiation::new(&c).decide(false), PgStep::Cleartext(SslReply::Unwilling));
+        assert_eq!(
+            PgNegotiation::new(&c).decide(true),
+            PgStep::Upgrade(SslReply::Willing)
+        );
+        assert_eq!(
+            PgNegotiation::new(&c).decide(false),
+            PgStep::Cleartext(SslReply::Unwilling)
+        );
     }
 
     #[test]
@@ -592,18 +609,25 @@ mod tests {
         // sslmode decide. Sending an ErrorResponse here would break `sslmode=prefer`
         // clients that would otherwise have connected fine.
         let c = TlsConfig::insecure();
-        assert_eq!(PgNegotiation::new(&c).decide(true), PgStep::Cleartext(SslReply::Unwilling));
+        assert_eq!(
+            PgNegotiation::new(&c).decide(true),
+            PgStep::Cleartext(SslReply::Unwilling)
+        );
         assert_eq!(c.preflight(), Ok(()));
     }
 
     #[test]
     fn mutual_tls_requires_a_provider_that_can_actually_do_it() {
-        let no_auth =
-            TlsConfig::with_policy(Policy::RequireClientCert, Box::new(FakeTls { client_auth: false }));
+        let no_auth = TlsConfig::with_policy(
+            Policy::RequireClientCert,
+            Box::new(FakeTls { client_auth: false }),
+        );
         assert_eq!(no_auth.preflight(), Err(Refusal::NoProvider));
 
-        let with_auth =
-            TlsConfig::with_policy(Policy::RequireClientCert, Box::new(FakeTls { client_auth: true }));
+        let with_auth = TlsConfig::with_policy(
+            Policy::RequireClientCert,
+            Box::new(FakeTls { client_auth: true }),
+        );
         assert_eq!(with_auth.preflight(), Ok(()));
     }
 
@@ -630,8 +654,14 @@ mod tests {
         let on = TlsConfig::with_policy(Policy::Require, Box::new(FakeTls { client_auth: false }));
         let off = TlsConfig::insecure();
         let base = 0x000F_A68D;
-        assert_ne!(MySqlNegotiation::new(&on).server_capabilities(base) & MySqlNegotiation::CLIENT_SSL, 0);
-        assert_eq!(MySqlNegotiation::new(&off).server_capabilities(base) & MySqlNegotiation::CLIENT_SSL, 0);
+        assert_ne!(
+            MySqlNegotiation::new(&on).server_capabilities(base) & MySqlNegotiation::CLIENT_SSL,
+            0
+        );
+        assert_eq!(
+            MySqlNegotiation::new(&off).server_capabilities(base) & MySqlNegotiation::CLIENT_SSL,
+            0
+        );
         // Every other advertised capability survives the masking, or the greeting changes
         // meaning when TLS is toggled.
         assert_eq!(
@@ -644,9 +674,15 @@ mod tests {
     fn a_truncated_mysql_response_is_exactly_thirty_two_bytes() {
         // Longer means the client attached credentials to the packet that precedes the
         // handshake, i.e. sent them in the clear.
-        assert!(MySqlNegotiation::truncated_response_is_wellformed(&[0u8; 32]));
-        assert!(!MySqlNegotiation::truncated_response_is_wellformed(&[0u8; 64]));
-        assert!(!MySqlNegotiation::truncated_response_is_wellformed(&[0u8; 20]));
+        assert!(MySqlNegotiation::truncated_response_is_wellformed(
+            &[0u8; 32]
+        ));
+        assert!(!MySqlNegotiation::truncated_response_is_wellformed(
+            &[0u8; 64]
+        ));
+        assert!(!MySqlNegotiation::truncated_response_is_wellformed(
+            &[0u8; 20]
+        ));
     }
 
     // ── the honesty properties ───────────────────────────────────────────────────────
@@ -671,7 +707,10 @@ mod tests {
             client_cert_presented: false,
             version: Some("TLSv1.3"),
         };
-        assert_eq!(bare.describe(), "TLSv1.3, encrypted, server identity unverified by the client");
+        assert_eq!(
+            bare.describe(),
+            "TLSv1.3, encrypted, server identity unverified by the client"
+        );
 
         let mutual = Negotiated {
             encrypted: true,
@@ -686,12 +725,26 @@ mod tests {
 
     #[test]
     fn every_libpq_sslmode_parses_and_round_trips() {
-        for s in ["disable", "allow", "prefer", "require", "verify-ca", "verify-full"] {
+        for s in [
+            "disable",
+            "allow",
+            "prefer",
+            "require",
+            "verify-ca",
+            "verify-full",
+        ] {
             let m = ClientMode::parse(s).unwrap_or_else(|| panic!("{s} should parse"));
             assert_eq!(m.to_string(), s);
         }
-        assert_eq!(ClientMode::parse("VERIFY-FULL"), Some(ClientMode::VerifyFull));
-        assert_eq!(ClientMode::parse("yes"), None, "an unknown mode must not default to something");
+        assert_eq!(
+            ClientMode::parse("VERIFY-FULL"),
+            Some(ClientMode::VerifyFull)
+        );
+        assert_eq!(
+            ClientMode::parse("yes"),
+            None,
+            "an unknown mode must not default to something"
+        );
     }
 
     #[test]
@@ -708,11 +761,18 @@ mod tests {
     fn a_handshake_failure_is_a_connection_error_and_not_an_auth_error() {
         // Mapping a TLS failure to 28000 sends the operator to check credentials for an
         // hour. It is a connection failure and 08006 says so.
-        assert_eq!(Refusal::Handshake("bad certificate".into()).sqlstate(), "08006");
+        assert_eq!(
+            Refusal::Handshake("bad certificate".into()).sqlstate(),
+            "08006"
+        );
         assert_eq!(Refusal::NoProvider.sqlstate(), "08006");
         assert_eq!(Refusal::CleartextRefused.sqlstate(), "28000");
-        assert!(Refusal::Handshake("expired".into()).message().contains("expired"),
-            "the provider's detail must survive verbatim");
+        assert!(
+            Refusal::Handshake("expired".into())
+                .message()
+                .contains("expired"),
+            "the provider's detail must survive verbatim"
+        );
     }
 
     #[test]

@@ -83,7 +83,10 @@ pub enum JoinKind {
 
 impl JoinKind {
     pub fn is_outer(self) -> bool {
-        matches!(self, JoinKind::LeftOuter | JoinKind::RightOuter | JoinKind::FullOuter)
+        matches!(
+            self,
+            JoinKind::LeftOuter | JoinKind::RightOuter | JoinKind::FullOuter
+        )
     }
 }
 
@@ -99,7 +102,10 @@ pub enum Scalar {
     /// A money constant in minor units at the named currency's declared scale. The
     /// currency travels with the value at every level of the IR: an operation that lost it
     /// would make the currency-safety theorem unstatable below the surface syntax.
-    LitMoney { minor: i128, currency: u32 },
+    LitMoney {
+        minor: i128,
+        currency: u32,
+    },
     /// The epoch the row was sealed at. Available to every operator, because the whole
     /// point of an epoch-ordered base is that visibility is a first-class column.
     Anchor,
@@ -112,18 +118,35 @@ pub enum Scalar {
     IsNull(Box<Scalar>),
     Not(Box<Scalar>),
     Neg(Box<Scalar>),
-    Binary { op: ScalarOp, lhs: Box<Scalar>, rhs: Box<Scalar> },
+    Binary {
+        op: ScalarOp,
+        lhs: Box<Scalar>,
+        rhs: Box<Scalar>,
+    },
     /// A fuel-metered user function. Its determinism obligation is checked at load, not
     /// here; what the IR records is that the call exists, so the verifier can refuse to
     /// place it on a path that must be reproducible.
-    Udf { id: u32, args: Vec<Scalar> },
+    Udf {
+        id: u32,
+        args: Vec<Scalar>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ScalarOp {
-    Add, Sub, Mul, Div, Rem,
-    Eq, Ne, Lt, Le, Gt, Ge,
-    And, Or,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Rem,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    And,
+    Or,
     Like,
 }
 
@@ -135,9 +158,12 @@ impl Scalar {
     pub fn is_reproducible(&self, certified_udfs: &[u32]) -> bool {
         match self {
             Scalar::Udf { id, args } => {
-                certified_udfs.contains(id) && args.iter().all(|a| a.is_reproducible(certified_udfs))
+                certified_udfs.contains(id)
+                    && args.iter().all(|a| a.is_reproducible(certified_udfs))
             }
-            Scalar::Not(x) | Scalar::Neg(x) | Scalar::IsNull(x) => x.is_reproducible(certified_udfs),
+            Scalar::Not(x) | Scalar::Neg(x) | Scalar::IsNull(x) => {
+                x.is_reproducible(certified_udfs)
+            }
             Scalar::Binary { lhs, rhs, .. } => {
                 lhs.is_reproducible(certified_udfs) && rhs.is_reproducible(certified_udfs)
             }
@@ -175,13 +201,25 @@ pub enum Op {
         /// The column indices forming the anchor index, if one is declared.
         anchor_key: Vec<ColIdx>,
     },
-    Filter { predicate: Scalar },
+    Filter {
+        predicate: Scalar,
+    },
     /// Projection and computation in one node, as in Materialize's `Map`/`Project` pair
     /// collapsed: a separate project node buys nothing once expressions are index-based.
-    Map { exprs: Vec<Scalar> },
-    Join { kind: JoinKind, left_key: Vec<ColIdx>, right_key: Vec<ColIdx>, residual: Option<Scalar> },
+    Map {
+        exprs: Vec<Scalar>,
+    },
+    Join {
+        kind: JoinKind,
+        left_key: Vec<ColIdx>,
+        right_key: Vec<ColIdx>,
+        residual: Option<Scalar>,
+    },
     /// Grouped aggregation. The workhorse: a balance is a `sum` over a `group_by (acct, cur)`.
-    Aggregate { group_key: Vec<ColIdx>, aggs: Vec<(Agg, Scalar)> },
+    Aggregate {
+        group_key: Vec<ColIdx>,
+        aggs: Vec<(Agg, Scalar)>,
+    },
     /// Canonicalising `distinct` in the Z-set sense: clamps every weight to 0 or 1.
     Distinct,
     Union,
@@ -191,7 +229,10 @@ pub enum Op {
     /// time, because the runtime must be able to *stop* — a fixpoint that could diverge
     /// would stall an epoch, and a stalled epoch stalls the visibility timeline for every
     /// reader in the system.
-    Fixpoint { measure: Scalar, max_rounds: u32 },
+    Fixpoint {
+        measure: Scalar,
+        max_rounds: u32,
+    },
     /// The DBSP delay `z⁻¹`. The only operator permitted to close a cycle.
     Delay,
     /// Integration: the running sum of a stream. `I` of Theorem 2.20.
@@ -200,15 +241,26 @@ pub enum Op {
     Differentiate,
     /// Index the input by a key, making it upqueryable. Inserted by the planner wherever a
     /// downstream node needs per-key reconstruction.
-    Index { key: Vec<ColIdx> },
+    Index {
+        key: Vec<ColIdx>,
+    },
     /// **Not incremental.** Retains its whole input.
-    OrderBy { keys: Vec<(ColIdx, bool)> },
+    OrderBy {
+        keys: Vec<(ColIdx, bool)>,
+    },
     /// **Not incremental.**
-    Limit { count: u64, offset: u64 },
+    Limit {
+        count: u64,
+        offset: u64,
+    },
     /// Pin a read to a system-time epoch — the system axis of bitemporality.
-    AsOf { epoch: Option<u64> },
+    AsOf {
+        epoch: Option<u64>,
+    },
     /// Pin a read to a valid-time instant — the world axis.
-    ValidAt { instant: Option<i64> },
+    ValidAt {
+        instant: Option<i64>,
+    },
 
     /// **The nested form of a subquery**: a dependent join.
     ///
@@ -227,7 +279,10 @@ pub enum Op {
     /// relation. Unnesting is therefore not an optimisation in the usual sense, where the
     /// unoptimised plan is merely slower; it is the step that makes the query
     /// maintainable at all.
-    Apply { kind: ApplyKind, correlation: Vec<(ColIdx, ColIdx)> },
+    Apply {
+        kind: ApplyKind,
+        correlation: Vec<(ColIdx, ColIdx)>,
+    },
 }
 
 /// What an [`Op::Apply`] does with the matching set of the inner relation.
@@ -342,7 +397,9 @@ impl Op {
             // total, and the verifier must know the difference.
             Op::Filter { .. } => false,
             Op::Limit { .. } => false,
-            Op::Join { kind, .. } => !kind.is_outer() && !matches!(kind, JoinKind::Anti | JoinKind::Semi),
+            Op::Join { kind, .. } => {
+                !kind.is_outer() && !matches!(kind, JoinKind::Anti | JoinKind::Semi)
+            }
             // `exists` and `in` drop outer rows; `not exists` and `not in` drop different
             // ones; a scalar subquery null-extends. None of the five moves every monetary
             // quantity through, so none is a control total.
@@ -368,10 +425,13 @@ impl Op {
             Op::Apply { .. } => input_keys.first().cloned().flatten(),
             // Filtering does not change the key; mapping may, so a map that rewrites the
             // key columns loses the index and the planner must re-index.
-            Op::Filter { .. } | Op::Delay | Op::Integrate | Op::Differentiate
-            | Op::AsOf { .. } | Op::ValidAt { .. } | Op::Distinct => {
-                input_keys.first().cloned().flatten()
-            }
+            Op::Filter { .. }
+            | Op::Delay
+            | Op::Integrate
+            | Op::Differentiate
+            | Op::AsOf { .. }
+            | Op::ValidAt { .. }
+            | Op::Distinct => input_keys.first().cloned().flatten(),
             Op::Union => match (input_keys.first(), input_keys.get(1)) {
                 (Some(Some(a)), Some(Some(b))) if a == b => Some(a.clone()),
                 _ => None,
@@ -384,7 +444,11 @@ impl Op {
 impl fmt::Display for Op {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Op::Source { relation, is_base, anchor_key } => {
+            Op::Source {
+                relation,
+                is_base,
+                anchor_key,
+            } => {
                 write!(f, "source({relation}")?;
                 if *is_base {
                     write!(f, ", base")?;
@@ -398,7 +462,12 @@ impl fmt::Display for Op {
                 let a: Vec<&str> = aggs.iter().map(|(a, _)| a.as_str()).collect();
                 write!(f, "aggregate(by={group_key:?}, {})", a.join(","))
             }
-            Op::Join { kind, left_key, right_key, .. } => {
+            Op::Join {
+                kind,
+                left_key,
+                right_key,
+                ..
+            } => {
                 write!(f, "join({kind:?}, {left_key:?} = {right_key:?})")
             }
             Op::Index { key } => write!(f, "index({key:?})"),
@@ -418,15 +487,29 @@ mod tests {
     #[test]
     fn non_incremental_operators_are_exactly_the_ordering_ones() {
         let ops = [
-            Op::Filter { predicate: Scalar::LitBool(true) },
+            Op::Filter {
+                predicate: Scalar::LitBool(true),
+            },
             Op::Map { exprs: vec![] },
-            Op::Aggregate { group_key: vec![0], aggs: vec![(Agg::Sum, Scalar::Column(1))] },
+            Op::Aggregate {
+                group_key: vec![0],
+                aggs: vec![(Agg::Sum, Scalar::Column(1))],
+            },
             Op::Distinct,
             Op::Union,
-            Op::OrderBy { keys: vec![(0, true)] },
-            Op::Limit { count: 10, offset: 0 },
+            Op::OrderBy {
+                keys: vec![(0, true)],
+            },
+            Op::Limit {
+                count: 10,
+                offset: 0,
+            },
         ];
-        let non: Vec<&str> = ops.iter().filter(|o| !o.is_incremental()).map(|o| o.name()).collect();
+        let non: Vec<&str> = ops
+            .iter()
+            .filter(|o| !o.is_incremental())
+            .map(|o| o.name())
+            .collect();
         assert_eq!(non, vec!["order_by", "limit"]);
     }
 
@@ -434,14 +517,26 @@ mod tests {
     fn a_filter_is_not_conservation_transparent() {
         // A filtered view is a legitimate thing to want, but it is not a control total,
         // and the IR must be able to tell a reader which it is looking at.
-        assert!(!Op::Filter { predicate: Scalar::LitBool(true) }.is_conservation_transparent());
-        assert!(Op::Aggregate { group_key: vec![0], aggs: vec![] }.is_conservation_transparent());
+        assert!(!Op::Filter {
+            predicate: Scalar::LitBool(true)
+        }
+        .is_conservation_transparent());
+        assert!(Op::Aggregate {
+            group_key: vec![0],
+            aggs: vec![]
+        }
+        .is_conservation_transparent());
         assert!(Op::Map { exprs: vec![] }.is_conservation_transparent());
     }
 
     #[test]
     fn outer_and_anti_joins_are_not_transparent_but_inner_joins_are() {
-        let mk = |k| Op::Join { kind: k, left_key: vec![0], right_key: vec![0], residual: None };
+        let mk = |k| Op::Join {
+            kind: k,
+            left_key: vec![0],
+            right_key: vec![0],
+            residual: None,
+        };
         assert!(mk(JoinKind::Inner).is_conservation_transparent());
         assert!(!mk(JoinKind::LeftOuter).is_conservation_transparent());
         assert!(!mk(JoinKind::Anti).is_conservation_transparent());
@@ -449,15 +544,26 @@ mod tests {
 
     #[test]
     fn an_aggregate_keys_its_output_by_its_group() {
-        let op = Op::Aggregate { group_key: vec![0, 1], aggs: vec![(Agg::Sum, Scalar::Column(2))] };
+        let op = Op::Aggregate {
+            group_key: vec![0, 1],
+            aggs: vec![(Agg::Sum, Scalar::Column(2))],
+        };
         assert_eq!(op.derive_key(&[Some(vec![5])]), Some(vec![0, 1]));
     }
 
     #[test]
     fn a_source_without_an_anchor_index_is_not_upqueryable() {
-        let bare = Op::Source { relation: "p".into(), is_base: true, anchor_key: vec![] };
+        let bare = Op::Source {
+            relation: "p".into(),
+            is_base: true,
+            anchor_key: vec![],
+        };
         assert_eq!(bare.derive_key(&[]), None);
-        let indexed = Op::Source { relation: "p".into(), is_base: true, anchor_key: vec![0, 1] };
+        let indexed = Op::Source {
+            relation: "p".into(),
+            is_base: true,
+            anchor_key: vec![0, 1],
+        };
         assert_eq!(indexed.derive_key(&[]), Some(vec![0, 1]));
     }
 
@@ -475,7 +581,10 @@ mod tests {
         // incremental views or charge it as O(1) when its deletion case is not.
         assert!(Agg::Sum.is_additive() && Agg::Count.is_additive());
         assert!(!Agg::Min.is_additive() && !Agg::Max.is_additive());
-        let op = Op::Aggregate { group_key: vec![0], aggs: vec![(Agg::Min, Scalar::Column(1))] };
+        let op = Op::Aggregate {
+            group_key: vec![0],
+            aggs: vec![(Agg::Min, Scalar::Column(1))],
+        };
         assert!(op.is_incremental());
     }
 
@@ -484,9 +593,15 @@ mod tests {
         let e = Scalar::Binary {
             op: ScalarOp::Add,
             lhs: Box::new(Scalar::Column(0)),
-            rhs: Box::new(Scalar::Udf { id: 7, args: vec![Scalar::Column(1)] }),
+            rhs: Box::new(Scalar::Udf {
+                id: 7,
+                args: vec![Scalar::Column(1)],
+            }),
         };
-        assert!(!e.is_reproducible(&[]), "an uncertified UDF must block reproduction");
+        assert!(
+            !e.is_reproducible(&[]),
+            "an uncertified UDF must block reproduction"
+        );
         assert!(e.is_reproducible(&[7]));
     }
 
@@ -495,7 +610,10 @@ mod tests {
         // If a lowering ever dropped the currency, the currency-safety theorem would be
         // unstatable below the surface syntax — which is exactly the gap that lets a
         // "generic amount" column reach production.
-        let m = Scalar::LitMoney { minor: 1000, currency: 3 };
+        let m = Scalar::LitMoney {
+            minor: 1000,
+            currency: 3,
+        };
         match m {
             Scalar::LitMoney { currency, .. } => assert_eq!(currency, 3),
             _ => panic!(),
@@ -505,8 +623,25 @@ mod tests {
     #[test]
     fn arity_is_declared_for_every_operator() {
         assert_eq!(Op::Union.arity(), 2);
-        assert_eq!(Op::Join { kind: JoinKind::Inner, left_key: vec![], right_key: vec![], residual: None }.arity(), 2);
-        assert_eq!(Op::Source { relation: "p".into(), is_base: true, anchor_key: vec![] }.arity(), 0);
+        assert_eq!(
+            Op::Join {
+                kind: JoinKind::Inner,
+                left_key: vec![],
+                right_key: vec![],
+                residual: None
+            }
+            .arity(),
+            2
+        );
+        assert_eq!(
+            Op::Source {
+                relation: "p".into(),
+                is_base: true,
+                anchor_key: vec![]
+            }
+            .arity(),
+            0
+        );
         assert_eq!(Op::Distinct.arity(), 1);
     }
 }

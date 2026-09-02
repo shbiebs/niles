@@ -75,7 +75,12 @@ impl Record {
         h.update(&parent);
         h.update(&epoch.to_le_bytes());
         h.update(&payload);
-        Record { epoch, parent, hash: h.finalize(), payload }
+        Record {
+            epoch,
+            parent,
+            hash: h.finalize(),
+            payload,
+        }
     }
 
     fn encode(&self) -> Vec<u8> {
@@ -149,18 +154,33 @@ impl Segment {
     /// Recovery is not optional and cannot be skipped: a segment whose tail has not been
     /// validated is a segment whose head hash is unknown, and appending to it would extend
     /// a chain from a link that may not exist.
-    pub fn open(path: impl AsRef<Path>, policy: SyncPolicy) -> std::io::Result<(Segment, Recovery)> {
+    pub fn open(
+        path: impl AsRef<Path>,
+        policy: SyncPolicy,
+    ) -> std::io::Result<(Segment, Recovery)> {
         let path = path.as_ref().to_path_buf();
-        let recovery = if path.exists() { recover(&path)? } else { Recovery {
-            records: Vec::new(),
-            cause: TruncationCause::CleanEnd,
-            truncated_bytes: 0,
-        } };
+        let recovery = if path.exists() {
+            recover(&path)?
+        } else {
+            Recovery {
+                records: Vec::new(),
+                cause: TruncationCause::CleanEnd,
+                truncated_bytes: 0,
+            }
+        };
 
         // Truncate the damaged tail before anything is appended. Leaving it would mean the
         // next append sits after unreadable bytes, and the file would never recover again.
-        let valid_len: u64 = recovery.records.iter().map(|r| (4 + HEADER + r.payload.len() + 4) as u64).sum();
-        let file = OpenOptions::new().read(true).write(true).create(true).open(&path)?;
+        let valid_len: u64 = recovery
+            .records
+            .iter()
+            .map(|r| (4 + HEADER + r.payload.len() + 4) as u64)
+            .sum();
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(&path)?;
         if file.metadata()?.len() != valid_len {
             file.set_len(valid_len)?;
             file.sync_all()?;
@@ -171,7 +191,16 @@ impl Segment {
         let head_hash = recovery.head_hash();
         let next_epoch = recovery.head().map_or(0, |e| e + 1);
         Ok((
-            Segment { path, file, policy, since_sync: 0, head_hash, next_epoch, fsyncs: 0, bytes_written: valid_len },
+            Segment {
+                path,
+                file,
+                policy,
+                since_sync: 0,
+                head_hash,
+                next_epoch,
+                fsyncs: 0,
+                bytes_written: valid_len,
+            },
             recovery,
         ))
     }
@@ -254,7 +283,10 @@ pub fn recover(path: impl AsRef<Path>) -> std::io::Result<Recovery> {
         let mut with_len = Vec::with_capacity(body.len());
         with_len.extend_from_slice(&body);
         if crc32(&with_len) != u32::from_le_bytes(crc_buf) {
-            break TruncationCause::BadChecksum { epoch, at_offset: offset };
+            break TruncationCause::BadChecksum {
+                epoch,
+                at_offset: offset,
+            };
         }
         let mut rec_parent = [0u8; 32];
         rec_parent.copy_from_slice(&body[8..40]);
@@ -263,22 +295,37 @@ pub fn recover(path: impl AsRef<Path>) -> std::io::Result<Recovery> {
         let payload = body[72..].to_vec();
 
         if epoch != expected_epoch {
-            break TruncationCause::OutOfOrder { expected: expected_epoch, found: epoch };
+            break TruncationCause::OutOfOrder {
+                expected: expected_epoch,
+                found: epoch,
+            };
         }
         // Recompute the link. A record whose stated hash does not follow from its parent is
         // either damaged or spliced, and in a ledger those are the same problem.
         let recomputed = Record::seal(epoch, parent, payload.clone());
         if rec_parent != parent || recomputed.hash != rec_hash {
-            break TruncationCause::BrokenChain { epoch, at_offset: offset };
+            break TruncationCause::BrokenChain {
+                epoch,
+                at_offset: offset,
+            };
         }
 
         parent = rec_hash;
         expected_epoch = epoch + 1;
         offset += 4 + body_len as u64 + 4;
-        records.push(Record { epoch, parent: rec_parent, hash: rec_hash, payload });
+        records.push(Record {
+            epoch,
+            parent: rec_parent,
+            hash: rec_hash,
+            payload,
+        });
     };
 
-    Ok(Recovery { records, cause, truncated_bytes: total - offset })
+    Ok(Recovery {
+        records,
+        cause,
+        truncated_bytes: total - offset,
+    })
 }
 
 /// CRC-32 (IEEE), computed with a small table built on first use. Written out rather than
@@ -291,7 +338,11 @@ fn crc32(data: &[u8]) -> u32 {
         for (i, e) in t.iter_mut().enumerate() {
             let mut c = i as u32;
             for _ in 0..8 {
-                c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
+                c = if c & 1 != 0 {
+                    0xEDB8_8320 ^ (c >> 1)
+                } else {
+                    c >> 1
+                };
             }
             *e = c;
         }
@@ -330,7 +381,11 @@ mod tests {
         assert_eq!(rec.records.len(), 5);
         assert!(rec.was_clean());
         assert_eq!(rec.head(), Some(4));
-        assert_eq!(s.next_epoch(), 5, "reopening continues the chain, it does not restart it");
+        assert_eq!(
+            s.next_epoch(),
+            5,
+            "reopening continues the chain, it does not restart it"
+        );
         let _ = std::fs::remove_file(&p);
     }
 
@@ -345,9 +400,16 @@ mod tests {
         }
         let rec = recover(&p).unwrap();
         for w in rec.records.windows(2) {
-            assert_eq!(w[1].parent, w[0].hash, "epoch {} does not link to {}", w[1].epoch, w[0].epoch);
+            assert_eq!(
+                w[1].parent, w[0].hash,
+                "epoch {} does not link to {}",
+                w[1].epoch, w[0].epoch
+            );
         }
-        assert_eq!(rec.records[0].parent, [0u8; 32], "the first epoch's parent is the zero hash");
+        assert_eq!(
+            rec.records[0].parent, [0u8; 32],
+            "the first epoch's parent is the zero hash"
+        );
         let _ = std::fs::remove_file(&p);
     }
 
@@ -371,7 +433,11 @@ mod tests {
 
         let rec = recover(&p).unwrap();
         assert_eq!(rec.records.len(), 5, "the five whole epochs must survive");
-        assert!(matches!(rec.cause, TruncationCause::ShortTail { .. }), "{:?}", rec.cause);
+        assert!(
+            matches!(rec.cause, TruncationCause::ShortTail { .. }),
+            "{:?}",
+            rec.cause
+        );
         assert!(rec.truncated_bytes > 0);
 
         // Reopening truncates the damage and continues cleanly from the surviving head.
@@ -381,7 +447,11 @@ mod tests {
         s.append(vec![99]).unwrap();
         let rec3 = recover(&p).unwrap();
         assert_eq!(rec3.records.len(), 6);
-        assert!(rec3.was_clean(), "the segment must be usable again after recovery: {:?}", rec3.cause);
+        assert!(
+            rec3.was_clean(),
+            "the segment must be usable again after recovery: {:?}",
+            rec3.cause
+        );
         let _ = std::fs::remove_file(&p);
     }
 
@@ -404,9 +474,15 @@ mod tests {
         std::fs::write(&p, &bytes).unwrap();
 
         let rec = recover(&p).unwrap();
-        assert!(rec.records.len() < 5, "the read must stop at the tampered record");
         assert!(
-            matches!(rec.cause, TruncationCause::BadChecksum { .. } | TruncationCause::BrokenChain { .. }),
+            rec.records.len() < 5,
+            "the read must stop at the tampered record"
+        );
+        assert!(
+            matches!(
+                rec.cause,
+                TruncationCause::BadChecksum { .. } | TruncationCause::BrokenChain { .. }
+            ),
             "{:?}",
             rec.cause
         );
@@ -437,8 +513,16 @@ mod tests {
         std::fs::write(&p, &bytes).unwrap();
 
         let rec = recover(&p).unwrap();
-        assert!(matches!(rec.cause, TruncationCause::BrokenChain { epoch: 1, .. }), "{:?}", rec.cause);
-        assert_eq!(rec.records.len(), 1, "only the epoch before the splice may be read");
+        assert!(
+            matches!(rec.cause, TruncationCause::BrokenChain { epoch: 1, .. }),
+            "{:?}",
+            rec.cause
+        );
+        assert_eq!(
+            rec.records.len(),
+            1,
+            "only the epoch before the splice may be read"
+        );
         let _ = std::fs::remove_file(&p);
     }
 
@@ -458,7 +542,10 @@ mod tests {
         for i in 0..12u8 {
             s2.append(vec![i]).unwrap();
         }
-        assert_eq!(s2.fsyncs, 0, "Never is for measurement only, and must really never sync");
+        assert_eq!(
+            s2.fsyncs, 0,
+            "Never is for measurement only, and must really never sync"
+        );
         let _ = std::fs::remove_file(&p2);
     }
 
@@ -476,7 +563,10 @@ mod tests {
         std::fs::write(&p, &bytes).unwrap();
         let rec = recover(&p).unwrap();
         assert_eq!(rec.records.len(), 3);
-        assert!(rec.truncated_bytes >= 30, "the operator must be told how much was dropped");
+        assert!(
+            rec.truncated_bytes >= 30,
+            "the operator must be told how much was dropped"
+        );
         assert!(!rec.was_clean());
         let _ = std::fs::remove_file(&p);
     }

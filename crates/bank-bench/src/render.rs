@@ -34,10 +34,26 @@ pub struct ContractRow {
 /// mode that looks like success.
 pub fn contract() -> Vec<ContractRow> {
     vec![
-        ContractRow { workload: "oltp", target: "5–10× PostgreSQL", factor: Some(5.0) },
-        ContractRow { workload: "analytical", target: "10–12× PostgreSQL", factor: Some(10.0) },
-        ContractRow { workload: "point", target: "parity with PostgreSQL", factor: None },
-        ContractRow { workload: "durable", target: "parity with PostgreSQL", factor: None },
+        ContractRow {
+            workload: "oltp",
+            target: "5–10× PostgreSQL",
+            factor: Some(5.0),
+        },
+        ContractRow {
+            workload: "analytical",
+            target: "10–12× PostgreSQL",
+            factor: Some(10.0),
+        },
+        ContractRow {
+            workload: "point",
+            target: "parity with PostgreSQL",
+            factor: None,
+        },
+        ContractRow {
+            workload: "durable",
+            target: "parity with PostgreSQL",
+            factor: None,
+        },
     ]
 }
 
@@ -95,7 +111,12 @@ fn median_p99_us(samples: &[&Sample]) -> Option<f64> {
 /// would be reporting noise as a finding. Outside the band the answer is `NOT MET`, including
 /// when the engine is *faster* than a parity target — a parity claim that overshoots is still
 /// a claim that was not what was written down.
-pub fn judge(row: &ContractRow, ours: Option<f64>, baseline: Option<f64>, gap: Option<String>) -> Verdict {
+pub fn judge(
+    row: &ContractRow,
+    ours: Option<f64>,
+    baseline: Option<f64>,
+    gap: Option<String>,
+) -> Verdict {
     if let Some(reason) = gap {
         return Verdict::NotRun(reason);
     }
@@ -133,7 +154,10 @@ pub fn contract_table(samples: &[Sample], gaps: &BTreeMap<String, String>) -> St
 
     for row in contract() {
         let of = |target: &str| -> Vec<&Sample> {
-            samples.iter().filter(|s| s.workload == row.workload && s.target == target).collect()
+            samples
+                .iter()
+                .filter(|s| s.workload == row.workload && s.target == target)
+                .collect()
         };
         let pg = of("postgres");
         let nls = of("nilestream");
@@ -149,10 +173,15 @@ pub fn contract_table(samples: &[Sample], gaps: &BTreeMap<String, String>) -> St
 
         // A latency row inverts: lower is better, so the ratio that means "as fast as" is
         // baseline over ours.
-        let (a, b) = if latency_row { (pg_value, nls_value) } else { (nls_value, pg_value) };
-        let gap = gaps.get(row.workload).cloned().or_else(|| {
-            nls.iter().find_map(|s| s.not_run.clone())
-        });
+        let (a, b) = if latency_row {
+            (pg_value, nls_value)
+        } else {
+            (nls_value, pg_value)
+        };
+        let gap = gaps
+            .get(row.workload)
+            .cloned()
+            .or_else(|| nls.iter().find_map(|s| s.not_run.clone()));
         let verdict = judge(&row, a, b, gap);
 
         let show = |v: Option<f64>| match v {
@@ -229,11 +258,24 @@ mod tests {
 
     #[test]
     fn a_throughput_row_is_met_only_at_the_stated_multiple() {
-        let row = ContractRow { workload: "oltp", target: "5–10×", factor: Some(5.0) };
-        assert_eq!(judge(&row, Some(5_000.0), Some(1_000.0), None), Verdict::Met);
-        assert_eq!(judge(&row, Some(4_999.0), Some(1_000.0), None), Verdict::NotMet);
+        let row = ContractRow {
+            workload: "oltp",
+            target: "5–10×",
+            factor: Some(5.0),
+        };
+        assert_eq!(
+            judge(&row, Some(5_000.0), Some(1_000.0), None),
+            Verdict::Met
+        );
+        assert_eq!(
+            judge(&row, Some(4_999.0), Some(1_000.0), None),
+            Verdict::NotMet
+        );
         // Faster than claimed still meets a *lower bound*.
-        assert_eq!(judge(&row, Some(50_000.0), Some(1_000.0), None), Verdict::Met);
+        assert_eq!(
+            judge(&row, Some(50_000.0), Some(1_000.0), None),
+            Verdict::Met
+        );
     }
 
     #[test]
@@ -241,7 +283,11 @@ mod tests {
         // Deliberate: a parity claim that overshoots is still not the claim that was written
         // down, and reporting it as met would let a specification be satisfied by a number it
         // did not predict.
-        let row = ContractRow { workload: "point", target: "parity", factor: None };
+        let row = ContractRow {
+            workload: "point",
+            target: "parity",
+            factor: None,
+        };
         assert_eq!(judge(&row, Some(100.0), Some(100.0), None), Verdict::Parity);
         assert_eq!(judge(&row, Some(85.0), Some(100.0), None), Verdict::Parity);
         assert_eq!(judge(&row, Some(120.0), Some(100.0), None), Verdict::Parity);
@@ -253,18 +299,40 @@ mod tests {
     fn a_row_with_no_measurement_is_not_run_rather_than_zero() {
         // The failure this whole module exists to prevent: an absent measurement rendered as
         // a number, which is indistinguishable in a table from a measured one.
-        let row = ContractRow { workload: "oltp", target: "5–10×", factor: Some(5.0) };
-        assert!(matches!(judge(&row, None, Some(1_000.0), None), Verdict::NotRun(_)));
-        assert!(matches!(judge(&row, Some(1.0), None, None), Verdict::NotRun(_)));
-        assert!(matches!(judge(&row, Some(1.0), Some(0.0), None), Verdict::NotRun(_)));
+        let row = ContractRow {
+            workload: "oltp",
+            target: "5–10×",
+            factor: Some(5.0),
+        };
+        assert!(matches!(
+            judge(&row, None, Some(1_000.0), None),
+            Verdict::NotRun(_)
+        ));
+        assert!(matches!(
+            judge(&row, Some(1.0), None, None),
+            Verdict::NotRun(_)
+        ));
+        assert!(matches!(
+            judge(&row, Some(1.0), Some(0.0), None),
+            Verdict::NotRun(_)
+        ));
     }
 
     #[test]
     fn a_declared_gap_wins_over_any_measurement() {
         // If a target says it cannot serve a workload, no number may appear for it — even if
         // something was measured under that name.
-        let row = ContractRow { workload: "oltp", target: "5–10×", factor: Some(5.0) };
-        let v = judge(&row, Some(99_999.0), Some(1.0), Some("no write surface".into()));
+        let row = ContractRow {
+            workload: "oltp",
+            target: "5–10×",
+            factor: Some(5.0),
+        };
+        let v = judge(
+            &row,
+            Some(99_999.0),
+            Some(1.0),
+            Some("no write surface".into()),
+        );
         assert_eq!(v.label(), "NOT RUN");
     }
 
@@ -279,7 +347,10 @@ mod tests {
         let table = contract_table(&samples, &BTreeMap::new());
         assert!(table.contains("PARITY"), "{table}");
         assert!(table.contains("NOT RUN"), "{table}");
-        assert!(table.contains("no write surface"), "the reason is in the notes: {table}");
+        assert!(
+            table.contains("no write surface"),
+            "the reason is in the notes: {table}"
+        );
         // Every contract row appears, whether or not it was measured.
         for w in ["oltp", "analytical", "point", "durable"] {
             assert!(table.contains(w), "{w} missing from {table}");
@@ -293,6 +364,10 @@ mod tests {
         let c = crate::workloads::skipped("point", "postgres", 3, "x".into());
         let m = median_ops(&[&a, &b, &c]).unwrap();
         assert!((m - 3_000.0).abs() < 1.0, "median of two is the upper: {m}");
-        assert_eq!(median_ops(&[&c]), None, "and all-skipped is no measurement at all");
+        assert_eq!(
+            median_ops(&[&c]),
+            None,
+            "and all-skipped is no measurement at all"
+        );
     }
 }

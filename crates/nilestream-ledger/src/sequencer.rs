@@ -223,14 +223,22 @@ impl Sequencer {
             }
         });
 
-        Sequencer { tx: Some(tx), frontier, stats, sealer: Some(sealer) }
+        Sequencer {
+            tx: Some(tx),
+            frontier,
+            stats,
+            sealer: Some(sealer),
+        }
     }
 
     /// Submit and wait for the transaction to be durable and visible.
     pub fn submit(&self, txn: Txn) -> Result<u64, Rejected> {
         let (reply, rx) = channel();
-        let Some(tx) = &self.tx else { return Err(Rejected::ShuttingDown) };
-        tx.send(Request { txn, reply }).map_err(|_| Rejected::ShuttingDown)?;
+        let Some(tx) = &self.tx else {
+            return Err(Rejected::ShuttingDown);
+        };
+        tx.send(Request { txn, reply })
+            .map_err(|_| Rejected::ShuttingDown)?;
         rx.recv().map_err(|_| Rejected::ShuttingDown)?
     }
 
@@ -284,10 +292,23 @@ mod tests {
     fn a_commit_returns_only_once_it_is_durable_and_visible() {
         let p = tmp("durable");
         let s = seq(&p, SyncPolicy::Always);
-        let e = s.submit(Txn { idem_key: "a".into(), payload: b"x".to_vec() }).unwrap();
+        let e = s
+            .submit(Txn {
+                idem_key: "a".into(),
+                payload: b"x".to_vec(),
+            })
+            .unwrap();
         assert!(e >= 1);
-        assert_eq!(s.frontier().visible(), e, "the frontier must be at the returned epoch");
-        assert_eq!(s.frontier().pending(), 0, "nothing sealed-but-unpublished may remain");
+        assert_eq!(
+            s.frontier().visible(),
+            e,
+            "the frontier must be at the returned epoch"
+        );
+        assert_eq!(
+            s.frontier().pending(),
+            0,
+            "nothing sealed-but-unpublished may remain"
+        );
         s.shutdown();
         // And it really is on disk.
         let rec = recover(&p).unwrap();
@@ -308,20 +329,35 @@ mod tests {
                 let mut mine = Vec::new();
                 for i in 0..50u64 {
                     let k = format!("t{t}-{i}");
-                    mine.push(s.submit(Txn { idem_key: k, payload: vec![t as u8, i as u8] }).unwrap());
+                    mine.push(
+                        s.submit(Txn {
+                            idem_key: k,
+                            payload: vec![t as u8, i as u8],
+                        })
+                        .unwrap(),
+                    );
                 }
                 mine
             }));
         }
-        let all: Vec<u64> = handles.into_iter().flat_map(|h| h.join().unwrap()).collect();
+        let all: Vec<u64> = handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap())
+            .collect();
         assert_eq!(all.len(), 400);
 
         let st = s.stats();
-        assert_eq!(st.txns_committed, 400, "every transaction must commit exactly once");
+        assert_eq!(
+            st.txns_committed, 400,
+            "every transaction must commit exactly once"
+        );
         // Epochs form a prefix of the integers with no gaps: a total order.
         let epochs: HashSet<u64> = all.iter().copied().collect();
         let max = *epochs.iter().max().unwrap();
-        assert_eq!(st.epochs_sealed, max, "epoch numbering must be gapless: {st:?}");
+        assert_eq!(
+            st.epochs_sealed, max,
+            "epoch numbering must be gapless: {st:?}"
+        );
         let _ = std::fs::remove_file(&p);
     }
 
@@ -337,7 +373,10 @@ mod tests {
             let s = Arc::clone(&s);
             handles.push(std::thread::spawn(move || {
                 for i in 0..100u64 {
-                    let _ = s.submit(Txn { idem_key: format!("g{t}-{i}"), payload: vec![0; 32] });
+                    let _ = s.submit(Txn {
+                        idem_key: format!("g{t}-{i}"),
+                        payload: vec![0; 32],
+                    });
                 }
             }));
         }
@@ -364,11 +403,22 @@ mod tests {
         // behaviour here is not an error — it is a second, successful, duplicate payment.
         let p = tmp("idem");
         let s = seq(&p, SyncPolicy::Always);
-        let first = s.submit(Txn { idem_key: "pay-991".into(), payload: b"100".to_vec() }).unwrap();
-        let again = s.submit(Txn { idem_key: "pay-991".into(), payload: b"100".to_vec() });
+        let first = s
+            .submit(Txn {
+                idem_key: "pay-991".into(),
+                payload: b"100".to_vec(),
+            })
+            .unwrap();
+        let again = s.submit(Txn {
+            idem_key: "pay-991".into(),
+            payload: b"100".to_vec(),
+        });
         assert_eq!(again, Err(Rejected::Duplicate { at_epoch: first }));
         let st = s.stats();
-        assert_eq!(st.txns_committed, 1, "the retry must not have created a second transaction");
+        assert_eq!(
+            st.txns_committed, 1,
+            "the retry must not have created a second transaction"
+        );
         assert_eq!(st.duplicates_absorbed, 1, "stats were {st:?}");
         s.shutdown();
         let _ = std::fs::remove_file(&p);
@@ -385,8 +435,18 @@ mod tests {
             let key = format!("race-{_round}");
             let (a, b) = (Arc::clone(&s), Arc::clone(&s));
             let (k1, k2) = (key.clone(), key.clone());
-            let h1 = std::thread::spawn(move || a.submit(Txn { idem_key: k1, payload: vec![1] }));
-            let h2 = std::thread::spawn(move || b.submit(Txn { idem_key: k2, payload: vec![1] }));
+            let h1 = std::thread::spawn(move || {
+                a.submit(Txn {
+                    idem_key: k1,
+                    payload: vec![1],
+                })
+            });
+            let h2 = std::thread::spawn(move || {
+                b.submit(Txn {
+                    idem_key: k2,
+                    payload: vec![1],
+                })
+            });
             let (r1, r2) = (h1.join().unwrap(), h2.join().unwrap());
             let committed = [&r1, &r2].iter().filter(|r| r.is_ok()).count();
             assert_eq!(committed, 1, "exactly one copy may commit: {r1:?} / {r2:?}");
@@ -398,7 +458,10 @@ mod tests {
             assert!(epoch >= 1);
         }
         let st = s.stats();
-        assert_eq!(st.txns_committed, 40, "40 distinct keys, 40 commits: {st:?}");
+        assert_eq!(
+            st.txns_committed, 40,
+            "40 distinct keys, 40 commits: {st:?}"
+        );
         assert_eq!(st.duplicates_absorbed, 40);
         let _ = std::fs::remove_file(&p);
     }
@@ -408,21 +471,33 @@ mod tests {
         let p = tmp("snapshot");
         let s = Arc::new(seq(&p, SyncPolicy::Always));
         for i in 0..20 {
-            s.submit(Txn { idem_key: format!("s{i}"), payload: vec![i] }).unwrap();
+            s.submit(Txn {
+                idem_key: format!("s{i}"),
+                payload: vec![i],
+            })
+            .unwrap();
         }
         let snap = s.frontier().snapshot();
         let writer = {
             let s = Arc::clone(&s);
             std::thread::spawn(move || {
                 for i in 20..60 {
-                    let _ = s.submit(Txn { idem_key: format!("s{i}"), payload: vec![i as u8] });
+                    let _ = s.submit(Txn {
+                        idem_key: format!("s{i}"),
+                        payload: vec![i as u8],
+                    });
                 }
             })
         };
         writer.join().unwrap();
-        assert!(s.frontier().visible() > snap.anchor, "the frontier must have moved on");
-        assert!(snap.includes(snap.anchor) && !snap.includes(snap.anchor + 1),
-            "the snapshot itself must not have moved");
+        assert!(
+            s.frontier().visible() > snap.anchor,
+            "the frontier must have moved on"
+        );
+        assert!(
+            snap.includes(snap.anchor) && !snap.includes(snap.anchor + 1),
+            "the snapshot itself must not have moved"
+        );
         let _ = std::fs::remove_file(&p);
     }
 
@@ -431,7 +506,11 @@ mod tests {
         let p = tmp("drain");
         let s = seq(&p, SyncPolicy::Always);
         for i in 0..25 {
-            s.submit(Txn { idem_key: format!("d{i}"), payload: vec![i] }).unwrap();
+            s.submit(Txn {
+                idem_key: format!("d{i}"),
+                payload: vec![i],
+            })
+            .unwrap();
         }
         let st = s.shutdown();
         assert_eq!(st.txns_committed, 25);

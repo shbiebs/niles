@@ -101,15 +101,25 @@ pub struct Ledger {
 
 impl Ledger {
     pub fn new() -> Self {
-        Self { chaining: true, ..Default::default() }
+        Self {
+            chaining: true,
+            ..Default::default()
+        }
     }
 
     pub fn with_checkpoints(interval: usize) -> Self {
-        Self { chaining: true, checkpoint_interval: interval, ..Default::default() }
+        Self {
+            chaining: true,
+            checkpoint_interval: interval,
+            ..Default::default()
+        }
     }
 
     pub fn without_chaining() -> Self {
-        Self { chaining: false, ..Default::default() }
+        Self {
+            chaining: false,
+            ..Default::default()
+        }
     }
 
     fn chain(&self, parent: &[u8; 32], rows: &[Row]) -> [u8; 32] {
@@ -188,7 +198,10 @@ impl Ledger {
         let id = self.epochs.len() as Epoch;
 
         for (i, r) in rows.iter().enumerate() {
-            let rr = RowRef { epoch: id, idx: i as u32 };
+            let rr = RowRef {
+                epoch: id,
+                idx: i as u32,
+            };
             match r {
                 Row::Post(p) => {
                     self.by_account.entry(p.acct).or_default().push(rr);
@@ -213,7 +226,12 @@ impl Ledger {
             }
         }
 
-        self.epochs.push(EpochRec { id, parent, hash, rows });
+        self.epochs.push(EpochRec {
+            id,
+            parent,
+            hash,
+            rows,
+        });
         self.idem.insert(key.to_string());
         Ok(id)
     }

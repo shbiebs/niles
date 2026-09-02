@@ -63,12 +63,22 @@ pub enum Value {
     Array(Rc<Vec<Value>>),
     Tuple(Rc<Vec<Value>>),
     /// A struct or an enum's struct-variant: a name and ordered fields.
-    Record { name: String, fields: Rc<BTreeMap<String, Value>> },
+    Record {
+        name: String,
+        fields: Rc<BTreeMap<String, Value>>,
+    },
     /// `Some(x)`, `Tok::Ident(s)` — a path and positional payload.
-    Variant { path: String, payload: Rc<Vec<Value>> },
+    Variant {
+        path: String,
+        payload: Rc<Vec<Value>>,
+    },
     Closure(Rc<ClosureVal>),
     /// Carried, not computed on. See the type docs.
-    Money { minor: i128, scale: u32, currency: String },
+    Money {
+        minor: i128,
+        scale: u32,
+        currency: String,
+    },
     Epoch(u64),
 }
 
@@ -109,25 +119,48 @@ impl Value {
             Value::Str(s) => (**s).clone(),
             Value::Bytes(b) => format!("b\"{}\"", String::from_utf8_lossy(b)),
             Value::Array(xs) => {
-                format!("[{}]", xs.iter().map(|v| v.render()).collect::<Vec<_>>().join(", "))
+                format!(
+                    "[{}]",
+                    xs.iter().map(|v| v.render()).collect::<Vec<_>>().join(", ")
+                )
             }
             Value::Tuple(xs) => {
-                format!("({})", xs.iter().map(|v| v.render()).collect::<Vec<_>>().join(", "))
+                format!(
+                    "({})",
+                    xs.iter().map(|v| v.render()).collect::<Vec<_>>().join(", ")
+                )
             }
             // BTreeMap iteration is by key, so this is stable across runs and targets.
             Value::Record { name, fields } => format!(
                 "{name} {{ {} }}",
-                fields.iter().map(|(k, v)| format!("{k}: {}", v.render())).collect::<Vec<_>>().join(", ")
+                fields
+                    .iter()
+                    .map(|(k, v)| format!("{k}: {}", v.render()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
             Value::Variant { path, payload } if payload.is_empty() => path.clone(),
             Value::Variant { path, payload } => format!(
                 "{path}({})",
-                payload.iter().map(|v| v.render()).collect::<Vec<_>>().join(", ")
+                payload
+                    .iter()
+                    .map(|v| v.render())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
             Value::Closure(_) => "<closure>".into(),
-            Value::Money { minor, scale, currency } => {
+            Value::Money {
+                minor,
+                scale,
+                currency,
+            } => {
                 let d = 10i128.pow(*scale);
-                format!("{}.{:0width$} {currency}", minor / d, (minor % d).abs(), width = *scale as usize)
+                format!(
+                    "{}.{:0width$} {currency}",
+                    minor / d,
+                    (minor % d).abs(),
+                    width = *scale as usize
+                )
             }
             Value::Epoch(e) => format!("#{e}"),
         }
@@ -152,20 +185,51 @@ impl Value {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Error {
     /// A construct outside the imperative subset. Named, never silently approximated.
-    NotInSubset { form: &'static str, at: Span },
-    Unbound { name: String, at: Span },
-    TypeMismatch { want: String, got: String, at: Span },
-    NoField { name: String, at: Span },
-    IndexOutOfBounds { index: i128, len: usize, at: Span },
-    DivideByZero { at: Span },
+    NotInSubset {
+        form: &'static str,
+        at: Span,
+    },
+    Unbound {
+        name: String,
+        at: Span,
+    },
+    TypeMismatch {
+        want: String,
+        got: String,
+        at: Span,
+    },
+    NoField {
+        name: String,
+        at: Span,
+    },
+    IndexOutOfBounds {
+        index: i128,
+        len: usize,
+        at: Span,
+    },
+    DivideByZero {
+        at: Span,
+    },
     /// Integer overflow. Checked rather than wrapping: a ledger interpreter that wrapped
     /// silently would be the exact defect Contribution 4 exists to exclude.
-    Overflow { op: &'static str, at: Span },
-    WrongArity { want: usize, got: usize, at: Span },
-    NoMatchingArm { at: Span },
+    Overflow {
+        op: &'static str,
+        at: Span,
+    },
+    WrongArity {
+        want: usize,
+        got: usize,
+        at: Span,
+    },
+    NoMatchingArm {
+        at: Span,
+    },
     /// The fuel ran out. See [`Interp::with_fuel`].
     OutOfFuel,
-    NotCallable { got: String, at: Span },
+    NotCallable {
+        got: String,
+        at: Span,
+    },
     /// Call nesting exceeded [`Interp::max_depth`].
     ///
     /// This exists because the alternative is a stack overflow, and a stack overflow in
@@ -173,7 +237,10 @@ pub enum Error {
     /// deeply nested input is worse than one that stops and says why. The limit is a
     /// property of the host, not of Niles, and [`Interp::with_max_depth`] is how a caller
     /// that has arranged a larger stack raises it.
-    TooDeep { limit: usize, at: Span },
+    TooDeep {
+        limit: usize,
+        at: Span,
+    },
 }
 
 impl Error {
@@ -246,7 +313,9 @@ struct Env {
 
 impl Env {
     fn new() -> Self {
-        Env { frames: vec![BTreeMap::new()] }
+        Env {
+            frames: vec![BTreeMap::new()],
+        }
     }
     fn push(&mut self) {
         self.frames.push(BTreeMap::new());
@@ -255,7 +324,10 @@ impl Env {
         self.frames.pop();
     }
     fn define(&mut self, name: &str, v: Value) {
-        self.frames.last_mut().expect("at least one frame").insert(name.into(), v);
+        self.frames
+            .last_mut()
+            .expect("at least one frame")
+            .insert(name.into(), v);
     }
     fn get(&self, name: &str) -> Option<&Value> {
         self.frames.iter().rev().find_map(|f| f.get(name))
@@ -354,12 +426,15 @@ impl Interp {
                 self.fns.insert(f.name.text.clone(), Rc::new(f.clone()));
             }
             Item::Struct(s) => {
-                self.structs
-                    .insert(s.name.text.clone(), s.fields.iter().map(|f| f.name.text.clone()).collect());
+                self.structs.insert(
+                    s.name.text.clone(),
+                    s.fields.iter().map(|f| f.name.text.clone()).collect(),
+                );
             }
             Item::Enum(e) => {
                 for (v, tys) in &e.variants {
-                    self.variants.insert(format!("{}::{}", e.name.text, v.text), tys.len());
+                    self.variants
+                        .insert(format!("{}::{}", e.name.text, v.text), tys.len());
                     // The bare form too, so `Ident(s)` works inside the enum's own module,
                     // matching Rust's `use Tok::*`.
                     self.variants.entry(v.text.clone()).or_insert(tys.len());
@@ -386,26 +461,39 @@ impl Interp {
     /// Call a top-level function by name.
     pub fn call(&mut self, name: &str, args: Vec<Value>) -> Result<Value, Error> {
         let at = Span { start: 0, end: 0 };
-        let f = self
-            .fns
-            .get(name)
-            .cloned()
-            .ok_or_else(|| Error::Unbound { name: name.into(), at })?;
+        let f = self.fns.get(name).cloned().ok_or_else(|| Error::Unbound {
+            name: name.into(),
+            at,
+        })?;
         match self.call_decl(&f, args, at) {
             Ok(v) => Ok(v),
             Err(Flow::Err(e)) => Err(e),
             Err(Flow::Return(v)) => Ok(v),
-            Err(_) => Err(Error::NotInSubset { form: "break outside a loop", at }),
+            Err(_) => Err(Error::NotInSubset {
+                form: "break outside a loop",
+                at,
+            }),
         }
     }
 
     fn call_decl(&mut self, f: &FnDecl, args: Vec<Value>, at: Span) -> Eval<Value> {
         if args.len() != f.params.len() {
-            return Err(Error::WrongArity { want: f.params.len(), got: args.len(), at }.into());
+            return Err(Error::WrongArity {
+                want: f.params.len(),
+                got: args.len(),
+                at,
+            }
+            .into());
         }
         let body = match &f.body {
             Some(b) => b.clone(),
-            None => return Err(Error::NotInSubset { form: "function without a body", at }.into()),
+            None => {
+                return Err(Error::NotInSubset {
+                    form: "function without a body",
+                    at,
+                }
+                .into())
+            }
         };
         // A fresh environment, not the caller's: the subset has no dynamic scope.
         let mut env = Env::new();
@@ -425,7 +513,11 @@ impl Interp {
     /// Count one level of call nesting, refusing rather than overflowing the host stack.
     fn enter(&mut self, at: Span) -> Eval<()> {
         if self.depth >= self.max_depth {
-            return Err(Error::TooDeep { limit: self.max_depth, at }.into());
+            return Err(Error::TooDeep {
+                limit: self.max_depth,
+                at,
+            }
+            .into());
         }
         self.depth += 1;
         Ok(())
@@ -461,7 +553,9 @@ impl Interp {
     fn stmt(&mut self, env: &mut Env, s: &Stmt) -> Eval<()> {
         self.burn()?;
         match s {
-            Stmt::Let { pat, init, span, .. } => {
+            Stmt::Let {
+                pat, init, span, ..
+            } => {
                 let v = match init {
                     Some(e) => self.expr(env, e)?,
                     None => Value::Unit,
@@ -493,9 +587,11 @@ impl Interp {
                 at: Span { start: 0, end: 0 },
             }
             .into()),
-            Stmt::Error(sp) => {
-                Err(Error::NotInSubset { form: "a statement that did not parse", at: *sp }.into())
+            Stmt::Error(sp) => Err(Error::NotInSubset {
+                form: "a statement that did not parse",
+                at: *sp,
             }
+            .into()),
         }
     }
 
@@ -591,9 +687,11 @@ impl Interp {
                     Ok(true)
                 }
             }
-            Pat::Error(sp) => {
-                Err(Error::NotInSubset { form: "a pattern that did not parse", at: *sp }.into())
+            Pat::Error(sp) => Err(Error::NotInSubset {
+                form: "a pattern that did not parse",
+                at: *sp,
             }
+            .into()),
         }
     }
 
@@ -608,7 +706,12 @@ impl Interp {
             Expr::Str(s, _) => Ok(Value::Str(Rc::new(s.clone()))),
             Expr::Bytes(b, _) => Ok(Value::Bytes(Rc::new(b.clone()))),
             Expr::Unit(_) => Ok(Value::Unit),
-            Expr::Money { minor, scale, currency, .. } => Ok(Value::Money {
+            Expr::Money {
+                minor,
+                scale,
+                currency,
+                ..
+            } => Ok(Value::Money {
                 minor: *minor,
                 scale: *scale,
                 currency: currency.text.clone(),
@@ -616,18 +719,24 @@ impl Interp {
             Expr::Epoch(n, _) => Ok(Value::Epoch(*n)),
             // Floats are excluded from the subset on purpose: cross-target determinism
             // (Appendix C.4) and money never being a float are the same commitment.
-            Expr::Float(_, sp) => {
-                Err(Error::NotInSubset { form: "floating-point literal", at: *sp }.into())
+            Expr::Float(_, sp) => Err(Error::NotInSubset {
+                form: "floating-point literal",
+                at: *sp,
             }
+            .into()),
             // Temporal literals belong to the bitemporal tier, which is checked and
             // lowered rather than interpreted. Carrying them as opaque values would let a
             // Niles program compare two instants without the axis discipline of §3.8.
-            Expr::Instant { span, .. } => {
-                Err(Error::NotInSubset { form: "temporal literal", at: *span }.into())
+            Expr::Instant { span, .. } => Err(Error::NotInSubset {
+                form: "temporal literal",
+                at: *span,
             }
-            Expr::Duration { span, .. } => {
-                Err(Error::NotInSubset { form: "duration literal", at: *span }.into())
+            .into()),
+            Expr::Duration { span, .. } => Err(Error::NotInSubset {
+                form: "duration literal",
+                at: *span,
             }
+            .into()),
 
             Expr::Path(p) => {
                 let name = path_text(p);
@@ -636,7 +745,10 @@ impl Interp {
                 }
                 if let Some(&arity) = self.variants.get(&name) {
                     if arity == 0 {
-                        return Ok(Value::Variant { path: name, payload: Rc::new(vec![]) });
+                        return Ok(Value::Variant {
+                            path: name,
+                            payload: Rc::new(vec![]),
+                        });
                     }
                 }
                 Err(Error::Unbound { name, at: p.span }.into())
@@ -663,7 +775,11 @@ impl Interp {
 
             Expr::Binary { op, lhs, rhs, span } => self.binary(env, *op, lhs, rhs, *span),
 
-            Expr::Assign { target, value, span } => self.assign(env, target, value, *span),
+            Expr::Assign {
+                target,
+                value,
+                span,
+            } => self.assign(env, target, value, *span),
 
             // A cast in the subset is between integers and is therefore the identity;
             // `as u8`-style truncation is not modelled, because a silent truncation in a
@@ -675,7 +791,12 @@ impl Interp {
             // --- control ---
             Expr::Block(b) => self.block(env, b),
 
-            Expr::If { cond, then, els, span } => {
+            Expr::If {
+                cond,
+                then,
+                els,
+                span,
+            } => {
                 let c = self.expr(env, cond)?.truthy(*span)?;
                 if c {
                     self.block(env, then)
@@ -688,7 +809,11 @@ impl Interp {
             }
 
             Expr::Case { arms, els, span } => self.case_arms(env, arms, els.as_deref(), *span),
-            Expr::Match { scrutinee, arms, span } => self.match_expr(env, scrutinee, arms, *span),
+            Expr::Match {
+                scrutinee,
+                arms,
+                span,
+            } => self.match_expr(env, scrutinee, arms, *span),
 
             Expr::While { cond, body, span } => {
                 loop {
@@ -717,7 +842,12 @@ impl Interp {
                 Ok(Value::Unit)
             }
 
-            Expr::For { pat, iter, body, span } => self.for_expr(env, pat, iter, body, *span),
+            Expr::For {
+                pat,
+                iter,
+                body,
+                span,
+            } => self.for_expr(env, pat, iter, body, *span),
 
             Expr::Return { value, .. } => {
                 let v = match value {
@@ -750,113 +880,134 @@ impl Interp {
             let v = self.expr(env, value)?;
             let span = &span;
             match target {
-                    Expr::Path(p) => {
-                        let name = path_text(p);
-                        if env.set(&name, v) {
-                            Ok(Value::Unit)
-                        } else {
-                            Err(Error::Unbound { name, at: *span }.into())
-                        }
+                Expr::Path(p) => {
+                    let name = path_text(p);
+                    if env.set(&name, v) {
+                        Ok(Value::Unit)
+                    } else {
+                        Err(Error::Unbound { name, at: *span }.into())
                     }
-                    // `xs[i] = v`. Arrays are `Rc<Vec<_>>`, so this reads, mutates a
-                    // clone, and rebinds — O(n) per write. Correct and slow, which is the
-                    // right trade for a stage-0 interpreter whose successor is a compiler.
-                    Expr::Index { base, index, .. } => {
-                        let idx = match self.expr(env, index)? {
-                            Value::Int(n) => n,
-                            other => {
-                                return Err(Error::TypeMismatch {
-                                    want: "int".into(),
-                                    got: other.type_name().into(),
-                                    at: *span,
-                                }
-                                .into())
-                            }
-                        };
-                        let name = match &**base {
-                            Expr::Path(p) => path_text(p),
-                            _ => {
-                                return Err(Error::NotInSubset {
-                                    form: "assignment to a computed place",
-                                    at: *span,
-                                }
-                                .into())
-                            }
-                        };
-                        let cur = env
-                            .get(&name)
-                            .cloned()
-                            .ok_or_else(|| Flow::Err(Error::Unbound { name: name.clone(), at: *span }))?;
-                        match cur {
-                            Value::Array(xs) => {
-                                if idx < 0 || idx as usize >= xs.len() {
-                                    return Err(Error::IndexOutOfBounds {
-                                        index: idx,
-                                        len: xs.len(),
-                                        at: *span,
-                                    }
-                                    .into());
-                                }
-                                let mut new = (*xs).clone();
-                                new[idx as usize] = v;
-                                env.set(&name, Value::Array(Rc::new(new)));
-                                Ok(Value::Unit)
-                            }
-                            other => Err(Error::TypeMismatch {
-                                want: "array".into(),
-                                got: other.type_name().into(),
-                                at: *span,
-                            }
-                            .into()),
-                        }
-                    }
-                    Expr::Field { base, name, .. } => {
-                        let vname = match &**base {
-                            Expr::Path(p) => path_text(p),
-                            _ => {
-                                return Err(Error::NotInSubset {
-                                    form: "assignment to a computed place",
-                                    at: *span,
-                                }
-                                .into())
-                            }
-                        };
-                        let cur = env
-                            .get(&vname)
-                            .cloned()
-                            .ok_or_else(|| Flow::Err(Error::Unbound { name: vname.clone(), at: *span }))?;
-                        match cur {
-                            Value::Record { name: rn, fields } => {
-                                let mut m = (*fields).clone();
-                                m.insert(name.text.clone(), v);
-                                env.set(&vname, Value::Record { name: rn, fields: Rc::new(m) });
-                                Ok(Value::Unit)
-                            }
-                            other => Err(Error::TypeMismatch {
-                                want: "struct".into(),
-                                got: other.type_name().into(),
-                                at: *span,
-                            }
-                            .into()),
-                        }
-                    }
-                    _ => Err(Error::NotInSubset { form: "assignment to this place", at: *span }.into()),
                 }
+                // `xs[i] = v`. Arrays are `Rc<Vec<_>>`, so this reads, mutates a
+                // clone, and rebinds — O(n) per write. Correct and slow, which is the
+                // right trade for a stage-0 interpreter whose successor is a compiler.
+                Expr::Index { base, index, .. } => {
+                    let idx = match self.expr(env, index)? {
+                        Value::Int(n) => n,
+                        other => {
+                            return Err(Error::TypeMismatch {
+                                want: "int".into(),
+                                got: other.type_name().into(),
+                                at: *span,
+                            }
+                            .into())
+                        }
+                    };
+                    let name = match &**base {
+                        Expr::Path(p) => path_text(p),
+                        _ => {
+                            return Err(Error::NotInSubset {
+                                form: "assignment to a computed place",
+                                at: *span,
+                            }
+                            .into())
+                        }
+                    };
+                    let cur = env.get(&name).cloned().ok_or_else(|| {
+                        Flow::Err(Error::Unbound {
+                            name: name.clone(),
+                            at: *span,
+                        })
+                    })?;
+                    match cur {
+                        Value::Array(xs) => {
+                            if idx < 0 || idx as usize >= xs.len() {
+                                return Err(Error::IndexOutOfBounds {
+                                    index: idx,
+                                    len: xs.len(),
+                                    at: *span,
+                                }
+                                .into());
+                            }
+                            let mut new = (*xs).clone();
+                            new[idx as usize] = v;
+                            env.set(&name, Value::Array(Rc::new(new)));
+                            Ok(Value::Unit)
+                        }
+                        other => Err(Error::TypeMismatch {
+                            want: "array".into(),
+                            got: other.type_name().into(),
+                            at: *span,
+                        }
+                        .into()),
+                    }
+                }
+                Expr::Field { base, name, .. } => {
+                    let vname = match &**base {
+                        Expr::Path(p) => path_text(p),
+                        _ => {
+                            return Err(Error::NotInSubset {
+                                form: "assignment to a computed place",
+                                at: *span,
+                            }
+                            .into())
+                        }
+                    };
+                    let cur = env.get(&vname).cloned().ok_or_else(|| {
+                        Flow::Err(Error::Unbound {
+                            name: vname.clone(),
+                            at: *span,
+                        })
+                    })?;
+                    match cur {
+                        Value::Record { name: rn, fields } => {
+                            let mut m = (*fields).clone();
+                            m.insert(name.text.clone(), v);
+                            env.set(
+                                &vname,
+                                Value::Record {
+                                    name: rn,
+                                    fields: Rc::new(m),
+                                },
+                            );
+                            Ok(Value::Unit)
+                        }
+                        other => Err(Error::TypeMismatch {
+                            want: "struct".into(),
+                            got: other.type_name().into(),
+                            at: *span,
+                        }
+                        .into()),
+                    }
+                }
+                _ => Err(Error::NotInSubset {
+                    form: "assignment to this place",
+                    at: *span,
+                }
+                .into()),
             }
+        }
     }
 
     #[inline(never)]
     fn field_of(&mut self, env: &mut Env, base: &Expr, name: &Name, span: Span) -> Eval<Value> {
         let b = self.expr(env, base)?;
         match &b {
-            Value::Record { fields, .. } => fields
-                .get(&name.text)
-                .cloned()
-                .ok_or_else(|| Error::NoField { name: name.text.clone(), at: span }.into()),
+            Value::Record { fields, .. } => fields.get(&name.text).cloned().ok_or_else(|| {
+                Error::NoField {
+                    name: name.text.clone(),
+                    at: span,
+                }
+                .into()
+            }),
             // Tuple field access, `t.0`.
             Value::Tuple(xs) => match name.text.parse::<usize>() {
                 Ok(i) if i < xs.len() => Ok(xs[i].clone()),
-                _ => Err(Error::NoField { name: name.text.clone(), at: span }.into()),
+                _ => Err(Error::NoField {
+                    name: name.text.clone(),
+                    at: span,
+                }
+                .into()),
             },
             other => Err(Error::TypeMismatch {
                 want: "struct".into(),
@@ -884,14 +1035,24 @@ impl Interp {
         match &b {
             Value::Array(xs) | Value::Tuple(xs) => {
                 if idx < 0 || idx as usize >= xs.len() {
-                    Err(Error::IndexOutOfBounds { index: idx, len: xs.len(), at: span }.into())
+                    Err(Error::IndexOutOfBounds {
+                        index: idx,
+                        len: xs.len(),
+                        at: span,
+                    }
+                    .into())
                 } else {
                     Ok(xs[idx as usize].clone())
                 }
             }
             Value::Bytes(bs) => {
                 if idx < 0 || idx as usize >= bs.len() {
-                    Err(Error::IndexOutOfBounds { index: idx, len: bs.len(), at: span }.into())
+                    Err(Error::IndexOutOfBounds {
+                        index: idx,
+                        len: bs.len(),
+                        at: span,
+                    }
+                    .into())
                 } else {
                     Ok(Value::Int(bs[idx as usize] as i128))
                 }
@@ -912,7 +1073,10 @@ impl Interp {
             let v = self.expr(env, fe)?;
             m.insert(n.text.clone(), v);
         }
-        Ok(Value::Record { name: path_text(path), fields: Rc::new(m) })
+        Ok(Value::Record {
+            name: path_text(path),
+            fields: Rc::new(m),
+        })
     }
 
     #[inline(never)]
@@ -1089,7 +1253,9 @@ impl Interp {
     /// are the collection and string builtins.
     fn stage_or_method(&mut self, env: &mut Env, e: &Expr, span: Span) -> Eval<Value> {
         let (recv, name, args) = match e {
-            Expr::Stage { recv, name, args, .. } => (recv, name.text.as_str(), args),
+            Expr::Stage {
+                recv, name, args, ..
+            } => (recv, name.text.as_str(), args),
             _ => unreachable!("stage_or_method called on a non-stage"),
         };
         let r = self.expr(env, recv)?;
@@ -1114,15 +1280,20 @@ impl Interp {
             // A variant constructor: `Tok::Ident("x")`.
             if let Some(&arity) = self.variants.get(n) {
                 if arity == vs.len() {
-                    return Ok(Value::Variant { path: n.clone(), payload: Rc::new(vs) });
+                    return Ok(Value::Variant {
+                        path: n.clone(),
+                        payload: Rc::new(vs),
+                    });
                 }
             }
             // A struct built positionally.
             if let Some(fields) = self.structs.get(n).cloned() {
                 if fields.len() == vs.len() {
-                    let m: BTreeMap<String, Value> =
-                        fields.into_iter().zip(vs.clone()).collect();
-                    return Ok(Value::Record { name: n.clone(), fields: Rc::new(m) });
+                    let m: BTreeMap<String, Value> = fields.into_iter().zip(vs.clone()).collect();
+                    return Ok(Value::Record {
+                        name: n.clone(),
+                        fields: Rc::new(m),
+                    });
                 }
             }
             // A user function.
@@ -1137,18 +1308,31 @@ impl Interp {
             if let Some(Value::Closure(c)) = env.get(n).cloned() {
                 return self.call_closure(&c, vs, span);
             }
-            return Err(Error::Unbound { name: n.clone(), at: span }.into());
+            return Err(Error::Unbound {
+                name: n.clone(),
+                at: span,
+            }
+            .into());
         }
 
         match self.expr(env, callee)? {
             Value::Closure(c) => self.call_closure(&c, vs, span),
-            other => Err(Error::NotCallable { got: other.type_name().into(), at: span }.into()),
+            other => Err(Error::NotCallable {
+                got: other.type_name().into(),
+                at: span,
+            }
+            .into()),
         }
     }
 
     fn call_closure(&mut self, c: &Rc<ClosureVal>, args: Vec<Value>, span: Span) -> Eval<Value> {
         if args.len() != c.params.len() {
-            return Err(Error::WrongArity { want: c.params.len(), got: args.len(), at: span }.into());
+            return Err(Error::WrongArity {
+                want: c.params.len(),
+                got: args.len(),
+                at: span,
+            }
+            .into());
         }
         let mut env = Env::new();
         for (k, v) in &c.captured {
@@ -1186,18 +1370,28 @@ impl Interp {
                 }
                 .into())
             }
-            ("Some", [v]) => Value::Variant { path: "Some".into(), payload: Rc::new(vec![v.clone()]) },
-            ("Ok", [v]) => Value::Variant { path: "Ok".into(), payload: Rc::new(vec![v.clone()]) },
-            ("Err", [v]) => Value::Variant { path: "Err".into(), payload: Rc::new(vec![v.clone()]) },
+            ("Some", [v]) => Value::Variant {
+                path: "Some".into(),
+                payload: Rc::new(vec![v.clone()]),
+            },
+            ("Ok", [v]) => Value::Variant {
+                path: "Ok".into(),
+                payload: Rc::new(vec![v.clone()]),
+            },
+            ("Err", [v]) => Value::Variant {
+                path: "Err".into(),
+                payload: Rc::new(vec![v.clone()]),
+            },
             ("range", [Value::Int(a), Value::Int(b)]) => {
                 let mut m = BTreeMap::new();
                 m.insert("start".to_string(), Value::Int(*a));
                 m.insert("end".to_string(), Value::Int(*b));
-                Value::Record { name: "Range".into(), fields: Rc::new(m) }
+                Value::Record {
+                    name: "Range".into(),
+                    fields: Rc::new(m),
+                }
             }
-            ("chr", [Value::Int(i)]) => {
-                Value::Str(Rc::new(((*i as u8) as char).to_string()))
-            }
+            ("chr", [Value::Int(i)]) => Value::Str(Rc::new(((*i as u8) as char).to_string())),
             _ => return Ok(None),
         };
         Ok(Some(v))
@@ -1229,7 +1423,11 @@ fn as_int(v: Option<&Value>, at: Span) -> Eval<i128> {
             at,
         }
         .into()),
-        None => Err(Error::NoField { name: "start/end".into(), at }.into()),
+        None => Err(Error::NoField {
+            name: "start/end".into(),
+            at,
+        }
+        .into()),
     }
 }
 
@@ -1238,19 +1436,26 @@ fn value_len(v: &Value, at: Span) -> Result<usize, Error> {
         Value::Str(s) => Ok(s.len()),
         Value::Bytes(b) => Ok(b.len()),
         Value::Array(xs) | Value::Tuple(xs) => Ok(xs.len()),
-        other => Err(Error::TypeMismatch { want: "a sized value".into(), got: other.type_name().into(), at }),
+        other => Err(Error::TypeMismatch {
+            want: "a sized value".into(),
+            got: other.type_name().into(),
+            at,
+        }),
     }
 }
 
 /// Whether a pattern's path names this runtime variant. `Tok::Ident` matches a value
 /// tagged `Ident` or `Tok::Ident`, so a program can `use` the enum or not.
 fn variant_matches(want: &str, got: &str) -> bool {
-    want == got
-        || want.rsplit("::").next() == got.rsplit("::").next()
+    want == got || want.rsplit("::").next() == got.rsplit("::").next()
 }
 
 fn path_text(p: &Path) -> String {
-    p.segments.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join("::")
+    p.segments
+        .iter()
+        .map(|s| s.text.as_str())
+        .collect::<Vec<_>>()
+        .join("::")
 }
 
 /// The relational tier and the un-parsed: named, refused, never approximated.
@@ -1335,15 +1540,18 @@ pub fn run_with_stack<T: Send + 'static>(
 fn arith(op: BinOp, a: &Value, b: &Value, at: Span) -> Result<Value, Error> {
     use BinOp::*;
     match (op, a, b) {
-        (Add, Value::Int(x), Value::Int(y)) => {
-            x.checked_add(*y).map(Value::Int).ok_or(Error::Overflow { op: "+", at })
-        }
-        (Sub, Value::Int(x), Value::Int(y)) => {
-            x.checked_sub(*y).map(Value::Int).ok_or(Error::Overflow { op: "-", at })
-        }
-        (Mul, Value::Int(x), Value::Int(y)) => {
-            x.checked_mul(*y).map(Value::Int).ok_or(Error::Overflow { op: "*", at })
-        }
+        (Add, Value::Int(x), Value::Int(y)) => x
+            .checked_add(*y)
+            .map(Value::Int)
+            .ok_or(Error::Overflow { op: "+", at }),
+        (Sub, Value::Int(x), Value::Int(y)) => x
+            .checked_sub(*y)
+            .map(Value::Int)
+            .ok_or(Error::Overflow { op: "-", at }),
+        (Mul, Value::Int(x), Value::Int(y)) => x
+            .checked_mul(*y)
+            .map(Value::Int)
+            .ok_or(Error::Overflow { op: "*", at }),
         (Div, Value::Int(_), Value::Int(0)) => Err(Error::DivideByZero { at }),
         (Div, Value::Int(x), Value::Int(y)) => Ok(Value::Int(x / y)),
         (Rem, Value::Int(_), Value::Int(0)) => Err(Error::DivideByZero { at }),
@@ -1358,7 +1566,10 @@ fn arith(op: BinOp, a: &Value, b: &Value, at: Span) -> Result<Value, Error> {
         // currency check that the type system performs; doing it here would create a
         // second, unchecked path to the same operation, which is the seam §6.9 refuses.
         (Add | Sub, Value::Money { .. }, _) | (Add | Sub, _, Value::Money { .. }) => {
-            Err(Error::NotInSubset { form: "money arithmetic (checked tier only)", at })
+            Err(Error::NotInSubset {
+                form: "money arithmetic (checked tier only)",
+                at,
+            })
         }
 
         (Eq, _, _) => Ok(Value::Bool(a == b)),
@@ -1405,18 +1616,31 @@ fn builtin_method(recv: &Value, name: &str, args: &[Value], at: Span) -> Result<
         (Value::Str(s), "byte_at", [Value::Int(i)]) => {
             let b = s.as_bytes();
             if *i < 0 || *i as usize >= b.len() {
-                Err(Error::IndexOutOfBounds { index: *i, len: b.len(), at })
+                Err(Error::IndexOutOfBounds {
+                    index: *i,
+                    len: b.len(),
+                    at,
+                })
             } else {
                 Ok(Value::Int(b[*i as usize] as i128))
             }
         }
         (Value::Str(s), "slice", [Value::Int(a), Value::Int(b)]) => {
             let bytes = s.as_bytes();
-            let (lo, hi) = (*a.max(&0) as usize, (*b).clamp(0, bytes.len() as i128) as usize);
+            let (lo, hi) = (
+                *a.max(&0) as usize,
+                (*b).clamp(0, bytes.len() as i128) as usize,
+            );
             if lo > hi || hi > bytes.len() {
-                return Err(Error::IndexOutOfBounds { index: *b, len: bytes.len(), at });
+                return Err(Error::IndexOutOfBounds {
+                    index: *b,
+                    len: bytes.len(),
+                    at,
+                });
             }
-            Ok(Value::Str(Rc::new(String::from_utf8_lossy(&bytes[lo..hi]).into_owned())))
+            Ok(Value::Str(Rc::new(
+                String::from_utf8_lossy(&bytes[lo..hi]).into_owned(),
+            )))
         }
         (Value::Str(s), "starts_with", [Value::Str(p)]) => Ok(Value::Bool(s.starts_with(&**p))),
         (Value::Str(s), "contains", [Value::Str(p)]) => Ok(Value::Bool(s.contains(&**p))),
@@ -1426,8 +1650,14 @@ fn builtin_method(recv: &Value, name: &str, args: &[Value], at: Span) -> Result<
         (Value::Str(s), "to_upper", []) => Ok(Value::Str(Rc::new(s.to_ascii_uppercase()))),
         (Value::Str(s), "bytes", []) => Ok(Value::Bytes(Rc::new(s.as_bytes().to_vec()))),
         (Value::Str(s), "parse_int", []) => match s.trim().parse::<i128>() {
-            Ok(i) => Ok(Value::Variant { path: "Some".into(), payload: Rc::new(vec![Value::Int(i)]) }),
-            Err(_) => Ok(Value::Variant { path: "None".into(), payload: Rc::new(vec![]) }),
+            Ok(i) => Ok(Value::Variant {
+                path: "Some".into(),
+                payload: Rc::new(vec![Value::Int(i)]),
+            }),
+            Err(_) => Ok(Value::Variant {
+                path: "None".into(),
+                payload: Rc::new(vec![]),
+            }),
         },
 
         // --- arrays. Persistent: `push` returns a new array rather than mutating, which
@@ -1439,7 +1669,10 @@ fn builtin_method(recv: &Value, name: &str, args: &[Value], at: Span) -> Result<
         }
         (Value::Array(xs), "get", [Value::Int(i)]) => {
             if *i < 0 || *i as usize >= xs.len() {
-                Ok(Value::Variant { path: "None".into(), payload: Rc::new(vec![]) })
+                Ok(Value::Variant {
+                    path: "None".into(),
+                    payload: Rc::new(vec![]),
+                })
             } else {
                 Ok(Value::Variant {
                     path: "Some".into(),
@@ -1448,14 +1681,22 @@ fn builtin_method(recv: &Value, name: &str, args: &[Value], at: Span) -> Result<
             }
         }
         (Value::Array(xs), "last", []) => match xs.last() {
-            Some(v) => Ok(Value::Variant { path: "Some".into(), payload: Rc::new(vec![v.clone()]) }),
-            None => Ok(Value::Variant { path: "None".into(), payload: Rc::new(vec![]) }),
+            Some(v) => Ok(Value::Variant {
+                path: "Some".into(),
+                payload: Rc::new(vec![v.clone()]),
+            }),
+            None => Ok(Value::Variant {
+                path: "None".into(),
+                payload: Rc::new(vec![]),
+            }),
         },
 
         // --- character classification. In the shim rather than in Niles because the
         // alternative is a Niles-side table, and a bootstrap should not begin by
         // transcribing ASCII. ---
-        (Value::Int(c), "is_digit", []) => Ok(Value::Bool((b'0' as i128..=b'9' as i128).contains(c))),
+        (Value::Int(c), "is_digit", []) => {
+            Ok(Value::Bool((b'0' as i128..=b'9' as i128).contains(c)))
+        }
         (Value::Int(c), "is_alpha", []) => Ok(Value::Bool(
             (b'a' as i128..=b'z' as i128).contains(c) || (b'A' as i128..=b'Z' as i128).contains(c),
         )),
@@ -1470,9 +1711,10 @@ fn builtin_method(recv: &Value, name: &str, args: &[Value], at: Span) -> Result<
                 || (b'0' as i128..=b'9' as i128).contains(c)
                 || *c == b'_' as i128,
         )),
-        (Value::Int(c), "is_space", []) => {
-            Ok(Value::Bool(matches!(*c as u8, b' ' | b'\t' | b'\n' | b'\r')))
-        }
+        (Value::Int(c), "is_space", []) => Ok(Value::Bool(matches!(
+            *c as u8,
+            b' ' | b'\t' | b'\n' | b'\r'
+        ))),
 
         // --- Option/Result ---
         (Value::Variant { path, payload }, "unwrap_or", [d]) => {
@@ -1482,10 +1724,17 @@ fn builtin_method(recv: &Value, name: &str, args: &[Value], at: Span) -> Result<
                 Ok(d.clone())
             }
         }
-        (Value::Variant { path, .. }, "is_some", []) => Ok(Value::Bool(variant_matches("Some", path))),
-        (Value::Variant { path, .. }, "is_none", []) => Ok(Value::Bool(variant_matches("None", path))),
+        (Value::Variant { path, .. }, "is_some", []) => {
+            Ok(Value::Bool(variant_matches("Some", path)))
+        }
+        (Value::Variant { path, .. }, "is_none", []) => {
+            Ok(Value::Bool(variant_matches("None", path)))
+        }
 
-        (r, n, _) => Err(Error::NoField { name: format!("{n} on {}", r.type_name()), at }),
+        (r, n, _) => Err(Error::NoField {
+            name: format!("{n} on {}", r.type_name()),
+            at,
+        }),
     }
 }
 
@@ -1510,7 +1759,11 @@ pub struct DeterminismReport {
 /// establish cross-target determinism, which needs the same program run on ARM64 and
 /// x86-64 and the outputs compared, and which this gate cannot perform from inside one
 /// process. §E.19 should say so, and the return type does not pretend otherwise.
-pub fn determinism_gate(prog: &Program, entry: &str, runs: usize) -> Result<DeterminismReport, Error> {
+pub fn determinism_gate(
+    prog: &Program,
+    entry: &str,
+    runs: usize,
+) -> Result<DeterminismReport, Error> {
     determinism_gate_deep(prog, entry, runs, DEFAULT_MAX_DEPTH)
 }
 
@@ -1536,14 +1789,22 @@ pub fn determinism_gate_deep(
             Some(f) => {
                 if *f != it.output {
                     divergence = Some(
-                        f.iter().zip(&it.output).position(|(a, b)| a != b).unwrap_or(f.len().min(it.output.len())),
+                        f.iter()
+                            .zip(&it.output)
+                            .position(|(a, b)| a != b)
+                            .unwrap_or(f.len().min(it.output.len())),
                     );
                 }
             }
         }
     }
     let output = first.unwrap_or_default();
-    Ok(DeterminismReport { runs, identical: divergence.is_none(), output, first_divergence: divergence })
+    Ok(DeterminismReport {
+        runs,
+        identical: divergence.is_none(),
+        output,
+        first_divergence: divergence,
+    })
 }
 
 #[cfg(test)]
@@ -1572,7 +1833,13 @@ mod tests {
 
     #[test]
     fn arithmetic_and_let_work() {
-        assert_eq!(run("fn main() -> i64 { let x = 2; let y = 3; x * y + 1 }", "main"), Ok(Value::Int(7)));
+        assert_eq!(
+            run(
+                "fn main() -> i64 { let x = 2; let y = 3; x * y + 1 }",
+                "main"
+            ),
+            Ok(Value::Int(7))
+        );
     }
 
     #[test]
@@ -1736,7 +2003,10 @@ mod tests {
         it.load(&prog);
         assert!(matches!(
             it.call("main", vec![]),
-            Err(Error::NotInSubset { form: "money arithmetic (checked tier only)", .. })
+            Err(Error::NotInSubset {
+                form: "money arithmetic (checked tier only)",
+                ..
+            })
         ));
     }
 
@@ -1749,14 +2019,20 @@ mod tests {
         it.load(&prog);
         assert!(matches!(
             it.call("main", vec![]),
-            Err(Error::NotInSubset { form: "floating-point literal", .. })
+            Err(Error::NotInSubset {
+                form: "floating-point literal",
+                ..
+            })
         ));
     }
 
     #[test]
     fn overflow_is_an_error_and_never_a_wrap() {
         let src = "fn main() -> i64 { let big = 170141183460469231731687303715884105727; big + 1 }";
-        assert!(matches!(run(src, "main"), Err(Error::Overflow { op: "+", .. })));
+        assert!(matches!(
+            run(src, "main"),
+            Err(Error::Overflow { op: "+", .. })
+        ));
     }
 
     #[test]
@@ -1771,7 +2047,14 @@ mod tests {
     fn an_out_of_bounds_index_names_the_index_and_the_length() {
         let src = "fn main() -> i64 { let xs = [1, 2]; xs[5] }";
         let e = run(src, "main").unwrap_err();
-        assert!(matches!(e, Error::IndexOutOfBounds { index: 5, len: 2, .. }));
+        assert!(matches!(
+            e,
+            Error::IndexOutOfBounds {
+                index: 5,
+                len: 2,
+                ..
+            }
+        ));
         // And the span must point at the indexing expression, not at the function. We
         // check the text it covers rather than its offsets, so the assertion survives an
         // edit to the string above.
@@ -1781,7 +2064,10 @@ mod tests {
 
     #[test]
     fn an_unbound_name_is_reported_rather_than_defaulted() {
-        assert!(matches!(run("fn main() -> i64 { nope }", "main"), Err(Error::Unbound { .. })));
+        assert!(matches!(
+            run("fn main() -> i64 { nope }", "main"),
+            Err(Error::Unbound { .. })
+        ));
     }
 
     #[test]
@@ -1886,7 +2172,10 @@ mod tests {
         let prog = deep_program((DEFAULT_MAX_DEPTH as i64) / 2);
         let mut it = Interp::new();
         it.load(&prog);
-        assert_eq!(it.call("main", vec![]), Ok(Value::Int((DEFAULT_MAX_DEPTH as i128) / 2)));
+        assert_eq!(
+            it.call("main", vec![]),
+            Ok(Value::Int((DEFAULT_MAX_DEPTH as i128) / 2))
+        );
     }
 
     #[test]
@@ -1899,7 +2188,9 @@ mod tests {
             let mut it = Interp::new().with_max_depth(1200);
             it.load(&prog);
             // `Value` is not `Send`, so the answer crosses back as a rendering.
-            it.call("main", vec![]).map(|v| v.render()).map_err(|e| e.message())
+            it.call("main", vec![])
+                .map(|v| v.render())
+                .map_err(|e| e.message())
         })
         .expect("the worker must not crash");
         assert_eq!(r, Ok("600".to_string()));

@@ -81,11 +81,22 @@ fn with_body(body: &str) -> String {
 fn the_worked_example_compiles_clean_and_verifies() {
     let src = include_str!("../../../examples/demo_bank.niles");
     let c = compile(src);
-    assert!(c.error_codes.is_empty(), "the worked example must compile clean:\n{}", c.diags);
+    assert!(
+        c.error_codes.is_empty(),
+        "the worked example must compile clean:\n{}",
+        c.diags
+    );
     let r = verify::verify(&c.circuit);
     assert!(r.is_ok(), "and its circuit must verify:\n{}", r.render());
-    assert!(c.proved >= 3, "it should prove its conservation obligations, proved {}", c.proved);
-    assert_eq!(c.runtime_obligations, 0, "and discharge none to the runtime");
+    assert!(
+        c.proved >= 3,
+        "it should prove its conservation obligations, proved {}",
+        c.proved
+    );
+    assert_eq!(
+        c.runtime_obligations, 0,
+        "and discharge none to the runtime"
+    );
 }
 
 #[test]
@@ -169,8 +180,16 @@ fn t(a: Id<Account>, b: Id<Account>) -> Result<(), E> ! { append, debit<usd>, cr
 }",
     ));
     assert!(c.error_codes.contains(&"NL0300"), "{}", c.diags);
-    assert!(c.diags.contains("-40.00"), "the residue must be named in minor units at the currency's scale:\n{}", c.diags);
-    assert!(c.diags.contains("conserve per"), "and the rule that forbids it must be shown:\n{}", c.diags);
+    assert!(
+        c.diags.contains("-40.00"),
+        "the residue must be named in minor units at the currency's scale:\n{}",
+        c.diags
+    );
+    assert!(
+        c.diags.contains("conserve per"),
+        "and the rule that forbids it must be shown:\n{}",
+        c.diags
+    );
 }
 
 #[test]
@@ -184,7 +203,11 @@ fn t(a: Id<Account>, b: Id<Account>) -> Result<(), E> ! { append, debit<usd>, cr
 }",
     ));
     let violations = c.error_codes.iter().filter(|x| **x == "NL0300").count();
-    assert_eq!(violations, 2, "both currencies must be reported, not netted:\n{}", c.diags);
+    assert_eq!(
+        violations, 2,
+        "both currencies must be reported, not netted:\n{}",
+        c.diags
+    );
 }
 
 #[test]
@@ -195,7 +218,11 @@ fn t() -> Money<usd> { 10.00 usd + 5.00 eur }
 ",
     ));
     assert!(c.error_codes.contains(&"NL0250"), "{}", c.diags);
-    assert!(c.diags.contains("use an `fx`"), "the error must point at the construct that does work:\n{}", c.diags);
+    assert!(
+        c.diags.contains("use an `fx`"),
+        "the error must point at the construct that does work:\n{}",
+        c.diags
+    );
 }
 
 #[test]
@@ -215,14 +242,22 @@ fn t(a: Id<Account>, b: Id<Account>, r: Rate) -> Result<(), E>
 ",
     ));
     assert!(c.error_codes.is_empty(), "{}", c.diags);
-    assert!(c.proved >= 2, "each leg is its own obligation, proved {} ", c.proved);
+    assert!(
+        c.proved >= 2,
+        "each leg is its own obligation, proved {} ",
+        c.proved
+    );
 }
 
 #[test]
 fn a_money_literal_at_the_wrong_scale_is_an_error_not_a_rounding() {
     let c = compile(&with_body("}\nfn t() -> Money<jpy> { 100.50 jpy }\n"));
     assert!(c.error_codes.contains(&"NL0240"), "{}", c.diags);
-    assert!(c.diags.contains("scale 0"), "the declared scale must be shown:\n{}", c.diags);
+    assert!(
+        c.diags.contains("scale 0"),
+        "the declared scale must be shown:\n{}",
+        c.diags
+    );
 }
 
 #[test]
@@ -235,8 +270,15 @@ fn t(a: Id<Account>, m: Money<usd>) -> Result<(), E> ! { append, debit<usd> } {
     txn idem(\"k\") { let d = debit(a, m)?; post(d) }
 }",
     ));
-    assert!(!c.error_codes.contains(&"NL0300"), "an opaque amount must not be accused:\n{}", c.diags);
-    assert_eq!(c.runtime_obligations, 1, "it must be counted as discharged to the runtime instead");
+    assert!(
+        !c.error_codes.contains(&"NL0300"),
+        "an opaque amount must not be accused:\n{}",
+        c.diags
+    );
+    assert_eq!(
+        c.runtime_obligations, 1,
+        "it must be counted as discharged to the runtime instead"
+    );
 }
 
 // ============ the effect checker, on source text ============
@@ -250,8 +292,16 @@ fn rung_monotonicity_is_enforced_on_real_source() {
         serve { consistency: ledger_consistent, materialize: demand };
 }",
     ));
-    assert!(c.error_codes.contains(&"NL0311"), "a strict view over a stale one must be rejected:\n{}", c.diags);
-    assert!(c.diags.contains("no fresher than its stalest input"), "{}", c.diags);
+    assert!(
+        c.error_codes.contains(&"NL0311"),
+        "a strict view over a stale one must be rejected:\n{}",
+        c.diags
+    );
+    assert!(
+        c.diags.contains("no fresher than its stalest input"),
+        "{}",
+        c.diags
+    );
 }
 
 #[test]
@@ -263,7 +313,11 @@ fn the_safe_direction_of_rung_monotonicity_is_permitted() {
         serve { consistency: bounded(epochs: 8), materialize: auto };
 }",
     ));
-    assert!(!c.error_codes.contains(&"NL0311"), "a weak view over a strict one is fine:\n{}", c.diags);
+    assert!(
+        !c.error_codes.contains(&"NL0311"),
+        "a weak view over a strict one is fine:\n{}",
+        c.diags
+    );
 }
 
 #[test]
@@ -315,7 +369,11 @@ fn t(a: Id<Account>) -> Result<(), E> ! { append, hold<usd> } {
 }
 ",
     ));
-    assert!(dropped.error_codes.contains(&"NL0320"), "a dropped hold must be caught:\n{}", dropped.diags);
+    assert!(
+        dropped.error_codes.contains(&"NL0320"),
+        "a dropped hold must be caught:\n{}",
+        dropped.diags
+    );
 
     let twice = compile(&with_body(
         "}
@@ -326,24 +384,41 @@ fn t(a: Id<Account>) -> Result<(), E> ! { append, hold<usd> } {
 }
 ",
     ));
-    assert!(twice.error_codes.contains(&"NL0321"), "a doubly-resolved hold must be caught:\n{}", twice.diags);
-    assert!(twice.diags.contains("release the same reservation twice"), "{}", twice.diags);
+    assert!(
+        twice.error_codes.contains(&"NL0321"),
+        "a doubly-resolved hold must be caught:\n{}",
+        twice.diags
+    );
+    assert!(
+        twice.diags.contains("release the same reservation twice"),
+        "{}",
+        twice.diags
+    );
 }
 
 // ============ base immutability ============
 
 #[test]
 fn a_ledger_cannot_be_updated_or_deleted_from() {
-    for verb in ["update postings set amt = 0.00 usd;", "delete from postings;"] {
+    for verb in [
+        "update postings set amt = 0.00 usd;",
+        "delete from postings;",
+    ] {
         let c = compile(&with_body(&format!("}}\nfn t() {{ {verb} }}\n")));
-        assert!(c.error_codes.contains(&"NL0230"), "`{verb}` must be rejected:\n{}", c.diags);
+        assert!(
+            c.error_codes.contains(&"NL0230"),
+            "`{verb}` must be rejected:\n{}",
+            c.diags
+        );
         assert!(c.diags.contains("history is the authority"), "{}", c.diags);
     }
 }
 
 #[test]
 fn a_table_may_be_updated() {
-    let c = compile(&with_body("}\nfn t() { update accounts set owner = \"x\"; }\n"));
+    let c = compile(&with_body(
+        "}\nfn t() { update accounts set owner = \"x\"; }\n",
+    ));
     assert!(!c.error_codes.contains(&"NL0230"), "{}", c.diags);
 }
 
@@ -382,5 +457,9 @@ schema b {
 ";
     let c = compile(src);
     assert!(c.warn_codes.contains(&"NL0223"), "{}", c.diags);
-    assert!(c.diags.contains("80-112x"), "the warning cites the measured constant factor:\n{}", c.diags);
+    assert!(
+        c.diags.contains("80-112x"),
+        "the warning cites the measured constant factor:\n{}",
+        c.diags
+    );
 }

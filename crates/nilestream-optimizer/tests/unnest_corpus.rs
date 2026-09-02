@@ -156,7 +156,11 @@ fn served() -> ServeContract {
 
 fn source(c: &mut Circuit, name: &str, arity: u16) -> NodeId {
     let id = c.add(
-        Op::Source { relation: name.into(), is_base: true, anchor_key: vec![0] },
+        Op::Source {
+            relation: name.into(),
+            is_base: true,
+            anchor_key: vec![0],
+        },
         vec![],
         ServeContract {
             consistency: Consistency::LedgerConsistent,
@@ -194,11 +198,20 @@ fn apply_case(
     let o = source(&mut c, outer_rel, outer_arity);
     let mut i = source(&mut c, inner_rel, inner_arity);
     if let Some(p) = inner_filter {
-        i = c.add(Op::Filter { predicate: p }, vec![i], internal_contract(), "inner filter");
+        i = c.add(
+            Op::Filter { predicate: p },
+            vec![i],
+            internal_contract(),
+            "inner filter",
+        );
     }
     let a = c.add(Op::Apply { kind, correlation }, vec![o, i], served(), name);
     c.set_output("out", a);
-    Case { name, nested: c, expect }
+    Case {
+        name,
+        nested: c,
+        expect,
+    }
 }
 
 fn gt(col: ColIdx, lit: i128) -> Scalar {
@@ -215,33 +228,285 @@ fn corpus() -> Vec<Case> {
     let corr = || vec![(1u16, 0u16)];
     vec![
         // --- exists / not exists ---
-        apply_case("exists, correlated", "orders", 3, "payments", 2, None, Exists, corr(), "exists-to-semi-join"),
-        apply_case("exists, no matching group", "orders", 3, "empty", 2, None, Exists, corr(), "exists-to-semi-join"),
-        apply_case("exists, with an inner filter", "orders", 3, "payments", 2, Some(gt(1, 300)), Exists, corr(), "exists-to-semi-join"),
-        apply_case("exists, uncorrelated", "orders", 3, "payments", 2, None, Exists, vec![], "exists-to-semi-join"),
-        apply_case("not exists, correlated", "orders", 3, "payments", 2, None, NotExists, corr(), "not-exists-to-anti-join"),
-        apply_case("not exists, empty inner", "orders", 3, "empty", 2, None, NotExists, corr(), "not-exists-to-anti-join"),
-        apply_case("not exists, with an inner filter", "orders", 3, "payments", 2, Some(gt(1, 300)), NotExists, corr(), "not-exists-to-anti-join"),
-        apply_case("not exists, uncorrelated", "orders", 3, "empty", 2, None, NotExists, vec![], "not-exists-to-anti-join"),
+        apply_case(
+            "exists, correlated",
+            "orders",
+            3,
+            "payments",
+            2,
+            None,
+            Exists,
+            corr(),
+            "exists-to-semi-join",
+        ),
+        apply_case(
+            "exists, no matching group",
+            "orders",
+            3,
+            "empty",
+            2,
+            None,
+            Exists,
+            corr(),
+            "exists-to-semi-join",
+        ),
+        apply_case(
+            "exists, with an inner filter",
+            "orders",
+            3,
+            "payments",
+            2,
+            Some(gt(1, 300)),
+            Exists,
+            corr(),
+            "exists-to-semi-join",
+        ),
+        apply_case(
+            "exists, uncorrelated",
+            "orders",
+            3,
+            "payments",
+            2,
+            None,
+            Exists,
+            vec![],
+            "exists-to-semi-join",
+        ),
+        apply_case(
+            "not exists, correlated",
+            "orders",
+            3,
+            "payments",
+            2,
+            None,
+            NotExists,
+            corr(),
+            "not-exists-to-anti-join",
+        ),
+        apply_case(
+            "not exists, empty inner",
+            "orders",
+            3,
+            "empty",
+            2,
+            None,
+            NotExists,
+            corr(),
+            "not-exists-to-anti-join",
+        ),
+        apply_case(
+            "not exists, with an inner filter",
+            "orders",
+            3,
+            "payments",
+            2,
+            Some(gt(1, 300)),
+            NotExists,
+            corr(),
+            "not-exists-to-anti-join",
+        ),
+        apply_case(
+            "not exists, uncorrelated",
+            "orders",
+            3,
+            "empty",
+            2,
+            None,
+            NotExists,
+            vec![],
+            "not-exists-to-anti-join",
+        ),
         // --- in ---
-        apply_case("in, correlated", "orders", 3, "payments", 2, None, In { probe: 2, inner: 1 }, corr(), "in-to-semi-join"),
-        apply_case("in, against a duplicated inner", "orders", 3, "payments", 2, None, In { probe: 2, inner: 1 }, vec![], "in-to-semi-join"),
-        apply_case("in, inner column all null", "orders", 3, "all_null", 2, None, In { probe: 2, inner: 1 }, corr(), "in-to-semi-join"),
-        apply_case("in, empty inner", "orders", 3, "empty", 2, None, In { probe: 2, inner: 1 }, corr(), "in-to-semi-join"),
+        apply_case(
+            "in, correlated",
+            "orders",
+            3,
+            "payments",
+            2,
+            None,
+            In { probe: 2, inner: 1 },
+            corr(),
+            "in-to-semi-join",
+        ),
+        apply_case(
+            "in, against a duplicated inner",
+            "orders",
+            3,
+            "payments",
+            2,
+            None,
+            In { probe: 2, inner: 1 },
+            vec![],
+            "in-to-semi-join",
+        ),
+        apply_case(
+            "in, inner column all null",
+            "orders",
+            3,
+            "all_null",
+            2,
+            None,
+            In { probe: 2, inner: 1 },
+            corr(),
+            "in-to-semi-join",
+        ),
+        apply_case(
+            "in, empty inner",
+            "orders",
+            3,
+            "empty",
+            2,
+            None,
+            In { probe: 2, inner: 1 },
+            corr(),
+            "in-to-semi-join",
+        ),
         // --- not in: eight cases, because one wrong one is the kill criterion ---
-        apply_case("not in, correlated, nulls on the right", "orders", 3, "payments", 2, None, NotIn { probe: 2, inner: 1 }, corr(), "not-in-to-anti-join-with-null-witness"),
-        apply_case("not in, correlated, no nulls anywhere", "orders", 3, "flags", 2, None, NotIn { probe: 2, inner: 1 }, corr(), "not-in-to-anti-join-with-null-witness"),
-        apply_case("not in, uncorrelated, one null poisons everything", "orders", 3, "payments", 2, None, NotIn { probe: 2, inner: 1 }, vec![], "not-in-to-anti-join-with-null-witness"),
-        apply_case("not in, uncorrelated, no nulls", "orders", 3, "flags", 2, None, NotIn { probe: 2, inner: 1 }, vec![], "not-in-to-anti-join-with-null-witness"),
-        apply_case("not in, inner column entirely null", "orders", 3, "all_null", 2, None, NotIn { probe: 2, inner: 1 }, corr(), "not-in-to-anti-join-with-null-witness"),
-        apply_case("not in, empty inner is vacuously true", "orders", 3, "empty", 2, None, NotIn { probe: 2, inner: 1 }, corr(), "not-in-to-anti-join-with-null-witness"),
-        apply_case("not in, inner filtered to nothing", "orders", 3, "payments", 2, Some(gt(1, 100_000)), NotIn { probe: 2, inner: 1 }, corr(), "not-in-to-anti-join-with-null-witness"),
-        apply_case("not in, a group that both matches and has a null", "orders", 3, "payments", 2, Some(gt(0, 30)), NotIn { probe: 2, inner: 1 }, corr(), "not-in-to-anti-join-with-null-witness"),
+        apply_case(
+            "not in, correlated, nulls on the right",
+            "orders",
+            3,
+            "payments",
+            2,
+            None,
+            NotIn { probe: 2, inner: 1 },
+            corr(),
+            "not-in-to-anti-join-with-null-witness",
+        ),
+        apply_case(
+            "not in, correlated, no nulls anywhere",
+            "orders",
+            3,
+            "flags",
+            2,
+            None,
+            NotIn { probe: 2, inner: 1 },
+            corr(),
+            "not-in-to-anti-join-with-null-witness",
+        ),
+        apply_case(
+            "not in, uncorrelated, one null poisons everything",
+            "orders",
+            3,
+            "payments",
+            2,
+            None,
+            NotIn { probe: 2, inner: 1 },
+            vec![],
+            "not-in-to-anti-join-with-null-witness",
+        ),
+        apply_case(
+            "not in, uncorrelated, no nulls",
+            "orders",
+            3,
+            "flags",
+            2,
+            None,
+            NotIn { probe: 2, inner: 1 },
+            vec![],
+            "not-in-to-anti-join-with-null-witness",
+        ),
+        apply_case(
+            "not in, inner column entirely null",
+            "orders",
+            3,
+            "all_null",
+            2,
+            None,
+            NotIn { probe: 2, inner: 1 },
+            corr(),
+            "not-in-to-anti-join-with-null-witness",
+        ),
+        apply_case(
+            "not in, empty inner is vacuously true",
+            "orders",
+            3,
+            "empty",
+            2,
+            None,
+            NotIn { probe: 2, inner: 1 },
+            corr(),
+            "not-in-to-anti-join-with-null-witness",
+        ),
+        apply_case(
+            "not in, inner filtered to nothing",
+            "orders",
+            3,
+            "payments",
+            2,
+            Some(gt(1, 100_000)),
+            NotIn { probe: 2, inner: 1 },
+            corr(),
+            "not-in-to-anti-join-with-null-witness",
+        ),
+        apply_case(
+            "not in, a group that both matches and has a null",
+            "orders",
+            3,
+            "payments",
+            2,
+            Some(gt(0, 30)),
+            NotIn { probe: 2, inner: 1 },
+            corr(),
+            "not-in-to-anti-join-with-null-witness",
+        ),
         // --- correlated scalar subqueries ---
-        apply_case("scalar sum, correlated", "orders", 3, "payments", 2, None, Scalar { agg: Agg::Sum, expr: niles_ir::operator::Scalar::Column(1) }, corr(), "scalar-to-outer-join-with-aggregate"),
-        apply_case("scalar count over an empty group", "orders", 3, "empty", 2, None, Scalar { agg: Agg::Count, expr: niles_ir::operator::Scalar::Column(1) }, corr(), "scalar-to-outer-join-with-aggregate"),
-        apply_case("scalar min, with nulls in the group", "orders", 3, "payments", 2, None, Scalar { agg: Agg::Min, expr: niles_ir::operator::Scalar::Column(1) }, corr(), "scalar-to-outer-join-with-aggregate"),
-        apply_case("scalar max over a filtered inner", "orders", 3, "payments", 2, Some(gt(1, 200)), Scalar { agg: Agg::Max, expr: niles_ir::operator::Scalar::Column(1) }, corr(), "scalar-to-outer-join-with-aggregate"),
+        apply_case(
+            "scalar sum, correlated",
+            "orders",
+            3,
+            "payments",
+            2,
+            None,
+            Scalar {
+                agg: Agg::Sum,
+                expr: niles_ir::operator::Scalar::Column(1),
+            },
+            corr(),
+            "scalar-to-outer-join-with-aggregate",
+        ),
+        apply_case(
+            "scalar count over an empty group",
+            "orders",
+            3,
+            "empty",
+            2,
+            None,
+            Scalar {
+                agg: Agg::Count,
+                expr: niles_ir::operator::Scalar::Column(1),
+            },
+            corr(),
+            "scalar-to-outer-join-with-aggregate",
+        ),
+        apply_case(
+            "scalar min, with nulls in the group",
+            "orders",
+            3,
+            "payments",
+            2,
+            None,
+            Scalar {
+                agg: Agg::Min,
+                expr: niles_ir::operator::Scalar::Column(1),
+            },
+            corr(),
+            "scalar-to-outer-join-with-aggregate",
+        ),
+        apply_case(
+            "scalar max over a filtered inner",
+            "orders",
+            3,
+            "payments",
+            2,
+            Some(gt(1, 200)),
+            Scalar {
+                agg: Agg::Max,
+                expr: niles_ir::operator::Scalar::Column(1),
+            },
+            corr(),
+            "scalar-to-outer-join-with-aggregate",
+        ),
     ]
 }
 
@@ -250,9 +515,16 @@ fn corpus() -> Vec<Case> {
 #[test]
 fn the_corpus_is_large_enough_and_weighted_toward_not_in() {
     let c = corpus();
-    assert!(c.len() >= 20, "the roadmap asks for at least twenty, got {}", c.len());
+    assert!(
+        c.len() >= 20,
+        "the roadmap asks for at least twenty, got {}",
+        c.len()
+    );
     let not_in = c.iter().filter(|x| x.name.starts_with("not in")).count();
-    assert!(not_in >= 5, "at least five `not in` cases with nulls on each side, got {not_in}");
+    assert!(
+        not_in >= 5,
+        "at least five `not in` cases with nulls on each side, got {not_in}"
+    );
 }
 
 #[test]
@@ -264,16 +536,31 @@ fn every_case_unnests_and_denotes_the_same_zset() {
     let mut checked = 0;
     for case in corpus() {
         let (flat, report) = unnest(&case.nested);
-        assert!(report.is_complete(), "`{}` was refused:\n{}", case.name, report.render());
-        assert_eq!(report.fired.len(), 1, "`{}` should fire exactly one rewrite", case.name);
+        assert!(
+            report.is_complete(),
+            "`{}` was refused:\n{}",
+            case.name,
+            report.render()
+        );
+        assert_eq!(
+            report.fired.len(),
+            1,
+            "`{}` should fire exactly one rewrite",
+            case.name
+        );
         assert_eq!(report.fired[0].name(), case.expect, "case `{}`", case.name);
 
         let (before, _) = run(&case.nested, "out", &src);
         let (after, _) = run(&flat, "out", &src);
         assert_eq!(
-            before, after,
+            before,
+            after,
             "\ncase: {}\nnested:   {:?}\nunnested: {:?}\n\nnested plan:\n{}\nunnested plan:\n{}",
-            case.name, before, after, case.nested.explain(), flat.explain()
+            case.name,
+            before,
+            after,
+            case.nested.explain(),
+            flat.explain()
         );
         checked += 1;
     }
@@ -293,7 +580,11 @@ fn the_unnested_plan_holds_no_apply_and_verifies() {
         // The access audit is not the subject here — a corpus circuit has no consumer that
         // reads every field — so only the structural and semantic codes are asserted.
         let real: Vec<_> = r.violations.iter().filter(|v| v.code != "IR020").collect();
-        assert!(real.is_empty(), "`{}` failed verification: {real:?}", case.name);
+        assert!(
+            real.is_empty(),
+            "`{}` failed verification: {real:?}",
+            case.name
+        );
     }
 }
 
@@ -358,7 +649,11 @@ fn not_in_oracle(
 
 /// The inner relation a case actually sees, after any filter below the apply.
 fn effective_inner(c: &Circuit, src: &BTreeMap<String, ZSet>) -> ZSet {
-    let apply = c.nodes.iter().find(|n| matches!(n.op, Op::Apply { .. })).expect("an apply");
+    let apply = c
+        .nodes
+        .iter()
+        .find(|n| matches!(n.op, Op::Apply { .. }))
+        .expect("an apply");
     niles_ir::eval::run_node(c, apply.inputs[1], src).0
 }
 
@@ -366,8 +661,16 @@ fn effective_inner(c: &Circuit, src: &BTreeMap<String, ZSet>) -> ZSet {
 fn every_not_in_case_matches_a_hand_written_three_valued_oracle() {
     let src = data();
     let mut checked = 0;
-    for case in corpus().into_iter().filter(|c| c.name.starts_with("not in")) {
-        let apply = case.nested.nodes.iter().find(|n| matches!(n.op, Op::Apply { .. })).unwrap();
+    for case in corpus()
+        .into_iter()
+        .filter(|c| c.name.starts_with("not in"))
+    {
+        let apply = case
+            .nested
+            .nodes
+            .iter()
+            .find(|n| matches!(n.op, Op::Apply { .. }))
+            .unwrap();
         let (kind, correlation) = match &apply.op {
             Op::Apply { kind, correlation } => (kind.clone(), correlation.clone()),
             _ => unreachable!(),
@@ -376,17 +679,34 @@ fn every_not_in_case_matches_a_hand_written_three_valued_oracle() {
             ApplyKind::NotIn { probe, inner } => (probe, inner),
             _ => unreachable!(),
         };
-        let want = not_in_oracle(&orders(), &effective_inner(&case.nested, &src), &correlation, probe, icol);
+        let want = not_in_oracle(
+            &orders(),
+            &effective_inner(&case.nested, &src),
+            &correlation,
+            probe,
+            icol,
+        );
 
         let (nested, _) = run(&case.nested, "out", &src);
-        assert_eq!(nested, want, "the *nested* form of `{}` is not SQL's `not in`", case.name);
+        assert_eq!(
+            nested, want,
+            "the *nested* form of `{}` is not SQL's `not in`",
+            case.name
+        );
 
         let (flat, _) = unnest(&case.nested);
         let (unnested, _) = run(&flat, "out", &src);
-        assert_eq!(unnested, want, "the *unnested* form of `{}` is not SQL's `not in`", case.name);
+        assert_eq!(
+            unnested, want,
+            "the *unnested* form of `{}` is not SQL's `not in`",
+            case.name
+        );
         checked += 1;
     }
-    assert_eq!(checked, 8, "eight `not in` cases, checked against the oracle");
+    assert_eq!(
+        checked, 8,
+        "eight `not in` cases, checked against the oracle"
+    );
 }
 
 #[test]
@@ -401,14 +721,23 @@ fn one_null_in_an_uncorrelated_subquery_returns_no_rows() {
         .unwrap();
     let (flat, _) = unnest(&case.nested);
     let (out, _) = run(&flat, "out", &src);
-    assert!(out.is_empty(), "a single null in the subquery must return no rows, got {out:?}");
+    assert!(
+        out.is_empty(),
+        "a single null in the subquery must return no rows, got {out:?}"
+    );
 
     // And the contrast, so the test is about the null rather than about the data: the same
     // query against a relation with no nulls returns rows.
-    let no_nulls = corpus().into_iter().find(|c| c.name == "not in, uncorrelated, no nulls").unwrap();
+    let no_nulls = corpus()
+        .into_iter()
+        .find(|c| c.name == "not in, uncorrelated, no nulls")
+        .unwrap();
     let (flat2, _) = unnest(&no_nulls.nested);
     let (out2, _) = run(&flat2, "out", &src);
-    assert!(!out2.is_empty(), "without nulls the same query must return rows");
+    assert!(
+        !out2.is_empty(),
+        "without nulls the same query must return rows"
+    );
 }
 
 #[test]
@@ -474,7 +803,10 @@ fn a_plain_anti_join_would_have_been_wrong_which_is_why_the_witness_exists() {
         "the null witness made no difference on this dataset, so the corpus does not test it"
     );
     assert!(correct.is_empty());
-    assert!(!wrong.is_empty(), "the naive rewrite returns rows SQL says do not exist");
+    assert!(
+        !wrong.is_empty(),
+        "the naive rewrite returns rows SQL says do not exist"
+    );
 }
 
 // ── refusals ─────────────────────────────────────────────────────────────────────────
@@ -487,9 +819,20 @@ fn unnesting_through_a_limit_is_refused_with_a_reason() {
     let mut c = Circuit::new();
     let o = source(&mut c, "orders", 3);
     let p = source(&mut c, "payments", 2);
-    let lim = c.add(Op::Limit { count: 3, offset: 0 }, vec![p], internal_contract(), "top 3");
+    let lim = c.add(
+        Op::Limit {
+            count: 3,
+            offset: 0,
+        },
+        vec![p],
+        internal_contract(),
+        "top 3",
+    );
     let a = c.add(
-        Op::Apply { kind: ApplyKind::Exists, correlation: vec![(1, 0)] },
+        Op::Apply {
+            kind: ApplyKind::Exists,
+            correlation: vec![(1, 0)],
+        },
         vec![o, lim],
         served(),
         "exists",
@@ -499,7 +842,11 @@ fn unnesting_through_a_limit_is_refused_with_a_reason() {
     let (_, report) = unnest(&c);
     assert!(!report.is_complete());
     assert_eq!(report.refused.len(), 1);
-    assert!(report.refused[0].reason.contains("limit"), "{}", report.refused[0].reason);
+    assert!(
+        report.refused[0].reason.contains("limit"),
+        "{}",
+        report.refused[0].reason
+    );
 }
 
 #[test]
@@ -508,20 +855,32 @@ fn unnesting_through_an_uncertified_udf_is_refused() {
     let o = source(&mut c, "orders", 3);
     let p = source(&mut c, "payments", 2);
     let f = c.add(
-        Op::Filter { predicate: Scalar::Udf { id: 7, args: vec![Scalar::Column(0)] } },
+        Op::Filter {
+            predicate: Scalar::Udf {
+                id: 7,
+                args: vec![Scalar::Column(0)],
+            },
+        },
         vec![p],
         internal_contract(),
         "udf filter",
     );
     let a = c.add(
-        Op::Apply { kind: ApplyKind::Exists, correlation: vec![(1, 0)] },
+        Op::Apply {
+            kind: ApplyKind::Exists,
+            correlation: vec![(1, 0)],
+        },
         vec![o, f],
         served(),
         "exists",
     );
     c.set_output("out", a);
     let (_, report) = unnest(&c);
-    assert!(report.refused[0].reason.contains("certified"), "{}", report.refused[0].reason);
+    assert!(
+        report.refused[0].reason.contains("certified"),
+        "{}",
+        report.refused[0].reason
+    );
 
     // Certify it and the same rewrite proceeds — the refusal is about determinism, not
     // about UDFs.
@@ -597,7 +956,12 @@ fn regime(case: &Case, src: &BTreeMap<String, ZSet>) -> Regime {
     if effective_inner(&case.nested, src).is_empty() {
         return Regime::EmptyInner;
     }
-    let apply = case.nested.nodes.iter().find(|n| matches!(n.op, Op::Apply { .. })).unwrap();
+    let apply = case
+        .nested
+        .nodes
+        .iter()
+        .find(|n| matches!(n.op, Op::Apply { .. }))
+        .unwrap();
     match &apply.op {
         Op::Apply { correlation, .. } if correlation.is_empty() => Regime::Uncorrelated,
         _ => Regime::Correlated,
@@ -617,8 +981,15 @@ fn the_three_regimes_are_all_represented_and_none_is_empty() {
             Regime::EmptyInner => n.2 += 1,
         }
     }
-    assert!(n.0 >= 12, "most of the corpus must be in the regime the gate measures, got {}", n.0);
-    assert!(n.1 >= 3 && n.2 >= 5, "the two exempt regimes must be represented: {n:?}");
+    assert!(
+        n.0 >= 12,
+        "most of the corpus must be in the regime the gate measures, got {}",
+        n.0
+    );
+    assert!(
+        n.1 >= 3 && n.2 >= 5,
+        "the two exempt regimes must be represented: {n:?}"
+    );
     assert_eq!(n.0 + n.1 + n.2, 24);
 }
 
@@ -647,8 +1018,14 @@ fn unnesting_is_asymptotically_cheaper_and_the_crossover_is_measured() {
     // k quadruples at each step, so a linear-in-k ratio quadruples too. Asserting a
     // trebling leaves room for the constant terms while still excluding a merely-constant
     // improvement, which is the thing being distinguished.
-    assert!(r16 > 3.0 * r4, "growth should be linear in k, not constant: {r4:.2} → {r16:.2}");
-    assert!(r64 > 3.0 * r16, "and it must keep growing: {r16:.2} → {r64:.2}");
+    assert!(
+        r16 > 3.0 * r4,
+        "growth should be linear in k, not constant: {r4:.2} → {r16:.2}"
+    );
+    assert!(
+        r64 > 3.0 * r16,
+        "and it must keep growing: {r16:.2} → {r64:.2}"
+    );
 
     // Every case in the measured regime, individually, at k = 8.
     let src = data_at(8);
@@ -728,9 +1105,11 @@ fn e17_write_the_measurement() {
     ));
 
     s.push_str("\n### The curve\n\n");
-    s.push_str("Whole corpus, and the correlated regime alone. The corpus total grows \
+    s.push_str(
+        "Whole corpus, and the correlated regime alone. The corpus total grows \
 sub-linearly because the uncorrelated cases stay quadratic in both plans and come to \
-dominate a sum that mixes regimes; the correlated column is the one the claim is about.\n\n");
+dominate a sum that mixes regimes; the correlated column is the one the claim is about.\n\n",
+    );
     s.push_str("| k | outer rows | inner rows | corpus nested | corpus unnested | corpus ratio | correlated ratio |\n|---|---|---|---|---|---|---|\n");
     for k in scales {
         let (n, u) = totals_at(k);
@@ -760,7 +1139,11 @@ dominate a sum that mixes regimes; the correlated column is the one the claim is
             }
             k *= 2;
         }
-        s.push_str(&format!("| {} | {} |\n", case.name, if k <= 64 { k.to_string() } else { ">64".into() }));
+        s.push_str(&format!(
+            "| {} | {} |\n",
+            case.name,
+            if k <= 64 { k.to_string() } else { ">64".into() }
+        ));
     }
 
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -818,7 +1201,13 @@ fn a_semi_join_that_widened_is_rejected_as_duplicate_inflation() {
         "semi",
     );
     c.set_output("out", j);
-    assert!(verify::verify(&c).violations.iter().all(|v| v.code != "IR017"), "a correct semi-join passes");
+    assert!(
+        verify::verify(&c)
+            .violations
+            .iter()
+            .all(|v| v.code != "IR017"),
+        "a correct semi-join passes"
+    );
 
     // Now widen it by hand, as a mis-implementation would.
     c.nodes[j as usize].arity = 5;
@@ -836,9 +1225,19 @@ fn the_evaluator_and_the_verifier_agree_that_a_semi_join_does_not_inflate() {
     // actual weights. Customer 10 has three payment rows, one of them a duplicate; the
     // `exists` over it must yield each order once.
     let src = data();
-    let case = corpus().into_iter().find(|c| c.name == "exists, correlated").unwrap();
+    let case = corpus()
+        .into_iter()
+        .find(|c| c.name == "exists, correlated")
+        .unwrap();
     let (flat, _) = unnest(&case.nested);
     let (out, _) = run(&flat, "out", &src);
-    let for_ten: i128 = out.iter().filter(|(r, _)| r[1] == Value::Int(10)).map(|(_, w)| *w).sum();
-    assert_eq!(for_ten, 2, "two orders for customer 10, each once — not once per payment");
+    let for_ten: i128 = out
+        .iter()
+        .filter(|(r, _)| r[1] == Value::Int(10))
+        .map(|(_, w)| *w)
+        .sum();
+    assert_eq!(
+        for_ten, 2,
+        "two orders for customer 10, each once — not once per payment"
+    );
 }

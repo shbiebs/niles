@@ -21,17 +21,17 @@
 //! machine, and it is what makes the phase diagram in Chapter 9 reproducible by a reader on
 //! different hardware.
 
-pub mod ledger;
-pub mod view;
-pub mod policy;
-pub mod workload;
 pub mod cost;
+pub mod ledger;
+pub mod policy;
+pub mod view;
+pub mod workload;
 
-pub use ledger::{Ledger, Posting, Reject, Row, Hold, Outcome};
-pub use view::{PartialView, Slot, ViewMode, ViewStats};
-pub use policy::EvictionPolicy;
-pub use workload::Zipf;
 pub use cost::CostModel;
+pub use ledger::{Hold, Ledger, Outcome, Posting, Reject, Row};
+pub use policy::EvictionPolicy;
+pub use view::{PartialView, Slot, ViewMode, ViewStats};
+pub use workload::Zipf;
 
 /// Exact integer minor units at the currency's declared scale (never floating point).
 pub type Minor = i128;

@@ -4,9 +4,9 @@
 //! commutative semiring, and the factorization theorem means the most general annotation
 //! specializes to every other semantics by homomorphism. Three declarable modes.
 
-pub mod semiring;
 pub mod explain;
 pub mod impact;
+pub mod semiring;
 
 /// Per-view lineage mode (thesis 3.10). `Off` still stamps every answer with its anchor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

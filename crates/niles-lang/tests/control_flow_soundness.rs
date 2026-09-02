@@ -51,8 +51,18 @@ fn check(body: &str) -> Out {
     let (_l, ld) = lower::lower_program(&prog, &cat);
     d.extend(ld);
     Out {
-        errors: d.items.iter().filter(|x| x.severity == Severity::Error).map(|x| x.code).collect(),
-        warnings: d.items.iter().filter(|x| x.severity == Severity::Warning).map(|x| x.code).collect(),
+        errors: d
+            .items
+            .iter()
+            .filter(|x| x.severity == Severity::Error)
+            .map(|x| x.code)
+            .collect(),
+        warnings: d
+            .items
+            .iter()
+            .filter(|x| x.severity == Severity::Warning)
+            .map(|x| x.code)
+            .collect(),
         rendered: d.render(&src, "t.niles"),
         proved: report.conservation_proved,
         obligations: report.runtime_obligations,
@@ -77,8 +87,15 @@ fn two_arms_that_each_conserve_do_not_sum_into_a_violation() {
     }}
 }}"
     ));
-    assert!(o.errors.is_empty(), "a program in which every path conserves must compile:\n{}", o.rendered);
-    assert_eq!(o.proved, 1, "and the agreement between the arms must be *proved*, not merely tolerated");
+    assert!(
+        o.errors.is_empty(),
+        "a program in which every path conserves must compile:\n{}",
+        o.rendered
+    );
+    assert_eq!(
+        o.proved, 1,
+        "and the agreement between the arms must be *proved*, not merely tolerated"
+    );
 }
 
 #[test]
@@ -91,8 +108,16 @@ fn a_hold_resolved_once_in_each_arm_is_resolved_once() {
     if p { resolve h post 20.00 usd } else { resolve h void }
 }",
     );
-    assert!(!o.errors.contains(&"NL0321"), "a hold resolved once per arm is not resolved twice:\n{}", o.rendered);
-    assert!(!o.errors.contains(&"NL0320"), "nor is it dropped:\n{}", o.rendered);
+    assert!(
+        !o.errors.contains(&"NL0321"),
+        "a hold resolved once per arm is not resolved twice:\n{}",
+        o.rendered
+    );
+    assert!(
+        !o.errors.contains(&"NL0320"),
+        "nor is it dropped:\n{}",
+        o.rendered
+    );
 }
 
 // ===================== the accusation must stay sound =====================
@@ -105,8 +130,16 @@ fn a_straight_line_imbalance_is_still_a_hard_error() {
     txn idem(\"k\") {{ let d = debit(a, 100.00 usd)?; let c = credit(b, 60.00 usd); post(d, c) }}
 }}"
     ));
-    assert!(o.errors.contains(&"NL0300"), "a straight-line hole is a must-violation:\n{}", o.rendered);
-    assert!(o.rendered.contains("-40.00"), "and the residue must be named:\n{}", o.rendered);
+    assert!(
+        o.errors.contains(&"NL0300"),
+        "a straight-line hole is a must-violation:\n{}",
+        o.rendered
+    );
+    assert!(
+        o.rendered.contains("-40.00"),
+        "and the residue must be named:\n{}",
+        o.rendered
+    );
 }
 
 #[test]
@@ -120,8 +153,15 @@ fn an_early_exit_does_not_weaken_a_real_violation() {
     txn idem(\"k\") {{ let d = debit(a, 100.00 usd)?; let c = credit(b, 60.00 usd); post(d, c) }}
 }}"
     ));
-    assert!(o.errors.contains(&"NL0300"), "atomicity means the abort path is not a committing path:\n{}", o.rendered);
-    assert!(!o.warnings.contains(&"NL0301"), "and it must not be downgraded to a may-violation");
+    assert!(
+        o.errors.contains(&"NL0300"),
+        "atomicity means the abort path is not a committing path:\n{}",
+        o.rendered
+    );
+    assert!(
+        !o.warnings.contains(&"NL0301"),
+        "and it must not be downgraded to a may-violation"
+    );
 }
 
 #[test]
@@ -141,8 +181,15 @@ fn arms_that_disagree_are_undecided_rather_than_accused() {
     }}
 }}"
     ));
-    assert!(!o.errors.contains(&"NL0300"), "a disagreement between arms is not a proof:\n{}", o.rendered);
-    assert!(o.obligations >= 1, "it must be counted as discharged to the runtime instead");
+    assert!(
+        !o.errors.contains(&"NL0300"),
+        "a disagreement between arms is not a proof:\n{}",
+        o.rendered
+    );
+    assert!(
+        o.obligations >= 1,
+        "it must be counted as discharged to the runtime instead"
+    );
 }
 
 #[test]
@@ -159,7 +206,11 @@ fn arms_that_agree_on_a_hole_is_a_must_violation() {
     }}
 }}"
     ));
-    assert!(o.errors.contains(&"NL0300"), "agreement on a hole is a proof of a hole:\n{}", o.rendered);
+    assert!(
+        o.errors.contains(&"NL0300"),
+        "agreement on a hole is a proof of a hole:\n{}",
+        o.rendered
+    );
     assert!(
         o.rendered.contains("every path through this transaction"),
         "and the message must say the accusation covers every path:\n{}",
@@ -180,7 +231,11 @@ fn a_loop_whose_body_balances_balances_for_any_trip_count() {
     }}
 }}"
     ));
-    assert!(o.errors.is_empty(), "a balanced loop body must be accepted:\n{}", o.rendered);
+    assert!(
+        o.errors.is_empty(),
+        "a balanced loop body must be accepted:\n{}",
+        o.rendered
+    );
 }
 
 #[test]
@@ -194,8 +249,15 @@ fn a_loop_whose_body_does_not_balance_is_undecided_not_accused() {
     }}
 }}"
     ));
-    assert!(!o.errors.contains(&"NL0300"), "an unknown trip count is not a proof of imbalance:\n{}", o.rendered);
-    assert!(o.obligations >= 1, "it must be counted as discharged to the runtime instead");
+    assert!(
+        !o.errors.contains(&"NL0300"),
+        "an unknown trip count is not a proof of imbalance:\n{}",
+        o.rendered
+    );
+    assert!(
+        o.obligations >= 1,
+        "it must be counted as discharged to the runtime instead"
+    );
 }
 
 #[test]
@@ -208,7 +270,11 @@ fn a_hold_resolved_inside_a_loop_is_resolved_an_unknown_number_of_times() {
     for x in xs { resolve h void }
 }",
     );
-    assert!(o.errors.contains(&"NL0321"), "resolving a hold in a loop must be rejected:\n{}", o.rendered);
+    assert!(
+        o.errors.contains(&"NL0321"),
+        "resolving a hold in a loop must be rejected:\n{}",
+        o.rendered
+    );
 }
 
 // ===================== scoping =====================
@@ -223,7 +289,11 @@ fn a_hold_created_in_one_arm_must_be_resolved_in_that_arm() {
     Ok(())
 }",
     );
-    assert!(o.errors.contains(&"NL0320"), "a hold dropped inside an arm must be caught there:\n{}", o.rendered);
+    assert!(
+        o.errors.contains(&"NL0320"),
+        "a hold dropped inside an arm must be caught there:\n{}",
+        o.rendered
+    );
 }
 
 #[test]
@@ -238,7 +308,11 @@ fn shadowed_bindings_in_sibling_arms_do_not_collide() {
     }}
 }}"
     ));
-    assert!(o.errors.is_empty(), "sibling arms have separate scopes:\n{}", o.rendered);
+    assert!(
+        o.errors.is_empty(),
+        "sibling arms have separate scopes:\n{}",
+        o.rendered
+    );
 }
 
 #[test]
@@ -272,7 +346,11 @@ fn match_arms_join_like_if_arms() {
     }}
 }}"
     ));
-    assert!(o.errors.is_empty(), "match arms are alternatives, not a sequence:\n{}", o.rendered);
+    assert!(
+        o.errors.is_empty(),
+        "match arms are alternatives, not a sequence:\n{}",
+        o.rendered
+    );
 }
 
 #[test]
@@ -303,5 +381,9 @@ fn a_cross_currency_hole_survives_the_join() {
 }}"
     ));
     let holes = o.errors.iter().filter(|c| **c == "NL0300").count();
-    assert_eq!(holes, 2, "both currencies must still be reported separately:\n{}", o.rendered);
+    assert_eq!(
+        holes, 2,
+        "both currencies must still be reported separately:\n{}",
+        o.rendered
+    );
 }

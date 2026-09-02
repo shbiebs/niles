@@ -46,7 +46,6 @@ use session::Serving;
 use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 
-
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut port = 5433u16;
@@ -84,7 +83,10 @@ fn main() {
     let (cat, rd) = niles_lang::resolve::resolve_program(&prog, 0);
     d.extend(rd);
     if d.has_errors() {
-        eprint!("{}", d.render(&schema, schema_path.as_deref().unwrap_or("<default>")));
+        eprint!(
+            "{}",
+            d.render(&schema, schema_path.as_deref().unwrap_or("<default>"))
+        );
         eprintln!("nilestreamd: the schema does not compile; refusing to start");
         std::process::exit(1);
     }
@@ -94,7 +96,11 @@ fn main() {
     // server reports excellent latencies for queries that return nothing, and because a view
     // over a base with no history never exercises the miss path — which is the interesting
     // one.
-    let mode = if full { proto_engine::ViewMode::Full } else { proto_engine::ViewMode::Demand };
+    let mode = if full {
+        proto_engine::ViewMode::Full
+    } else {
+        proto_engine::ViewMode::Demand
+    };
     let engine = Arc::new(Mutex::new(RevEngine::seeded(
         accounts,
         rounds,
@@ -111,7 +117,12 @@ fn main() {
         }
     };
     eprintln!("nilestreamd 0.1 — PostgreSQL wire protocol on 127.0.0.1:{port}");
-    eprintln!("  schema: {} ({} view(s), {} relation(s))", schema_path.as_deref().unwrap_or("<default>"), cat.views.len(), cat.relations.len());
+    eprintln!(
+        "  schema: {} ({} view(s), {} relation(s))",
+        schema_path.as_deref().unwrap_or("<default>"),
+        cat.views.len(),
+        cat.relations.len()
+    );
     {
         let e = engine.lock().unwrap();
         eprintln!(
@@ -128,4 +139,3 @@ fn main() {
 
     daemon::accept_loop(listener, schema, engine);
 }
-

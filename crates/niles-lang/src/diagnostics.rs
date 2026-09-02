@@ -120,14 +120,25 @@ impl Diagnostic {
         }
     }
     pub fn warning(code: &'static str, msg: impl Into<String>) -> Self {
-        Diagnostic { severity: Severity::Warning, ..Self::error(code, msg) }
+        Diagnostic {
+            severity: Severity::Warning,
+            ..Self::error(code, msg)
+        }
     }
     pub fn primary(mut self, span: Span, msg: impl Into<String>) -> Self {
-        self.labels.push(Label { span, msg: msg.into(), primary: true });
+        self.labels.push(Label {
+            span,
+            msg: msg.into(),
+            primary: true,
+        });
         self
     }
     pub fn secondary(mut self, span: Span, msg: impl Into<String>) -> Self {
-        self.labels.push(Label { span, msg: msg.into(), primary: false });
+        self.labels.push(Label {
+            span,
+            msg: msg.into(),
+            primary: false,
+        });
         self
     }
     pub fn note(mut self, n: impl Into<String>) -> Self {
@@ -176,7 +187,11 @@ impl Diagnostic {
             .iter()
             .any(|s| s.applicability == Applicability::MachineApplicable);
         if !has_fix {
-            self.labels.push(Label { span, msg: rule.into(), primary: false });
+            self.labels.push(Label {
+                span,
+                msg: rule.into(),
+                primary: false,
+            });
         } else {
             self.elided_warrants += 1;
         }
@@ -217,7 +232,10 @@ impl Diagnostics {
         self.items.iter().any(|d| d.severity == Severity::Error)
     }
     pub fn error_count(&self) -> usize {
-        self.items.iter().filter(|d| d.severity == Severity::Error).count()
+        self.items
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .count()
     }
     pub fn extend(&mut self, other: Diagnostics) {
         self.items.extend(other.items);
@@ -244,7 +262,11 @@ impl Diagnostics {
                 let _ = writeln!(out, "{pad} |");
                 let _ = writeln!(out, "{gutter} | {text}");
                 let caret = if label.primary { '^' } else { '-' };
-                let width = label.span.len().max(1).min(text.len().saturating_sub(col - 1).max(1));
+                let width = label
+                    .span
+                    .len()
+                    .max(1)
+                    .min(text.len().saturating_sub(col - 1).max(1));
                 let _ = writeln!(
                     out,
                     "{pad} | {}{} {}",
@@ -330,15 +352,32 @@ mod tests {
         // rule declaration in another file is cost without benefit.
         let with_fix = Diagnostic::error("NL0300", "does not conserve `usd`")
             .primary(Span::new(10, 20), "net movement is 5.00 usd")
-            .suggest(Span::new(10, 20), "post(balancing)", "add the balancing posting", Applicability::MachineApplicable)
+            .suggest(
+                Span::new(10, 20),
+                "post(balancing)",
+                "add the balancing posting",
+                Applicability::MachineApplicable,
+            )
             .warrant(Span::new(0, 5), "`conserve per (txn, cur)` declared here");
-        assert_eq!(with_fix.labels.len(), 1, "the warrant must yield to the fix");
-        assert_eq!(with_fix.elided_warrants(), 1, "and the elision must be observable, not silent");
+        assert_eq!(
+            with_fix.labels.len(),
+            1,
+            "the warrant must yield to the fix"
+        );
+        assert_eq!(
+            with_fix.elided_warrants(),
+            1,
+            "and the elision must be observable, not silent"
+        );
 
         let without_fix = Diagnostic::error("NL0300", "does not conserve `usd`")
             .primary(Span::new(10, 20), "net movement is 5.00 usd")
             .warrant(Span::new(0, 5), "`conserve per (txn, cur)` declared here");
-        assert_eq!(without_fix.labels.len(), 2, "with no fix, the warrant is what the reader has");
+        assert_eq!(
+            without_fix.labels.len(),
+            2,
+            "with no fix, the warrant is what the reader has"
+        );
     }
 
     #[test]
@@ -347,7 +386,12 @@ mod tests {
         // must fill in themselves is not a resolution in Barik's sense.
         let d = Diagnostic::error("NL0300", "does not conserve `usd`")
             .primary(Span::new(10, 20), "net movement is 5.00 usd")
-            .suggest(Span::new(10, 20), "post(<account>, 5.00 usd)", "add a balancing posting", Applicability::HasPlaceholders)
+            .suggest(
+                Span::new(10, 20),
+                "post(<account>, 5.00 usd)",
+                "add a balancing posting",
+                Applicability::HasPlaceholders,
+            )
             .warrant(Span::new(0, 5), "`conserve per (txn, cur)` declared here");
         assert_eq!(d.labels.len(), 2);
         assert_eq!(d.elided_warrants(), 0);
@@ -358,7 +402,10 @@ mod tests {
         // rustc's doctrine, as a property of ours: the primary label must make sense as
         // the only thing displayed, because in an IDE it often is.
         let d = Diagnostic::error("NL0300", "this transaction does not conserve `usd`")
-            .primary(Span::new(10, 20), "net movement on every path through this transaction is -40.00, which must be zero")
+            .primary(
+                Span::new(10, 20),
+                "net movement on every path through this transaction is -40.00, which must be zero",
+            )
             .warrant(Span::new(0, 5), "`conserve per (txn, cur)` declared here");
         let primary = d.labels.iter().find(|l| l.primary).unwrap();
         assert!(

@@ -62,7 +62,9 @@ pub fn zset(rows: &[(&[i128], i128)]) -> ZSet {
 
 /// Build a row that may contain nulls, from `Option<i128>`.
 pub fn row(vs: &[Option<i128>]) -> Row {
-    vs.iter().map(|v| v.map(Value::Int).unwrap_or(Value::Null)).collect()
+    vs.iter()
+        .map(|v| v.map(Value::Int).unwrap_or(Value::Null))
+        .collect()
 }
 
 /// Evaluate a scalar against a row. Nulls propagate; comparisons are three-valued.
@@ -126,20 +128,32 @@ pub struct Eval<'a> {
 
 /// Evaluate a named output and report the counted work.
 pub fn run(c: &Circuit, output: &str, sources: &BTreeMap<String, ZSet>) -> (ZSet, u64) {
-    let id = *c.outputs.get(output).unwrap_or_else(|| panic!("no output named `{output}`"));
+    let id = *c
+        .outputs
+        .get(output)
+        .unwrap_or_else(|| panic!("no output named `{output}`"));
     run_node(c, id, sources)
 }
 
 /// Evaluate one node and report the counted work.
 pub fn run_node(c: &Circuit, id: NodeId, sources: &BTreeMap<String, ZSet>) -> (ZSet, u64) {
-    let mut e = Eval { circuit: c, sources, work: 0 };
+    let mut e = Eval {
+        circuit: c,
+        sources,
+        work: 0,
+    };
     let z = e.node(id);
     (z, e.work)
 }
 
 impl<'a> Eval<'a> {
     fn node(&mut self, id: NodeId) -> ZSet {
-        let n = self.circuit.nodes.iter().find(|n| n.id == id).expect("node");
+        let n = self
+            .circuit
+            .nodes
+            .iter()
+            .find(|n| n.id == id)
+            .expect("node");
         match &n.op {
             Op::Source { relation, .. } => {
                 let z = self.sources.get(relation).cloned().unwrap_or_default();
@@ -162,11 +176,20 @@ impl<'a> Eval<'a> {
                 let mut out = ZSet::new();
                 for (r, w) in inp {
                     self.work += 1;
-                    add(&mut out, exprs.iter().map(|e| eval_scalar(e, &r)).collect(), w);
+                    add(
+                        &mut out,
+                        exprs.iter().map(|e| eval_scalar(e, &r)).collect(),
+                        w,
+                    );
                 }
                 out
             }
-            Op::Join { kind, left_key, right_key, residual } => {
+            Op::Join {
+                kind,
+                left_key,
+                right_key,
+                residual,
+            } => {
                 let l = self.node(n.inputs[0]);
                 let r = self.node(n.inputs[1]);
                 self.join(*kind, left_key, right_key, residual.as_ref(), &l, &r)
@@ -214,8 +237,12 @@ impl<'a> Eval<'a> {
             // Pass-throughs at this level of abstraction: the reference semantics is about
             // *what* a circuit denotes, and these operators change when or how it is
             // computed rather than what comes out.
-            Op::Index { .. } | Op::AsOf { .. } | Op::ValidAt { .. } | Op::Integrate
-            | Op::Differentiate | Op::Delay => self.node(n.inputs[0]),
+            Op::Index { .. }
+            | Op::AsOf { .. }
+            | Op::ValidAt { .. }
+            | Op::Integrate
+            | Op::Differentiate
+            | Op::Delay => self.node(n.inputs[0]),
             other => panic!("the reference evaluator does not cover {}", other.name()),
         }
     }
@@ -333,7 +360,10 @@ impl<'a> Eval<'a> {
         let mut raw: BTreeMap<Row, Vec<Vec<(Value, i128)>>> = BTreeMap::new();
         for (r, w) in inp {
             self.work += 1;
-            let k: Row = group_key.iter().map(|c| *r.get(*c as usize).unwrap_or(&Value::Null)).collect();
+            let k: Row = group_key
+                .iter()
+                .map(|c| *r.get(*c as usize).unwrap_or(&Value::Null))
+                .collect();
             let slot = raw.entry(k).or_insert_with(|| vec![Vec::new(); aggs.len()]);
             for (i, (_, e)) in aggs.iter().enumerate() {
                 slot[i].push((eval_scalar(e, r), *w));
@@ -399,9 +429,9 @@ impl<'a> Eval<'a> {
                     if p.is_null() {
                         continue;
                     }
-                    let found = group
-                        .iter()
-                        .any(|(r, w)| *w > 0 && compare(p, r[*icol as usize], |a, b| a == b).keeps());
+                    let found = group.iter().any(|(r, w)| {
+                        *w > 0 && compare(p, r[*icol as usize], |a, b| a == b).keeps()
+                    });
                     if found {
                         add(&mut out, orow.clone(), *ow);
                     }
@@ -427,11 +457,17 @@ impl<'a> Eval<'a> {
                     }
                 }
                 ApplyKind::Scalar { agg, expr } => {
-                    let vals: Vec<(Value, i128)> =
-                        group.iter().map(|(r, w)| (eval_scalar(expr, r), *w)).collect();
+                    let vals: Vec<(Value, i128)> = group
+                        .iter()
+                        .map(|(r, w)| (eval_scalar(expr, r), *w))
+                        .collect();
                     // An empty matching set yields null — SQL's rule for a scalar
                     // subquery, and the reason the unnested form is a *left outer* join.
-                    let v = if vals.is_empty() { Value::Null } else { fold(*agg, &vals) };
+                    let v = if vals.is_empty() {
+                        Value::Null
+                    } else {
+                        fold(*agg, &vals)
+                    };
                     let mut r = orow.clone();
                     r.push(v);
                     add(&mut out, r, *ow);
@@ -467,16 +503,26 @@ pub fn fold(a: Agg, vals: &[(Value, i128)]) -> Value {
             }
         }
         Agg::Min | Agg::Max => {
-            let live: Vec<i128> =
-                vals.iter().filter(|(_, w)| *w > 0).filter_map(|(v, _)| v.int()).collect();
-            match if a == Agg::Min { live.iter().min() } else { live.iter().max() } {
+            let live: Vec<i128> = vals
+                .iter()
+                .filter(|(_, w)| *w > 0)
+                .filter_map(|(v, _)| v.int())
+                .collect();
+            match if a == Agg::Min {
+                live.iter().min()
+            } else {
+                live.iter().max()
+            } {
                 Some(x) => Value::Int(*x),
                 None => Value::Null,
             }
         }
         Agg::Avg => {
-            let live: Vec<(i128, i128)> =
-                vals.iter().filter(|(_, w)| *w > 0).filter_map(|(v, w)| v.int().map(|x| (x, *w))).collect();
+            let live: Vec<(i128, i128)> = vals
+                .iter()
+                .filter(|(_, w)| *w > 0)
+                .filter_map(|(v, w)| v.int().map(|x| (x, *w)))
+                .collect();
             let n: i128 = live.iter().map(|(_, w)| *w).sum();
             if n == 0 {
                 Value::Null
@@ -495,7 +541,11 @@ mod tests {
 
     fn src(c: &mut Circuit, name: &str) -> NodeId {
         c.add(
-            Op::Source { relation: name.into(), is_base: true, anchor_key: vec![0] },
+            Op::Source {
+                relation: name.into(),
+                is_base: true,
+                anchor_key: vec![0],
+            },
             vec![],
             internal_contract(),
             name,
@@ -503,7 +553,10 @@ mod tests {
     }
 
     fn sources(pairs: &[(&str, ZSet)]) -> BTreeMap<String, ZSet> {
-        pairs.iter().map(|(n, z)| (n.to_string(), z.clone())).collect()
+        pairs
+            .iter()
+            .map(|(n, z)| (n.to_string(), z.clone()))
+            .collect()
     }
 
     #[test]
@@ -511,7 +564,10 @@ mod tests {
         let mut z = ZSet::new();
         add(&mut z, row(&[Some(1)]), 3);
         add(&mut z, row(&[Some(1)]), -3);
-        assert!(z.is_empty(), "a cancelled row must leave no trace, or equality is encoding-dependent");
+        assert!(
+            z.is_empty(),
+            "a cancelled row must leave no trace, or equality is encoding-dependent"
+        );
     }
 
     #[test]
@@ -522,7 +578,12 @@ mod tests {
         let l = src(&mut c, "l");
         let r = src(&mut c, "r");
         let j = c.add(
-            Op::Join { kind: JoinKind::Semi, left_key: vec![0], right_key: vec![0], residual: None },
+            Op::Join {
+                kind: JoinKind::Semi,
+                left_key: vec![0],
+                right_key: vec![0],
+                residual: None,
+            },
             vec![l, r],
             internal_contract(),
             "semi",
@@ -541,14 +602,23 @@ mod tests {
         let l2 = src(&mut c2, "l");
         let r2 = src(&mut c2, "r");
         let j2 = c2.add(
-            Op::Join { kind: JoinKind::Inner, left_key: vec![0], right_key: vec![0], residual: None },
+            Op::Join {
+                kind: JoinKind::Inner,
+                left_key: vec![0],
+                right_key: vec![0],
+                residual: None,
+            },
             vec![l2, r2],
             internal_contract(),
             "inner",
         );
         c2.set_output("out", j2);
         let (out2, _) = run(&c2, "out", &s);
-        assert_eq!(out2.values().sum::<i128>(), 3, "an inner join does duplicate; a semi-join must not");
+        assert_eq!(
+            out2.values().sum::<i128>(),
+            3,
+            "an inner join does duplicate; a semi-join must not"
+        );
     }
 
     #[test]
@@ -561,15 +631,26 @@ mod tests {
         let l = src(&mut c, "l");
         let r = src(&mut c, "r");
         let j = c.add(
-            Op::Join { kind: JoinKind::Semi, left_key: vec![0], right_key: vec![0], residual: None },
+            Op::Join {
+                kind: JoinKind::Semi,
+                left_key: vec![0],
+                right_key: vec![0],
+                residual: None,
+            },
             vec![l, r],
             internal_contract(),
             "semi",
         );
         c.set_output("out", j);
-        let s = sources(&[("l", zset(&[(&[1], 1)])), ("r", zset(&[(&[1], 1), (&[1], -1)]))]);
+        let s = sources(&[
+            ("l", zset(&[(&[1], 1)])),
+            ("r", zset(&[(&[1], 1), (&[1], -1)])),
+        ]);
         let (out, _) = run(&c, "out", &s);
-        assert!(out.is_empty(), "a cancelled right row must not satisfy `exists`");
+        assert!(
+            out.is_empty(),
+            "a cancelled right row must not satisfy `exists`"
+        );
     }
 
     #[test]
@@ -578,7 +659,12 @@ mod tests {
         let l = src(&mut c, "l");
         let r = src(&mut c, "r");
         let j = c.add(
-            Op::Join { kind: JoinKind::Inner, left_key: vec![0], right_key: vec![0], residual: None },
+            Op::Join {
+                kind: JoinKind::Inner,
+                left_key: vec![0],
+                right_key: vec![0],
+                residual: None,
+            },
             vec![l, r],
             internal_contract(),
             "j",
@@ -589,7 +675,10 @@ mod tests {
         let mut rs = ZSet::new();
         add(&mut rs, row(&[None]), 1);
         let (out, _) = run(&c, "out", &sources(&[("l", ls), ("r", rs)]));
-        assert!(out.is_empty(), "null = null is unknown, and unknown does not join");
+        assert!(
+            out.is_empty(),
+            "null = null is unknown, and unknown does not join"
+        );
     }
 
     #[test]
@@ -598,13 +687,21 @@ mod tests {
         let l = src(&mut c, "l");
         let r = src(&mut c, "r");
         let j = c.add(
-            Op::Join { kind: JoinKind::LeftOuter, left_key: vec![0], right_key: vec![0], residual: None },
+            Op::Join {
+                kind: JoinKind::LeftOuter,
+                left_key: vec![0],
+                right_key: vec![0],
+                residual: None,
+            },
             vec![l, r],
             internal_contract(),
             "j",
         );
         c.set_output("out", j);
-        let s = sources(&[("l", zset(&[(&[1], 1), (&[2], 1)])), ("r", zset(&[(&[1, 50], 1)]))]);
+        let s = sources(&[
+            ("l", zset(&[(&[1], 1), (&[2], 1)])),
+            ("r", zset(&[(&[1, 50], 1)])),
+        ]);
         let (out, _) = run(&c, "out", &s);
         let mut want = ZSet::new();
         add(&mut want, row(&[Some(1), Some(1), Some(50)]), 1);
@@ -619,13 +716,22 @@ mod tests {
         assert_eq!(fold(Agg::Sum, &[]), Value::Null);
         assert_eq!(fold(Agg::Count, &[]), Value::Int(0));
         assert_eq!(fold(Agg::Sum, &[(Value::Null, 1)]), Value::Null);
-        assert_eq!(fold(Agg::Sum, &[(Value::Int(3), 2), (Value::Int(4), 1)]), Value::Int(10));
+        assert_eq!(
+            fold(Agg::Sum, &[(Value::Int(3), 2), (Value::Int(4), 1)]),
+            Value::Int(10)
+        );
     }
 
     #[test]
     fn min_ignores_retracted_rows() {
-        assert_eq!(fold(Agg::Min, &[(Value::Int(1), -1), (Value::Int(5), 1)]), Value::Int(5));
-        assert_eq!(fold(Agg::Max, &[(Value::Int(1), 1), (Value::Int(5), 1)]), Value::Int(5));
+        assert_eq!(
+            fold(Agg::Min, &[(Value::Int(1), -1), (Value::Int(5), 1)]),
+            Value::Int(5)
+        );
+        assert_eq!(
+            fold(Agg::Max, &[(Value::Int(1), 1), (Value::Int(5), 1)]),
+            Value::Int(5)
+        );
     }
 
     #[test]
@@ -634,7 +740,10 @@ mod tests {
         let l = src(&mut c, "l");
         let r = src(&mut c, "r");
         let a = c.add(
-            Op::Apply { kind: ApplyKind::Exists, correlation: vec![(0, 0)] },
+            Op::Apply {
+                kind: ApplyKind::Exists,
+                correlation: vec![(0, 0)],
+            },
             vec![l, r],
             internal_contract(),
             "apply",
@@ -656,7 +765,12 @@ mod tests {
         let l2 = src(&mut c2, "l");
         let r2 = src(&mut c2, "r");
         let j = c2.add(
-            Op::Join { kind: JoinKind::Semi, left_key: vec![0], right_key: vec![0], residual: None },
+            Op::Join {
+                kind: JoinKind::Semi,
+                left_key: vec![0],
+                right_key: vec![0],
+                residual: None,
+            },
             vec![l2, r2],
             internal_contract(),
             "semi",
@@ -666,6 +780,9 @@ mod tests {
         let rs2 = zset(&[(&[1], 1), (&[2], 1), (&[9], 1), (&[8], 1)]);
         let (out2, work2) = run(&c2, "out", &sources(&[("l", ls2), ("r", rs2)]));
         assert_eq!(out2, out, "the rewrite must not change the answer");
-        assert!(work2 < work, "the set-at-a-time form must cost less: {work} vs {work2}");
+        assert!(
+            work2 < work,
+            "the set-at-a-time form must cost less: {work} vs {work2}"
+        );
     }
 }

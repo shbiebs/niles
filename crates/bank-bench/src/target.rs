@@ -128,7 +128,8 @@ impl Target for PgTarget {
                  epoch  bigint    not null
              )",
         )?;
-        self.client.simple("create index ix_postings_acct on postings (acct, epoch)")?;
+        self.client
+            .simple("create index ix_postings_acct on postings (acct, epoch)")?;
         // Seed: one opening posting per account, and its contra against a house account, so
         // the table conserves exactly as the ledger does.
         self.client.simple(&format!(
@@ -305,7 +306,11 @@ mod tests {
             let reason = nilestream_gap(w).unwrap_or_else(|| panic!("{w} should be refused"));
             assert!(reason.len() > 40, "a reason, not a shrug: {reason}");
         }
-        assert_eq!(nilestream_gap("point"), None, "the read path is real and is measured");
+        assert_eq!(
+            nilestream_gap("point"),
+            None,
+            "the read path is real and is measured"
+        );
     }
 
     #[test]

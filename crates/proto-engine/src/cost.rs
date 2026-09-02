@@ -24,12 +24,20 @@ impl Default for CostModel {
     fn default() -> Self {
         // Unit weights: one resident entry-epoch, one delta application, and one base-row
         // read each cost 1. Every reported ratio states the weights it used.
-        Self { memory: 1.0, maintenance: 1.0, reconstruction: 1.0 }
+        Self {
+            memory: 1.0,
+            maintenance: 1.0,
+            reconstruction: 1.0,
+        }
     }
 }
 
 impl CostModel {
     pub fn new(memory: f64, maintenance: f64, reconstruction: f64) -> Self {
-        Self { memory, maintenance, reconstruction }
+        Self {
+            memory,
+            maintenance,
+            reconstruction,
+        }
     }
 }

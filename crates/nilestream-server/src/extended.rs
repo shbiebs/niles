@@ -93,12 +93,18 @@ pub enum ExtError {
     UnknownStatement(String),
     UnknownPortal(String),
     /// A parameter count mismatch between `Parse` and `Bind`.
-    ParamCount { expected: usize, got: usize },
+    ParamCount {
+        expected: usize,
+        got: usize,
+    },
     /// Binary format requested. Named rather than silently downgraded, because a client
     /// that asked for binary and received text will misparse every value.
     BinaryFormatUnsupported,
     /// The statement did not compile. Carries the compiler's own code.
-    Compile { code: String, message: String },
+    Compile {
+        code: String,
+        message: String,
+    },
 }
 
 impl ExtError {
@@ -119,7 +125,9 @@ impl ExtError {
             ExtError::ParamCount { expected, got } => Backend::ErrorResponse {
                 severity: "ERROR".into(),
                 code: "08P01".into(), // protocol_violation
-                message: format!("bind message supplies {got} parameters but the statement requires {expected}"),
+                message: format!(
+                    "bind message supplies {got} parameters but the statement requires {expected}"
+                ),
                 detail: None,
             },
             ExtError::BinaryFormatUnsupported => pg_wire::unsupported(
@@ -179,7 +187,11 @@ impl PlanCache {
     /// Returns `Ok(plan)` if it is still valid, and `Err(stale_sql)` if it must be
     /// recompiled — which the caller does, rather than failing. A client's prepared
     /// statement surviving a migration is the entire reason to prepare it.
-    pub fn lookup(&mut self, name: &str, current_schema: SchemaEpoch) -> Result<&Prepared, Option<String>> {
+    pub fn lookup(
+        &mut self,
+        name: &str,
+        current_schema: SchemaEpoch,
+    ) -> Result<&Prepared, Option<String>> {
         match self.statements.get(name) {
             None => Err(None),
             Some(p) if p.schema_epoch == current_schema => {
@@ -222,7 +234,10 @@ impl PlanCache {
             return Err(ExtError::UnknownStatement(statement.to_string()));
         };
         if params.len() != p.param_count {
-            return Err(ExtError::ParamCount { expected: p.param_count, got: params.len() });
+            return Err(ExtError::ParamCount {
+                expected: p.param_count,
+                got: params.len(),
+            });
         }
         self.portals.insert(
             portal.to_string(),
@@ -237,7 +252,9 @@ impl PlanCache {
     }
 
     pub fn portal(&self, name: &str) -> Result<&Portal, ExtError> {
-        self.portals.get(name).ok_or_else(|| ExtError::UnknownPortal(name.to_string()))
+        self.portals
+            .get(name)
+            .ok_or_else(|| ExtError::UnknownPortal(name.to_string()))
     }
 
     /// `Describe` on a statement: the row shape, without executing.
@@ -312,7 +329,13 @@ mod tests {
     #[test]
     fn a_plan_is_reused_while_the_schema_stands_still() {
         let mut c = PlanCache::new();
-        c.parse("s1", "select acct, sum(amt) from postings where acct = $1 group by acct", 100, fields(), 1);
+        c.parse(
+            "s1",
+            "select acct, sum(amt) from postings where acct = $1 group by acct",
+            100,
+            fields(),
+            1,
+        );
         for _ in 0..10 {
             assert!(c.lookup("s1", 100).is_ok());
         }
@@ -328,7 +351,10 @@ mod tests {
         let mut c = PlanCache::new();
         c.parse("s1", "select x from t", 100, fields(), 0);
         let stale = c.lookup("s1", 101);
-        assert!(matches!(stale, Err(Some(_))), "a moved schema must invalidate the plan");
+        assert!(
+            matches!(stale, Err(Some(_))),
+            "a moved schema must invalidate the plan"
+        );
         assert_eq!(c.hits, 0, "and must not count as a hit");
     }
 
@@ -337,10 +363,18 @@ mod tests {
         // A prepared statement surviving a migration is the entire reason to prepare it.
         let mut c = PlanCache::new();
         c.parse("s1", "select x from t", 100, fields(), 0);
-        let Err(Some(sql)) = c.lookup("s1", 200) else { panic!("expected a recompile request") };
-        assert_eq!(sql, "select x from t", "the SQL comes back so the caller can recompile it");
+        let Err(Some(sql)) = c.lookup("s1", 200) else {
+            panic!("expected a recompile request")
+        };
+        assert_eq!(
+            sql, "select x from t",
+            "the SQL comes back so the caller can recompile it"
+        );
         c.recompiled("s1", 200, fields());
-        assert!(c.lookup("s1", 200).is_ok(), "and the client's statement name keeps working");
+        assert!(
+            c.lookup("s1", 200).is_ok(),
+            "and the client's statement name keeps working"
+        );
         assert_eq!(c.recompilations, 1);
     }
 
@@ -352,7 +386,10 @@ mod tests {
         let mut c = PlanCache::new();
         c.parse("s", "select 1", 50, fields(), 0);
         assert!(c.lookup("s", 50).is_ok());
-        assert!(c.lookup("s", 49).is_err(), "an older schema is also a mismatch, not a match");
+        assert!(
+            c.lookup("s", 49).is_err(),
+            "an older schema is also a mismatch, not a match"
+        );
         assert!(c.lookup("s", 51).is_err());
     }
 
@@ -362,9 +399,14 @@ mod tests {
         c.parse("s", "select $1, $2", 1, fields(), 2);
         assert_eq!(
             c.bind("p", "s", vec![Some("1".into())], 0, false),
-            Err(ExtError::ParamCount { expected: 2, got: 1 })
+            Err(ExtError::ParamCount {
+                expected: 2,
+                got: 1
+            })
         );
-        assert!(c.bind("p", "s", vec![Some("1".into()), None], 0, false).is_ok());
+        assert!(c
+            .bind("p", "s", vec![Some("1".into()), None], 0, false)
+            .is_ok());
     }
 
     #[test]
@@ -375,7 +417,9 @@ mod tests {
         c.parse("s", "select 1", 1, fields(), 0);
         let e = c.bind("p", "s", vec![], 0, true).unwrap_err();
         assert_eq!(e, ExtError::BinaryFormatUnsupported);
-        let Backend::ErrorResponse { code, detail, .. } = e.to_backend() else { panic!() };
+        let Backend::ErrorResponse { code, detail, .. } = e.to_backend() else {
+            panic!()
+        };
         assert_eq!(code, "0A000");
         assert!(detail.unwrap().contains("misparse"));
     }
@@ -384,8 +428,13 @@ mod tests {
     fn binding_an_unknown_statement_is_the_right_sqlstate() {
         let mut c = PlanCache::new();
         let e = c.bind("p", "nope", vec![], 0, false).unwrap_err();
-        let Backend::ErrorResponse { code, .. } = e.to_backend() else { panic!() };
-        assert_eq!(code, "26000", "invalid_sql_statement_name, not a generic error");
+        let Backend::ErrorResponse { code, .. } = e.to_backend() else {
+            panic!()
+        };
+        assert_eq!(
+            code, "26000",
+            "invalid_sql_statement_name, not a generic error"
+        );
     }
 
     #[test]
@@ -406,11 +455,20 @@ mod tests {
     #[test]
     fn describe_reports_the_row_shape_without_executing() {
         let mut c = PlanCache::new();
-        c.parse("s", "select acct, sum(amt) from postings group by acct", 1, fields(), 0);
+        c.parse(
+            "s",
+            "select acct, sum(amt) from postings group by acct",
+            1,
+            fields(),
+            0,
+        );
         let f = c.describe("s").unwrap();
         assert_eq!(f.len(), 2);
         assert_eq!(f[1].type_oid, 1700, "money is still numeric on this path");
-        assert_eq!(c.statements["s"].executions, 0, "describing must not execute");
+        assert_eq!(
+            c.statements["s"].executions, 0,
+            "describing must not execute"
+        );
     }
 
     #[test]
@@ -426,7 +484,12 @@ mod tests {
     #[test]
     fn a_row_limit_is_declined_with_the_open_question_named() {
         assert!(row_limit_notice(0).is_none(), "no limit, no notice");
-        let Some(Backend::NoticeResponse { message }) = row_limit_notice(50) else { panic!() };
-        assert!(message.contains("reconstruction order"), "the refusal must name why: {message}");
+        let Some(Backend::NoticeResponse { message }) = row_limit_notice(50) else {
+            panic!()
+        };
+        assert!(
+            message.contains("reconstruction order"),
+            "the refusal must name why: {message}"
+        );
     }
 }

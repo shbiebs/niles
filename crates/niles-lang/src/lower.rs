@@ -30,11 +30,23 @@ pub struct Lowered {
 }
 
 pub fn lower_program(prog: &Program, cat: &Catalog) -> (Lowered, Diagnostics) {
-    let mut lx = Lx { cat, circuit: Circuit::new(), schemas: HashMap::new(), d: Diagnostics::new(), sources: HashMap::new() };
+    let mut lx = Lx {
+        cat,
+        circuit: Circuit::new(),
+        schemas: HashMap::new(),
+        d: Diagnostics::new(),
+        sources: HashMap::new(),
+    };
     for item in &prog.items {
         lx.item(item);
     }
-    (Lowered { circuit: lx.circuit, schemas: lx.schemas }, lx.d)
+    (
+        Lowered {
+            circuit: lx.circuit,
+            schemas: lx.schemas,
+        },
+        lx.d,
+    )
 }
 
 struct Lx<'a> {
@@ -81,7 +93,8 @@ impl<'a> Lx<'a> {
         };
         // The view's own contract is attached to its output node, replacing the inherited
         // one. This is the node the engine consults when a read arrives.
-        self.circuit.nodes[id as usize].contract = niles_ir::circuit::Checked::new("contract", contract);
+        self.circuit.nodes[id as usize].contract =
+            niles_ir::circuit::Checked::new("contract", contract);
         self.circuit.set_output(v.name.text.clone(), id);
     }
 
@@ -91,7 +104,10 @@ impl<'a> Lx<'a> {
         };
         ServeContract {
             consistency: match info.rung {
-                Rung::Bounded => Consistency::Bounded { epochs: 4, millis: 1_000 },
+                Rung::Bounded => Consistency::Bounded {
+                    epochs: 4,
+                    millis: 1_000,
+                },
                 Rung::Monotonic => Consistency::Monotonic,
                 Rung::ReadYourWrites => Consistency::ReadYourWrites,
                 Rung::Snapshot => Consistency::Snapshot,
@@ -124,20 +140,37 @@ impl<'a> Lx<'a> {
     }
 
     fn col_index(&self, id: NodeId, name: &str) -> Option<ColIdx> {
-        self.schema_of(id).iter().position(|c| c == name).map(|i| i as ColIdx)
+        self.schema_of(id)
+            .iter()
+            .position(|c| c == name)
+            .map(|i| i as ColIdx)
     }
 
     fn expr(&mut self, e: &Expr, c: ServeContract) -> Option<NodeId> {
         match e {
             Expr::Path(p) => self.source(&p.last().text, c),
-            Expr::Stage { recv, kind, name, args, .. } => {
+            Expr::Stage {
+                recv,
+                kind,
+                name,
+                args,
+                ..
+            } => {
                 let input = self.expr(recv, c)?;
                 self.stage(input, *kind, name, args, c)
             }
             Expr::Fixpoint { recv, measure, .. } => {
                 let input = self.expr(recv, c)?;
                 let m = self.scalar(input, measure).unwrap_or(Scalar::LitInt(0));
-                let id = self.circuit.add(Op::Fixpoint { measure: m, max_rounds: 1_000 }, vec![input], c, "fixpoint");
+                let id = self.circuit.add(
+                    Op::Fixpoint {
+                        measure: m,
+                        max_rounds: 1_000,
+                    },
+                    vec![input],
+                    c,
+                    "fixpoint",
+                );
                 self.schemas.insert(id, self.schema_of(input).to_vec());
                 Some(id)
             }
@@ -163,17 +196,29 @@ impl<'a> Lx<'a> {
         let anchor_key: Vec<ColIdx> = rel
             .anchor_indices
             .first()
-            .map(|ix| ix.iter().filter_map(|c| cols.iter().position(|x| x == c).map(|i| i as ColIdx)).collect())
+            .map(|ix| {
+                ix.iter()
+                    .filter_map(|c| cols.iter().position(|x| x == c).map(|i| i as ColIdx))
+                    .collect()
+            })
             .unwrap_or_default();
         let contract = ServeContract {
             // A base is never partial and is read at the frontier: it *is* the frontier.
             consistency: Consistency::LedgerConsistent,
             materialize: Materialize::Full,
-            retain: if rel.is_base() { Retention::Forever } else { Retention::Pinned },
+            retain: if rel.is_base() {
+                Retention::Forever
+            } else {
+                Retention::Pinned
+            },
             lineage: Lineage::Key,
         };
         let id = self.circuit.add(
-            Op::Source { relation: name.to_string(), is_base: rel.is_base(), anchor_key },
+            Op::Source {
+                relation: name.to_string(),
+                is_base: rel.is_base(),
+                anchor_key,
+            },
             vec![],
             contract,
             name,
@@ -183,11 +228,21 @@ impl<'a> Lx<'a> {
         Some(id)
     }
 
-    fn stage(&mut self, input: NodeId, kind: StageKind, name: &Name, args: &[Arg], c: ServeContract) -> Option<NodeId> {
+    fn stage(
+        &mut self,
+        input: NodeId,
+        kind: StageKind,
+        name: &Name,
+        args: &[Arg],
+        c: ServeContract,
+    ) -> Option<NodeId> {
         let in_schema = self.schema_of(input).to_vec();
         let (op, out_schema): (Op, Vec<String>) = match kind {
             StageKind::Where | StageKind::Having => {
-                let p = args.first().and_then(|a| self.scalar(input, &a.value)).unwrap_or(Scalar::LitBool(true));
+                let p = args
+                    .first()
+                    .and_then(|a| self.scalar(input, &a.value))
+                    .unwrap_or(Scalar::LitBool(true));
                 (Op::Filter { predicate: p }, in_schema.clone())
             }
             StageKind::Map | StageKind::Select => {
@@ -205,7 +260,11 @@ impl<'a> Lx<'a> {
                 let key = self.key_of(input, args);
                 (Op::Index { key }, in_schema.clone())
             }
-            StageKind::Sum | StageKind::Count | StageKind::Min | StageKind::Max | StageKind::Avg => {
+            StageKind::Sum
+            | StageKind::Count
+            | StageKind::Min
+            | StageKind::Max
+            | StageKind::Avg => {
                 let agg = match kind {
                     StageKind::Sum => Agg::Sum,
                     StageKind::Count => Agg::Count,
@@ -219,9 +278,14 @@ impl<'a> Lx<'a> {
                     Op::Index { key } => key.clone(),
                     _ => self.circuit.node(input).key.clone().unwrap_or_default(),
                 };
-                let value = args.first().and_then(|a| self.scalar(input, &a.value)).unwrap_or(Scalar::Column(0));
-                let mut names: Vec<String> =
-                    group_key.iter().filter_map(|i| in_schema.get(*i as usize).cloned()).collect();
+                let value = args
+                    .first()
+                    .and_then(|a| self.scalar(input, &a.value))
+                    .unwrap_or(Scalar::Column(0));
+                let mut names: Vec<String> = group_key
+                    .iter()
+                    .filter_map(|i| in_schema.get(*i as usize).cloned())
+                    .collect();
                 names.push(agg.as_str().to_string());
                 // Fold the aggregate into the upstream Index rather than stacking a node
                 // on it: `group_by(k).sum(v)` is one operator, and emitting two would make
@@ -229,7 +293,10 @@ impl<'a> Lx<'a> {
                 if matches!(self.circuit.node(input).op, Op::Index { .. }) {
                     let real_input = self.circuit.node(input).inputs[0];
                     let id = self.circuit.add(
-                        Op::Aggregate { group_key, aggs: vec![(agg, value)] },
+                        Op::Aggregate {
+                            group_key,
+                            aggs: vec![(agg, value)],
+                        },
                         vec![real_input],
                         c,
                         name.text.clone(),
@@ -237,9 +304,19 @@ impl<'a> Lx<'a> {
                     self.schemas.insert(id, names);
                     return Some(id);
                 }
-                (Op::Aggregate { group_key, aggs: vec![(agg, value)] }, names)
+                (
+                    Op::Aggregate {
+                        group_key,
+                        aggs: vec![(agg, value)],
+                    },
+                    names,
+                )
             }
-            StageKind::Join | StageKind::LeftJoin | StageKind::RightJoin | StageKind::FullOuterJoin | StageKind::CrossJoin => {
+            StageKind::Join
+            | StageKind::LeftJoin
+            | StageKind::RightJoin
+            | StageKind::FullOuterJoin
+            | StageKind::CrossJoin => {
                 let rhs = args.first().and_then(|a| self.expr(&a.value, c))?;
                 let jk = match kind {
                     StageKind::LeftJoin => IrJoin::LeftOuter,
@@ -249,11 +326,21 @@ impl<'a> Lx<'a> {
                 };
                 let residual = args.get(1).and_then(|a| self.scalar(input, &a.value));
                 let lk = self.circuit.node(input).key.clone().unwrap_or_default();
-                let rk = self.circuit.node(rhs).key.clone().unwrap_or_else(|| lk.clone());
+                let rk = self
+                    .circuit
+                    .node(rhs)
+                    .key
+                    .clone()
+                    .unwrap_or_else(|| lk.clone());
                 let mut names = in_schema.clone();
                 names.extend(self.schema_of(rhs).iter().cloned());
                 let id = self.circuit.add(
-                    Op::Join { kind: jk, left_key: lk, right_key: rk, residual },
+                    Op::Join {
+                        kind: jk,
+                        left_key: lk,
+                        right_key: rk,
+                        residual,
+                    },
                     vec![input, rhs],
                     c,
                     name.text.clone(),
@@ -263,7 +350,9 @@ impl<'a> Lx<'a> {
             }
             StageKind::Union | StageKind::UnionAll => {
                 let rhs = args.first().and_then(|a| self.expr(&a.value, c))?;
-                let id = self.circuit.add(Op::Union, vec![input, rhs], c, name.text.clone());
+                let id = self
+                    .circuit
+                    .add(Op::Union, vec![input, rhs], c, name.text.clone());
                 self.schemas.insert(id, in_schema.clone());
                 if kind == StageKind::Union {
                     let d = self.circuit.add(Op::Distinct, vec![id], c, "distinct");
@@ -276,7 +365,9 @@ impl<'a> Lx<'a> {
                 let rhs = args.first().and_then(|a| self.expr(&a.value, c))?;
                 let neg = self.circuit.add(Op::Negate, vec![rhs], c, "negate");
                 self.schemas.insert(neg, self.schema_of(rhs).to_vec());
-                let id = self.circuit.add(Op::Union, vec![input, neg], c, name.text.clone());
+                let id = self
+                    .circuit
+                    .add(Op::Union, vec![input, neg], c, name.text.clone());
                 self.schemas.insert(id, in_schema);
                 return Some(id);
             }
@@ -287,9 +378,19 @@ impl<'a> Lx<'a> {
                 // every theorem quantifies over that set.
                 let rhs = args.first().and_then(|a| self.expr(&a.value, c))?;
                 let lk = self.circuit.node(input).key.clone().unwrap_or_default();
-                let rk = self.circuit.node(rhs).key.clone().unwrap_or_else(|| lk.clone());
+                let rk = self
+                    .circuit
+                    .node(rhs)
+                    .key
+                    .clone()
+                    .unwrap_or_else(|| lk.clone());
                 let id = self.circuit.add(
-                    Op::Join { kind: IrJoin::Semi, left_key: lk, right_key: rk, residual: None },
+                    Op::Join {
+                        kind: IrJoin::Semi,
+                        left_key: lk,
+                        right_key: rk,
+                        residual: None,
+                    },
                     vec![input, rhs],
                     c,
                     name.text.clone(),
@@ -311,14 +412,26 @@ impl<'a> Lx<'a> {
                     Some(Expr::Int(v, _)) => *v as u64,
                     _ => u64::MAX,
                 };
-                (Op::Limit { count: n, offset: 0 }, in_schema.clone())
+                (
+                    Op::Limit {
+                        count: n,
+                        offset: 0,
+                    },
+                    in_schema.clone(),
+                )
             }
             StageKind::Offset => {
                 let n = match args.first().map(|a| &a.value) {
                     Some(Expr::Int(v, _)) => *v as u64,
                     _ => 0,
                 };
-                (Op::Limit { count: u64::MAX, offset: n }, in_schema.clone())
+                (
+                    Op::Limit {
+                        count: u64::MAX,
+                        offset: n,
+                    },
+                    in_schema.clone(),
+                )
             }
             StageKind::AsOf => {
                 let e = match args.first().map(|a| &a.value) {
@@ -345,7 +458,10 @@ impl<'a> Lx<'a> {
         if let Some(a) = args.first() {
             collect_field_names(&a.value, &mut names);
         }
-        names.iter().filter_map(|n| self.col_index(input, n)).collect()
+        names
+            .iter()
+            .filter_map(|n| self.col_index(input, n))
+            .collect()
     }
 
     /// One scalar. Returns `None` for shapes the IR has no form for; the caller supplies a
@@ -357,17 +473,32 @@ impl<'a> Lx<'a> {
             Expr::Int(v, _) => Scalar::LitInt(*v),
             Expr::Bool(v, _) => Scalar::LitBool(*v),
             Expr::Str(s, _) => Scalar::LitText(s.clone()),
-            Expr::Money { minor, currency, .. } => Scalar::LitMoney {
+            Expr::Money {
+                minor, currency, ..
+            } => Scalar::LitMoney {
                 minor: *minor,
                 // The currency travels with the value into the IR. An index into the
                 // catalog's currency list, so the engine never has to parse a string to
                 // know which money it is holding.
-                currency: self.cat.currencies.keys().position(|k| k == &currency.text).unwrap_or(0) as u32,
+                currency: self
+                    .cat
+                    .currencies
+                    .keys()
+                    .position(|k| k == &currency.text)
+                    .unwrap_or(0) as u32,
             },
             Expr::Field { name, .. } => Scalar::Column(self.col_index(input, &name.text)?),
             Expr::Path(p) => Scalar::Column(self.col_index(input, &p.last().text)?),
-            Expr::Unary { op: UnOp::Not, operand, .. } => Scalar::Not(Box::new(self.scalar(input, operand)?)),
-            Expr::Unary { op: UnOp::Neg, operand, .. } => Scalar::Neg(Box::new(self.scalar(input, operand)?)),
+            Expr::Unary {
+                op: UnOp::Not,
+                operand,
+                ..
+            } => Scalar::Not(Box::new(self.scalar(input, operand)?)),
+            Expr::Unary {
+                op: UnOp::Neg,
+                operand,
+                ..
+            } => Scalar::Neg(Box::new(self.scalar(input, operand)?)),
             Expr::Binary { op, lhs, rhs, .. } => {
                 let sop = match op {
                     BinOp::Add => ScalarOp::Add,
@@ -400,8 +531,16 @@ impl<'a> Lx<'a> {
                     Expr::Path(p) => p.last().text.clone(),
                     _ => return None,
                 };
-                let id = name.bytes().fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
-                Scalar::Udf { id, args: args.iter().filter_map(|a| self.scalar(input, &a.value)).collect() }
+                let id = name
+                    .bytes()
+                    .fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
+                Scalar::Udf {
+                    id,
+                    args: args
+                        .iter()
+                        .filter_map(|a| self.scalar(input, &a.value))
+                        .collect(),
+                }
             }
             _ => return None,
         })
@@ -427,13 +566,16 @@ impl<'a> Lx<'a> {
             Some(p) => Some(p),
             None => {
                 self.d.push(
-                    Diagnostic::error("NL0501", format!("this `{clause}` predicate has no lowering"))
-                        .primary(e.span(), "cannot be expressed in the circuit")
-                        .note(
-                            "a predicate that cannot be lowered is not defaulted to `true` or \
+                    Diagnostic::error(
+                        "NL0501",
+                        format!("this `{clause}` predicate has no lowering"),
+                    )
+                    .primary(e.span(), "cannot be expressed in the circuit")
+                    .note(
+                        "a predicate that cannot be lowered is not defaulted to `true` or \
                              `false`: one would return rows that should have been filtered out \
                              and the other would hide rows that exist",
-                        ),
+                    ),
                 );
                 None
             }
@@ -443,7 +585,9 @@ impl<'a> Lx<'a> {
     fn scalar_list(&mut self, input: NodeId, e: &Expr) -> Vec<Scalar> {
         match e {
             Expr::Closure { body, .. } => self.scalar_list(input, body),
-            Expr::Tuple { elems, .. } => elems.iter().filter_map(|x| self.scalar(input, x)).collect(),
+            Expr::Tuple { elems, .. } => {
+                elems.iter().filter_map(|x| self.scalar(input, x)).collect()
+            }
             other => self.scalar(input, other).into_iter().collect(),
         }
     }
@@ -470,7 +614,9 @@ impl<'a> Lx<'a> {
             }
             if let Some(r) = residual {
                 let p = self.predicate(cur, &r, "where")?;
-                let id = self.circuit.add(Op::Filter { predicate: p }, vec![cur], c, "where");
+                let id = self
+                    .circuit
+                    .add(Op::Filter { predicate: p }, vec![cur], c, "where");
                 self.schemas.insert(id, self.schema_of(cur).to_vec());
                 cur = id;
             }
@@ -481,7 +627,10 @@ impl<'a> Lx<'a> {
             for g in &s.group_by {
                 collect_field_names(g, &mut names);
             }
-            let group_key: Vec<ColIdx> = names.iter().filter_map(|n| self.col_index(cur, n)).collect();
+            let group_key: Vec<ColIdx> = names
+                .iter()
+                .filter_map(|n| self.col_index(cur, n))
+                .collect();
             // The aggregate in the projection list.
             let mut aggs = Vec::new();
             for (e, _) in &s.projections {
@@ -496,22 +645,31 @@ impl<'a> Lx<'a> {
                             _ => None,
                         };
                         if let Some(a) = agg {
-                            let v = args.first().and_then(|x| self.scalar(cur, &x.value)).unwrap_or(Scalar::Column(0));
+                            let v = args
+                                .first()
+                                .and_then(|x| self.scalar(cur, &x.value))
+                                .unwrap_or(Scalar::Column(0));
                             aggs.push((a, v));
                         }
                     }
                 }
             }
-            let mut out: Vec<String> =
-                group_key.iter().filter_map(|i| in_schema.get(*i as usize).cloned()).collect();
+            let mut out: Vec<String> = group_key
+                .iter()
+                .filter_map(|i| in_schema.get(*i as usize).cloned())
+                .collect();
             out.extend(aggs.iter().map(|(a, _)| a.as_str().to_string()));
-            let id = self.circuit.add(Op::Aggregate { group_key, aggs }, vec![cur], c, "group by");
+            let id = self
+                .circuit
+                .add(Op::Aggregate { group_key, aggs }, vec![cur], c, "group by");
             self.schemas.insert(id, out);
             cur = id;
         }
         if let Some(h) = &s.having {
             let p = self.predicate(cur, h, "having")?;
-            let id = self.circuit.add(Op::Filter { predicate: p }, vec![cur], c, "having");
+            let id = self
+                .circuit
+                .add(Op::Filter { predicate: p }, vec![cur], c, "having");
             self.schemas.insert(id, self.schema_of(cur).to_vec());
             cur = id;
         }
@@ -526,7 +684,9 @@ impl<'a> Lx<'a> {
                 .zip(names.iter())
                 .filter_map(|((_, asc), n)| self.col_index(cur, n).map(|i| (i, *asc)))
                 .collect();
-            let id = self.circuit.add(Op::OrderBy { keys }, vec![cur], c, "order by");
+            let id = self
+                .circuit
+                .add(Op::OrderBy { keys }, vec![cur], c, "order by");
             self.schemas.insert(id, self.schema_of(cur).to_vec());
             cur = id;
         }
@@ -535,7 +695,15 @@ impl<'a> Lx<'a> {
                 Some(Expr::Int(o, _)) => *o as u64,
                 _ => 0,
             };
-            let id = self.circuit.add(Op::Limit { count: *n as u64, offset: off }, vec![cur], c, "limit");
+            let id = self.circuit.add(
+                Op::Limit {
+                    count: *n as u64,
+                    offset: off,
+                },
+                vec![cur],
+                c,
+                "limit",
+            );
             self.schemas.insert(id, self.schema_of(cur).to_vec());
             cur = id;
         }
@@ -565,7 +733,12 @@ impl<'a> Lx<'a> {
         }
         for l in local {
             let p = self.predicate(inner, l, "subquery where")?;
-            let id = self.circuit.add(Op::Filter { predicate: p }, vec![inner], c, "subquery where");
+            let id = self.circuit.add(
+                Op::Filter { predicate: p },
+                vec![inner],
+                c,
+                "subquery where",
+            );
             self.schemas.insert(id, self.schema_of(inner).to_vec());
             inner = id;
         }
@@ -588,15 +761,26 @@ impl<'a> Lx<'a> {
                 }
                 let icol = self.col_of(inner, &sq.query.projections[0].0)?;
                 if matches!(sq.kind, SubqueryKind::In(_)) {
-                    ApplyKind::In { probe: p, inner: icol }
+                    ApplyKind::In {
+                        probe: p,
+                        inner: icol,
+                    }
                 } else {
-                    ApplyKind::NotIn { probe: p, inner: icol }
+                    ApplyKind::NotIn {
+                        probe: p,
+                        inner: icol,
+                    }
                 }
             }
         };
 
         let label = format!("{} subquery", kind.name());
-        let id = self.circuit.add(Op::Apply { kind, correlation }, vec![outer, inner], c, label);
+        let id = self.circuit.add(
+            Op::Apply { kind, correlation },
+            vec![outer, inner],
+            c,
+            label,
+        );
         // An `Apply` in these four kinds preserves the outer row exactly, so it preserves
         // the outer schema. A scalar subquery would widen it; that surface form is not
         // reachable yet and would need this line to change with it.
@@ -614,7 +798,15 @@ impl<'a> Lx<'a> {
     /// `exists` would be a no-op. So the relation name is read off the side it belongs to,
     /// and the unqualified rule is only the fallback for when there is no qualifier to read.
     fn as_correlation(&self, outer: NodeId, inner: NodeId, e: &Expr) -> Option<(ColIdx, ColIdx)> {
-        let Expr::Binary { op: BinOp::Eq, lhs, rhs, .. } = e else { return None };
+        let Expr::Binary {
+            op: BinOp::Eq,
+            lhs,
+            rhs,
+            ..
+        } = e
+        else {
+            return None;
+        };
         let (ln, rn) = (leaf_name(lhs)?, leaf_name(rhs)?);
         let inner_rel = self.relation_of(inner);
 
@@ -663,7 +855,13 @@ impl<'a> Lx<'a> {
         match t {
             TableRef::Named { name, .. } => self.source(&name.text, c),
             TableRef::Sub { query, .. } => self.select(query, c),
-            TableRef::Join { left, right, kind, on, .. } => {
+            TableRef::Join {
+                left,
+                right,
+                kind,
+                on,
+                ..
+            } => {
                 let l = self.table_ref(left, c)?;
                 let r = self.table_ref(right, c)?;
                 let jk = match kind {
@@ -674,10 +872,25 @@ impl<'a> Lx<'a> {
                 };
                 let residual = on.as_ref().and_then(|o| self.scalar(l, o));
                 let lk = self.circuit.node(l).key.clone().unwrap_or_default();
-                let rk = self.circuit.node(r).key.clone().unwrap_or_else(|| lk.clone());
+                let rk = self
+                    .circuit
+                    .node(r)
+                    .key
+                    .clone()
+                    .unwrap_or_else(|| lk.clone());
                 let mut names = self.schema_of(l).to_vec();
                 names.extend(self.schema_of(r).iter().cloned());
-                let id = self.circuit.add(Op::Join { kind: jk, left_key: lk, right_key: rk, residual }, vec![l, r], c, "join");
+                let id = self.circuit.add(
+                    Op::Join {
+                        kind: jk,
+                        left_key: lk,
+                        right_key: rk,
+                        residual,
+                    },
+                    vec![l, r],
+                    c,
+                    "join",
+                );
                 self.schemas.insert(id, names);
                 Some(id)
             }
@@ -702,7 +915,12 @@ enum SubqueryKind {
 /// The conjuncts of an `and`-chain, left to right.
 fn conjuncts(e: &Expr) -> Vec<&Expr> {
     match e {
-        Expr::Binary { op: BinOp::And, lhs, rhs, .. } => {
+        Expr::Binary {
+            op: BinOp::And,
+            lhs,
+            rhs,
+            ..
+        } => {
             let mut v = conjuncts(lhs);
             v.extend(conjuncts(rhs));
             v
@@ -723,16 +941,27 @@ fn split_subqueries(e: &Expr, out: &mut Vec<Subquery>) -> Option<Expr> {
     let mut residual: Option<Expr> = None;
     for conj in conjuncts(e) {
         match conj {
-            Expr::Exists { query, .. } => {
-                out.push(Subquery { kind: SubqueryKind::Exists, query: (**query).clone() })
-            }
-            Expr::Unary { op: UnOp::Not, operand, .. } => match &**operand {
-                Expr::Exists { query, .. } => {
-                    out.push(Subquery { kind: SubqueryKind::NotExists, query: (**query).clone() })
-                }
+            Expr::Exists { query, .. } => out.push(Subquery {
+                kind: SubqueryKind::Exists,
+                query: (**query).clone(),
+            }),
+            Expr::Unary {
+                op: UnOp::Not,
+                operand,
+                ..
+            } => match &**operand {
+                Expr::Exists { query, .. } => out.push(Subquery {
+                    kind: SubqueryKind::NotExists,
+                    query: (**query).clone(),
+                }),
                 _ => residual = Some(and_with(residual, conj)),
             },
-            Expr::Binary { op: op @ (BinOp::In | BinOp::NotIn), lhs, rhs, .. } => match &**rhs {
+            Expr::Binary {
+                op: op @ (BinOp::In | BinOp::NotIn),
+                lhs,
+                rhs,
+                ..
+            } => match &**rhs {
                 Expr::Select(q) => {
                     let probe = (**lhs).clone();
                     let kind = if *op == BinOp::In {
@@ -740,7 +969,10 @@ fn split_subqueries(e: &Expr, out: &mut Vec<Subquery>) -> Option<Expr> {
                     } else {
                         SubqueryKind::NotIn(probe)
                     };
-                    out.push(Subquery { kind, query: (**q).clone() });
+                    out.push(Subquery {
+                        kind,
+                        query: (**q).clone(),
+                    });
                 }
                 // `x in (1, 2, 3)` is a list membership test, not a subquery, and lowers
                 // as an ordinary scalar.

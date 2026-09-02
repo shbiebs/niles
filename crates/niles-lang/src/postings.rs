@@ -91,7 +91,12 @@ impl Shape {
             s.push_str("fx true\n");
         }
         for l in &self.legs {
-            s.push_str(&format!("{} {} {}\n", l.direction.name(), l.account, l.amount));
+            s.push_str(&format!(
+                "{} {} {}\n",
+                l.direction.name(),
+                l.account,
+                l.amount
+            ));
         }
         s
     }
@@ -109,7 +114,10 @@ pub fn shape_of(prog: &Program, function: &str) -> Option<Shape> {
     for item in &prog.items {
         if let Item::Fn(f) = item {
             if f.name.text == function {
-                let mut shape = Shape { function: function.to_string(), ..Shape::default() };
+                let mut shape = Shape {
+                    function: function.to_string(),
+                    ..Shape::default()
+                };
                 // A function with no body is a declaration: it contributes no legs, which is
                 // different from not existing, and the caller can tell.
                 if let Some(body) = &f.body {
@@ -167,7 +175,11 @@ fn walk_expr(e: &Expr, shape: &mut Shape, in_branch: bool) {
                     // front end, so it cannot be reached with one.
                     let account = args.first().map(|a| render(&a.value)).unwrap_or_default();
                     let amount = args.get(1).map(|a| render(&a.value)).unwrap_or_default();
-                    shape.legs.push(Leg { direction, account, amount });
+                    shape.legs.push(Leg {
+                        direction,
+                        account,
+                        amount,
+                    });
                 }
                 _ => {}
             }
@@ -177,7 +189,9 @@ fn walk_expr(e: &Expr, shape: &mut Shape, in_branch: bool) {
         }
         Expr::Try { expr, .. } => walk_expr(expr, shape, in_branch),
         Expr::Block(b) => walk_block(b, shape, in_branch),
-        Expr::If { cond, then, els, .. } => {
+        Expr::If {
+            cond, then, els, ..
+        } => {
             walk_expr(cond, shape, in_branch);
             // Everything below an `if` is branched, whatever the enclosing context was.
             walk_block(then, shape, true);
@@ -232,16 +246,16 @@ fn walk_expr(e: &Expr, shape: &mut Shape, in_branch: bool) {
             }
         }
         Expr::Resolve { hold, .. } => walk_expr(hold, shape, in_branch),
-        Expr::Hold { args, .. }
-        | Expr::Authorize { args, .. }
-        | Expr::Declassify { args, .. } => {
+        Expr::Hold { args, .. } | Expr::Authorize { args, .. } | Expr::Declassify { args, .. } => {
             for a in args {
                 walk_expr(&a.value, shape, in_branch);
             }
         }
 
         // ── control flow ────────────────────────────────────────────────────────────
-        Expr::Match { scrutinee, arms, .. } => {
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
             walk_expr(scrutinee, shape, in_branch);
             for arm in arms {
                 walk_expr(&arm.body, shape, true);
@@ -299,7 +313,12 @@ fn render(e: &Expr) -> String {
             .map(|s| s.text.clone())
             .collect::<Vec<_>>()
             .join("::"),
-        Expr::Money { minor, scale, currency, .. } => {
+        Expr::Money {
+            minor,
+            scale,
+            currency,
+            ..
+        } => {
             let d = 10i128.pow(*scale);
             let sign = if *minor < 0 { "-" } else { "" };
             let a = minor.abs();
@@ -350,11 +369,14 @@ fn transfer(from: Id<Account>, to: Id<Account>, amount: Money<usd>)
     fn a_two_leg_transfer_yields_two_legs_in_source_order() {
         let s = shape_of(&parse(TRANSFER), "transfer").expect("found");
         assert_eq!(s.legs.len(), 2);
-        assert_eq!(s.legs[0], Leg {
-            direction: Direction::Debit,
-            account: "from".into(),
-            amount: "amount".into(),
-        });
+        assert_eq!(
+            s.legs[0],
+            Leg {
+                direction: Direction::Debit,
+                account: "from".into(),
+                amount: "amount".into(),
+            }
+        );
         assert_eq!(s.legs[1].direction, Direction::Credit);
         assert_eq!(s.legs[1].account, "to");
         assert!(!s.branched);
@@ -452,7 +474,10 @@ fn draw(b: Id<Account>, l1: Id<Account>, l2: Id<Account>, l3: Id<Account>)
         let s = shape_of(&parse(src), "draw").expect("found");
         assert_eq!(s.legs.len(), 4);
         assert_eq!(
-            s.legs.iter().filter(|l| l.direction == Direction::Debit).count(),
+            s.legs
+                .iter()
+                .filter(|l| l.direction == Direction::Debit)
+                .count(),
             3
         );
         assert_eq!(s.legs[3].account, "b");
@@ -468,7 +493,11 @@ fn draw(b: Id<Account>, l1: Id<Account>, l2: Id<Account>, l3: Id<Account>)
     fn every_function_with_legs_is_found_by_the_bulk_extractor() {
         let src = format!("{TRANSFER}\nfn nothing() -> Int {{ 1 }}\n");
         let shapes = all_shapes(&parse(&src));
-        assert_eq!(shapes.len(), 1, "the legless function is not a posting shape");
+        assert_eq!(
+            shapes.len(),
+            1,
+            "the legless function is not a posting shape"
+        );
         assert_eq!(shapes[0].function, "transfer");
     }
 }

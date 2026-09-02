@@ -73,7 +73,10 @@ fn reaches_output(c: &Circuit, id: NodeId) -> bool {
 
 /// Verify a circuit. A circuit that fails here never reaches the engine.
 pub fn verify(c: &Circuit) -> VerifyReport {
-    let mut r = VerifyReport { violations: Vec::new(), nodes_checked: c.nodes.len() };
+    let mut r = VerifyReport {
+        violations: Vec::new(),
+        nodes_checked: c.nodes.len(),
+    };
 
     // ---- structural ----
     for n in &c.nodes {
@@ -81,12 +84,21 @@ pub fn verify(c: &Circuit) -> VerifyReport {
             r.violations.push(Violation {
                 code: "IR001",
                 node: Some(n.id),
-                msg: format!("`{}` takes {} input(s) but has {}", n.op.name(), n.op.arity(), n.inputs.len()),
+                msg: format!(
+                    "`{}` takes {} input(s) but has {}",
+                    n.op.name(),
+                    n.op.arity(),
+                    n.inputs.len()
+                ),
             });
         }
         for i in &n.inputs {
             if *i as usize >= c.nodes.len() {
-                r.violations.push(Violation { code: "IR002", node: Some(n.id), msg: format!("input {i} does not exist") });
+                r.violations.push(Violation {
+                    code: "IR002",
+                    node: Some(n.id),
+                    msg: format!("input {i} does not exist"),
+                });
             } else if *i >= n.id && !matches!(n.op, Op::Delay) {
                 // Forward references are only legal through a `Delay`, which is what makes
                 // a fixpoint's cycle well founded rather than an infinite regress.
@@ -107,7 +119,11 @@ pub fn verify(c: &Circuit) -> VerifyReport {
     }
     for (name, id) in &c.outputs {
         if *id as usize >= c.nodes.len() {
-            r.violations.push(Violation { code: "IR005", node: None, msg: format!("output `{name}` names a node that does not exist") });
+            r.violations.push(Violation {
+                code: "IR005",
+                node: None,
+                msg: format!("output `{name}` names a node that does not exist"),
+            });
         }
     }
 
@@ -126,7 +142,10 @@ pub fn verify(c: &Circuit) -> VerifyReport {
             r.violations.push(Violation {
                 code: "IR010",
                 node: Some(n.id),
-                msg: format!("contract {:?}/{:?}/{:?} is not serveable", contract.consistency, contract.materialize, contract.retain),
+                msg: format!(
+                    "contract {:?}/{:?}/{:?} is not serveable",
+                    contract.consistency, contract.materialize, contract.retain
+                ),
             });
         }
 
@@ -146,7 +165,10 @@ pub fn verify(c: &Circuit) -> VerifyReport {
         // Evictable state must be reconstructible, or eviction is data loss rather than a
         // memory-management decision. This is the IR-level statement of Proposition 3.4.
         let evictable = contract.retain == Retention::Evictable
-            && matches!(contract.materialize, Materialize::Demand | Materialize::Absent | Materialize::Tiered);
+            && matches!(
+                contract.materialize,
+                Materialize::Demand | Materialize::Absent | Materialize::Tiered
+            );
         if evictable && !matches!(n.op, Op::Source { .. }) {
             match upquery_path::derive(c, n.id, 0) {
                 Ok(p) if !p.is_anchored() => r.violations.push(Violation {
@@ -165,15 +187,25 @@ pub fn verify(c: &Circuit) -> VerifyReport {
 
         // A base is never partial. This is not a policy the optimizer may trade away; it
         // is the premise every reconstruction theorem starts from.
-        if let Op::Source { relation, is_base: true, .. } = &n.op {
+        if let Op::Source {
+            relation,
+            is_base: true,
+            ..
+        } = &n.op
+        {
             if contract.retain != Retention::Forever {
                 r.violations.push(Violation {
                     code: "IR014",
                     node: Some(n.id),
-                    msg: format!("base `{relation}` must be `retain: forever`; the base is never partial"),
+                    msg: format!(
+                        "base `{relation}` must be `retain: forever`; the base is never partial"
+                    ),
                 });
             }
-            if matches!(contract.materialize, Materialize::Absent | Materialize::Demand) {
+            if matches!(
+                contract.materialize,
+                Materialize::Absent | Materialize::Demand
+            ) {
                 r.violations.push(Violation {
                     code: "IR015",
                     node: Some(n.id),
@@ -191,7 +223,11 @@ pub fn verify(c: &Circuit) -> VerifyReport {
         // the three is a correct row.
         if let Op::Join { kind, .. } = &n.op {
             if matches!(kind, JoinKind::Semi | JoinKind::Anti) {
-                let left = n.inputs.first().and_then(|i| c.nodes.get(*i as usize)).map(|x| x.arity);
+                let left = n
+                    .inputs
+                    .first()
+                    .and_then(|i| c.nodes.get(*i as usize))
+                    .map(|x| x.arity);
                 if let Some(w) = left {
                     if n.arity != w {
                         r.violations.push(Violation {
@@ -226,8 +262,12 @@ pub fn verify(c: &Circuit) -> VerifyReport {
                     ),
                 });
             }
-            let widths: Vec<u16> =
-                n.inputs.iter().filter_map(|i| c.nodes.get(*i as usize)).map(|x| x.arity).collect();
+            let widths: Vec<u16> = n
+                .inputs
+                .iter()
+                .filter_map(|i| c.nodes.get(*i as usize))
+                .map(|x| x.arity)
+                .collect();
             if widths.len() == 2 {
                 for (o, i) in correlation {
                     if *o >= widths[0] || *i >= widths[1] {
@@ -249,11 +289,15 @@ pub fn verify(c: &Circuit) -> VerifyReport {
         // the kind of bug a hand-built circuit introduces.
         if transparent {
             for i in &n.inputs {
-                if (*i as usize) < c.nodes.len() && !*c.nodes[*i as usize].conservation_transparent.peek() {
+                if (*i as usize) < c.nodes.len()
+                    && !*c.nodes[*i as usize].conservation_transparent.peek()
+                {
                     r.violations.push(Violation {
                         code: "IR016",
                         node: Some(n.id),
-                        msg: format!("claims conservation transparency over non-transparent input {i}"),
+                        msg: format!(
+                            "claims conservation transparency over non-transparent input {i}"
+                        ),
                     });
                 }
             }
@@ -282,19 +326,35 @@ mod tests {
     use crate::{Lineage, ServeContract};
 
     fn contract(cons: Consistency, m: Materialize, r: Retention) -> ServeContract {
-        ServeContract { consistency: cons, materialize: m, retain: r, lineage: Lineage::Off }
+        ServeContract {
+            consistency: cons,
+            materialize: m,
+            retain: r,
+            lineage: Lineage::Off,
+        }
     }
 
     fn base_circuit(view_contract: ServeContract) -> Circuit {
         let mut c = Circuit::new();
         let src = c.add(
-            Op::Source { relation: "postings".into(), is_base: true, anchor_key: vec![0, 1] },
+            Op::Source {
+                relation: "postings".into(),
+                is_base: true,
+                anchor_key: vec![0, 1],
+            },
             vec![],
-            contract(Consistency::LedgerConsistent, Materialize::Full, Retention::Forever),
+            contract(
+                Consistency::LedgerConsistent,
+                Materialize::Full,
+                Retention::Forever,
+            ),
             "postings",
         );
         let agg = c.add(
-            Op::Aggregate { group_key: vec![0, 1], aggs: vec![(Agg::Sum, Scalar::Column(2))] },
+            Op::Aggregate {
+                group_key: vec![0, 1],
+                aggs: vec![(Agg::Sum, Scalar::Column(2))],
+            },
             vec![src],
             view_contract,
             "balance",
@@ -305,7 +365,11 @@ mod tests {
 
     #[test]
     fn a_well_formed_circuit_verifies() {
-        let c = base_circuit(contract(Consistency::Snapshot, Materialize::Demand, Retention::Evictable));
+        let c = base_circuit(contract(
+            Consistency::Snapshot,
+            Materialize::Demand,
+            Retention::Evictable,
+        ));
         let r = verify(&c);
         assert!(r.is_ok(), "{}", r.render());
         assert_eq!(r.nodes_checked, 2);
@@ -316,26 +380,50 @@ mod tests {
         // The premise every reconstruction theorem starts from, enforced rather than assumed.
         let mut c = Circuit::new();
         c.add(
-            Op::Source { relation: "postings".into(), is_base: true, anchor_key: vec![0] },
+            Op::Source {
+                relation: "postings".into(),
+                is_base: true,
+                anchor_key: vec![0],
+            },
             vec![],
-            contract(Consistency::LedgerConsistent, Materialize::Demand, Retention::Forever),
+            contract(
+                Consistency::LedgerConsistent,
+                Materialize::Demand,
+                Retention::Forever,
+            ),
             "",
         );
         let r = verify(&c);
-        assert!(r.violations.iter().any(|v| v.code == "IR015"), "{}", r.render());
+        assert!(
+            r.violations.iter().any(|v| v.code == "IR015"),
+            "{}",
+            r.render()
+        );
     }
 
     #[test]
     fn a_base_must_be_retained_forever() {
         let mut c = Circuit::new();
         c.add(
-            Op::Source { relation: "postings".into(), is_base: true, anchor_key: vec![0] },
+            Op::Source {
+                relation: "postings".into(),
+                is_base: true,
+                anchor_key: vec![0],
+            },
             vec![],
-            contract(Consistency::LedgerConsistent, Materialize::Full, Retention::Evictable),
+            contract(
+                Consistency::LedgerConsistent,
+                Materialize::Full,
+                Retention::Evictable,
+            ),
             "",
         );
         let r = verify(&c);
-        assert!(r.violations.iter().any(|v| v.code == "IR014"), "{}", r.render());
+        assert!(
+            r.violations.iter().any(|v| v.code == "IR014"),
+            "{}",
+            r.render()
+        );
     }
 
     #[test]
@@ -343,64 +431,127 @@ mod tests {
         // Eviction over a source whose history is gone is data loss, not memory management.
         let mut c = Circuit::new();
         let src = c.add(
-            Op::Source { relation: "staging".into(), is_base: false, anchor_key: vec![0] },
+            Op::Source {
+                relation: "staging".into(),
+                is_base: false,
+                anchor_key: vec![0],
+            },
             vec![],
-            contract(Consistency::Snapshot, Materialize::Full, Retention::Evictable),
+            contract(
+                Consistency::Snapshot,
+                Materialize::Full,
+                Retention::Evictable,
+            ),
             "",
         );
         c.add(
-            Op::Aggregate { group_key: vec![0], aggs: vec![(Agg::Sum, Scalar::Column(1))] },
+            Op::Aggregate {
+                group_key: vec![0],
+                aggs: vec![(Agg::Sum, Scalar::Column(1))],
+            },
             vec![src],
-            contract(Consistency::Snapshot, Materialize::Demand, Retention::Evictable),
+            contract(
+                Consistency::Snapshot,
+                Materialize::Demand,
+                Retention::Evictable,
+            ),
             "",
         );
         let r = verify(&c);
-        assert!(r.violations.iter().any(|v| v.code == "IR013"), "{}", r.render());
-        assert!(r.render().contains("history is not retained"), "{}", r.render());
+        assert!(
+            r.violations.iter().any(|v| v.code == "IR013"),
+            "{}",
+            r.render()
+        );
+        assert!(
+            r.render().contains("history is not retained"),
+            "{}",
+            r.render()
+        );
     }
 
     #[test]
     fn the_top_rung_cannot_be_served_from_a_pinned_anchor() {
         let mut c = Circuit::new();
         let src = c.add(
-            Op::Source { relation: "p".into(), is_base: true, anchor_key: vec![0] },
+            Op::Source {
+                relation: "p".into(),
+                is_base: true,
+                anchor_key: vec![0],
+            },
             vec![],
-            contract(Consistency::LedgerConsistent, Materialize::Full, Retention::Forever),
+            contract(
+                Consistency::LedgerConsistent,
+                Materialize::Full,
+                Retention::Forever,
+            ),
             "",
         );
         c.add(
             Op::AsOf { epoch: Some(4200) },
             vec![src],
-            contract(Consistency::LedgerConsistent, Materialize::Full, Retention::Pinned),
+            contract(
+                Consistency::LedgerConsistent,
+                Materialize::Full,
+                Retention::Pinned,
+            ),
             "",
         );
         let r = verify(&c);
-        assert!(r.violations.iter().any(|v| v.code == "IR011"), "{}", r.render());
+        assert!(
+            r.violations.iter().any(|v| v.code == "IR011"),
+            "{}",
+            r.render()
+        );
     }
 
     #[test]
     fn an_infeasible_contract_is_rejected_at_the_ir_too() {
         // Already checked in the front end. Checked again here because the IR is the
         // stable contract and may be produced by something that is not this compiler.
-        let c = base_circuit(contract(Consistency::LedgerConsistent, Materialize::Spilled, Retention::Evictable));
+        let c = base_circuit(contract(
+            Consistency::LedgerConsistent,
+            Materialize::Spilled,
+            Retention::Evictable,
+        ));
         let r = verify(&c);
-        assert!(r.violations.iter().any(|v| v.code == "IR010"), "{}", r.render());
+        assert!(
+            r.violations.iter().any(|v| v.code == "IR010"),
+            "{}",
+            r.render()
+        );
     }
 
     #[test]
     fn a_dangling_input_is_caught_before_the_engine_panics() {
-        let mut c = base_circuit(contract(Consistency::Snapshot, Materialize::Full, Retention::Pinned));
+        let mut c = base_circuit(contract(
+            Consistency::Snapshot,
+            Materialize::Full,
+            Retention::Pinned,
+        ));
         c.nodes[1].inputs = vec![99];
         let r = verify(&c);
-        assert!(r.violations.iter().any(|v| v.code == "IR002"), "{}", r.render());
+        assert!(
+            r.violations.iter().any(|v| v.code == "IR002"),
+            "{}",
+            r.render()
+        );
     }
 
     #[test]
     fn arity_mismatches_are_caught() {
-        let mut c = base_circuit(contract(Consistency::Snapshot, Materialize::Full, Retention::Pinned));
+        let mut c = base_circuit(contract(
+            Consistency::Snapshot,
+            Materialize::Full,
+            Retention::Pinned,
+        ));
         c.nodes[1].inputs = vec![0, 0];
         let r = verify(&c);
-        assert!(r.violations.iter().any(|v| v.code == "IR001"), "{}", r.render());
+        assert!(
+            r.violations.iter().any(|v| v.code == "IR001"),
+            "{}",
+            r.render()
+        );
     }
 
     #[test]
@@ -408,7 +559,11 @@ mod tests {
         // Self-check: if the verifier stopped consulting one of the checked fields, the
         // audit it runs at the end would report that field as unread — so this test also
         // guards the verifier against its own future drift.
-        let c = base_circuit(contract(Consistency::Snapshot, Materialize::Full, Retention::Pinned));
+        let c = base_circuit(contract(
+            Consistency::Snapshot,
+            Materialize::Full,
+            Retention::Pinned,
+        ));
         let r = verify(&c);
         assert!(
             !r.violations.iter().any(|v| v.code == "IR020"),

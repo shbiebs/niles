@@ -180,7 +180,10 @@ impl Rev {
             let effective = (*e).max(self.applied);
             if effective >= anchor {
                 self.stats.hits += 1;
-                return Anchored { value: *v, anchor: effective };
+                return Anchored {
+                    value: *v,
+                    anchor: effective,
+                };
             }
         }
 
@@ -206,7 +209,9 @@ impl Rev {
     fn enforce_budget(&mut self) {
         let Some(b) = self.budget else { return };
         while self.resident > b {
-            let Some(victim) = self.choose_victim() else { break };
+            let Some(victim) = self.choose_victim() else {
+                break;
+            };
             if let Some(s) = self.slots.get_mut(&victim) {
                 // Honest absence: the value goes, the version stays.
                 if s.evict() {
@@ -291,7 +296,9 @@ impl Unsupported {
                  key-aggregate fragment this runtime executes"
             ),
             Unsupported::NoKey { node } => {
-                format!("node {node} has no derivable key, so there is nothing to materialize per key")
+                format!(
+                    "node {node} has no derivable key, so there is nothing to materialize per key"
+                )
             }
             Unsupported::Aggregate { node, agg } => {
                 format!("node {node} aggregates with `{agg}`, which this runtime does not maintain")
@@ -310,21 +317,36 @@ pub struct Runtime {
 impl Runtime {
     /// Install a compiled circuit. Rejects anything outside the executable fragment rather
     /// than silently mis-executing it.
-    pub fn install(circuit: Circuit, budget: Option<u64>, policy: Policy) -> Result<Runtime, Unsupported> {
+    pub fn install(
+        circuit: Circuit,
+        budget: Option<u64>,
+        policy: Policy,
+    ) -> Result<Runtime, Unsupported> {
         let mut views = Vec::new();
-        let outputs: Vec<(String, NodeId)> =
-            circuit.outputs.iter().map(|(n, i)| (n.clone(), *i)).collect();
+        let outputs: Vec<(String, NodeId)> = circuit
+            .outputs
+            .iter()
+            .map(|(n, i)| (n.clone(), *i))
+            .collect();
         for (name, id) in outputs {
             let n = circuit.node(id);
             match &n.op {
                 Op::Aggregate { aggs, .. } => {
                     for (a, _) in aggs {
                         if !matches!(a, Agg::Sum | Agg::Count) {
-                            return Err(Unsupported::Aggregate { node: id, agg: a.as_str() });
+                            return Err(Unsupported::Aggregate {
+                                node: id,
+                                agg: a.as_str(),
+                            });
                         }
                     }
                 }
-                other => return Err(Unsupported::Shape { node: id, op: other.name() }),
+                other => {
+                    return Err(Unsupported::Shape {
+                        node: id,
+                        op: other.name(),
+                    })
+                }
             }
             if n.key.is_none() {
                 return Err(Unsupported::NoKey { node: id });
@@ -361,7 +383,11 @@ impl Runtime {
             });
         }
         views.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(Runtime { circuit, views, epoch: 0 })
+        Ok(Runtime {
+            circuit,
+            views,
+            epoch: 0,
+        })
     }
 
     pub fn view_mut(&mut self, name: &str) -> Option<&mut Rev> {
@@ -440,7 +466,10 @@ mod tests {
 
     impl FoldBase {
         fn new(interval: usize) -> Self {
-            FoldBase { interval, ..Default::default() }
+            FoldBase {
+                interval,
+                ..Default::default()
+            }
         }
         fn seal(&mut self, key: Key, delta: Value) -> Epoch {
             self.head += 1;
@@ -448,9 +477,16 @@ mod tests {
             let c = self.counts.entry(key.clone()).or_insert(0);
             *c += 1;
             if self.interval > 0 && *c % self.interval == 0 {
-                let running: Value =
-                    self.rows.iter().filter(|(_, k, _)| *k == key).map(|(_, _, d)| d).sum();
-                self.checkpoints.entry(key).or_default().push((self.head, running));
+                let running: Value = self
+                    .rows
+                    .iter()
+                    .filter(|(_, k, _)| *k == key)
+                    .map(|(_, _, d)| d)
+                    .sum();
+                self.checkpoints
+                    .entry(key)
+                    .or_default()
+                    .push((self.head, running));
             }
             self.head
         }
@@ -478,22 +514,38 @@ mod tests {
             (acc, rows)
         }
         fn deltas_at(&mut self, e: Epoch) -> Vec<(Key, Value)> {
-            self.rows.iter().filter(|(re, _, _)| *re == e).map(|(_, k, d)| (k.clone(), *d)).collect()
+            self.rows
+                .iter()
+                .filter(|(re, _, _)| *re == e)
+                .map(|(_, k, d)| (k.clone(), *d))
+                .collect()
         }
     }
 
     fn circuit(mat: Materialize, rung: Consistency) -> Circuit {
         let mut c = Circuit::new();
         let src = c.add(
-            Op::Source { relation: "postings".into(), is_base: true, anchor_key: vec![0] },
+            Op::Source {
+                relation: "postings".into(),
+                is_base: true,
+                anchor_key: vec![0],
+            },
             vec![],
             internal_contract(),
             "postings",
         );
         let agg = c.add(
-            Op::Aggregate { group_key: vec![0], aggs: vec![(Agg::Sum, Scalar::Column(1))] },
+            Op::Aggregate {
+                group_key: vec![0],
+                aggs: vec![(Agg::Sum, Scalar::Column(1))],
+            },
             vec![src],
-            ServeContract { consistency: rung, materialize: mat, retain: Retention::Evictable, lineage: Lineage::Key },
+            ServeContract {
+                consistency: rung,
+                materialize: mat,
+                retain: Retention::Evictable,
+                lineage: Lineage::Key,
+            },
             "balance",
         );
         c.set_output("balance", agg);
@@ -508,7 +560,12 @@ mod tests {
         for i in 0..50 {
             base.seal(vec![i % 5], 100 + i as i128);
         }
-        let mut rt = Runtime::install(circuit(Materialize::Demand, Consistency::Snapshot), Some(2), Policy::Lru).unwrap();
+        let mut rt = Runtime::install(
+            circuit(Materialize::Demand, Consistency::Snapshot),
+            Some(2),
+            Policy::Lru,
+        )
+        .unwrap();
         let anchor = base.frontier();
         let v = rt.view_mut("balance").unwrap();
 
@@ -517,7 +574,11 @@ mod tests {
             first.insert(k, v.read(&mut base, &vec![k], anchor).value);
         }
         // With a budget of 2 and 5 keys, the sweep above already evicted three of them.
-        assert!(v.stats.evictions >= 3, "the budget must actually bite: {:?}", v.stats);
+        assert!(
+            v.stats.evictions >= 3,
+            "the budget must actually bite: {:?}",
+            v.stats
+        );
         for k in 0..5i64 {
             let again = v.read(&mut base, &vec![k], anchor).value;
             assert_eq!(again, first[&k], "key {k} changed across an eviction");
@@ -528,7 +589,12 @@ mod tests {
     fn an_evicted_entry_keeps_its_version_and_never_answers_zero() {
         let mut base = FoldBase::new(0);
         base.seal(vec![7], 500);
-        let mut rt = Runtime::install(circuit(Materialize::Demand, Consistency::Snapshot), Some(1), Policy::Lru).unwrap();
+        let mut rt = Runtime::install(
+            circuit(Materialize::Demand, Consistency::Snapshot),
+            Some(1),
+            Policy::Lru,
+        )
+        .unwrap();
         let anchor = base.frontier();
         let v = rt.view_mut("balance").unwrap();
         assert_eq!(v.read(&mut base, &vec![7], anchor).value, 500);
@@ -536,7 +602,11 @@ mod tests {
         base.seal(vec![8], 900);
         let head = base.frontier();
         v.read(&mut base, &vec![8], head);
-        assert!(matches!(v.slot(&vec![7]), Slot::Hole(_)), "must be a hole, not gone: {}", v.slot(&vec![7]));
+        assert!(
+            matches!(v.slot(&vec![7]), Slot::Hole(_)),
+            "must be a hole, not gone: {}",
+            v.slot(&vec![7])
+        );
         // And reading it back reconstructs the real value, not the aggregate's identity.
         let head = base.frontier();
         assert_eq!(v.read(&mut base, &vec![7], head).value, 500);
@@ -547,11 +617,20 @@ mod tests {
         let mut base = FoldBase::new(0);
         base.seal(vec![1], 10);
         base.seal(vec![1], 20);
-        let mut rt = Runtime::install(circuit(Materialize::Demand, Consistency::Snapshot), None, Policy::Lru).unwrap();
+        let mut rt = Runtime::install(
+            circuit(Materialize::Demand, Consistency::Snapshot),
+            None,
+            Policy::Lru,
+        )
+        .unwrap();
         let v = rt.view_mut("balance").unwrap();
         let a = v.read(&mut base, &vec![1], 1);
         let b = v.read(&mut base, &vec![1], 2);
-        assert_eq!((a.value, a.anchor), (10, 1), "an as-of read sees the prefix, not the head");
+        assert_eq!(
+            (a.value, a.anchor),
+            (10, 1),
+            "an as-of read sees the prefix, not the head"
+        );
         assert_eq!((b.value, b.anchor), (30, 2));
     }
 
@@ -561,7 +640,12 @@ mod tests {
         for i in 0..20 {
             base.seal(vec![i % 10], 1);
         }
-        let mut rt = Runtime::install(circuit(Materialize::Demand, Consistency::Snapshot), Some(2), Policy::Lru).unwrap();
+        let mut rt = Runtime::install(
+            circuit(Materialize::Demand, Consistency::Snapshot),
+            Some(2),
+            Policy::Lru,
+        )
+        .unwrap();
         {
             let v = rt.view_mut("balance").unwrap();
             v.read(&mut base, &vec![0], 1);
@@ -570,7 +654,10 @@ mod tests {
             rt.advance(&mut base, e);
         }
         let s = rt.stats();
-        assert!(s.deltas_skipped > s.deltas_applied, "partiality must skip more than it applies: {s:?}");
+        assert!(
+            s.deltas_skipped > s.deltas_applied,
+            "partiality must skip more than it applies: {s:?}"
+        );
     }
 
     #[test]
@@ -581,13 +668,21 @@ mod tests {
         for i in 0..10 {
             base.seal(vec![i], 1);
         }
-        let mut rt = Runtime::install(circuit(Materialize::Full, Consistency::Snapshot), Some(1), Policy::Lru).unwrap();
+        let mut rt = Runtime::install(
+            circuit(Materialize::Full, Consistency::Snapshot),
+            Some(1),
+            Policy::Lru,
+        )
+        .unwrap();
         let anchor = base.frontier();
         let v = rt.view_mut("balance").unwrap();
         for k in 0..10i64 {
             v.read(&mut base, &vec![k], anchor);
         }
-        assert_eq!(v.stats.evictions, 0, "a fully materialized view must not evict");
+        assert_eq!(
+            v.stats.evictions, 0,
+            "a fully materialized view must not evict"
+        );
         assert_eq!(v.resident_count(), 10);
     }
 
@@ -595,12 +690,19 @@ mod tests {
     fn a_lax_rung_is_maintained_less_often_and_that_is_where_its_cost_lives() {
         // The measured finding, as a test: a rung's price falls on maintenance, not reads.
         let mut runs = Vec::new();
-        for rung in [Consistency::Bounded { epochs: 8, millis: 0 }, Consistency::LedgerConsistent] {
+        for rung in [
+            Consistency::Bounded {
+                epochs: 8,
+                millis: 0,
+            },
+            Consistency::LedgerConsistent,
+        ] {
             let mut base = FoldBase::new(0);
             for i in 0..200 {
                 base.seal(vec![i % 4], 1);
             }
-            let mut rt = Runtime::install(circuit(Materialize::Demand, rung), None, Policy::Lru).unwrap();
+            let mut rt =
+                Runtime::install(circuit(Materialize::Demand, rung), None, Policy::Lru).unwrap();
             {
                 let v = rt.view_mut("balance").unwrap();
                 for k in 0..4i64 {
@@ -617,7 +719,10 @@ mod tests {
             strict.deltas_applied > lax.deltas_applied * 4,
             "the strict rung must pay materially more maintenance: {lax:?} vs {strict:?}"
         );
-        assert_eq!(lax.reads, strict.reads, "and the read counts must be indistinguishable");
+        assert_eq!(
+            lax.reads, strict.reads,
+            "and the read counts must be indistinguishable"
+        );
     }
 
     #[test]
@@ -630,7 +735,12 @@ mod tests {
             for i in 0..2000 {
                 base.seal(vec![i % 4], 1);
             }
-            let mut rt = Runtime::install(circuit(Materialize::Demand, Consistency::Snapshot), Some(1), Policy::Lru).unwrap();
+            let mut rt = Runtime::install(
+                circuit(Materialize::Demand, Consistency::Snapshot),
+                Some(1),
+                Policy::Lru,
+            )
+            .unwrap();
             let anchor = base.frontier();
             let v = rt.view_mut("balance").unwrap();
             for _ in 0..8 {
@@ -641,28 +751,48 @@ mod tests {
             costs.push(v.stats.base_rows_read as f64 / v.stats.upqueries as f64);
         }
         let (unbounded, bounded) = (costs[0], costs[1]);
-        assert!(unbounded > 400.0, "without checkpoints the fold is history-length: {unbounded}");
+        assert!(
+            unbounded > 400.0,
+            "without checkpoints the fold is history-length: {unbounded}"
+        );
         // Predicted bound: C/2 + 1 on average, so 9 for C = 16. Allow the interval itself
         // as slack, since the last checkpoint's position within the run varies.
-        assert!(bounded <= 16.0, "with C=16 the fold must be bounded near C/2+1 = 9, measured {bounded}");
+        assert!(
+            bounded <= 16.0,
+            "with C=16 the fold must be bounded near C/2+1 = 9, measured {bounded}"
+        );
     }
 
     #[test]
     fn a_circuit_outside_the_fragment_is_rejected_not_mis_executed() {
         let mut c = Circuit::new();
         let src = c.add(
-            Op::Source { relation: "p".into(), is_base: true, anchor_key: vec![0] },
+            Op::Source {
+                relation: "p".into(),
+                is_base: true,
+                anchor_key: vec![0],
+            },
             vec![],
             internal_contract(),
             "",
         );
-        let f = c.add(Op::Filter { predicate: Scalar::LitBool(true) }, vec![src], internal_contract(), "");
+        let f = c.add(
+            Op::Filter {
+                predicate: Scalar::LitBool(true),
+            },
+            vec![src],
+            internal_contract(),
+            "",
+        );
         c.set_output("v", f);
         let e = match Runtime::install(c, None, Policy::Lru) {
             Err(e) => e,
             Ok(_) => panic!("a filter-terminated circuit must be rejected, not installed"),
         };
-        assert!(matches!(e, Unsupported::Shape { op: "filter", .. }), "{e:?}");
+        assert!(
+            matches!(e, Unsupported::Shape { op: "filter", .. }),
+            "{e:?}"
+        );
         assert!(e.explain().contains("outside the key-aggregate fragment"));
     }
 
@@ -679,7 +809,10 @@ mod tests {
             .into_iter()
             .filter(|(n, _)| rt.views.iter().any(|v| v.node == *n))
             .collect();
-        assert!(unread.is_empty(), "the runtime ignored a semantic field: {unread:?}");
+        assert!(
+            unread.is_empty(),
+            "the runtime ignored a semantic field: {unread:?}"
+        );
     }
 
     #[test]
@@ -689,12 +822,24 @@ mod tests {
         for i in 0..300 {
             base.seal(vec![i % 6], (i as i128 % 7) - 3);
         }
-        let mut rt = Runtime::install(circuit(Materialize::Demand, Consistency::Snapshot), Some(3), Policy::CostAware).unwrap();
+        let mut rt = Runtime::install(
+            circuit(Materialize::Demand, Consistency::Snapshot),
+            Some(3),
+            Policy::CostAware,
+        )
+        .unwrap();
         let anchor = base.frontier();
         let v = rt.view_mut("balance").unwrap();
-        let before: Vec<Value> = (0..6i64).map(|k| v.read(&mut base, &vec![k], anchor).value).collect();
+        let before: Vec<Value> = (0..6i64)
+            .map(|k| v.read(&mut base, &vec![k], anchor).value)
+            .collect();
         v.wipe();
-        let after: Vec<Value> = (0..6i64).map(|k| v.read(&mut base, &vec![k], anchor).value).collect();
-        assert_eq!(before, after, "a full rebuild from the base must reproduce every balance");
+        let after: Vec<Value> = (0..6i64)
+            .map(|k| v.read(&mut base, &vec![k], anchor).value)
+            .collect();
+        assert_eq!(
+            before, after,
+            "a full rebuild from the base must reproduce every balance"
+        );
     }
 }

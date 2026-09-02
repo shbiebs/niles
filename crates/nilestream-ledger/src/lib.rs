@@ -2,12 +2,12 @@
 //!
 //! Append-only, hash-chained, epoch-ordered, strictly serializable, never partial.
 
-pub mod epoch;
-pub mod segment;
-pub mod chain;
 pub mod admission;
-pub mod sequencer;
+pub mod chain;
+pub mod epoch;
 pub mod frontiers;
+pub mod segment;
+pub mod sequencer;
 
 /// Exact minor-unit money. Floats never touch amounts (thesis 7.1).
 pub type Minor = i128;

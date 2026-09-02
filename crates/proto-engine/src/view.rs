@@ -214,7 +214,9 @@ impl PartialView {
             return;
         }
         while self.resident() > self.budget {
-            let victim = self.policy.choose_victim(&self.slots, &self.meta, self.clock);
+            let victim = self
+                .policy
+                .choose_victim(&self.slots, &self.meta, self.clock);
             match victim {
                 Some(k) => {
                     // Honest absence: Present(v, e) becomes Hole(e). The value is dropped;
@@ -248,7 +250,10 @@ impl PartialView {
     }
 
     pub fn slot(&self, acct: Acct, cur: Cur) -> Slot {
-        self.slots.get(&(acct, cur)).copied().unwrap_or(Slot::Bottom)
+        self.slots
+            .get(&(acct, cur))
+            .copied()
+            .unwrap_or(Slot::Bottom)
     }
 
     /// Raw counters, for cost models applied after the fact.

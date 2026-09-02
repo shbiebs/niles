@@ -100,9 +100,18 @@ pub static MAPPING: &[Mapping] = &[
 
 /// The fragment, as a count. Cited rather than typed by hand.
 pub fn fragment_size() -> (usize, usize, usize) {
-    let equivalent = MAPPING.iter().filter(|m| m.status == Status::Equivalent).count();
-    let lowered = MAPPING.iter().filter(|m| m.status == Status::Lowered).count();
-    let excluded = MAPPING.iter().filter(|m| matches!(m.status, Status::Excluded(_))).count();
+    let equivalent = MAPPING
+        .iter()
+        .filter(|m| m.status == Status::Equivalent)
+        .count();
+    let lowered = MAPPING
+        .iter()
+        .filter(|m| m.status == Status::Lowered)
+        .count();
+    let excluded = MAPPING
+        .iter()
+        .filter(|m| matches!(m.status, Status::Excluded(_)))
+        .count();
     (equivalent, lowered, excluded)
 }
 
@@ -125,7 +134,10 @@ pub fn features(s: &SelectStmt) -> Features {
         has_filter: s.filter.is_some(),
         has_group: !s.group_by.is_empty(),
         has_having: s.having.is_some(),
-        has_join: s.from.iter().any(|t| matches!(t, crate::ast::TableRef::Join { .. })),
+        has_join: s
+            .from
+            .iter()
+            .any(|t| matches!(t, crate::ast::TableRef::Join { .. })),
         has_order: !s.order_by.is_empty(),
         has_limit: s.limit.is_some(),
         has_set_op: s.set_op.as_ref().map(|(op, _)| match op {
@@ -161,9 +173,15 @@ mod tests {
     #[test]
     fn the_fragment_is_stated_and_bounded() {
         let (eq, lowered, excluded) = fragment_size();
-        assert!(eq >= 2, "at least the core constructs must be equality-tested");
+        assert!(
+            eq >= 2,
+            "at least the core constructs must be equality-tested"
+        );
         assert!(lowered >= 10);
-        assert!(excluded >= 5, "a fragment with no stated exclusions is not a fragment");
+        assert!(
+            excluded >= 5,
+            "a fragment with no stated exclusions is not a fragment"
+        );
     }
 
     #[test]
@@ -171,7 +189,11 @@ mod tests {
         // An exclusion without a reason is an omission pretending to be a decision.
         for m in MAPPING {
             if let Status::Excluded(why) = m.status {
-                assert!(why.len() > 30, "`{}` is excluded without a real reason", m.sql);
+                assert!(
+                    why.len() > 30,
+                    "`{}` is excluded without a real reason",
+                    m.sql
+                );
             }
         }
     }
@@ -182,8 +204,12 @@ mod tests {
             "sql { select acct, sum(amt) as bal from postings where amt > 0 group by acct having bal > 0 order by bal limit 10 }",
         );
         assert!(!d.has_errors(), "{:?}", d.items);
-        let crate::ast::Expr::Sql { inner, .. } = &e else { panic!() };
-        let crate::ast::Expr::Select(s) = &**inner else { panic!() };
+        let crate::ast::Expr::Sql { inner, .. } = &e else {
+            panic!()
+        };
+        let crate::ast::Expr::Select(s) = &**inner else {
+            panic!()
+        };
         let f = features(s);
         assert!(f.has_filter && f.has_group && f.has_having && f.has_order && f.has_limit);
         assert!(!f.has_join && !f.distinct);
@@ -194,6 +220,9 @@ mod tests {
         let t = render_table();
         assert!(t.contains("**equivalent** (lowering-equality tested)"));
         assert!(t.contains("*excluded*"));
-        assert!(t.contains("specified, not in stage 0"), "the table must not present unbuilt rows as built");
+        assert!(
+            t.contains("specified, not in stage 0"),
+            "the table must not present unbuilt rows as built"
+        );
     }
 }

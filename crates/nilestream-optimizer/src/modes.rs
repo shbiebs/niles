@@ -78,7 +78,10 @@ mod tests {
         let cheap = miss_charge(&s, 1.0);
         s.reconstruction_latency = 2.0; // slower reconstruction, same arrival rate
         let dear = miss_charge(&s, 1.0);
-        assert!(dear > cheap, "a slower reconstruction must cost more, not the same");
+        assert!(
+            dear > cheap,
+            "a slower reconstruction must cost more, not the same"
+        );
     }
 
     #[test]

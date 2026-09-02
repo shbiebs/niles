@@ -56,8 +56,18 @@ pub enum Outcome {
 #[derive(Debug, Clone)]
 pub enum Row {
     Post(Posting),
-    Hold { id: u64, acct: Acct, cur: Cur, amount: Minor, valid: i64 },
-    Resolve { hold: u64, outcome: Outcome, valid: i64 },
+    Hold {
+        id: u64,
+        acct: Acct,
+        cur: Cur,
+        amount: Minor,
+        valid: i64,
+    },
+    Resolve {
+        hold: u64,
+        outcome: Outcome,
+        valid: i64,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -97,7 +107,13 @@ fn chain(parent: &[u8; 32], rows: &[Row]) -> [u8; 32] {
                 h.update(&p.amt.to_le_bytes());
                 h.update(&p.valid.to_le_bytes());
             }
-            Row::Hold { id, acct, cur, amount, valid } => {
+            Row::Hold {
+                id,
+                acct,
+                cur,
+                amount,
+                valid,
+            } => {
                 h.update(b"H");
                 h.update(&id.to_le_bytes());
                 h.update(&acct.0.to_le_bytes());
@@ -105,7 +121,11 @@ fn chain(parent: &[u8; 32], rows: &[Row]) -> [u8; 32] {
                 h.update(&amount.to_le_bytes());
                 h.update(&valid.to_le_bytes());
             }
-            Row::Resolve { hold, outcome, valid } => {
+            Row::Resolve {
+                hold,
+                outcome,
+                valid,
+            } => {
                 h.update(b"R");
                 h.update(&hold.to_le_bytes());
                 match outcome {
@@ -165,25 +185,35 @@ impl Oracle {
         let parent = self.epochs.last().map(|e| e.hash).unwrap_or([0; 32]);
         let hash = chain(&parent, &rows);
         let id = self.epochs.len() as u64;
-        self.epochs.push(EpochRec { id, parent, hash, rows });
+        self.epochs.push(EpochRec {
+            id,
+            parent,
+            hash,
+            rows,
+        });
         self.idem.insert(key.to_string());
         Ok(id)
     }
 
     fn rows_upto(&self, anchor: u64) -> impl Iterator<Item = &Row> {
-        self.epochs.iter().take(anchor as usize + 1).flat_map(|e| &e.rows)
+        self.epochs
+            .iter()
+            .take(anchor as usize + 1)
+            .flat_map(|e| &e.rows)
     }
 
     fn hold_exists(&self, id: u64) -> bool {
-        self.epochs.iter().flat_map(|e| &e.rows).any(
-            |r| matches!(r, Row::Hold { id: h, .. } if *h == id),
-        )
+        self.epochs
+            .iter()
+            .flat_map(|e| &e.rows)
+            .any(|r| matches!(r, Row::Hold { id: h, .. } if *h == id))
     }
 
     fn hold_is_resolved(&self, id: u64) -> bool {
-        self.epochs.iter().flat_map(|e| &e.rows).any(
-            |r| matches!(r, Row::Resolve { hold, .. } if *hold == id),
-        )
+        self.epochs
+            .iter()
+            .flat_map(|e| &e.rows)
+            .any(|r| matches!(r, Row::Resolve { hold, .. } if *hold == id))
     }
 
     /// The ledger balance: settled postings only. This is the regulator's "ledger
@@ -211,11 +241,13 @@ impl Oracle {
 
         self.rows_upto(anchor)
             .filter_map(|r| match r {
-                Row::Hold { id, acct, cur, amount, .. }
-                    if *acct == a && *cur == c && !resolved.contains(id) =>
-                {
-                    Some(*amount)
-                }
+                Row::Hold {
+                    id,
+                    acct,
+                    cur,
+                    amount,
+                    ..
+                } if *acct == a && *cur == c && !resolved.contains(id) => Some(*amount),
                 _ => None,
             })
             .sum()
@@ -275,17 +307,31 @@ mod tests {
     const JPY: Cur = Cur(392);
 
     fn p(txn: u64, acct: u64, cur: Cur, amt: Minor) -> Row {
-        Row::Post(Posting { txn, acct: Acct(acct), cur, amt, valid: 0 })
+        Row::Post(Posting {
+            txn,
+            acct: Acct(acct),
+            cur,
+            amt,
+            valid: 0,
+        })
     }
 
     fn pv(txn: u64, acct: u64, cur: Cur, amt: Minor, valid: i64) -> Row {
-        Row::Post(Posting { txn, acct: Acct(acct), cur, amt, valid })
+        Row::Post(Posting {
+            txn,
+            acct: Acct(acct),
+            cur,
+            amt,
+            valid,
+        })
     }
 
     #[test]
     fn balanced_transfer_conserves() {
         let mut o = Oracle::new();
-        let e = o.submit("t1", vec![p(1, 1, USD, -500), p(1, 2, USD, 500)]).unwrap();
+        let e = o
+            .submit("t1", vec![p(1, 1, USD, -500), p(1, 2, USD, 500)])
+            .unwrap();
         assert_eq!(o.ledger_balance(Acct(1), USD, e), -500);
         assert_eq!(o.ledger_balance(Acct(2), USD, e), 500);
         assert!(o.conservation_ok(e));
@@ -305,7 +351,8 @@ mod tests {
     #[test]
     fn duplicate_idempotency_key_is_rejected() {
         let mut o = Oracle::new();
-        o.submit("t1", vec![p(1, 1, USD, -1), p(1, 2, USD, 1)]).unwrap();
+        o.submit("t1", vec![p(1, 1, USD, -1), p(1, 2, USD, 1)])
+            .unwrap();
         assert_eq!(
             o.submit("t1", vec![p(2, 1, USD, -1), p(2, 2, USD, 1)]),
             Err(Reject::Duplicate)
@@ -344,7 +391,9 @@ mod tests {
     fn zero_scale_currency_is_representable() {
         // JPY has no minor unit; a Money type hard-coded to scale 2 could not express this.
         let mut o = Oracle::new();
-        let e = o.submit("jpy", vec![p(1, 1, JPY, -1000), p(1, 2, JPY, 1000)]).unwrap();
+        let e = o
+            .submit("jpy", vec![p(1, 1, JPY, -1000), p(1, 2, JPY, 1000)])
+            .unwrap();
         assert_eq!(o.ledger_balance(Acct(2), JPY, e), 1000);
         assert!(o.conservation_ok(e));
     }
@@ -352,9 +401,12 @@ mod tests {
     #[test]
     fn bitemporal_answers_are_total() {
         let mut o = Oracle::new();
-        o.submit("a", vec![pv(0, 1, USD, -1, 0), pv(0, 2, USD, 1, 0)]).unwrap();
+        o.submit("a", vec![pv(0, 1, USD, -1, 0), pv(0, 2, USD, 1, 0)])
+            .unwrap();
         // A backdated correction: recorded later, valid earlier.
-        let e1 = o.submit("b", vec![pv(1, 1, USD, -10, 5), pv(1, 2, USD, 10, 5)]).unwrap();
+        let e1 = o
+            .submit("b", vec![pv(1, 1, USD, -10, 5), pv(1, 2, USD, 10, 5)])
+            .unwrap();
         // As of system epoch 0 we did not yet believe the backdated posting:
         assert_eq!(o.bitemporal(Acct(1), USD, 0, 100), -1);
         // As of e1 we do, even for the old valid time:
@@ -364,11 +416,18 @@ mod tests {
     #[test]
     fn hold_reduces_available_but_not_ledger_balance() {
         let mut o = Oracle::new();
-        o.submit("fund", vec![p(1, 1, USD, 10_000), p(1, 99, USD, -10_000)]).unwrap();
+        o.submit("fund", vec![p(1, 1, USD, 10_000), p(1, 99, USD, -10_000)])
+            .unwrap();
         let e = o
             .submit(
                 "auth",
-                vec![Row::Hold { id: 7, acct: Acct(1), cur: USD, amount: 2_500, valid: 0 }],
+                vec![Row::Hold {
+                    id: 7,
+                    acct: Acct(1),
+                    cur: USD,
+                    amount: 2_500,
+                    valid: 0,
+                }],
             )
             .unwrap();
 
@@ -381,10 +440,17 @@ mod tests {
     #[test]
     fn partial_capture_releases_the_remainder() {
         let mut o = Oracle::new();
-        o.submit("fund", vec![p(1, 1, USD, 10_000), p(1, 99, USD, -10_000)]).unwrap();
+        o.submit("fund", vec![p(1, 1, USD, 10_000), p(1, 99, USD, -10_000)])
+            .unwrap();
         o.submit(
             "auth",
-            vec![Row::Hold { id: 7, acct: Acct(1), cur: USD, amount: 2_500, valid: 0 }],
+            vec![Row::Hold {
+                id: 7,
+                acct: Acct(1),
+                cur: USD,
+                amount: 2_500,
+                valid: 0,
+            }],
         )
         .unwrap();
 
@@ -394,7 +460,11 @@ mod tests {
             .submit(
                 "capture",
                 vec![
-                    Row::Resolve { hold: 7, outcome: Outcome::Post(1_800), valid: 0 },
+                    Row::Resolve {
+                        hold: 7,
+                        outcome: Outcome::Post(1_800),
+                        valid: 0,
+                    },
                     p(2, 1, USD, -1_800),
                     p(2, 50, USD, 1_800),
                 ],
@@ -410,14 +480,28 @@ mod tests {
     #[test]
     fn voided_hold_restores_availability_without_touching_the_ledger_balance() {
         let mut o = Oracle::new();
-        o.submit("fund", vec![p(1, 1, USD, 500), p(1, 99, USD, -500)]).unwrap();
+        o.submit("fund", vec![p(1, 1, USD, 500), p(1, 99, USD, -500)])
+            .unwrap();
         o.submit(
             "auth",
-            vec![Row::Hold { id: 3, acct: Acct(1), cur: USD, amount: 200, valid: 0 }],
+            vec![Row::Hold {
+                id: 3,
+                acct: Acct(1),
+                cur: USD,
+                amount: 200,
+                valid: 0,
+            }],
         )
         .unwrap();
         let e = o
-            .submit("void", vec![Row::Resolve { hold: 3, outcome: Outcome::Void, valid: 0 }])
+            .submit(
+                "void",
+                vec![Row::Resolve {
+                    hold: 3,
+                    outcome: Outcome::Void,
+                    valid: 0,
+                }],
+            )
             .unwrap();
 
         assert_eq!(o.ledger_balance(Acct(1), USD, e), 500);
@@ -427,14 +511,28 @@ mod tests {
     #[test]
     fn expired_hold_is_resolved_like_any_other() {
         let mut o = Oracle::new();
-        o.submit("fund", vec![p(1, 1, USD, 500), p(1, 99, USD, -500)]).unwrap();
+        o.submit("fund", vec![p(1, 1, USD, 500), p(1, 99, USD, -500)])
+            .unwrap();
         o.submit(
             "auth",
-            vec![Row::Hold { id: 4, acct: Acct(1), cur: USD, amount: 120, valid: 0 }],
+            vec![Row::Hold {
+                id: 4,
+                acct: Acct(1),
+                cur: USD,
+                amount: 120,
+                valid: 0,
+            }],
         )
         .unwrap();
         let e = o
-            .submit("exp", vec![Row::Resolve { hold: 4, outcome: Outcome::Expire, valid: 0 }])
+            .submit(
+                "exp",
+                vec![Row::Resolve {
+                    hold: 4,
+                    outcome: Outcome::Expire,
+                    valid: 0,
+                }],
+            )
             .unwrap();
         assert_eq!(o.available_balance(Acct(1), USD, e), 500);
     }
@@ -444,13 +542,33 @@ mod tests {
         let mut o = Oracle::new();
         o.submit(
             "auth",
-            vec![Row::Hold { id: 9, acct: Acct(1), cur: USD, amount: 10, valid: 0 }],
+            vec![Row::Hold {
+                id: 9,
+                acct: Acct(1),
+                cur: USD,
+                amount: 10,
+                valid: 0,
+            }],
         )
         .unwrap();
-        o.submit("r1", vec![Row::Resolve { hold: 9, outcome: Outcome::Void, valid: 0 }])
-            .unwrap();
+        o.submit(
+            "r1",
+            vec![Row::Resolve {
+                hold: 9,
+                outcome: Outcome::Void,
+                valid: 0,
+            }],
+        )
+        .unwrap();
         assert_eq!(
-            o.submit("r2", vec![Row::Resolve { hold: 9, outcome: Outcome::Void, valid: 0 }]),
+            o.submit(
+                "r2",
+                vec![Row::Resolve {
+                    hold: 9,
+                    outcome: Outcome::Void,
+                    valid: 0
+                }]
+            ),
             Err(Reject::BadResolution)
         );
     }
@@ -459,7 +577,14 @@ mod tests {
     fn resolution_of_unknown_hold_is_rejected() {
         let mut o = Oracle::new();
         assert_eq!(
-            o.submit("r", vec![Row::Resolve { hold: 404, outcome: Outcome::Void, valid: 0 }]),
+            o.submit(
+                "r",
+                vec![Row::Resolve {
+                    hold: 404,
+                    outcome: Outcome::Void,
+                    valid: 0
+                }]
+            ),
             Err(Reject::BadResolution)
         );
     }
@@ -467,19 +592,39 @@ mod tests {
     #[test]
     fn available_balance_identity_holds_at_every_anchor() {
         let mut o = Oracle::new();
-        o.submit("fund", vec![p(1, 1, USD, 1_000), p(1, 99, USD, -1_000)]).unwrap();
+        o.submit("fund", vec![p(1, 1, USD, 1_000), p(1, 99, USD, -1_000)])
+            .unwrap();
         o.submit(
             "h1",
-            vec![Row::Hold { id: 1, acct: Acct(1), cur: USD, amount: 100, valid: 0 }],
+            vec![Row::Hold {
+                id: 1,
+                acct: Acct(1),
+                cur: USD,
+                amount: 100,
+                valid: 0,
+            }],
         )
         .unwrap();
         o.submit(
             "h2",
-            vec![Row::Hold { id: 2, acct: Acct(1), cur: USD, amount: 250, valid: 0 }],
+            vec![Row::Hold {
+                id: 2,
+                acct: Acct(1),
+                cur: USD,
+                amount: 250,
+                valid: 0,
+            }],
         )
         .unwrap();
-        o.submit("v", vec![Row::Resolve { hold: 1, outcome: Outcome::Void, valid: 0 }])
-            .unwrap();
+        o.submit(
+            "v",
+            vec![Row::Resolve {
+                hold: 1,
+                outcome: Outcome::Void,
+                valid: 0,
+            }],
+        )
+        .unwrap();
 
         for anchor in 0..o.epochs.len() as u64 {
             let ledger = o.ledger_balance(Acct(1), USD, anchor);
@@ -491,33 +636,50 @@ mod tests {
     #[test]
     fn conservation_holds_at_every_epoch_of_a_mixed_history() {
         let mut o = Oracle::new();
-        o.submit("a", vec![p(1, 1, USD, 100), p(1, 99, USD, -100)]).unwrap();
+        o.submit("a", vec![p(1, 1, USD, 100), p(1, 99, USD, -100)])
+            .unwrap();
         o.submit(
             "b",
-            vec![Row::Hold { id: 1, acct: Acct(1), cur: USD, amount: 40, valid: 0 }],
+            vec![Row::Hold {
+                id: 1,
+                acct: Acct(1),
+                cur: USD,
+                amount: 40,
+                valid: 0,
+            }],
         )
         .unwrap();
         o.submit(
             "c",
             vec![
-                Row::Resolve { hold: 1, outcome: Outcome::Post(40), valid: 0 },
+                Row::Resolve {
+                    hold: 1,
+                    outcome: Outcome::Post(40),
+                    valid: 0,
+                },
                 p(2, 1, USD, -40),
                 p(2, 2, USD, 40),
             ],
         )
         .unwrap();
-        o.submit("d", vec![p(3, 2, USD, -15), p(3, 3, USD, 15)]).unwrap();
+        o.submit("d", vec![p(3, 2, USD, -15), p(3, 3, USD, 15)])
+            .unwrap();
 
         for anchor in 0..o.epochs.len() as u64 {
-            assert!(o.conservation_ok(anchor), "conservation failed at epoch {anchor}");
+            assert!(
+                o.conservation_ok(anchor),
+                "conservation failed at epoch {anchor}"
+            );
         }
     }
 
     #[test]
     fn tamper_is_self_announcing() {
         let mut o = Oracle::new();
-        o.submit("a", vec![p(0, 1, USD, -1), p(0, 2, USD, 1)]).unwrap();
-        o.submit("b", vec![p(1, 1, USD, -2), p(1, 2, USD, 2)]).unwrap();
+        o.submit("a", vec![p(0, 1, USD, -1), p(0, 2, USD, 1)])
+            .unwrap();
+        o.submit("b", vec![p(1, 1, USD, -2), p(1, 2, USD, 2)])
+            .unwrap();
         assert!(o.verify_chain());
 
         // The forbidden eraser.
@@ -532,11 +694,16 @@ mod tests {
         // The property that makes anchored reconstruction meaningful: an answer at an
         // anchor never changes, however much history is appended afterwards.
         let mut o = Oracle::new();
-        let e0 = o.submit("a", vec![p(1, 1, USD, 100), p(1, 99, USD, -100)]).unwrap();
+        let e0 = o
+            .submit("a", vec![p(1, 1, USD, 100), p(1, 99, USD, -100)])
+            .unwrap();
         let before = o.ledger_balance(Acct(1), USD, e0);
         for i in 0..25u64 {
-            o.submit(&format!("x{i}"), vec![p(10 + i, 1, USD, 5), p(10 + i, 99, USD, -5)])
-                .unwrap();
+            o.submit(
+                &format!("x{i}"),
+                vec![p(10 + i, 1, USD, 5), p(10 + i, 99, USD, -5)],
+            )
+            .unwrap();
         }
         assert_eq!(o.ledger_balance(Acct(1), USD, e0), before);
     }

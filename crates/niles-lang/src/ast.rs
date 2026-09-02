@@ -25,7 +25,10 @@ pub struct Name {
 
 impl Name {
     pub fn new(text: impl Into<String>, span: Span) -> Self {
-        Name { text: text.into(), span }
+        Name {
+            text: text.into(),
+            span,
+        }
     }
 }
 
@@ -50,16 +53,42 @@ impl Path {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Ty {
     /// `i64`, `Text`, `Money<USD>`, `Signal<Money<USD>>`, `Id<Account>`
-    Path { path: Path, args: Vec<Ty>, span: Span },
+    Path {
+        path: Path,
+        args: Vec<Ty>,
+        span: Span,
+    },
     /// `&T` / `&mut T`
-    Ref { inner: Box<Ty>, mutable: bool, span: Span },
-    Tuple { elems: Vec<Ty>, span: Span },
-    Slice { elem: Box<Ty>, span: Span },
-    Array { elem: Box<Ty>, len: Box<Expr>, span: Span },
+    Ref {
+        inner: Box<Ty>,
+        mutable: bool,
+        span: Span,
+    },
+    Tuple {
+        elems: Vec<Ty>,
+        span: Span,
+    },
+    Slice {
+        elem: Box<Ty>,
+        span: Span,
+    },
+    Array {
+        elem: Box<Ty>,
+        len: Box<Expr>,
+        span: Span,
+    },
     /// `fn(A, B) -> C ! { e1, e2 }`. The effect row is part of the type, not a comment.
-    Fn { params: Vec<Ty>, ret: Box<Ty>, effects: EffectRow, span: Span },
+    Fn {
+        params: Vec<Ty>,
+        ret: Box<Ty>,
+        effects: EffectRow,
+        span: Span,
+    },
     /// `dyn Trait`
-    Dyn { path: Path, span: Span },
+    Dyn {
+        path: Path,
+        span: Span,
+    },
     Unit(Span),
     Infer(Span),
     Error(Span),
@@ -119,11 +148,32 @@ pub enum Item {
     Enum(EnumDecl),
     Trait(TraitDecl),
     Impl(ImplDecl),
-    Mod { name: Name, items: Vec<Item>, span: Span },
-    Use { path: Path, span: Span },
-    Const { name: Name, ty: Ty, value: Expr, is_static: bool, span: Span },
-    TypeAlias { name: Name, ty: Ty, span: Span },
-    Capability { name: Name, ty: Ty, span: Span },
+    Mod {
+        name: Name,
+        items: Vec<Item>,
+        span: Span,
+    },
+    Use {
+        path: Path,
+        span: Span,
+    },
+    Const {
+        name: Name,
+        ty: Ty,
+        value: Expr,
+        is_static: bool,
+        span: Span,
+    },
+    TypeAlias {
+        name: Name,
+        ty: Ty,
+        span: Span,
+    },
+    Capability {
+        name: Name,
+        ty: Ty,
+        span: Span,
+    },
     /// A top-level view, outside any schema.
     View(ViewDecl),
     /// A parse error covering the tokens the parser skipped. Keeping it in the tree, rather
@@ -195,15 +245,31 @@ pub struct FieldDecl {
 #[derive(Debug, Clone, PartialEq)]
 pub enum RelRule {
     /// `conserve per (txn, cur);` — the double-entry invariant, as a checkable rule.
-    Conserve { keys: Vec<Name>, span: Span },
+    Conserve {
+        keys: Vec<Name>,
+        span: Span,
+    },
     /// `retain forever;` — mandatory on a base or ledger.
-    Retain { mode: Name, span: Span },
+    Retain {
+        mode: Name,
+        span: Span,
+    },
     /// `bitemporal;` — declares both time axes.
-    Bitemporal { span: Span },
+    Bitemporal {
+        span: Span,
+    },
     /// `foreign key (a) references t (b)`
-    ForeignKey { cols: Vec<Name>, target: Name, target_cols: Vec<Name>, span: Span },
+    ForeignKey {
+        cols: Vec<Name>,
+        target: Name,
+        target_cols: Vec<Name>,
+        span: Span,
+    },
     /// `primary key (a, b)` in table-constraint position.
-    PrimaryKey { cols: Vec<Name>, span: Span },
+    PrimaryKey {
+        cols: Vec<Name>,
+        span: Span,
+    },
     Error(Span),
 }
 
@@ -240,7 +306,10 @@ pub struct ServeContract {
 
 impl ServeContract {
     pub fn get(&self, key: &str) -> Option<&ContractValue> {
-        self.entries.iter().find(|(k, _)| k.text == key).map(|(_, v)| v)
+        self.entries
+            .iter()
+            .find(|(k, _)| k.text == key)
+            .map(|(_, v)| v)
     }
 }
 
@@ -248,9 +317,17 @@ impl ServeContract {
 pub enum ContractValue {
     Word(Name),
     Int(i128, Span),
-    Duration { value: i128, unit: TimeUnit, span: Span },
+    Duration {
+        value: i128,
+        unit: TimeUnit,
+        span: Span,
+    },
     /// `bounded(epochs: 4, millis: 200)`
-    Call { name: Name, args: Vec<(Option<Name>, ContractValue)>, span: Span },
+    Call {
+        name: Name,
+        args: Vec<(Option<Name>, ContractValue)>,
+        span: Span,
+    },
     Error(Span),
 }
 
@@ -353,7 +430,12 @@ pub struct Block {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
-    Let { pat: Pat, ty: Option<Ty>, init: Option<Expr>, span: Span },
+    Let {
+        pat: Pat,
+        ty: Option<Ty>,
+        init: Option<Expr>,
+        span: Span,
+    },
     Expr(Expr),
     Semi(Expr),
     Item(Box<Item>),
@@ -365,16 +447,48 @@ pub enum Stmt {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Dml {
-    Insert { table: Name, cols: Vec<Name>, rows: Vec<Vec<Expr>>, span: Span },
-    Update { table: Name, sets: Vec<(Name, Expr)>, filter: Option<Expr>, span: Span },
-    Delete { table: Name, filter: Option<Expr>, span: Span },
+    Insert {
+        table: Name,
+        cols: Vec<Name>,
+        rows: Vec<Vec<Expr>>,
+        span: Span,
+    },
+    Update {
+        table: Name,
+        sets: Vec<(Name, Expr)>,
+        filter: Option<Expr>,
+        span: Span,
+    },
+    Delete {
+        table: Name,
+        filter: Option<Expr>,
+        span: Span,
+    },
     Begin(Span),
     Commit(Span),
     Rollback(Span),
-    Grant { effect: Effect, on: Name, to: Name, span: Span },
-    Revoke { effect: Effect, on: Name, from: Name, span: Span },
-    Backfill { view: Name, upto: Option<Expr>, span: Span },
-    Emit { view: Name, to: Name, span: Span },
+    Grant {
+        effect: Effect,
+        on: Name,
+        to: Name,
+        span: Span,
+    },
+    Revoke {
+        effect: Effect,
+        on: Name,
+        from: Name,
+        span: Span,
+    },
+    Backfill {
+        view: Name,
+        upto: Option<Expr>,
+        span: Span,
+    },
+    Emit {
+        view: Name,
+        to: Name,
+        span: Span,
+    },
 }
 
 // ============================ patterns ============================
@@ -382,11 +496,28 @@ pub enum Dml {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Pat {
     Wild(Span),
-    Bind { name: Name, mutable: bool, by_ref: bool, span: Span },
-    Tuple { elems: Vec<Pat>, span: Span },
+    Bind {
+        name: Name,
+        mutable: bool,
+        by_ref: bool,
+        span: Span,
+    },
+    Tuple {
+        elems: Vec<Pat>,
+        span: Span,
+    },
     /// `Some(x)`, `Outcome::Post(m)`
-    TupleStruct { path: Path, elems: Vec<Pat>, span: Span },
-    Struct { path: Path, fields: Vec<(Name, Pat)>, rest: bool, span: Span },
+    TupleStruct {
+        path: Path,
+        elems: Vec<Pat>,
+        span: Span,
+    },
+    Struct {
+        path: Path,
+        fields: Vec<(Name, Pat)>,
+        rest: bool,
+        span: Span,
+    },
     Lit(Box<Expr>),
     Path(Path),
     Error(Span),
@@ -436,78 +567,214 @@ pub enum Expr {
     /// `10.00 usd` — the minor value at the literal's own scale, plus that scale. The
     /// scale is kept separate from the currency so that `10.001 usd` is a *scale* error
     /// naming both numbers, rather than a silent rounding.
-    Money { minor: i128, scale: u32, currency: Name, span: Span },
+    Money {
+        minor: i128,
+        scale: u32,
+        currency: Name,
+        span: Span,
+    },
     /// `#4200`
     Epoch(u64, Span),
     /// `@2026-03-01` (system axis) / `v@2026-03-01` (valid-time axis)
-    Instant { text: String, valid_axis: bool, span: Span },
-    Duration { value: i128, unit: TimeUnit, span: Span },
+    Instant {
+        text: String,
+        valid_axis: bool,
+        span: Span,
+    },
+    Duration {
+        value: i128,
+        unit: TimeUnit,
+        span: Span,
+    },
     Path(Path),
 
     // --- composition ---
-    Tuple { elems: Vec<Expr>, span: Span },
-    Array { elems: Vec<Expr>, span: Span },
-    StructLit { path: Path, fields: Vec<(Name, Expr)>, span: Span },
-    Field { base: Box<Expr>, name: Name, span: Span },
-    Index { base: Box<Expr>, index: Box<Expr>, span: Span },
-    Call { callee: Box<Expr>, args: Vec<Arg>, span: Span },
+    Tuple {
+        elems: Vec<Expr>,
+        span: Span,
+    },
+    Array {
+        elems: Vec<Expr>,
+        span: Span,
+    },
+    StructLit {
+        path: Path,
+        fields: Vec<(Name, Expr)>,
+        span: Span,
+    },
+    Field {
+        base: Box<Expr>,
+        name: Name,
+        span: Span,
+    },
+    Index {
+        base: Box<Expr>,
+        index: Box<Expr>,
+        span: Span,
+    },
+    Call {
+        callee: Box<Expr>,
+        args: Vec<Arg>,
+        span: Span,
+    },
     /// A pipeline stage: `q.where(|r| p)`, `q |> where(|r| p)`. Both spellings produce
     /// this node; the `|>` form exists so a long query reads top-to-bottom.
-    Stage { recv: Box<Expr>, kind: StageKind, name: Name, args: Vec<Arg>, span: Span },
-    Closure { params: Vec<(Pat, Option<Ty>)>, body: Box<Expr>, is_move: bool, span: Span },
-    Unary { op: UnOp, operand: Box<Expr>, span: Span },
-    Binary { op: BinOp, lhs: Box<Expr>, rhs: Box<Expr>, span: Span },
-    Assign { target: Box<Expr>, value: Box<Expr>, span: Span },
-    Cast { expr: Box<Expr>, ty: Ty, span: Span },
+    Stage {
+        recv: Box<Expr>,
+        kind: StageKind,
+        name: Name,
+        args: Vec<Arg>,
+        span: Span,
+    },
+    Closure {
+        params: Vec<(Pat, Option<Ty>)>,
+        body: Box<Expr>,
+        is_move: bool,
+        span: Span,
+    },
+    Unary {
+        op: UnOp,
+        operand: Box<Expr>,
+        span: Span,
+    },
+    Binary {
+        op: BinOp,
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+        span: Span,
+    },
+    Assign {
+        target: Box<Expr>,
+        value: Box<Expr>,
+        span: Span,
+    },
+    Cast {
+        expr: Box<Expr>,
+        ty: Ty,
+        span: Span,
+    },
     /// `e?` — propagate a `Result` error. The only non-local exit in query context.
-    Try { expr: Box<Expr>, span: Span },
+    Try {
+        expr: Box<Expr>,
+        span: Span,
+    },
 
     // --- control ---
     Block(Box<Block>),
-    If { cond: Box<Expr>, then: Box<Block>, els: Option<Box<Expr>>, span: Span },
+    If {
+        cond: Box<Expr>,
+        then: Box<Block>,
+        els: Option<Box<Expr>>,
+        span: Span,
+    },
     /// SQL's `case when .. then .. else .. end`. Kept distinct from `match` because it is
     /// not exhaustive-checked: it is an expression over predicates, not over constructors.
-    Case { arms: Vec<(Expr, Expr)>, els: Option<Box<Expr>>, span: Span },
-    Match { scrutinee: Box<Expr>, arms: Vec<MatchArm>, span: Span },
-    While { cond: Box<Expr>, body: Box<Block>, span: Span },
-    Loop { body: Box<Block>, span: Span },
-    For { pat: Pat, iter: Box<Expr>, body: Box<Block>, span: Span },
-    Return { value: Option<Box<Expr>>, span: Span },
+    Case {
+        arms: Vec<(Expr, Expr)>,
+        els: Option<Box<Expr>>,
+        span: Span,
+    },
+    Match {
+        scrutinee: Box<Expr>,
+        arms: Vec<MatchArm>,
+        span: Span,
+    },
+    While {
+        cond: Box<Expr>,
+        body: Box<Block>,
+        span: Span,
+    },
+    Loop {
+        body: Box<Block>,
+        span: Span,
+    },
+    For {
+        pat: Pat,
+        iter: Box<Expr>,
+        body: Box<Block>,
+        span: Span,
+    },
+    Return {
+        value: Option<Box<Expr>>,
+        span: Span,
+    },
     Break(Span),
     Continue(Span),
 
     // --- the novel forms ---
     /// `txn idem("k", window: 24.hours) { .. }` — the unit the conservation rule is
     /// checked over, and the unit an epoch seals.
-    Txn { idem: Option<IdemSpec>, body: Box<Block>, span: Span },
+    Txn {
+        idem: Option<IdemSpec>,
+        body: Box<Block>,
+        span: Span,
+    },
     /// `hold(acct, 20.00 usd, expires: 7.days)`
-    Hold { args: Vec<Arg>, span: Span },
+    Hold {
+        args: Vec<Arg>,
+        span: Span,
+    },
     /// `resolve h post 18.50 usd` / `resolve h void` / `resolve h expire`
-    Resolve { hold: Box<Expr>, outcome: ResolveOutcome, span: Span },
+    Resolve {
+        hold: Box<Expr>,
+        outcome: ResolveOutcome,
+        span: Span,
+    },
     /// `fx { leg a: post(..), leg b: post(..), rate: r }` — two conserved legs sealed in
     /// one epoch, which is what makes cross-currency movement atomic without a currency
     /// that both sides share.
-    Fx { legs: Vec<(Name, Expr)>, rate: Option<Box<Expr>>, span: Span },
+    Fx {
+        legs: Vec<(Name, Expr)>,
+        rate: Option<Box<Expr>>,
+        span: Span,
+    },
     /// `q.fixpoint(step) guard measure(depth)` — recursion with its termination witness
     /// attached. Unguarded recursion has no spelling.
-    Fixpoint { recv: Box<Expr>, step: Box<Expr>, measure: Box<Expr>, span: Span },
+    Fixpoint {
+        recv: Box<Expr>,
+        step: Box<Expr>,
+        measure: Box<Expr>,
+        span: Span,
+    },
     /// `.as_of(#4200)`, `.valid_at(@2026-03-01)` — parsed as stages, kept as such.
     /// `authorize(auth, acct, amount)` — the only construct permitted to approach a floor.
-    Authorize { args: Vec<Arg>, span: Span },
+    Authorize {
+        args: Vec<Arg>,
+        span: Span,
+    },
     /// `declassify(x, auth)` — the single audited construct that lowers confidentiality.
-    Declassify { args: Vec<Arg>, span: Span },
+    Declassify {
+        args: Vec<Arg>,
+        span: Span,
+    },
     /// `explain e` / `reproduce e at #4200` / `impact r`
-    Explain { target: Box<Expr>, span: Span },
-    Reproduce { target: Box<Expr>, at: Option<Box<Expr>>, span: Span },
-    Impact { target: Box<Expr>, span: Span },
+    Explain {
+        target: Box<Expr>,
+        span: Span,
+    },
+    Reproduce {
+        target: Box<Expr>,
+        at: Option<Box<Expr>>,
+        span: Span,
+    },
+    Impact {
+        target: Box<Expr>,
+        span: Span,
+    },
     /// `sql { select .. }` — the SQL surface, lowering to the same IR.
-    Sql { inner: Box<Expr>, span: Span },
+    Sql {
+        inner: Box<Expr>,
+        span: Span,
+    },
     /// `exists (select ..)` — a subquery in predicate position.
     ///
     /// `not exists (..)` has no variant of its own: it parses as `Unary { Not, Exists }`,
     /// because `not` is an ordinary prefix operator and giving the pair a fused node would
     /// mean two spellings of one thing in the tree. Lowering matches on the pair.
-    Exists { query: Box<SelectStmt>, span: Span },
+    Exists {
+        query: Box<SelectStmt>,
+        span: Span,
+    },
     /// A SQL `select` as written, before it is rewritten into a pipeline.
     Select(Box<SelectStmt>),
 
@@ -574,9 +841,23 @@ pub enum SetOp {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TableRef {
-    Named { name: Name, alias: Option<Name>, span: Span },
-    Join { left: Box<TableRef>, right: Box<TableRef>, kind: JoinKind, on: Option<Expr>, span: Span },
-    Sub { query: Box<SelectStmt>, alias: Option<Name>, span: Span },
+    Named {
+        name: Name,
+        alias: Option<Name>,
+        span: Span,
+    },
+    Join {
+        left: Box<TableRef>,
+        right: Box<TableRef>,
+        kind: JoinKind,
+        on: Option<Expr>,
+        span: Span,
+    },
+    Sub {
+        query: Box<SelectStmt>,
+        alias: Option<Name>,
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -668,10 +949,37 @@ impl StageKind {
     /// The known stage names, for "did you mean" suggestions.
     pub fn all_names() -> &'static [&'static str] {
         &[
-            "where", "filter", "map", "select", "group_by", "having", "join", "left_join", "right_join",
-            "full_outer_join", "cross_join", "union", "union_all", "except", "intersect",
-            "distinct", "distinct_by", "order_by", "limit", "offset", "sum", "count", "min",
-            "max", "avg", "fold", "fixpoint", "as_of", "valid_at", "get", "range",
+            "where",
+            "filter",
+            "map",
+            "select",
+            "group_by",
+            "having",
+            "join",
+            "left_join",
+            "right_join",
+            "full_outer_join",
+            "cross_join",
+            "union",
+            "union_all",
+            "except",
+            "intersect",
+            "distinct",
+            "distinct_by",
+            "order_by",
+            "limit",
+            "offset",
+            "sum",
+            "count",
+            "min",
+            "max",
+            "avg",
+            "fold",
+            "fixpoint",
+            "as_of",
+            "valid_at",
+            "get",
+            "range",
         ]
     }
 
@@ -680,7 +988,10 @@ impl StageKind {
     /// cannot be served at rung 5 without full materialization — a fact the planner needs
     /// and the surface syntax must not hide.
     pub fn is_incremental(self) -> bool {
-        !matches!(self, StageKind::OrderBy | StageKind::Limit | StageKind::Offset)
+        !matches!(
+            self,
+            StageKind::OrderBy | StageKind::Limit | StageKind::Offset
+        )
     }
 }
 
@@ -695,13 +1006,27 @@ pub enum UnOp {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinOp {
-    Add, Sub, Mul, Div, Rem,
-    Eq, Ne, Lt, Le, Gt, Ge,
-    And, Or,
-    BitAnd, BitOr, BitXor,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Rem,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    And,
+    Or,
+    BitAnd,
+    BitOr,
+    BitXor,
     /// `is null` / `is not null`
-    Is, IsNot,
-    In, NotIn,
+    Is,
+    IsNot,
+    In,
+    NotIn,
     Like,
     Between,
 }
@@ -727,8 +1052,16 @@ impl Expr {
     pub fn span(&self) -> Span {
         use Expr::*;
         match self {
-            Int(_, s) | Float(_, s) | Bool(_, s) | Str(_, s) | Bytes(_, s) | Unit(s)
-            | Epoch(_, s) | Break(s) | Continue(s) | Error(s) => *s,
+            Int(_, s)
+            | Float(_, s)
+            | Bool(_, s)
+            | Str(_, s)
+            | Bytes(_, s)
+            | Unit(s)
+            | Epoch(_, s)
+            | Break(s)
+            | Continue(s)
+            | Error(s) => *s,
             Money { span, .. }
             | Instant { span, .. }
             | Duration { span, .. }

@@ -89,12 +89,18 @@ impl Amount {
         Amount::default()
     }
     pub fn constant(v: i128) -> Self {
-        Amount { constant: v, symbols: BTreeMap::new() }
+        Amount {
+            constant: v,
+            symbols: BTreeMap::new(),
+        }
     }
     pub fn symbol(s: Symbol) -> Self {
         let mut m = BTreeMap::new();
         m.insert(s, 1);
-        Amount { constant: 0, symbols: m }
+        Amount {
+            constant: 0,
+            symbols: m,
+        }
     }
     pub fn is_zero(&self) -> bool {
         self.constant == 0 && self.symbols.values().all(|c| *c == 0)
@@ -272,7 +278,9 @@ impl Row {
         self.provenance = self.provenance.join(other.provenance);
         self.poison = self.poison.max(other.poison);
         for (c, a) in &other.entries {
-            self.origins.entry(c.clone()).or_insert_with(|| other.origins[c]);
+            self.origins
+                .entry(c.clone())
+                .or_insert_with(|| other.origins[c]);
             let e = self.entries.entry(c.clone()).or_default();
             *e = e.add(a);
         }
@@ -295,7 +303,10 @@ impl Row {
         let mut out = Row {
             entries: BTreeMap::new(),
             origins: BTreeMap::new(),
-            provenance: self.provenance.join(other.provenance).join(Provenance::Merged),
+            provenance: self
+                .provenance
+                .join(other.provenance)
+                .join(Provenance::Merged),
             poison: self.poison.max(other.poison) + 1,
         };
         let mut currencies: Vec<Cur> = self.entries.keys().cloned().collect();
@@ -404,7 +415,11 @@ impl Unifier {
         match c {
             Cur::Known(_) => c.clone(),
             Cur::Var(v) => {
-                let p = self.parent.get(*v as usize).cloned().unwrap_or_else(|| c.clone());
+                let p = self
+                    .parent
+                    .get(*v as usize)
+                    .cloned()
+                    .unwrap_or_else(|| c.clone());
                 if &p == c {
                     c.clone()
                 } else {
@@ -441,15 +456,28 @@ pub enum Verdict {
     Conserves,
     /// **A must-violation.** The body is straight-line and abort-free, every symbol
     /// cancelled, and the residue is a non-zero constant. This transaction cannot balance.
-    Violates { currency: String, residue: Amount, span: Span },
+    Violates {
+        currency: String,
+        residue: Amount,
+        span: Span,
+    },
     /// The arithmetic does not balance, but the row was accumulated across a control-flow
     /// merge or a path that can abort, so this is an alarm rather than a proof. Reported
     /// as a warning with the reason, never as an error: a checker that accuses a program
     /// it cannot follow teaches its users to disable it.
-    MayViolate { currency: String, residue: Amount, span: Span, why: Provenance },
+    MayViolate {
+        currency: String,
+        residue: Amount,
+        span: Span,
+        why: Provenance,
+    },
     /// The row mentions an amount the checker cannot see through. Not a violation —
     /// an honest "not proven", which the caller turns into a runtime obligation.
-    Undecided { currency: String, residue: Amount, span: Span },
+    Undecided {
+        currency: String,
+        residue: Amount,
+        span: Span,
+    },
 }
 
 /// The conservation judgement: is this row zero in every currency?
@@ -479,7 +507,11 @@ pub fn check_conservation(row: &Row) -> Vec<Verdict> {
             continue;
         } else if a.is_decided() {
             if row.provenance.supports_must_violation() {
-                out.push(Verdict::Violates { currency: name, residue: a.clone(), span });
+                out.push(Verdict::Violates {
+                    currency: name,
+                    residue: a.clone(),
+                    span,
+                });
             } else {
                 out.push(Verdict::MayViolate {
                     currency: name,
@@ -489,7 +521,11 @@ pub fn check_conservation(row: &Row) -> Vec<Verdict> {
                 });
             }
         } else {
-            out.push(Verdict::Undecided { currency: name, residue: a.clone(), span });
+            out.push(Verdict::Undecided {
+                currency: name,
+                residue: a.clone(),
+                span,
+            });
         }
     }
     if out.is_empty() {
@@ -585,7 +621,12 @@ mod tests {
         r.movement(usd(), Amount::constant(-1000), sp(1));
         r.movement(usd(), Amount::constant(500), sp(2));
         let v = check_conservation(&r);
-        let Verdict::Violates { currency, residue, .. } = &v[0] else { panic!("{v:?}") };
+        let Verdict::Violates {
+            currency, residue, ..
+        } = &v[0]
+        else {
+            panic!("{v:?}")
+        };
         assert_eq!(currency, "usd");
         assert_eq!(residue.constant, -500);
         let d = diagnose(&v[0], 2).unwrap();
@@ -600,7 +641,11 @@ mod tests {
         r.movement(usd(), Amount::constant(1000), sp(1));
         r.movement(eur(), Amount::constant(-1000), sp(2));
         let v = check_conservation(&r);
-        assert_eq!(v.len(), 2, "both currencies must be reported, not netted: {v:?}");
+        assert_eq!(
+            v.len(),
+            2,
+            "both currencies must be reported, not netted: {v:?}"
+        );
         assert!(v.iter().all(|x| matches!(x, Verdict::Violates { .. })));
     }
 
@@ -623,13 +668,19 @@ mod tests {
         r.movement(usd(), Amount::symbol(3), sp(1));
         let v = check_conservation(&r);
         assert!(matches!(v[0], Verdict::Undecided { .. }), "{v:?}");
-        assert!(diagnose(&v[0], 2).is_none(), "an undecided row must not produce an error");
+        assert!(
+            diagnose(&v[0], 2).is_none(),
+            "an undecided row must not produce an error"
+        );
     }
 
     #[test]
     fn distinct_known_currencies_do_not_unify() {
         let mut u = Unifier::new();
-        assert!(u.unify(&usd(), &eur()).is_err(), "usd and eur must not unify");
+        assert!(
+            u.unify(&usd(), &eur()).is_err(),
+            "usd and eur must not unify"
+        );
         assert!(u.unify(&usd(), &usd()).is_ok());
     }
 
@@ -666,7 +717,11 @@ mod tests {
         let mut r = Row::new();
         r.movement(a.clone(), Amount::constant(-1000), sp(1));
         r.movement(b.clone(), Amount::constant(1000), sp(2));
-        assert_eq!(check_conservation(&r).len(), 2, "before unification, two entries");
+        assert_eq!(
+            check_conservation(&r).len(),
+            2,
+            "before unification, two entries"
+        );
         u.unify(&a, &b).unwrap();
         r.substitute(&u);
         assert_eq!(check_conservation(&r), vec![Verdict::Conserves]);

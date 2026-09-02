@@ -62,11 +62,23 @@ mod tests {
 
     #[test]
     fn a_bounded_rung_is_maintained_less_often_in_proportion_to_its_slack() {
-        assert_eq!(maintenance_stride(Consistency::Bounded { epochs: 8, millis: 0 }), 8);
+        assert_eq!(
+            maintenance_stride(Consistency::Bounded {
+                epochs: 8,
+                millis: 0
+            }),
+            8
+        );
         assert_eq!(maintenance_stride(Consistency::LedgerConsistent), 1);
         // A zero-epoch bound is the strict rung wearing a different name, and must not
         // become a division by zero.
-        assert_eq!(maintenance_stride(Consistency::Bounded { epochs: 0, millis: 0 }), 1);
+        assert_eq!(
+            maintenance_stride(Consistency::Bounded {
+                epochs: 0,
+                millis: 0
+            }),
+            1
+        );
     }
 
     #[test]
@@ -78,8 +90,23 @@ mod tests {
 
     #[test]
     fn monotonicity_permits_the_safe_direction_only() {
-        assert!(permits_reading(Consistency::Bounded { epochs: 4, millis: 0 }, Consistency::LedgerConsistent));
-        assert!(!permits_reading(Consistency::LedgerConsistent, Consistency::Bounded { epochs: 4, millis: 0 }));
-        assert!(permits_reading(Consistency::Snapshot, Consistency::Snapshot));
+        assert!(permits_reading(
+            Consistency::Bounded {
+                epochs: 4,
+                millis: 0
+            },
+            Consistency::LedgerConsistent
+        ));
+        assert!(!permits_reading(
+            Consistency::LedgerConsistent,
+            Consistency::Bounded {
+                epochs: 4,
+                millis: 0
+            }
+        ));
+        assert!(permits_reading(
+            Consistency::Snapshot,
+            Consistency::Snapshot
+        ));
     }
 }

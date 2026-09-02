@@ -47,12 +47,17 @@ fn table() -> Vec<(u8, Vec<String>)> {
         // the table silently loses an operator.
         const PIPE: &str = "\u{1}";
         let hidden = line.replace("\\|", PIPE);
-        let cells: Vec<String> =
-            hidden.trim_matches('|').split('|').map(|c| c.trim().to_string()).collect();
+        let cells: Vec<String> = hidden
+            .trim_matches('|')
+            .split('|')
+            .map(|c| c.trim().to_string())
+            .collect();
         if cells.len() < 3 {
             continue;
         }
-        let Ok(power) = cells[0].parse::<u8>() else { continue };
+        let Ok(power) = cells[0].parse::<u8>() else {
+            continue;
+        };
         // Split on backticks rather than whitespace: `is not` and `not in` are single
         // operators spelled with a space, and whitespace splitting would turn each into
         // two words that name nothing.
@@ -108,9 +113,18 @@ fn render(src: &str) -> String {
 #[test]
 fn the_appendix_table_is_present_and_complete() {
     let t = table();
-    assert_eq!(t.len(), 8, "B.10.1 must have eight numbered binding powers, got {}", t.len());
+    assert_eq!(
+        t.len(),
+        8,
+        "B.10.1 must have eight numbered binding powers, got {}",
+        t.len()
+    );
     let powers: Vec<u8> = t.iter().map(|(p, _)| *p).collect();
-    assert_eq!(powers, vec![1, 2, 3, 4, 5, 6, 7, 8], "the levels must be 1..=8 in order");
+    assert_eq!(
+        powers,
+        vec![1, 2, 3, 4, 5, 6, 7, 8],
+        "the levels must be 1..=8 in order"
+    );
 
     // Every binary operator the compiler has must appear somewhere in the table, or the
     // table is documenting a subset and calling itself normative.
@@ -120,12 +134,30 @@ fn the_appendix_table_is_present_and_complete() {
         .filter_map(|s| binop_of(s))
         .collect();
     for op in [
-        BinOp::Add, BinOp::Sub, BinOp::Mul, BinOp::Div, BinOp::Rem,
-        BinOp::Eq, BinOp::Ne, BinOp::Lt, BinOp::Le, BinOp::Gt, BinOp::Ge,
-        BinOp::And, BinOp::Or, BinOp::BitAnd, BinOp::BitOr, BinOp::BitXor,
-        BinOp::In, BinOp::Like, BinOp::Between,
+        BinOp::Add,
+        BinOp::Sub,
+        BinOp::Mul,
+        BinOp::Div,
+        BinOp::Rem,
+        BinOp::Eq,
+        BinOp::Ne,
+        BinOp::Lt,
+        BinOp::Le,
+        BinOp::Gt,
+        BinOp::Ge,
+        BinOp::And,
+        BinOp::Or,
+        BinOp::BitAnd,
+        BinOp::BitOr,
+        BinOp::BitXor,
+        BinOp::In,
+        BinOp::Like,
+        BinOp::Between,
     ] {
-        assert!(spelled.contains(&op), "{op:?} is in the compiler but not in B.10.1");
+        assert!(
+            spelled.contains(&op),
+            "{op:?} is in the compiler but not in B.10.1"
+        );
     }
 }
 
@@ -163,8 +195,7 @@ fn the_parser_associates_the_way_the_table_says() {
     // Right-associative where the table says right. This is the regression test for the
     // defect the second implementation found.
     assert!(
-        render("fn f() { a = b = c; }")
-            .contains("(assign (path a) (assign (path b) (path c)))"),
+        render("fn f() { a = b = c; }").contains("(assign (path a) (assign (path b) (path c)))"),
         "assignment must associate right, following Rust: {}",
         render("fn f() { a = b = c; }")
     );
@@ -181,19 +212,40 @@ fn the_levels_actually_nest_in_the_order_the_table_gives() {
     // as the inner node.
     let cases = [
         // 8 over 7
-        ("fn f() { a + b * c; }", "(binary add (path a) (binary mul (path b) (path c)))"),
+        (
+            "fn f() { a + b * c; }",
+            "(binary add (path a) (binary mul (path b) (path c)))",
+        ),
         // 7 over 6
-        ("fn f() { a & b + c; }", "(binary bitand (path a) (binary add (path b) (path c)))"),
+        (
+            "fn f() { a & b + c; }",
+            "(binary bitand (path a) (binary add (path b) (path c)))",
+        ),
         // 6 over 5
-        ("fn f() { a ^ b & c; }", "(binary bitxor (path a) (binary bitand (path b) (path c)))"),
+        (
+            "fn f() { a ^ b & c; }",
+            "(binary bitxor (path a) (binary bitand (path b) (path c)))",
+        ),
         // 5 over 4
-        ("fn f() { a | b ^ c; }", "(binary bitor (path a) (binary bitxor (path b) (path c)))"),
+        (
+            "fn f() { a | b ^ c; }",
+            "(binary bitor (path a) (binary bitxor (path b) (path c)))",
+        ),
         // 4 over 3
-        ("fn f() { a == b | c; }", "(binary eq (path a) (binary bitor (path b) (path c)))"),
+        (
+            "fn f() { a == b | c; }",
+            "(binary eq (path a) (binary bitor (path b) (path c)))",
+        ),
         // 3 over 2
-        ("fn f() { a && b == c; }", "(binary and (path a) (binary eq (path b) (path c)))"),
+        (
+            "fn f() { a && b == c; }",
+            "(binary and (path a) (binary eq (path b) (path c)))",
+        ),
         // 2 over 1
-        ("fn f() { a || b && c; }", "(binary or (path a) (binary and (path b) (path c)))"),
+        (
+            "fn f() { a || b && c; }",
+            "(binary or (path a) (binary and (path b) (path c)))",
+        ),
     ];
     for (src, want) in cases {
         let got = render(src);
@@ -217,10 +269,8 @@ fn unary_binds_tighter_than_every_binary_level() {
     // The table's last row. A prefix operator that bound looser than `*` would make
     // `-a * b` mean `-(a * b)`, which is the same number for negation and a different one
     // for `!`.
-    assert!(render("fn f() { -a * b; }")
-        .contains("(binary mul (unary neg (path a)) (path b))"));
-    assert!(render("fn f() { !a && b; }")
-        .contains("(binary and (unary not (path a)) (path b))"));
+    assert!(render("fn f() { -a * b; }").contains("(binary mul (unary neg (path a)) (path b))"));
+    assert!(render("fn f() { !a && b; }").contains("(binary and (unary not (path a)) (path b))"));
     // Postfix binds tighter still, and applies to the operand rather than the result.
     assert!(render("fn f() { -a.b; }").contains("(unary neg (field (path a) b))"));
 }

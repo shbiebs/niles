@@ -123,13 +123,21 @@ pub fn derive(circuit: &Circuit, node: NodeId, epoch: u64) -> Result<UpqueryPath
         }
         let n = circuit.node(id);
         if !n.op.is_incremental() {
-            return Err(NoPath::NonIncremental { node: id, op: n.op.name() });
+            return Err(NoPath::NonIncremental {
+                node: id,
+                op: n.op.name(),
+            });
         }
         let mut base_columns = Vec::new();
         match &n.op {
-            Op::Source { relation, is_base, .. } => {
+            Op::Source {
+                relation, is_base, ..
+            } => {
                 if !is_base {
-                    return Err(NoPath::MutableSource { node: id, relation: relation.clone() });
+                    return Err(NoPath::MutableSource {
+                        node: id,
+                        relation: relation.clone(),
+                    });
                 }
                 sources.push(relation.clone());
                 base_columns = key.clone();
@@ -165,25 +173,41 @@ pub fn derive(circuit: &Circuit, node: NodeId, epoch: u64) -> Result<UpqueryPath
         base_columns.sort_unstable();
         base_columns.dedup();
         let _ = &mut all_bases;
-        hops.push(Hop { node: id, op_name: n.op.name(), key: key.clone(), base_columns });
+        hops.push(Hop {
+            node: id,
+            op_name: n.op.name(),
+            key: key.clone(),
+            base_columns,
+        });
         for input in &n.inputs {
             // The key translates downward: a node's inputs are asked at the key the node
             // groups or joins by, which for the operators above is the same key. A `map`
             // that rewrote the key columns would need a translation here, and the planner
             // inserts an explicit `Index` in that case rather than guessing.
-            let child_key = circuit.node(*input).key.clone().unwrap_or_else(|| key.clone());
+            let child_key = circuit
+                .node(*input)
+                .key
+                .clone()
+                .unwrap_or_else(|| key.clone());
             stack.push((*input, child_key));
         }
     }
 
     sources.sort();
     sources.dedup();
-    all_bases = hops.iter().all(|h| h.op_name != "source")
-        || sources.iter().all(|s| {
-            circuit.nodes.iter().any(|n| matches!(&n.op, Op::Source { relation, is_base, .. } if relation == s && *is_base))
-        });
+    all_bases = hops.iter().all(|h| h.op_name != "source") || sources.iter().all(|s| {
+        circuit.nodes.iter().any(
+            |n| matches!(&n.op, Op::Source { relation, is_base, .. } if relation == s && *is_base),
+        )
+    });
 
-    Ok(UpqueryPath { origin: node, hops, sources, anchor: epoch, all_sources_are_bases: all_bases })
+    Ok(UpqueryPath {
+        origin: node,
+        hops,
+        sources,
+        anchor: epoch,
+        all_sources_are_bases: all_bases,
+    })
 }
 
 impl UpqueryPath {
@@ -198,14 +222,22 @@ impl UpqueryPath {
 
     /// A one-line rendering for `explain`.
     pub fn render(&self) -> String {
-        let route: Vec<String> = self.hops.iter().map(|h| format!("{}#{}", h.op_name, h.node)).collect();
+        let route: Vec<String> = self
+            .hops
+            .iter()
+            .map(|h| format!("{}#{}", h.op_name, h.node))
+            .collect();
         format!(
             "upquery(node={}, anchor=#{}) : {} <- [{}]{}",
             self.origin,
             self.anchor,
             route.join(" <- "),
             self.sources.join(", "),
-            if self.is_anchored() { "" } else { "  [NOT ANCHORED]" }
+            if self.is_anchored() {
+                ""
+            } else {
+                "  [NOT ANCHORED]"
+            }
         )
     }
 }
@@ -219,13 +251,20 @@ mod tests {
     fn balance(is_base: bool, anchor_key: Vec<ColIdx>) -> (Circuit, NodeId) {
         let mut c = Circuit::new();
         let src = c.add(
-            Op::Source { relation: "postings".into(), is_base, anchor_key },
+            Op::Source {
+                relation: "postings".into(),
+                is_base,
+                anchor_key,
+            },
             vec![],
             internal_contract(),
             "postings",
         );
         let agg = c.add(
-            Op::Aggregate { group_key: vec![0, 1], aggs: vec![(Agg::Sum, Scalar::Column(2))] },
+            Op::Aggregate {
+                group_key: vec![0, 1],
+                aggs: vec![(Agg::Sum, Scalar::Column(2))],
+            },
             vec![src],
             internal_contract(),
             "balance",
@@ -261,19 +300,34 @@ mod tests {
         let (c, agg) = balance(false, vec![0, 1]);
         let e = derive(&c, agg, 1).unwrap_err();
         assert!(matches!(e, NoPath::MutableSource { .. }), "{e:?}");
-        assert!(e.explain().contains("history is not retained"), "{}", e.explain());
+        assert!(
+            e.explain().contains("history is not retained"),
+            "{}",
+            e.explain()
+        );
     }
 
     #[test]
     fn a_view_without_a_derivable_key_cannot_be_upqueried() {
         let mut c = Circuit::new();
         let src = c.add(
-            Op::Source { relation: "postings".into(), is_base: true, anchor_key: vec![] },
+            Op::Source {
+                relation: "postings".into(),
+                is_base: true,
+                anchor_key: vec![],
+            },
             vec![],
             internal_contract(),
             "",
         );
-        let f = c.add(Op::Filter { predicate: Scalar::LitBool(true) }, vec![src], internal_contract(), "");
+        let f = c.add(
+            Op::Filter {
+                predicate: Scalar::LitBool(true),
+            },
+            vec![src],
+            internal_contract(),
+            "",
+        );
         let e = derive(&c, f, 1).unwrap_err();
         assert!(matches!(e, NoPath::KeyDoesNotDerive { .. }));
         assert!(e.explain().contains("Add an `index`"), "{}", e.explain());
@@ -285,19 +339,31 @@ mod tests {
         // answer, then reconstruction-equivalence is *false*, not merely unproven.
         let mut c = Circuit::new();
         let src = c.add(
-            Op::Source { relation: "p".into(), is_base: true, anchor_key: vec![0] },
+            Op::Source {
+                relation: "p".into(),
+                is_base: true,
+                anchor_key: vec![0],
+            },
             vec![],
             internal_contract(),
             "",
         );
         let f = c.add(
-            Op::Filter { predicate: Scalar::Udf { id: 7, args: vec![Scalar::Column(0)] } },
+            Op::Filter {
+                predicate: Scalar::Udf {
+                    id: 7,
+                    args: vec![Scalar::Column(0)],
+                },
+            },
             vec![src],
             internal_contract(),
             "",
         );
         let idx = c.add(Op::Index { key: vec![0] }, vec![f], internal_contract(), "");
-        assert!(matches!(derive(&c, idx, 1), Err(NoPath::Irreproducible { .. })));
+        assert!(matches!(
+            derive(&c, idx, 1),
+            Err(NoPath::Irreproducible { .. })
+        ));
 
         // Certifying it unblocks the path, which is the point of having a certification
         // step at all rather than a blanket ban on UDFs.
@@ -309,15 +375,34 @@ mod tests {
     fn an_ordering_stage_cannot_be_reconstructed_per_key() {
         let mut c = Circuit::new();
         let src = c.add(
-            Op::Source { relation: "p".into(), is_base: true, anchor_key: vec![0] },
+            Op::Source {
+                relation: "p".into(),
+                is_base: true,
+                anchor_key: vec![0],
+            },
             vec![],
             internal_contract(),
             "",
         );
-        let ob = c.add(Op::OrderBy { keys: vec![(1, true)] }, vec![src], internal_contract(), "");
-        let idx = c.add(Op::Index { key: vec![0] }, vec![ob], internal_contract(), "");
+        let ob = c.add(
+            Op::OrderBy {
+                keys: vec![(1, true)],
+            },
+            vec![src],
+            internal_contract(),
+            "",
+        );
+        let idx = c.add(
+            Op::Index { key: vec![0] },
+            vec![ob],
+            internal_contract(),
+            "",
+        );
         let e = derive(&c, idx, 1).unwrap_err();
-        assert!(matches!(e, NoPath::NonIncremental { op: "order_by", .. }), "{e:?}");
+        assert!(
+            matches!(e, NoPath::NonIncremental { op: "order_by", .. }),
+            "{e:?}"
+        );
         assert!(e.explain().contains("materialize: full"), "{}", e.explain());
     }
 
@@ -327,13 +412,20 @@ mod tests {
         // Fetching more would be waste; fetching fewer would be wrong.
         let mut c = Circuit::new();
         let src = c.add(
-            Op::Source { relation: "p".into(), is_base: true, anchor_key: vec![0, 1] },
+            Op::Source {
+                relation: "p".into(),
+                is_base: true,
+                anchor_key: vec![0, 1],
+            },
             vec![],
             internal_contract(),
             "",
         );
         let agg = c.add(
-            Op::Aggregate { group_key: vec![0, 1], aggs: vec![(Agg::Sum, Scalar::Column(4))] },
+            Op::Aggregate {
+                group_key: vec![0, 1],
+                aggs: vec![(Agg::Sum, Scalar::Column(4))],
+            },
             vec![src],
             internal_contract(),
             "",
@@ -345,6 +437,9 @@ mod tests {
     #[test]
     fn render_flags_an_unanchored_path() {
         let (c, agg) = balance(true, vec![0, 1]);
-        assert!(!derive(&c, agg, 7).unwrap().render().contains("NOT ANCHORED"));
+        assert!(!derive(&c, agg, 7)
+            .unwrap()
+            .render()
+            .contains("NOT ANCHORED"));
     }
 }

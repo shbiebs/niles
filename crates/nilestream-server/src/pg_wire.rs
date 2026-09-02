@@ -45,7 +45,10 @@ use std::io::{Read, Write};
 #[derive(Debug, Clone, PartialEq)]
 pub enum Frontend {
     /// The first message, which has no type byte — the protocol's one irregularity.
-    Startup { version: u32, params: Vec<(String, String)> },
+    Startup {
+        version: u32,
+        params: Vec<(String, String)>,
+    },
     /// A request to negotiate TLS, also without a type byte.
     SslRequest,
     /// `Q` — the simple query protocol.
@@ -71,11 +74,19 @@ pub struct Field {
 impl Field {
     /// `int8`. Epochs, counts and identifiers.
     pub fn int8(name: &str) -> Field {
-        Field { name: name.into(), type_oid: 20, type_size: 8 }
+        Field {
+            name: name.into(),
+            type_oid: 20,
+            type_size: 8,
+        }
     }
     /// `text`.
     pub fn text(name: &str) -> Field {
-        Field { name: name.into(), type_oid: 25, type_size: -1 }
+        Field {
+            name: name.into(),
+            type_oid: 25,
+            type_size: -1,
+        }
     }
     /// `numeric`, **not** `float8`.
     ///
@@ -85,7 +96,11 @@ impl Field {
     /// the last hop if the wire format throws it away. `numeric` is arbitrary-precision
     /// decimal in every PostgreSQL client, so the exactness survives the boundary.
     pub fn numeric(name: &str) -> Field {
-        Field { name: name.into(), type_oid: 1700, type_size: -1 }
+        Field {
+            name: name.into(),
+            type_oid: 1700,
+            type_size: -1,
+        }
     }
 }
 
@@ -94,7 +109,10 @@ impl Field {
 pub enum Backend {
     AuthenticationOk,
     ParameterStatus(String, String),
-    BackendKeyData { pid: u32, secret: u32 },
+    BackendKeyData {
+        pid: u32,
+        secret: u32,
+    },
     /// `Z` — with the transaction status: `I` idle, `T` in a transaction, `E` failed.
     ReadyForQuery(u8),
     RowDescription(Vec<Field>),
@@ -103,8 +121,15 @@ pub enum Backend {
     DataRow(Vec<Option<String>>),
     CommandComplete(String),
     EmptyQueryResponse,
-    ErrorResponse { severity: String, code: String, message: String, detail: Option<String> },
-    NoticeResponse { message: String },
+    ErrorResponse {
+        severity: String,
+        code: String,
+        message: String,
+        detail: Option<String>,
+    },
+    NoticeResponse {
+        message: String,
+    },
 }
 
 pub fn encode(msg: &Backend) -> Vec<u8> {
@@ -159,7 +184,12 @@ pub fn encode(msg: &Backend) -> Vec<u8> {
             (b'C', b)
         }
         Backend::EmptyQueryResponse => (b'I', Vec::new()),
-        Backend::ErrorResponse { severity, code, message, detail } => {
+        Backend::ErrorResponse {
+            severity,
+            code,
+            message,
+            detail,
+        } => {
             let mut b = Vec::new();
             b.push(b'S');
             put_cstr(&mut b, severity);
@@ -212,7 +242,10 @@ pub fn read_startup(r: &mut impl Read) -> std::io::Result<Frontend> {
     r.read_exact(&mut len_buf)?;
     let len = i32::from_be_bytes(len_buf) as usize;
     if len < 8 || len > 10_000 {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "implausible startup length"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "implausible startup length",
+        ));
     }
     let mut body = vec![0u8; len - 4];
     r.read_exact(&mut body)?;
@@ -239,7 +272,10 @@ pub fn read_message(r: &mut impl Read) -> std::io::Result<Frontend> {
     r.read_exact(&mut len_buf)?;
     let len = i32::from_be_bytes(len_buf) as usize;
     if len < 4 || len > 64 * 1024 * 1024 {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "implausible message length"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "implausible message length",
+        ));
     }
     let mut body = vec![0u8; len - 4];
     r.read_exact(&mut body)?;
@@ -355,9 +391,17 @@ mod tests {
     fn a_real_startup_message_parses() {
         let bytes = startup_bytes(&[("user", "ada"), ("database", "bank")]);
         let m = read_startup(&mut Cursor::new(bytes)).unwrap();
-        let Frontend::Startup { version, params } = m else { panic!("{m:?}") };
+        let Frontend::Startup { version, params } = m else {
+            panic!("{m:?}")
+        };
         assert_eq!(version, 196608, "protocol 3.0");
-        assert_eq!(params, vec![("user".into(), "ada".into()), ("database".into(), "bank".into())]);
+        assert_eq!(
+            params,
+            vec![
+                ("user".into(), "ada".into()),
+                ("database".into(), "bank".into())
+            ]
+        );
     }
 
     #[test]
@@ -365,18 +409,27 @@ mod tests {
         let mut out = Vec::new();
         out.extend_from_slice(&8i32.to_be_bytes());
         out.extend_from_slice(&80877103u32.to_be_bytes());
-        assert_eq!(read_startup(&mut Cursor::new(out)).unwrap(), Frontend::SslRequest);
+        assert_eq!(
+            read_startup(&mut Cursor::new(out)).unwrap(),
+            Frontend::SslRequest
+        );
     }
 
     #[test]
     fn a_simple_query_round_trips() {
         let mut bytes = vec![b'Q'];
         let mut body = Vec::new();
-        put_cstr(&mut body, "select acct, sum(amt) from postings group by acct");
+        put_cstr(
+            &mut body,
+            "select acct, sum(amt) from postings group by acct",
+        );
         bytes.extend_from_slice(&((body.len() + 4) as i32).to_be_bytes());
         bytes.extend_from_slice(&body);
         let m = read_message(&mut Cursor::new(bytes)).unwrap();
-        assert_eq!(m, Frontend::Query("select acct, sum(amt) from postings group by acct".into()));
+        assert_eq!(
+            m,
+            Frontend::Query("select acct, sum(amt) from postings group by acct".into())
+        );
     }
 
     #[test]
@@ -387,15 +440,23 @@ mod tests {
         let msgs = vec![
             Backend::AuthenticationOk,
             Backend::ParameterStatus("server_encoding".into(), "UTF8".into()),
-            Backend::BackendKeyData { pid: 42, secret: 99 },
+            Backend::BackendKeyData {
+                pid: 42,
+                secret: 99,
+            },
             Backend::ReadyForQuery(b'I'),
             Backend::RowDescription(vec![Field::int8("acct"), Field::numeric("balance")]),
             Backend::DataRow(vec![Some("1001".into()), Some("850.00".into())]),
             Backend::DataRow(vec![Some("1002".into()), None]),
             Backend::CommandComplete("SELECT 2".into()),
             Backend::EmptyQueryResponse,
-            unsupported("the extended query protocol", "prepared statements need an epoch-keyed plan cache"),
-            Backend::NoticeResponse { message: "hello".into() },
+            unsupported(
+                "the extended query protocol",
+                "prepared statements need an epoch-keyed plan cache",
+            ),
+            Backend::NoticeResponse {
+                message: "hello".into(),
+            },
         ];
         for m in &msgs {
             let bytes = encode(m);
@@ -427,7 +488,11 @@ mod tests {
         let with_null = encode(&Backend::DataRow(vec![None]));
         let with_empty = encode(&Backend::DataRow(vec![Some(String::new())]));
         assert_ne!(with_null, with_empty);
-        assert_eq!(&with_null[7..11], &(-1i32).to_be_bytes(), "null is length -1");
+        assert_eq!(
+            &with_null[7..11],
+            &(-1i32).to_be_bytes(),
+            "null is length -1"
+        );
         assert_eq!(&with_empty[7..11], &0i32.to_be_bytes(), "empty is length 0");
     }
 
@@ -436,20 +501,34 @@ mod tests {
         for tag in [b'P', b'B', b'E'] {
             let mut bytes = vec![tag];
             bytes.extend_from_slice(&4i32.to_be_bytes());
-            assert_eq!(read_message(&mut Cursor::new(bytes)).unwrap(), Frontend::Extended(tag));
+            assert_eq!(
+                read_message(&mut Cursor::new(bytes)).unwrap(),
+                Frontend::Extended(tag)
+            );
         }
         let e = unsupported("Bind", "prepared statements need an epoch-keyed plan cache");
-        let Backend::ErrorResponse { code, detail, .. } = &e else { panic!() };
+        let Backend::ErrorResponse { code, detail, .. } = &e else {
+            panic!()
+        };
         assert_eq!(code, "0A000", "feature_not_supported, not a syntax error");
-        assert!(detail.as_ref().unwrap().contains("epoch"), "the refusal must say why");
+        assert!(
+            detail.as_ref().unwrap().contains("epoch"),
+            "the refusal must say why"
+        );
     }
 
     #[test]
     fn a_compiler_diagnostic_keeps_its_code_on_the_wire() {
         // A conservation error mapped onto `42601 syntax_error` would tell the user the one
         // thing that is certainly false about their program.
-        let e = diagnostic_error("NL0300", "this transaction does not conserve `usd`", Some("net movement is -40.00"));
-        let Backend::ErrorResponse { message, .. } = &e else { panic!() };
+        let e = diagnostic_error(
+            "NL0300",
+            "this transaction does not conserve `usd`",
+            Some("net movement is -40.00"),
+        );
+        let Backend::ErrorResponse { message, .. } = &e else {
+            panic!()
+        };
         assert!(message.contains("NL0300"), "{message}");
         assert!(message.contains("conserve"), "{message}");
     }
@@ -461,7 +540,9 @@ mod tests {
         let r = startup_reply(1, 2);
         assert_eq!(r.first(), Some(&Backend::AuthenticationOk));
         assert!(matches!(r.last(), Some(Backend::ReadyForQuery(b'I'))));
-        assert!(r.iter().any(|m| matches!(m, Backend::ParameterStatus(k, _) if k == "server_version")));
+        assert!(r
+            .iter()
+            .any(|m| matches!(m, Backend::ParameterStatus(k, _) if k == "server_version")));
     }
 
     #[test]

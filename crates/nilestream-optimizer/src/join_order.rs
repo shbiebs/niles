@@ -88,11 +88,21 @@ pub struct Relation {
 
 impl Relation {
     pub fn base(name: &str, rows: u64) -> Self {
-        Relation { name: name.into(), rows, is_base: true, distinct: BTreeMap::new() }
+        Relation {
+            name: name.into(),
+            rows,
+            is_base: true,
+            distinct: BTreeMap::new(),
+        }
     }
 
     pub fn derived(name: &str, rows: u64) -> Self {
-        Relation { name: name.into(), rows, is_base: false, distinct: BTreeMap::new() }
+        Relation {
+            name: name.into(),
+            rows,
+            is_base: false,
+            distinct: BTreeMap::new(),
+        }
     }
 
     pub fn with_distinct(mut self, col: usize, n: u64) -> Self {
@@ -121,7 +131,12 @@ pub struct Edge {
 
 impl Edge {
     pub fn new(left: usize, left_col: usize, right: usize, right_col: usize) -> Self {
-        Edge { left, left_col, right, right_col }
+        Edge {
+            left,
+            left_col,
+            right,
+            right_col,
+        }
     }
 }
 
@@ -149,18 +164,33 @@ impl Weights {
     /// This corresponds to a warm view — the regime the thesis argues is the common one,
     /// and the one the Pareto-skew hypothesis (F-skew) predicts.
     pub fn warm() -> Self {
-        Weights { flow: 1.0, state: 1.0, reconstruct: 1.0, miss_rate: 0.05 }
+        Weights {
+            flow: 1.0,
+            state: 1.0,
+            reconstruct: 1.0,
+            miss_rate: 0.05,
+        }
     }
 
     /// A cold analytical view: state is expensive, misses are the common case.
     pub fn cold() -> Self {
-        Weights { flow: 1.0, state: 4.0, reconstruct: 1.0, miss_rate: 0.60 }
+        Weights {
+            flow: 1.0,
+            state: 4.0,
+            reconstruct: 1.0,
+            miss_rate: 0.60,
+        }
     }
 
     /// A hot serving view under a tight freshness bound: reconstruction latency dominates,
     /// so state is cheap by comparison.
     pub fn hot() -> Self {
-        Weights { flow: 1.0, state: 0.25, reconstruct: 8.0, miss_rate: 0.01 }
+        Weights {
+            flow: 1.0,
+            state: 0.25,
+            reconstruct: 8.0,
+            miss_rate: 0.01,
+        }
     }
 }
 
@@ -168,10 +198,17 @@ impl Weights {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Plan {
     Scan(usize),
-    Join { left: Box<Plan>, right: Box<Plan>, on: Edge },
+    Join {
+        left: Box<Plan>,
+        right: Box<Plan>,
+        on: Edge,
+    },
     /// Only produced when the query graph is disconnected. Kept as a distinct variant so
     /// that a plan containing one is visible to the caller rather than silently costed.
-    Cross { left: Box<Plan>, right: Box<Plan> },
+    Cross {
+        left: Box<Plan>,
+        right: Box<Plan>,
+    },
 }
 
 impl Plan {
@@ -285,7 +322,12 @@ pub struct JoinPlanner {
 
 impl JoinPlanner {
     pub fn new(rels: Vec<Relation>, edges: Vec<Edge>) -> Self {
-        JoinPlanner { rels, edges, weights: Weights::warm(), require_reconstructible: false }
+        JoinPlanner {
+            rels,
+            edges,
+            weights: Weights::warm(),
+            require_reconstructible: false,
+        }
     }
 
     pub fn with_weights(mut self, w: Weights) -> Self {
@@ -334,7 +376,12 @@ impl JoinPlanner {
     /// Cost of a scan: no flow, no reconstruction, and resident state only if this leaf
     /// is going to be indexed for a join, which it is in every case the planner sees.
     fn scan_cost(&self, i: usize) -> Cost {
-        Cost { flow: 0.0, state: self.rels[i].rows as f64, reconstruct: 0.0, rows: self.rels[i].rows as f64 }
+        Cost {
+            flow: 0.0,
+            state: self.rels[i].rows as f64,
+            reconstruct: 0.0,
+            rows: self.rels[i].rows as f64,
+        }
     }
 
     /// The three-term cost of adding one join above two costed subtrees.
@@ -363,7 +410,12 @@ impl JoinPlanner {
         let reconstruct =
             l.reconstruct + r.reconstruct + self.weights.miss_rate * rows * (depth as f64);
 
-        Cost { flow, state, reconstruct, rows }
+        Cost {
+            flow,
+            state,
+            reconstruct,
+            rows,
+        }
     }
 
     /// Prune orderings that a partial node above cannot reconstruct through.
@@ -374,7 +426,9 @@ impl JoinPlanner {
         self.rels
             .iter()
             .filter(|r| !r.is_base)
-            .map(|r| Illegal::NotReconstructible { relation: r.name.clone() })
+            .map(|r| Illegal::NotReconstructible {
+                relation: r.name.clone(),
+            })
             .collect()
     }
 
@@ -529,8 +583,9 @@ impl JoinPlanner {
     /// state-term effect the cost model exists to expose.
     fn greedy(&self) -> Planned {
         let n = self.rels.len();
-        let mut parts: Vec<(u64, Plan, Cost)> =
-            (0..n).map(|i| (1u64 << i, Plan::Scan(i), self.scan_cost(i))).collect();
+        let mut parts: Vec<(u64, Plan, Cost)> = (0..n)
+            .map(|i| (1u64 << i, Plan::Scan(i), self.scan_cost(i)))
+            .collect();
         let mut pairs = 0u64;
 
         while parts.len() > 1 {
@@ -560,14 +615,26 @@ impl JoinPlanner {
                 // them; force the first.
                 None => {
                     let depth = 1 + parts[0].1.depth().max(parts[1].1.depth());
-                    (0, 1, None, self.join_cost(&parts[0].2, &parts[1].2, None, depth))
+                    (
+                        0,
+                        1,
+                        None,
+                        self.join_cost(&parts[0].2, &parts[1].2, None, depth),
+                    )
                 }
             };
             let (bm, bp, _) = parts.remove(b);
             let (am, ap, _) = parts.remove(a);
             let plan = match e {
-                Some(on) => Plan::Join { left: Box::new(ap), right: Box::new(bp), on },
-                None => Plan::Cross { left: Box::new(ap), right: Box::new(bp) },
+                Some(on) => Plan::Join {
+                    left: Box::new(ap),
+                    right: Box::new(bp),
+                    on,
+                },
+                None => Plan::Cross {
+                    left: Box::new(ap),
+                    right: Box::new(bp),
+                },
             };
             parts.push((am | bm, plan, cost));
         }
@@ -609,7 +676,9 @@ mod tests {
     fn chain() -> (Vec<Relation>, Vec<Edge>) {
         let rels = vec![
             Relation::base("postings", 10_000_000).with_distinct(0, 50_000),
-            Relation::base("accounts", 50_000).with_distinct(0, 50_000).with_distinct(1, 5_000),
+            Relation::base("accounts", 50_000)
+                .with_distinct(0, 50_000)
+                .with_distinct(1, 5_000),
             Relation::base("customers", 5_000).with_distinct(0, 5_000),
         ];
         let edges = vec![Edge::new(0, 0, 1, 0), Edge::new(1, 1, 2, 0)];
@@ -622,7 +691,10 @@ mod tests {
         let p = JoinPlanner::new(rels.clone(), edges).plan().unwrap();
         assert_eq!(p.plan.relations(), 0b111);
         assert!(p.exhaustive);
-        assert!(!p.plan.contains_cross(), "a connected chain needs no cross product");
+        assert!(
+            !p.plan.contains_cross(),
+            "a connected chain needs no cross product"
+        );
     }
 
     #[test]
@@ -634,7 +706,8 @@ mod tests {
         let p = JoinPlanner::new(rels.clone(), edges).plan().unwrap();
         let rendered = p.plan.render(&rels);
         assert!(
-            rendered.contains("(accounts ⋈ customers)") || rendered.contains("(customers ⋈ accounts)"),
+            rendered.contains("(accounts ⋈ customers)")
+                || rendered.contains("(customers ⋈ accounts)"),
             "expected the small pair to be an inner node, got {rendered}"
         );
     }
@@ -653,11 +726,21 @@ mod tests {
         let edges = vec![Edge::new(0, 0, 1, 0), Edge::new(1, 0, 2, 0)];
 
         let cheap_state = JoinPlanner::new(rels.clone(), edges.clone())
-            .with_weights(Weights { flow: 1.0, state: 0.0, reconstruct: 0.0, miss_rate: 0.0 })
+            .with_weights(Weights {
+                flow: 1.0,
+                state: 0.0,
+                reconstruct: 0.0,
+                miss_rate: 0.0,
+            })
             .plan()
             .unwrap();
         let dear_state = JoinPlanner::new(rels.clone(), edges)
-            .with_weights(Weights { flow: 0.0, state: 1.0, reconstruct: 0.0, miss_rate: 0.0 })
+            .with_weights(Weights {
+                flow: 0.0,
+                state: 1.0,
+                reconstruct: 0.0,
+                miss_rate: 0.0,
+            })
             .plan()
             .unwrap();
 
@@ -677,26 +760,59 @@ mod tests {
         // same plan were optimal at every point of the weight space, the phase diagram
         // of §9.13 would have one region and there would be nothing to characterise.
         let rels = vec![
-            Relation::base("l", 100_000).with_distinct(0, 100).with_distinct(1, 100_000),
-            Relation::base("m", 100_000).with_distinct(0, 100).with_distinct(1, 100),
+            Relation::base("l", 100_000)
+                .with_distinct(0, 100)
+                .with_distinct(1, 100_000),
+            Relation::base("m", 100_000)
+                .with_distinct(0, 100)
+                .with_distinct(1, 100),
             Relation::base("n", 100).with_distinct(0, 100),
             Relation::base("o", 1_000_000).with_distinct(0, 100_000),
         ];
-        let edges =
-            vec![Edge::new(0, 1, 3, 0), Edge::new(0, 0, 1, 0), Edge::new(1, 1, 2, 0)];
+        let edges = vec![
+            Edge::new(0, 1, 3, 0),
+            Edge::new(0, 0, 1, 0),
+            Edge::new(1, 1, 2, 0),
+        ];
 
-        let hot = JoinPlanner::new(rels.clone(), edges.clone()).with_weights(Weights::hot()).plan().unwrap();
-        let cold = JoinPlanner::new(rels.clone(), edges).with_weights(Weights::cold()).plan().unwrap();
+        let hot = JoinPlanner::new(rels.clone(), edges.clone())
+            .with_weights(Weights::hot())
+            .plan()
+            .unwrap();
+        let cold = JoinPlanner::new(rels.clone(), edges)
+            .with_weights(Weights::cold())
+            .plan()
+            .unwrap();
 
         // Both must be valid and complete; whether they coincide is an empirical fact
         // about this graph, so we assert the interesting invariant instead: each plan is
         // at least as good as the other *under its own weights*.
-        let hp = JoinPlanner::new(rels.clone(), vec![Edge::new(0, 1, 3, 0), Edge::new(0, 0, 1, 0), Edge::new(1, 1, 2, 0)])
-            .with_weights(Weights::hot());
-        let cp = JoinPlanner::new(rels.clone(), vec![Edge::new(0, 1, 3, 0), Edge::new(0, 0, 1, 0), Edge::new(1, 1, 2, 0)])
-            .with_weights(Weights::cold());
-        assert!(hp.cost_of(&hot.plan).total(&Weights::hot()) <= hp.cost_of(&cold.plan).total(&Weights::hot()) + 1e-6);
-        assert!(cp.cost_of(&cold.plan).total(&Weights::cold()) <= cp.cost_of(&hot.plan).total(&Weights::cold()) + 1e-6);
+        let hp = JoinPlanner::new(
+            rels.clone(),
+            vec![
+                Edge::new(0, 1, 3, 0),
+                Edge::new(0, 0, 1, 0),
+                Edge::new(1, 1, 2, 0),
+            ],
+        )
+        .with_weights(Weights::hot());
+        let cp = JoinPlanner::new(
+            rels.clone(),
+            vec![
+                Edge::new(0, 1, 3, 0),
+                Edge::new(0, 0, 1, 0),
+                Edge::new(1, 1, 2, 0),
+            ],
+        )
+        .with_weights(Weights::cold());
+        assert!(
+            hp.cost_of(&hot.plan).total(&Weights::hot())
+                <= hp.cost_of(&cold.plan).total(&Weights::hot()) + 1e-6
+        );
+        assert!(
+            cp.cost_of(&cold.plan).total(&Weights::cold())
+                <= cp.cost_of(&hot.plan).total(&Weights::cold()) + 1e-6
+        );
     }
 
     #[test]
@@ -729,7 +845,10 @@ mod tests {
         let edges = vec![Edge::new(0, 0, 1, 0)];
         let p = JoinPlanner::new(rels.clone(), edges).plan().unwrap();
         assert_eq!(p.plan.relations(), 0b111);
-        assert!(p.plan.contains_cross(), "c can only be attached by a cross product");
+        assert!(
+            p.plan.contains_cross(),
+            "c can only be attached by a cross product"
+        );
     }
 
     #[test]
@@ -753,10 +872,15 @@ mod tests {
             Relation::derived("live_fx_quotes", 500), // a mutable table, not a base
         ];
         let edges = vec![Edge::new(0, 0, 1, 0)];
-        let err = JoinPlanner::new(rels, edges).requiring_reconstructible().plan().unwrap_err();
+        let err = JoinPlanner::new(rels, edges)
+            .requiring_reconstructible()
+            .plan()
+            .unwrap_err();
         assert_eq!(
             err,
-            vec![Illegal::NotReconstructible { relation: "live_fx_quotes".into() }]
+            vec![Illegal::NotReconstructible {
+                relation: "live_fx_quotes".into()
+            }]
         );
     }
 
@@ -780,7 +904,9 @@ mod tests {
         // the same input must produce the same plan and the same enumeration count, or a
         // measured regression cannot be attributed to a change.
         let (rels, edges) = chain();
-        let a = JoinPlanner::new(rels.clone(), edges.clone()).plan().unwrap();
+        let a = JoinPlanner::new(rels.clone(), edges.clone())
+            .plan()
+            .unwrap();
         let b = JoinPlanner::new(rels, edges).plan().unwrap();
         assert_eq!(a.plan, b.plan);
         assert_eq!(a.pairs_enumerated, b.pairs_enumerated);
@@ -792,7 +918,9 @@ mod tests {
         // than a specific count, because a specific count would pin an implementation
         // detail; but the gap must be large, or DP_LIMIT is protecting against nothing.
         let n = 8;
-        let rels: Vec<_> = (0..n).map(|i| Relation::base(&format!("r{i}"), 1_000).with_distinct(0, 100)).collect();
+        let rels: Vec<_> = (0..n)
+            .map(|i| Relation::base(&format!("r{i}"), 1_000).with_distinct(0, 100))
+            .collect();
 
         let chain_edges: Vec<_> = (0..n - 1).map(|i| Edge::new(i, 0, i + 1, 0)).collect();
         let mut clique_edges = Vec::new();
@@ -817,8 +945,9 @@ mod tests {
         // Honesty about which algorithm produced the plan. §9.13.4 attributes a
         // regression to the search only if it can tell which search ran.
         let n = DP_LIMIT + 2;
-        let rels: Vec<_> =
-            (0..n).map(|i| Relation::base(&format!("r{i}"), 1_000).with_distinct(0, 100)).collect();
+        let rels: Vec<_> = (0..n)
+            .map(|i| Relation::base(&format!("r{i}"), 1_000).with_distinct(0, 100))
+            .collect();
         let edges: Vec<_> = (0..n - 1).map(|i| Edge::new(i, 0, i + 1, 0)).collect();
         let p = JoinPlanner::new(rels, edges).plan().unwrap();
         assert!(!p.exhaustive, "above DP_LIMIT the fallback must run");
@@ -859,10 +988,18 @@ mod tests {
         // The three terms must be separable, because §9.13.4 reports them separately and
         // a reader has to be able to attribute a cost change to a cause.
         let (rels, edges) = chain();
-        let low = JoinPlanner::new(rels.clone(), edges.clone())
-            .with_weights(Weights { flow: 1.0, state: 1.0, reconstruct: 1.0, miss_rate: 0.0 });
-        let high = JoinPlanner::new(rels.clone(), edges)
-            .with_weights(Weights { flow: 1.0, state: 1.0, reconstruct: 1.0, miss_rate: 1.0 });
+        let low = JoinPlanner::new(rels.clone(), edges.clone()).with_weights(Weights {
+            flow: 1.0,
+            state: 1.0,
+            reconstruct: 1.0,
+            miss_rate: 0.0,
+        });
+        let high = JoinPlanner::new(rels.clone(), edges).with_weights(Weights {
+            flow: 1.0,
+            state: 1.0,
+            reconstruct: 1.0,
+            miss_rate: 1.0,
+        });
 
         let plan = low.plan().unwrap().plan;
         let lc = low.cost_of(&plan);
@@ -871,7 +1008,10 @@ mod tests {
         assert_eq!(lc.state, hc.state);
         assert_eq!(lc.rows, hc.rows);
         assert!(hc.reconstruct > lc.reconstruct);
-        assert_eq!(lc.reconstruct, 0.0, "at miss_rate 0 there is no reconstruction to pay for");
+        assert_eq!(
+            lc.reconstruct, 0.0,
+            "at miss_rate 0 there is no reconstruction to pay for"
+        );
     }
 
     #[test]
@@ -894,6 +1034,10 @@ mod tests {
         let r = Relation::base("x", 1_000);
         assert_eq!(r.ndv(0), 100);
         let tiny = Relation::base("y", 3);
-        assert_eq!(tiny.ndv(0), 1, "never zero, or the selectivity divides by zero");
+        assert_eq!(
+            tiny.ndv(0),
+            1,
+            "never zero, or the selectivity divides by zero"
+        );
     }
 }

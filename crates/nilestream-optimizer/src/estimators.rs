@@ -14,7 +14,11 @@ pub struct Ewma {
 
 impl Ewma {
     pub fn new(alpha: f64) -> Self {
-        Self { value: 0.0, alpha, initialized: false }
+        Self {
+            value: 0.0,
+            alpha,
+            initialized: false,
+        }
     }
 
     pub fn update(&mut self, sample: f64) -> f64 {

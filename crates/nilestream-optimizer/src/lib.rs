@@ -12,11 +12,11 @@
 //! 3. **Explainability**: every transition records the estimates that caused it.
 
 pub mod estimators;
-pub mod modes;
 pub mod eviction;
 pub mod join_order;
-pub mod plan_space;
+pub mod modes;
 pub mod offline;
+pub mod plan_space;
 pub mod unnest;
 
 pub use modes::{Mode, ModeDecision};

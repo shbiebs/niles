@@ -56,8 +56,15 @@ pub fn accept_loop(listener: TcpListener, schema: String, engine: Arc<Mutex<RevE
     }
 }
 
-pub fn serve(stream: TcpStream, schema: String, engine: Arc<Mutex<RevEngine>>) -> std::io::Result<()> {
-    let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
+pub fn serve(
+    stream: TcpStream,
+    schema: String,
+    engine: Arc<Mutex<RevEngine>>,
+) -> std::io::Result<()> {
+    let peer = stream
+        .peer_addr()
+        .map(|a| a.to_string())
+        .unwrap_or_default();
     // **Disable Nagle.** A request/response protocol with small replies is the exact shape
     // Nagle's algorithm penalises: the reply is held pending an acknowledgement the peer's
     // delayed-ACK timer will not send for 40ms. The wall-clock harness measured 23 point
@@ -97,9 +104,18 @@ pub fn serve(stream: TcpStream, schema: String, engine: Arc<Mutex<RevEngine>>) -
     let Frontend::Startup { params, .. } = startup else {
         return Ok(());
     };
-    let get = |k: &str| params.iter().find(|(a, _)| a == k).map(|(_, v)| v.clone()).unwrap_or_default();
+    let get = |k: &str| {
+        params
+            .iter()
+            .find(|(a, _)| a == k)
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default()
+    };
     let mut session = Session::new(get("user"), get("database"), schema);
-    eprintln!("nilestreamd: {peer} connected as `{}` to `{}`", session.user, session.database);
+    eprintln!(
+        "nilestreamd: {peer} connected as `{}` to `{}`",
+        session.user, session.database
+    );
 
     let pid = std::process::id();
     pg_wire::write_all(&mut w, &pg_wire::startup_reply(pid, 0x5eed))?;
@@ -121,7 +137,10 @@ pub fn serve(stream: TcpStream, schema: String, engine: Arc<Mutex<RevEngine>>) -
         }
         pg_wire::write_all(&mut w, &replies)?;
     }
-    eprintln!("nilestreamd: {peer} disconnected after {} queries", session.queries_served);
+    eprintln!(
+        "nilestreamd: {peer} disconnected after {} queries",
+        session.queries_served
+    );
     Ok(())
 }
 
@@ -135,4 +154,3 @@ impl<T: std::io::Write> WriteBytes for T {
         self.flush()
     }
 }
-

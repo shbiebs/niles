@@ -32,7 +32,7 @@
 //! pretending they passed would falsify it.
 
 use niles_interp::{determinism_gate, Error, Interp, Value};
-use niles_lang::lexer::{Tok, TimeUnit};
+use niles_lang::lexer::{TimeUnit, Tok};
 use niles_lang::parser;
 
 const LEXER_SRC: &str = include_str!("../../../bootstrap/lexer.niles");
@@ -68,13 +68,23 @@ fn render_rust(src: &str) -> String {
 /// Run `bootstrap/lexer.niles` under stage 0 and return its rendering of `input`.
 fn render_niles(input: &str) -> Result<String, Error> {
     let (prog, d) = parser::parse_program(LEXER_SRC);
-    assert!(!d.has_errors(), "bootstrap/lexer.niles must parse: {:?}", d.items);
+    assert!(
+        !d.has_errors(),
+        "bootstrap/lexer.niles must parse: {:?}",
+        d.items
+    );
     let mut it = Interp::new();
     it.load(&prog);
-    let v = it.call("lex_and_render", vec![Value::Str(std::rc::Rc::new(input.to_string()))])?;
+    let v = it.call(
+        "lex_and_render",
+        vec![Value::Str(std::rc::Rc::new(input.to_string()))],
+    )?;
     match v {
         Value::Str(s) => Ok((*s).clone()),
-        other => panic!("lex_and_render should return a string, got {}", other.type_name()),
+        other => panic!(
+            "lex_and_render should return a string, got {}",
+            other.type_name()
+        ),
     }
 }
 
@@ -115,11 +125,17 @@ fn corpus() -> Vec<(&'static str, &'static str)> {
         ("whitespace only", "   \n\t  \n"),
         ("one identifier", "balance"),
         ("keyword and identifier", "let balance = 1;"),
-        ("keywords, and two near-misses that are not", "fn view ledger base txn serve evict conserves currency schema"),
+        (
+            "keywords, and two near-misses that are not",
+            "fn view ledger base txn serve evict conserves currency schema",
+        ),
         // The classic longest-match traps. `::` before `:`, `|>` before `|`, `=>` before `=`.
         ("path separator", "std::collections::BTreeMap"),
         ("pipeline arrow", "q |> where(p) |> group_by(k)"),
-        ("fat arrow and thin arrow", "fn f() -> i64 { match x { 1 => 2 } }"),
+        (
+            "fat arrow and thin arrow",
+            "fn f() -> i64 { match x { 1 => 2 } }",
+        ),
         ("comparison operators", "a == b != c <= d >= e < f > g"),
         ("logical operators", "a && b || !c"),
         ("range", "0..10"),
@@ -167,10 +183,18 @@ fn stage_1_the_niles_written_lexer_parses_and_runs() {
     let mut it = Interp::new();
     it.load(&prog);
     let names = it.function_names();
-    for wanted in ["lex", "next_token", "skip_trivia", "scan_punct", "lex_and_render", "main"] {
+    for wanted in [
+        "lex",
+        "next_token",
+        "skip_trivia",
+        "scan_punct",
+        "lex_and_render",
+        "main",
+    ] {
         assert!(names.contains(&wanted.to_string()), "missing fn {wanted}");
     }
-    it.call("main", vec![]).expect("the Niles lexer's self-check must run");
+    it.call("main", vec![])
+        .expect("the Niles lexer's self-check must run");
     assert!(!it.output.is_empty(), "it must produce a rendering");
 }
 
@@ -185,8 +209,10 @@ fn keyword_table_matches_the_registry_exactly() {
     // makes for having a registry at all, arriving here as evidence rather than as an
     // assertion. This test is the fence: the Niles-side table is generated from
     // `keywords.rs`, and the build fails the moment the two diverge again.
-    let registry: std::collections::BTreeSet<String> =
-        niles_lang::keywords::KEYWORDS.iter().map(|k| k.word.to_string()).collect();
+    let registry: std::collections::BTreeSet<String> = niles_lang::keywords::KEYWORDS
+        .iter()
+        .map(|k| k.word.to_string())
+        .collect();
 
     // Extract the array literal from the Niles source. Parsing it out of the file rather
     // than duplicating it here is the point: the assertion is about the file that runs.
@@ -202,10 +228,20 @@ fn keyword_table_matches_the_registry_exactly() {
 
     let missing: Vec<_> = registry.difference(&in_niles).collect();
     let invented: Vec<_> = in_niles.difference(&registry).collect();
-    assert!(missing.is_empty(), "in the registry but not in the Niles lexer: {missing:?}");
-    assert!(invented.is_empty(), "in the Niles lexer but not in the registry: {invented:?}");
+    assert!(
+        missing.is_empty(),
+        "in the registry but not in the Niles lexer: {missing:?}"
+    );
+    assert!(
+        invented.is_empty(),
+        "in the Niles lexer but not in the registry: {invented:?}"
+    );
     assert_eq!(in_niles.len(), registry.len());
-    assert!(registry.len() >= 170, "the registry should be the full table, got {}", registry.len());
+    assert!(
+        registry.len() >= 170,
+        "the registry should be the full table, got {}",
+        registry.len()
+    );
 }
 
 #[test]
@@ -230,7 +266,11 @@ fn keyword_matching_is_case_insensitive_on_both_sides() {
     let rust = render_rust(mixed);
     let niles = render_niles(mixed).unwrap();
     assert_eq!(niles, rust);
-    assert_eq!(rust.matches("KW ").count(), 6, "all six spellings are the same two words");
+    assert_eq!(
+        rust.matches("KW ").count(),
+        6,
+        "all six spellings are the same two words"
+    );
 }
 
 #[test]
@@ -238,8 +278,13 @@ fn stage_1_uses_only_constructs_the_language_actually_has() {
     // A weak but real expressiveness result: the file uses `fn`, `let mut`, `while`,
     // `if`, `match`, `struct`, `enum` with payloads, arrays and early `return`, and it
     // parses. Had any of those been aspirational, this file would not exist.
-    for construct in ["fn ", "let mut ", "while ", "match ", "struct ", "enum ", "return "] {
-        assert!(LEXER_SRC.contains(construct), "the bootstrap should exercise `{construct}`");
+    for construct in [
+        "fn ", "let mut ", "while ", "match ", "struct ", "enum ", "return ",
+    ] {
+        assert!(
+            LEXER_SRC.contains(construct),
+            "the bootstrap should exercise `{construct}`"
+        );
     }
 }
 
@@ -257,13 +302,15 @@ fn stage_1_equivalence_the_two_lexers_agree_token_for_token() {
             continue;
         }
         let rust = render_rust(src);
-        let niles = render_niles(src).unwrap_or_else(|e| {
-            panic!("the Niles lexer failed on `{name}`: {}", e.message())
-        });
+        let niles = render_niles(src)
+            .unwrap_or_else(|e| panic!("the Niles lexer failed on `{name}`: {}", e.message()));
         assert_eq!(niles, rust, "\ncase: {name}\nsource: {src:?}\n");
         checked += 1;
     }
-    assert!(checked >= 25, "the gate must actually cover the corpus, checked {checked}");
+    assert!(
+        checked >= 25,
+        "the gate must actually cover the corpus, checked {checked}"
+    );
     // Every skip is reported rather than hidden. If this list grows, the gate proves less.
     assert!(
         skipped.is_empty(),
@@ -276,7 +323,10 @@ fn the_scope_exclusion_is_real_and_not_a_way_to_pass() {
     // Guarding the guard. `in_scope` must actually exclude the four unimplemented forms;
     // if it silently returned true, the gate above would appear to prove more than it does.
     assert!(!in_scope("@2026-03-01"), "instants are out of scope");
-    assert!(!in_scope("v@2026-03-01"), "valid-time instants are out of scope");
+    assert!(
+        !in_scope("v@2026-03-01"),
+        "valid-time instants are out of scope"
+    );
     assert!(!in_scope("7.days"), "durations are out of scope");
     assert!(!in_scope("1.5"), "floats are out of scope");
     assert!(in_scope("let x = 10.00 usd;"), "money is in scope");
@@ -305,7 +355,10 @@ fn stage_2_the_niles_lexer_lexes_its_own_source() {
     // self-referential, and where a hidden assumption about the input usually surfaces.
     let niles = render_niles(LEXER_SRC).expect("it must survive its own source");
     let lines = niles.lines().count();
-    assert!(lines > 800, "its own source is a few thousand tokens, got {lines}");
+    assert!(
+        lines > 800,
+        "its own source is a few thousand tokens, got {lines}"
+    );
     assert!(niles.ends_with(&format!("EOF {}..{} \n", LEXER_SRC.len(), LEXER_SRC.len())));
 }
 
@@ -349,7 +402,11 @@ fn stage_3_repeated_runs_are_byte_identical() {
     let (prog, d) = parser::parse_program(LEXER_SRC);
     assert!(!d.has_errors());
     let r = determinism_gate(&prog, "main", 5).expect("the self-check must run");
-    assert!(r.identical, "diverged at output line {:?}", r.first_divergence);
+    assert!(
+        r.identical,
+        "diverged at output line {:?}",
+        r.first_divergence
+    );
     assert_eq!(r.runs, 5);
     assert!(!r.output.is_empty());
 }
@@ -375,7 +432,10 @@ fn the_relational_tier_is_still_refused_and_the_bootstrap_does_not_touch_it() {
     let (prog, _) = parser::parse_program("fn f() -> i64 { txn { 1 } }");
     let mut it = Interp::new();
     it.load(&prog);
-    assert!(matches!(it.call("f", vec![]), Err(Error::NotInSubset { form: "txn", .. })));
+    assert!(matches!(
+        it.call("f", vec![]),
+        Err(Error::NotInSubset { form: "txn", .. })
+    ));
     assert!(
         !LEXER_SRC.contains("txn {"),
         "the bootstrap lexer must stay in the imperative subset"
@@ -387,7 +447,11 @@ fn a_duration_unit_still_exists_in_the_reference_lexer_so_the_gap_is_a_gap() {
     // Pinning that the excluded forms are real language features rather than dead syntax
     // — otherwise "out of scope" would be an empty concession.
     let (toks, _) = niles_lang::lexer::lex("7.days");
-    assert!(toks
-        .iter()
-        .any(|t| matches!(t.tok, Tok::Duration { unit: TimeUnit::Days, .. })));
+    assert!(toks.iter().any(|t| matches!(
+        t.tok,
+        Tok::Duration {
+            unit: TimeUnit::Days,
+            ..
+        }
+    )));
 }

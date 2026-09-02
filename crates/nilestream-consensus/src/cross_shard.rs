@@ -76,7 +76,10 @@ pub enum Vote {
     /// Refused, with the reason. A refusal is as durable as a preparation: a participant
     /// that said no must not later say yes, because the coordinator may already have
     /// aborted on its word.
-    Refused { shard: ShardId, reason: RefuseReason },
+    Refused {
+        shard: ShardId,
+        reason: RefuseReason,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,9 +188,19 @@ impl Coordinator {
         // Conservation first: an unbalanced transaction must abort even if every
         // participant is individually willing, because each shard only saw its own piece.
         let d = if let Err((cur, net)) = self.conserves() {
-            Decision::Abort { xid: self.xid, why: AbortReason::DoesNotConserve { currency: cur, net } }
-        } else if self.votes.values().any(|v| matches!(v, Vote::Refused { .. })) {
-            Decision::Abort { xid: self.xid, why: AbortReason::ParticipantRefused }
+            Decision::Abort {
+                xid: self.xid,
+                why: AbortReason::DoesNotConserve { currency: cur, net },
+            }
+        } else if self
+            .votes
+            .values()
+            .any(|v| matches!(v, Vote::Refused { .. }))
+        {
+            Decision::Abort {
+                xid: self.xid,
+                why: AbortReason::ParticipantRefused,
+            }
         } else {
             let at = self
                 .votes
@@ -199,7 +212,10 @@ impl Coordinator {
                 .max()
                 .unwrap_or(0)
                 + 1;
-            Decision::Commit { xid: self.xid, at_epoch: at }
+            Decision::Commit {
+                xid: self.xid,
+                at_epoch: at,
+            }
         };
         self.decided = Some(d.clone());
         Some(d)
@@ -274,10 +290,16 @@ impl Participant {
         // A participant that already answered must answer the same way. A prepare that
         // could be retracted is not a prepare.
         if let Some(e) = self.prepared_at {
-            return Vote::Prepared { shard: self.shard, at_epoch: e };
+            return Vote::Prepared {
+                shard: self.shard,
+                at_epoch: e,
+            };
         }
         if let Some(r) = self.refused {
-            return Vote::Refused { shard: self.shard, reason: r };
+            return Vote::Refused {
+                shard: self.shard,
+                reason: r,
+            };
         }
         let reason = if self.seen_idem.contains(idem_key) {
             Some(RefuseReason::Duplicate)
@@ -289,11 +311,17 @@ impl Participant {
         match reason {
             Some(r) => {
                 self.refused = Some(r);
-                Vote::Refused { shard: self.shard, reason: r }
+                Vote::Refused {
+                    shard: self.shard,
+                    reason: r,
+                }
             }
             None => {
                 self.prepared_at = Some(local_epoch);
-                Vote::Prepared { shard: self.shard, at_epoch: local_epoch }
+                Vote::Prepared {
+                    shard: self.shard,
+                    at_epoch: local_epoch,
+                }
             }
         }
     }
@@ -345,10 +373,17 @@ mod tests {
         quorum: bool,
     ) -> (Coordinator, Vec<Participant>) {
         let mut c = Coordinator::new(1, 1, fragments);
-        let mut ps: Vec<Participant> =
-            c.participants.iter().map(|s| Participant::new(*s, 1)).collect();
+        let mut ps: Vec<Participant> = c
+            .participants
+            .iter()
+            .map(|s| Participant::new(*s, 1))
+            .collect();
         for p in &mut ps {
-            let e = epochs.iter().find(|(s, _)| *s == p.shard).map(|(_, e)| *e).unwrap_or(10);
+            let e = epochs
+                .iter()
+                .find(|(s, _)| *s == p.shard)
+                .map(|(_, e)| *e)
+                .unwrap_or(10);
             c.record(p.prepare("k", e, quorum));
         }
         c.decide();
@@ -364,10 +399,20 @@ mod tests {
     #[test]
     fn a_balanced_cross_shard_transaction_commits_at_one_epoch_everywhere() {
         // The property that makes it atomic to a reader: the same epoch on every shard.
-        let (_c, ps) = run(vec![frag(1, "usd", -100), frag(2, "usd", 100)], &[(1, 10), (2, 40)], true);
+        let (_c, ps) = run(
+            vec![frag(1, "usd", -100), frag(2, "usd", 100)],
+            &[(1, 10), (2, 40)],
+            true,
+        );
         let epochs: Vec<Option<Index>> = ps.iter().map(|p| p.committed_at()).collect();
-        assert!(epochs.iter().all(|e| e.is_some()), "both shards must commit: {epochs:?}");
-        assert_eq!(epochs[0], epochs[1], "and at the SAME epoch, or a reader can see half of it");
+        assert!(
+            epochs.iter().all(|e| e.is_some()),
+            "both shards must commit: {epochs:?}"
+        );
+        assert_eq!(
+            epochs[0], epochs[1],
+            "and at the SAME epoch, or a reader can see half of it"
+        );
         assert_eq!(epochs[0], Some(41), "strictly above every prepared epoch");
     }
 
@@ -376,7 +421,11 @@ mod tests {
         // Swept across the whole epoch range: there is no anchor at which one shard shows
         // the transaction and the other does not. That window is the failure this protocol
         // exists to remove, so it gets an exhaustive check rather than a spot one.
-        let (_c, ps) = run(vec![frag(1, "usd", -100), frag(2, "usd", 100)], &[(1, 7), (2, 55)], true);
+        let (_c, ps) = run(
+            vec![frag(1, "usd", -100), frag(2, "usd", 100)],
+            &[(1, 7), (2, 55)],
+            true,
+        );
         for anchor in 0..80 {
             let seen: Vec<bool> = ps.iter().map(|p| p.visible_at(anchor)).collect();
             assert!(
@@ -391,15 +440,25 @@ mod tests {
         // The check only the coordinator can make. Each shard sees a fragment that is
         // individually fine; only the union is unbalanced. Without this, sharding would
         // silently lose the invariant the single-node design proves.
-        let (c, ps) = run(vec![frag(1, "usd", -100), frag(2, "usd", 60)], &[(1, 10), (2, 10)], true);
+        let (c, ps) = run(
+            vec![frag(1, "usd", -100), frag(2, "usd", 60)],
+            &[(1, 10), (2, 10)],
+            true,
+        );
         match c.send_decision() {
-            Some(Decision::Abort { why: AbortReason::DoesNotConserve { currency, net }, .. }) => {
+            Some(Decision::Abort {
+                why: AbortReason::DoesNotConserve { currency, net },
+                ..
+            }) => {
                 assert_eq!(currency, "usd");
                 assert_eq!(net, -40);
             }
             other => panic!("expected a conservation abort, got {other:?}"),
         }
-        assert!(ps.iter().all(|p| p.committed_at().is_none()), "nothing may commit");
+        assert!(
+            ps.iter().all(|p| p.committed_at().is_none()),
+            "nothing may commit"
+        );
     }
 
     #[test]
@@ -412,7 +471,10 @@ mod tests {
         let (c, _) = run(vec![a, b], &[(1, 5), (2, 5)], true);
         assert!(matches!(
             c.send_decision(),
-            Some(Decision::Abort { why: AbortReason::DoesNotConserve { .. }, .. })
+            Some(Decision::Abort {
+                why: AbortReason::DoesNotConserve { .. },
+                ..
+            })
         ));
     }
 
@@ -427,7 +489,10 @@ mod tests {
         c.persist_decision();
         assert!(matches!(
             c.send_decision(),
-            Some(Decision::Abort { why: AbortReason::ParticipantRefused, .. })
+            Some(Decision::Abort {
+                why: AbortReason::ParticipantRefused,
+                ..
+            })
         ));
     }
 
@@ -443,7 +508,10 @@ mod tests {
         c.record(p1.prepare("k", 4, true));
         c.record(p2.prepare("k", 4, true));
         assert!(c.decide().is_some(), "the decision exists");
-        assert!(c.send_decision().is_none(), "but must not be sendable before it is persisted");
+        assert!(
+            c.send_decision().is_none(),
+            "but must not be sendable before it is persisted"
+        );
         c.persist_decision();
         assert!(c.send_decision().is_some());
     }
@@ -464,7 +532,13 @@ mod tests {
     fn a_refusal_is_as_durable_as_a_preparation() {
         let mut p = Participant::new(1, 1).with_committed_keys(&["k"]);
         let first = p.prepare("k", 5, true);
-        assert!(matches!(first, Vote::Refused { reason: RefuseReason::Duplicate, .. }));
+        assert!(matches!(
+            first,
+            Vote::Refused {
+                reason: RefuseReason::Duplicate,
+                ..
+            }
+        ));
         // Even with the duplicate condition gone, a participant that said no must not later
         // say yes: the coordinator may already have aborted on its word.
         p.seen_idem.clear();
@@ -475,9 +549,19 @@ mod tests {
     fn applying_a_decision_twice_does_not_double_the_movement() {
         let mut p = Participant::new(1, 1);
         p.prepare("k", 3, true);
-        p.apply(Decision::Commit { xid: 1, at_epoch: 9 });
-        p.apply(Decision::Commit { xid: 1, at_epoch: 77 });
-        assert_eq!(p.committed_at(), Some(9), "a redelivered decision is the same decision");
+        p.apply(Decision::Commit {
+            xid: 1,
+            at_epoch: 9,
+        });
+        p.apply(Decision::Commit {
+            xid: 1,
+            at_epoch: 77,
+        });
+        assert_eq!(
+            p.committed_at(),
+            Some(9),
+            "a redelivered decision is the same decision"
+        );
     }
 
     #[test]
@@ -485,12 +569,31 @@ mod tests {
         // The answer to 2PC's blocking objection: the coordinator IS a ledger group, so its
         // decision is a replicated log entry that a successor reads out.
         let log = vec![
-            Decision::Abort { xid: 5, why: AbortReason::ParticipantRefused },
-            Decision::Commit { xid: 7, at_epoch: 42 },
+            Decision::Abort {
+                xid: 5,
+                why: AbortReason::ParticipantRefused,
+            },
+            Decision::Commit {
+                xid: 7,
+                at_epoch: 42,
+            },
         ];
-        assert_eq!(Coordinator::recover(&log, 7), Some(Decision::Commit { xid: 7, at_epoch: 42 }));
-        assert!(matches!(Coordinator::recover(&log, 5), Some(Decision::Abort { .. })));
-        assert_eq!(Coordinator::recover(&log, 99), None, "an unknown xid has no decision to recover");
+        assert_eq!(
+            Coordinator::recover(&log, 7),
+            Some(Decision::Commit {
+                xid: 7,
+                at_epoch: 42
+            })
+        );
+        assert!(matches!(
+            Coordinator::recover(&log, 5),
+            Some(Decision::Abort { .. })
+        ));
+        assert_eq!(
+            Coordinator::recover(&log, 99),
+            None,
+            "an unknown xid has no decision to recover"
+        );
     }
 
     #[test]
@@ -498,7 +601,10 @@ mod tests {
         let mut p = Participant::new(4, 1);
         assert!(matches!(
             p.prepare("k", 8, false),
-            Vote::Refused { reason: RefuseReason::NoQuorum, .. }
+            Vote::Refused {
+                reason: RefuseReason::NoQuorum,
+                ..
+            }
         ));
         assert!(!p.is_prepared());
     }
@@ -514,7 +620,10 @@ mod tests {
                 true,
             );
             let at = ps[0].committed_at().unwrap();
-            assert!(at > spread.0 && at > spread.1, "commit epoch {at} does not clear {spread:?}");
+            assert!(
+                at > spread.0 && at > spread.1,
+                "commit epoch {at} does not clear {spread:?}"
+            );
         }
     }
 }

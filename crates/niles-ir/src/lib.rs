@@ -6,12 +6,12 @@
 //! those annotations would leave the proofs talking about something else.
 
 pub mod circuit;
-pub mod operator;
-pub mod value;
 pub mod eval;
+pub mod operator;
 pub mod schedule;
-pub mod verify;
 pub mod upquery_path;
+pub mod value;
+pub mod verify;
 
 /// The consistency ladder (thesis 3.7), declarable per view.
 ///
@@ -77,7 +77,9 @@ impl ServeContract {
     /// O(1) at the session rungs, while the top rung pays a freshness term on every miss.
     pub fn cost_multiplier(&self) -> f64 {
         match self.consistency {
-            Consistency::Bounded { .. } | Consistency::Monotonic | Consistency::ReadYourWrites => 1.0,
+            Consistency::Bounded { .. } | Consistency::Monotonic | Consistency::ReadYourWrites => {
+                1.0
+            }
             Consistency::Snapshot => 1.2,
             Consistency::Serializable => 1.6,
             Consistency::LedgerConsistent => 2.5,
@@ -103,12 +105,23 @@ mod tests {
     use super::*;
 
     fn contract(c: Consistency, r: Retention) -> ServeContract {
-        ServeContract { consistency: c, materialize: Materialize::Auto, retain: r, lineage: Lineage::Off }
+        ServeContract {
+            consistency: c,
+            materialize: Materialize::Auto,
+            retain: r,
+            lineage: Lineage::Off,
+        }
     }
 
     #[test]
     fn stricter_rungs_cost_more() {
-        let lax = contract(Consistency::Bounded { epochs: 2, millis: 5_000 }, Retention::Evictable);
+        let lax = contract(
+            Consistency::Bounded {
+                epochs: 2,
+                millis: 5_000,
+            },
+            Retention::Evictable,
+        );
         let strict = contract(Consistency::LedgerConsistent, Retention::Evictable);
         assert!(strict.cost_multiplier() > lax.cost_multiplier());
     }

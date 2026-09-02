@@ -14,11 +14,16 @@
 use std::path::{Path, PathBuf};
 
 fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap()
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap()
 }
 
 fn niles_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for e in entries.flatten() {
         let p = e.path();
         if p.is_dir() {
@@ -68,19 +73,39 @@ fn every_niles_source_in_the_repository_compiles_and_verifies() {
     niles_files(&root.join("niles"), &mut files);
     niles_files(&root.join("examples"), &mut files);
     files.sort();
-    assert!(files.len() >= 3, "expected the Niles sources to be found, got {files:?}");
+    assert!(
+        files.len() >= 3,
+        "expected the Niles sources to be found, got {files:?}"
+    );
 
     let mut total_views = 0usize;
     let mut total_proved = 0usize;
     for f in &files {
         let o = compile(f);
-        assert_eq!(o.errors, 0, "{} does not compile:\n{}", f.display(), o.diags);
-        assert!(o.verified, "{} does not verify:\n{}", f.display(), o.verify_report);
+        assert_eq!(
+            o.errors,
+            0,
+            "{} does not compile:\n{}",
+            f.display(),
+            o.diags
+        );
+        assert!(
+            o.verified,
+            "{} does not verify:\n{}",
+            f.display(),
+            o.verify_report
+        );
         total_views += o.views;
         total_proved += o.proved;
     }
-    assert!(total_views >= 10, "only {total_views} views across the sources");
-    assert!(total_proved >= 5, "only {total_proved} conservation obligations proved");
+    assert!(
+        total_views >= 10,
+        "only {total_views} views across the sources"
+    );
+    assert!(
+        total_proved >= 5,
+        "only {total_proved} conservation obligations proved"
+    );
 }
 
 #[test]
@@ -90,7 +115,11 @@ fn the_banking_layer_needs_no_kernel_construct() {
     // the file uses only constructs any Niles program may use, and it compiles.
     let o = compile(&repo_root().join("niles/std/bank.niles"));
     assert_eq!(o.errors, 0, "{}", o.diags);
-    assert!(o.proved >= 5, "the domain layer should prove its conservation obligations, proved {}", o.proved);
+    assert!(
+        o.proved >= 5,
+        "the domain layer should prove its conservation obligations, proved {}",
+        o.proved
+    );
     assert_eq!(o.obligations, 0, "and discharge none to the runtime");
 }
 
@@ -101,7 +130,10 @@ fn the_reservation_policy_survives_contact_with_real_code() {
     // reserved set small: the most natural name for the source account in a transfer is
     // `from`, and a language that forbids it is a language a bank rewrites its code for.
     let src = std::fs::read_to_string(repo_root().join("niles/std/bank.niles")).unwrap();
-    assert!(src.contains("fn transfer(from:"), "the test's premise has moved");
+    assert!(
+        src.contains("fn transfer(from:"),
+        "the test's premise has moved"
+    );
     let o = compile(&repo_root().join("niles/std/bank.niles"));
     assert_eq!(o.errors, 0, "{}", o.diags);
 }
@@ -113,5 +145,9 @@ fn the_engine_observes_itself_through_its_own_language() {
     let o = compile(&repo_root().join("niles/nilestream/observability.niles"));
     assert_eq!(o.errors, 0, "{}", o.diags);
     assert!(o.verified, "{}", o.verify_report);
-    assert!(o.views >= 4, "expected the telemetry views, found {}", o.views);
+    assert!(
+        o.views >= 4,
+        "expected the telemetry views, found {}",
+        o.views
+    );
 }

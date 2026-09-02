@@ -67,7 +67,10 @@ fn render_niles(input: &str) -> Result<String, String> {
     run_with_stack(4096, move || {
         let (prog, d) = parser::parse_program(&src);
         if d.has_errors() {
-            return Err(format!("the Niles front end must parse:\n{}", d.render(&src, "front-end")));
+            return Err(format!(
+                "the Niles front end must parse:\n{}",
+                d.render(&src, "front-end")
+            ));
         }
         let mut it = Interp::new().with_max_depth(4096).with_fuel(2_000_000_000);
         it.load(&prog);
@@ -118,56 +121,152 @@ fn corpus() -> Vec<(&'static str, &'static str)> {
         ("a signature with no body", "fn f(a: i64) -> i64;"),
         ("visibility and generics", "pub fn id<T>(x: T) -> T { x }"),
         ("a use item", "use std::collections::BTreeMap;"),
-        ("a struct", "struct Token { kind: Kind, text: str, start: i64 }"),
+        (
+            "a struct",
+            "struct Token { kind: Kind, text: str, start: i64 }",
+        ),
         ("a generic struct", "struct Pair<A, B> { a: A, b: [B] }"),
         ("an enum with payloads", "enum E { A(i64, str), B, C([E]) }"),
-        ("an effect row", "fn t(a: Id<Account>) -> i64 ! { append, read@snapshot, debit<usd> } { 0 }"),
-        ("a nested item", "fn outer() -> i64 { fn inner_helper() -> i64 { 1 } inner_helper() }"),
+        (
+            "an effect row",
+            "fn t(a: Id<Account>) -> i64 ! { append, read@snapshot, debit<usd> } { 0 }",
+        ),
+        (
+            "a nested item",
+            "fn outer() -> i64 { fn inner_helper() -> i64 { 1 } inner_helper() }",
+        ),
         // --- precedence and associativity: the classic traps ---
         ("subtraction associates left", "fn f() -> i64 { a - b - c }"),
-        ("multiplication binds tighter than addition", "fn f() -> i64 { a + b * c - d }"),
-        ("comparison binds looser than arithmetic", "fn f() -> bool { a + b < c * d }"),
-        ("and binds tighter than or", "fn f() -> bool { a || b && c }"),
-        ("bitwise sits between comparison and arithmetic", "fn f() -> i64 { a | b ^ c & d + e }"),
-        ("unary minus binds tighter than binary", "fn f() -> i64 { -a * b }"),
-        ("assignment is right-associative and lowest", "fn f() { a = b = c + d; }"),
+        (
+            "multiplication binds tighter than addition",
+            "fn f() -> i64 { a + b * c - d }",
+        ),
+        (
+            "comparison binds looser than arithmetic",
+            "fn f() -> bool { a + b < c * d }",
+        ),
+        (
+            "and binds tighter than or",
+            "fn f() -> bool { a || b && c }",
+        ),
+        (
+            "bitwise sits between comparison and arithmetic",
+            "fn f() -> i64 { a | b ^ c & d + e }",
+        ),
+        (
+            "unary minus binds tighter than binary",
+            "fn f() -> i64 { -a * b }",
+        ),
+        (
+            "assignment is right-associative and lowest",
+            "fn f() { a = b = c + d; }",
+        ),
         ("parentheses override", "fn f() -> i64 { (a + b) * c }"),
         // --- the struct-literal ambiguity ---
-        ("a struct literal in value position", "fn f() -> S { S { a: 1, b: x } }"),
-        ("a brace after an `if` head opens the body", "fn f() -> i64 { if s { 1 } else { 2 } }"),
-        ("shorthand struct-literal fields", "fn f() -> S { let a = 1; S { a } }"),
-        ("a while head is not a struct literal", "fn f() { while s { g(); } }"),
+        (
+            "a struct literal in value position",
+            "fn f() -> S { S { a: 1, b: x } }",
+        ),
+        (
+            "a brace after an `if` head opens the body",
+            "fn f() -> i64 { if s { 1 } else { 2 } }",
+        ),
+        (
+            "shorthand struct-literal fields",
+            "fn f() -> S { let a = 1; S { a } }",
+        ),
+        (
+            "a while head is not a struct literal",
+            "fn f() { while s { g(); } }",
+        ),
         // --- statements, tails and optional slots ---
-        ("a tail expression is not a statement", "fn f() -> i64 { g(); h() }"),
-        ("a let with a type and no initialiser", "fn f() { let x: i64; }"),
-        ("a let with an initialiser and no type", "fn f() { let mut x = 1; }"),
-        ("a stray semicolon is not a statement", "fn f() -> i64 { ; 1 }"),
+        (
+            "a tail expression is not a statement",
+            "fn f() -> i64 { g(); h() }",
+        ),
+        (
+            "a let with a type and no initialiser",
+            "fn f() { let x: i64; }",
+        ),
+        (
+            "a let with an initialiser and no type",
+            "fn f() { let mut x = 1; }",
+        ),
+        (
+            "a stray semicolon is not a statement",
+            "fn f() -> i64 { ; 1 }",
+        ),
         // --- control flow ---
-        ("an else-if chain", "fn f() -> i64 { if a { 1 } else if b { 2 } else { 3 } }"),
-        ("match with a guard and a wildcard", "fn f(x: E) -> i64 { match x { E::A(y) if y > 1 => y, _ => 0 } }"),
-        ("match on a path pattern", "fn f(k: Kind) -> str { match k { Kind::Eof => \"e\", Kind::Ident => \"i\" } }"),
-        ("for, loop, break and continue", "fn f(xs: [i64]) { for x in xs { if x == 0 { continue; } } loop { break; } }"),
+        (
+            "an else-if chain",
+            "fn f() -> i64 { if a { 1 } else if b { 2 } else { 3 } }",
+        ),
+        (
+            "match with a guard and a wildcard",
+            "fn f(x: E) -> i64 { match x { E::A(y) if y > 1 => y, _ => 0 } }",
+        ),
+        (
+            "match on a path pattern",
+            "fn f(k: Kind) -> str { match k { Kind::Eof => \"e\", Kind::Ident => \"i\" } }",
+        ),
+        (
+            "for, loop, break and continue",
+            "fn f(xs: [i64]) { for x in xs { if x == 0 { continue; } } loop { break; } }",
+        ),
         // --- postfix, calls and stages ---
         ("chained postfix", "fn f() -> i64 { xs[0].len() }"),
-        ("a method that is not a known stage", "fn f() -> i64 { s.byte_at(i) }"),
+        (
+            "a method that is not a known stage",
+            "fn f() -> i64 { s.byte_at(i) }",
+        ),
         ("a known stage", "fn f(q: Q) -> Q { q.where(p) }"),
-        ("the two spellings of a stage agree", "fn f(q: Q) -> Q { q |> map(g) }"),
-        ("named arguments", "fn f() -> H { hold_for(acct, expires: d) }"),
+        (
+            "the two spellings of a stage agree",
+            "fn f(q: Q) -> Q { q |> map(g) }",
+        ),
+        (
+            "named arguments",
+            "fn f() -> H { hold_for(acct, expires: d) }",
+        ),
         ("the try operator", "fn f() -> i64 { g()? + 1 }"),
         ("a cast", "fn f() -> i64 { x as i64 }"),
         // --- literals ---
         ("integer with underscores", "fn f() -> i64 { 1_000_000 }"),
-        ("money keeps its own scale", "fn f() -> Money<usd> { 0.000001 btc }"),
+        (
+            "money keeps its own scale",
+            "fn f() -> Money<usd> { 0.000001 btc }",
+        ),
         ("an epoch literal", "fn f() -> Epoch { #4200 }"),
-        ("string escapes", "fn f() -> str { \"a\\\"b\\\\c\\nd\\te\" }"),
-        ("booleans and the unit value", "fn f() { let a = true; let b = false; let c = (); }"),
-        ("tuples and arrays", "fn f() { let t = (1, \"a\"); let xs = [1, 2, 3]; let e = []; }"),
+        (
+            "string escapes",
+            "fn f() -> str { \"a\\\"b\\\\c\\nd\\te\" }",
+        ),
+        (
+            "booleans and the unit value",
+            "fn f() { let a = true; let b = false; let c = (); }",
+        ),
+        (
+            "tuples and arrays",
+            "fn f() { let t = (1, \"a\"); let xs = [1, 2, 3]; let e = []; }",
+        ),
         // --- closures, references, patterns ---
-        ("a closure with a typed parameter", "fn f() { let g = |x: i64| x + 1; }"),
+        (
+            "a closure with a typed parameter",
+            "fn f() { let g = |x: i64| x + 1; }",
+        ),
         ("a closure with no parameters", "fn f() { let g = || 1; }"),
-        ("references in types and expressions", "fn f(x: &mut i64) { g(&x); }"),
-        ("a tuple pattern in a let", "fn f(t: (i64, i64)) { let (a, b) = t; }"),
-        ("a struct pattern with rest", "fn f(v: V) { match v { V::S { a, .. } => a, _ => 0 } }"),
+        (
+            "references in types and expressions",
+            "fn f(x: &mut i64) { g(&x); }",
+        ),
+        (
+            "a tuple pattern in a let",
+            "fn f(t: (i64, i64)) { let (a, b) = t; }",
+        ),
+        (
+            "a struct pattern with rest",
+            "fn f(v: V) { match v { V::S { a, .. } => a, _ => 0 } }",
+        ),
     ]
 }
 
@@ -177,13 +276,27 @@ fn corpus() -> Vec<(&'static str, &'static str)> {
 fn stage_1_the_niles_written_parser_parses_and_runs() {
     let src = front_end();
     let (prog, d) = parser::parse_program(&src);
-    assert!(!d.has_errors(), "the Niles front end must parse under stage 0");
+    assert!(
+        !d.has_errors(),
+        "the Niles front end must parse under stage 0"
+    );
     let mut it = Interp::new();
     it.load(&prog);
     let names = it.function_names();
     for wanted in [
-        "p_program", "p_item", "p_fn", "p_block", "p_stmt", "p_expr_bp", "p_unary",
-        "p_postfix", "p_primary", "p_pat", "p_ty", "render_node", "parse_and_render",
+        "p_program",
+        "p_item",
+        "p_fn",
+        "p_block",
+        "p_stmt",
+        "p_expr_bp",
+        "p_unary",
+        "p_postfix",
+        "p_primary",
+        "p_pat",
+        "p_ty",
+        "render_node",
+        "parse_and_render",
     ] {
         assert!(names.contains(&wanted.to_string()), "missing fn {wanted}");
     }
@@ -192,12 +305,18 @@ fn stage_1_the_niles_written_parser_parses_and_runs() {
         let (prog, _) = parser::parse_program(&src);
         let mut it = Interp::new().with_max_depth(4096);
         it.load(&prog);
-        it.call("parser_main", vec![]).map(|_| it.output.clone()).map_err(|e| e.message())
+        it.call("parser_main", vec![])
+            .map(|_| it.output.clone())
+            .map_err(|e| e.message())
     })
     .expect("the worker must not crash")
     .expect("the parser's self-check must run");
     assert!(!out.is_empty());
-    assert!(out[0].starts_with("(program (fn priv transfer"), "{}", &out[0][..80.min(out[0].len())]);
+    assert!(
+        out[0].starts_with("(program (fn priv transfer"),
+        "{}",
+        &out[0][..80.min(out[0].len())]
+    );
 }
 
 #[test]
@@ -226,9 +345,19 @@ fn the_reserved_word_table_matches_the_registry_exactly() {
 
     let missing: Vec<_> = registry.difference(&in_niles).collect();
     let invented: Vec<_> = in_niles.difference(&registry).collect();
-    assert!(missing.is_empty(), "reserved in the registry but not in the Niles parser: {missing:?}");
-    assert!(invented.is_empty(), "reserved in the Niles parser but not in the registry: {invented:?}");
-    assert!(registry.len() >= 60, "the reserved set should be substantial, got {}", registry.len());
+    assert!(
+        missing.is_empty(),
+        "reserved in the registry but not in the Niles parser: {missing:?}"
+    );
+    assert!(
+        invented.is_empty(),
+        "reserved in the Niles parser but not in the registry: {invented:?}"
+    );
+    assert!(
+        registry.len() >= 60,
+        "the reserved set should be substantial, got {}",
+        registry.len()
+    );
 }
 
 #[test]
@@ -267,8 +396,10 @@ fn stage_1_equivalence_the_two_parsers_agree_node_for_node() {
     let src = front_end();
 
     // One interpreter for the whole corpus: loading the front end is the expensive part.
-    let cases: Vec<(String, String)> =
-        corpus().into_iter().map(|(n, s)| (n.to_string(), s.to_string())).collect();
+    let cases: Vec<(String, String)> = corpus()
+        .into_iter()
+        .map(|(n, s)| (n.to_string(), s.to_string()))
+        .collect();
     let expected: Vec<String> = cases.iter().map(|(_, s)| render_rust(s)).collect();
 
     let got: Vec<Result<String, String>> = run_with_stack(4096, move || {
@@ -279,7 +410,10 @@ fn stage_1_equivalence_the_two_parsers_agree_node_for_node() {
         cases
             .iter()
             .map(|(_, s)| {
-                match it.call("parse_and_render", vec![Value::Str(std::rc::Rc::new(s.clone()))]) {
+                match it.call(
+                    "parse_and_render",
+                    vec![Value::Str(std::rc::Rc::new(s.clone()))],
+                ) {
                     Ok(Value::Str(out)) => Ok((*out).clone()),
                     Ok(other) => Err(format!("expected a string, got {}", other.type_name())),
                     Err(e) => Err(e.message()),
@@ -294,11 +428,16 @@ fn stage_1_equivalence_the_two_parsers_agree_node_for_node() {
             skipped.push(name);
             continue;
         }
-        let niles = got[i].as_ref().unwrap_or_else(|e| panic!("the Niles parser failed on `{name}`: {e}"));
+        let niles = got[i]
+            .as_ref()
+            .unwrap_or_else(|e| panic!("the Niles parser failed on `{name}`: {e}"));
         assert_eq!(niles, &expected[i], "\ncase: {name}\nsource: {src:?}\n");
         checked += 1;
     }
-    assert!(checked >= 30, "the gate must actually cover the corpus, checked {checked}");
+    assert!(
+        checked >= 30,
+        "the gate must actually cover the corpus, checked {checked}"
+    );
     // Every skip is reported rather than hidden. If this list grows, the gate proves less.
     assert!(
         skipped.is_empty(),
@@ -311,13 +450,31 @@ fn the_scope_exclusion_is_real_and_not_a_way_to_pass() {
     // Guarding the guard. If `in_scope` silently returned true, the gate above would
     // appear to prove more than it does.
     assert!(!in_scope("schema s { }"), "schemas are out of scope");
-    assert!(!in_scope("fn f() { txn { post(a, b) } }"), "txn is out of scope");
-    assert!(!in_scope("fn f() { select 1 }"), "the SQL surface is out of scope");
-    assert!(!in_scope("#[udf] fn f() { }"), "attributes are out of scope");
+    assert!(
+        !in_scope("fn f() { txn { post(a, b) } }"),
+        "txn is out of scope"
+    );
+    assert!(
+        !in_scope("fn f() { select 1 }"),
+        "the SQL surface is out of scope"
+    );
+    assert!(
+        !in_scope("#[udf] fn f() { }"),
+        "attributes are out of scope"
+    );
     assert!(!in_scope("fn f() { 1.5 }"), "floats are out of scope");
-    assert!(!in_scope("fn f() -> str { \"caf\u{e9}\" }"), "a non-ASCII string literal is out of scope");
-    assert!(in_scope("// caf\u{e9}\nfn f() -> i64 { 1 }"), "a non-ASCII comment is not");
-    assert!(in_scope("fn f() -> i64 { 1 + 2 }"), "an ordinary function is in scope");
+    assert!(
+        !in_scope("fn f() -> str { \"caf\u{e9}\" }"),
+        "a non-ASCII string literal is out of scope"
+    );
+    assert!(
+        in_scope("// caf\u{e9}\nfn f() -> i64 { 1 }"),
+        "a non-ASCII comment is not"
+    );
+    assert!(
+        in_scope("fn f() -> i64 { 1 + 2 }"),
+        "an ordinary function is in scope"
+    );
 }
 
 #[test]
@@ -340,11 +497,18 @@ fn the_niles_parser_disagrees_where_it_should_which_shows_the_gate_can_fail() {
 fn stage_2_the_niles_parser_parses_the_niles_lexer() {
     // The smaller half of self-application, and the faster one: the parser is pointed at
     // the file it shares a program with.
-    assert!(in_scope(LEXER_SRC), "the lexer's source must stay inside the parser's subset");
+    assert!(
+        in_scope(LEXER_SRC),
+        "the lexer's source must stay inside the parser's subset"
+    );
     let rust = render_rust(LEXER_SRC);
     let niles = render_niles(LEXER_SRC).expect("it must survive the lexer's source");
     assert_same_tree(&niles, &rust, "lexer.niles");
-    assert!(niles.len() > 15_000, "its source is a substantial tree, got {} bytes", niles.len());
+    assert!(
+        niles.len() > 15_000,
+        "its source is a substantial tree, got {} bytes",
+        niles.len()
+    );
 }
 
 #[test]
@@ -357,7 +521,10 @@ fn stage_2_the_niles_front_end_parses_its_own_two_source_files() {
     // by a tree-walking interpreter, over 1,200 lines of Niles. About half a minute in a
     // debug build. It earns it: nothing else executes the front end against itself.
     let src = front_end();
-    assert!(in_scope(&src), "the front end's own source must stay inside the subset it implements");
+    assert!(
+        in_scope(&src),
+        "the front end's own source must stay inside the subset it implements"
+    );
     let rust = render_rust(&src);
     let niles = render_niles(&src).expect("self-application must succeed");
     assert_same_tree(&niles, &rust, "the front end");
@@ -369,7 +536,11 @@ fn assert_same_tree(niles: &str, rust: &str, what: &str) {
     if niles == rust {
         return;
     }
-    let at = niles.bytes().zip(rust.bytes()).position(|(a, b)| a != b).unwrap_or(niles.len().min(rust.len()));
+    let at = niles
+        .bytes()
+        .zip(rust.bytes())
+        .position(|(a, b)| a != b)
+        .unwrap_or(niles.len().min(rust.len()));
     let lo = at.saturating_sub(140);
     panic!(
         "parsing {what} diverged at byte {at} (niles {} bytes, rust {} bytes):\n\
@@ -394,7 +565,11 @@ fn stage_3_repeated_runs_of_the_parser_are_byte_identical() {
     })
     .expect("the worker must not crash")
     .expect("the self-check must run");
-    assert!(r.identical, "diverged at output line {:?}", r.first_divergence);
+    assert!(
+        r.identical,
+        "diverged at output line {:?}",
+        r.first_divergence
+    );
     assert_eq!(r.runs, 5);
     assert!(!r.output.is_empty());
 }
@@ -421,11 +596,17 @@ fn negative_control_a_missing_brace_is_an_error_on_both_sides() {
     // read, and say so — rather than loop, or claim success.
     let src = "fn f() -> i64 { let x = 1;";
     let (p, d) = parser::parse_program(src);
-    assert!(d.has_errors(), "the reference parser must report the missing brace");
+    assert!(
+        d.has_errors(),
+        "the reference parser must report the missing brace"
+    );
     let rust = sexpr::program(&p);
     let niles = render_niles(src).expect("the Niles parser must terminate rather than hang");
     assert_eq!(niles, rust, "both must recover to the same tree");
-    assert!(rust.contains("(let (pbind x imm val) (none) (int 1))"), "{rust}");
+    assert!(
+        rust.contains("(let (pbind x imm val) (none) (int 1))"),
+        "{rust}"
+    );
 }
 
 #[test]
@@ -437,9 +618,15 @@ fn negative_control_a_non_expression_becomes_an_error_node_on_both_sides() {
     let (p, d) = parser::parse_program(src);
     assert!(d.has_errors());
     let rust = sexpr::program(&p);
-    assert!(rust.contains("(eerr)"), "the reference parser must build an error node: {rust}");
+    assert!(
+        rust.contains("(eerr)"),
+        "the reference parser must build an error node: {rust}"
+    );
     let niles = render_niles(src).unwrap();
-    assert_eq!(niles, rust, "recovery must reach the same point on both sides");
+    assert_eq!(
+        niles, rust,
+        "recovery must reach the same point on both sides"
+    );
 }
 
 #[test]
@@ -481,10 +668,17 @@ fn the_reserved_word_gap_is_real_and_declared() {
     // reason `parser.niles` carries the reserved table at all.
     let src = "struct S { Where: i64, kind: Kind }";
     let (p, d) = parser::parse_program(src);
-    assert!(d.has_errors(), "the reference parser must report `Where` used as a field name");
+    assert!(
+        d.has_errors(),
+        "the reference parser must report `Where` used as a field name"
+    );
     let rust = sexpr::program(&p);
     assert!(rust.contains("(field where (tp i64))"), "{rust}");
-    assert_eq!(render_niles(src).unwrap(), rust, "the trees agree; only the diagnostics differ");
+    assert_eq!(
+        render_niles(src).unwrap(),
+        rust,
+        "the trees agree; only the diagnostics differ"
+    );
 }
 
 // ── the honest boundary ──────────────────────────────────────────────────────────────
@@ -494,12 +688,18 @@ fn the_parser_stays_inside_the_imperative_subset() {
     // The bootstrap must not have quietly acquired a second, unchecked path into the
     // relational tier. `parser.niles` recognises the *words* `txn` and `select` only as
     // strings in its tables; it must not contain the forms.
-    assert!(!PARSER_SRC.contains("txn {"), "the parser must stay in the imperative subset");
+    assert!(
+        !PARSER_SRC.contains("txn {"),
+        "the parser must stay in the imperative subset"
+    );
     assert!(!PARSER_SRC.contains("sql {"));
     let (prog, _) = parser::parse_program(PARSER_SRC);
     let mut it = Interp::new();
     it.load(&prog);
-    assert!(it.function_names().len() > 30, "it should be a real program");
+    assert!(
+        it.function_names().len() > 30,
+        "it should be a real program"
+    );
 }
 
 #[test]
@@ -509,9 +709,19 @@ fn stage_2_uses_only_constructs_the_language_actually_has() {
     // and string methods, and it parses. Had any of those been aspirational, the file
     // would not exist.
     for construct in [
-        "enum Node {", "Node::List([", "match n {", "while going", "let mut", "return ",
-        "struct P {", ".to_lower()", ".push(",
+        "enum Node {",
+        "Node::List([",
+        "match n {",
+        "while going",
+        "let mut",
+        "return ",
+        "struct P {",
+        ".to_lower()",
+        ".push(",
     ] {
-        assert!(PARSER_SRC.contains(construct), "the bootstrap should exercise `{construct}`");
+        assert!(
+            PARSER_SRC.contains(construct),
+            "the bootstrap should exercise `{construct}`"
+        );
     }
 }

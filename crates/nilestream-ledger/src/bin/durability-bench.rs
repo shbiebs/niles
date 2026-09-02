@@ -36,7 +36,10 @@ fn run(threads: usize, per_thread: usize, policy: SyncPolicy, tag: &str) -> (f64
         handles.push(std::thread::spawn(move || {
             for i in 0..per_thread {
                 // A realistic payload: two postings, sixteen bytes each.
-                let _ = s.submit(Txn { idem_key: format!("{t}-{i}"), payload: vec![0u8; 32] });
+                let _ = s.submit(Txn {
+                    idem_key: format!("{t}-{i}"),
+                    payload: vec![0u8; 32],
+                });
             }
         }));
     }
@@ -46,7 +49,11 @@ fn run(threads: usize, per_thread: usize, policy: SyncPolicy, tag: &str) -> (f64
     let elapsed = start.elapsed().as_secs_f64();
     let st = seq.stats();
     let _ = std::fs::remove_file(&path);
-    (st.txns_committed as f64 / elapsed, st.txns_per_fsync(), st.max_batch)
+    (
+        st.txns_committed as f64 / elapsed,
+        st.txns_per_fsync(),
+        st.max_batch,
+    )
 }
 
 fn main() {

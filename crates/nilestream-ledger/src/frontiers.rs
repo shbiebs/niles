@@ -72,7 +72,9 @@ impl Frontier {
     /// a snapshot names cannot change — which is the cheapest thing about building a read
     /// path over an append-only history.
     pub fn snapshot(&self) -> Snapshot {
-        Snapshot { anchor: self.visible() }
+        Snapshot {
+            anchor: self.visible(),
+        }
     }
 
     /// The number of epochs sealed but not yet published: the durability window. A healthy
@@ -100,7 +102,9 @@ impl Snapshot {
     /// Monotonicity, per session: a session's anchors never decrease. This is rung 1, and
     /// it is one `max`, which is the cheapest rung on the ladder for a reason.
     pub fn advance_to(self, other: Snapshot) -> Snapshot {
-        Snapshot { anchor: self.anchor.max(other.anchor) }
+        Snapshot {
+            anchor: self.anchor.max(other.anchor),
+        }
     }
 }
 
@@ -138,7 +142,10 @@ mod tests {
         f.publish(5);
         let s = f.snapshot();
         f.publish(50);
-        assert_eq!(s.anchor, 5, "a taken snapshot is unaffected by later commits");
+        assert_eq!(
+            s.anchor, 5,
+            "a taken snapshot is unaffected by later commits"
+        );
         assert!(s.includes(5) && !s.includes(6));
     }
 
@@ -155,7 +162,8 @@ mod tests {
         // writer publishes only after "durability" (here, setting a flag); the reader must
         // never see a frontier whose corresponding durability flag is unset.
         let f = Frontier::new();
-        let durable: Arc<Vec<AtomicBool>> = Arc::new((0..200).map(|_| AtomicBool::new(false)).collect());
+        let durable: Arc<Vec<AtomicBool>> =
+            Arc::new((0..200).map(|_| AtomicBool::new(false)).collect());
         let (fw, dw) = (Arc::clone(&f), Arc::clone(&durable));
 
         let writer = thread::spawn(move || {
@@ -188,6 +196,9 @@ mod tests {
 
         writer.join().unwrap();
         let observed = reader.join().unwrap();
-        assert!(observed > 0, "the reader saw nothing at all; the test proved nothing");
+        assert!(
+            observed > 0,
+            "the reader saw nothing at all; the test proved nothing"
+        );
     }
 }

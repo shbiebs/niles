@@ -109,7 +109,10 @@ impl Catalog {
     /// The catalog as of an epoch. The epoch is not decoration: it is what makes a
     /// resolution well defined.
     pub fn at(epoch: Epoch) -> Self {
-        Catalog { epoch, ..Default::default() }
+        Catalog {
+            epoch,
+            ..Default::default()
+        }
     }
     pub fn relation_names(&self) -> Vec<&str> {
         self.relations.keys().map(|s| s.as_str()).collect()
@@ -157,7 +160,11 @@ fn collect_item(item: &Item, cat: &mut Catalog, d: &mut Diagnostics) {
             insert_unique(
                 &mut cat.functions,
                 f.name.text.clone(),
-                FnInfo { name: f.name.text.clone(), declared_effects: f.effects.clone(), span: f.name.span },
+                FnInfo {
+                    name: f.name.text.clone(),
+                    declared_effects: f.effects.clone(),
+                    span: f.name.span,
+                },
                 |x| x.span,
                 "function",
                 f.name.span,
@@ -178,7 +185,11 @@ fn collect_schema_item(si: &SchemaItem, cat: &mut Catalog, d: &mut Diagnostics) 
             insert_unique(
                 &mut cat.currencies,
                 c.name.text.clone(),
-                CurrencyInfo { name: c.name.text.clone(), scale: c.scale, span: c.name.span },
+                CurrencyInfo {
+                    name: c.name.text.clone(),
+                    scale: c.scale,
+                    span: c.name.span,
+                },
                 |x| x.span,
                 "currency",
                 c.name.span,
@@ -187,13 +198,22 @@ fn collect_schema_item(si: &SchemaItem, cat: &mut Catalog, d: &mut Diagnostics) 
         }
         SchemaItem::Table(r) | SchemaItem::Base(r) => {
             let info = relation_info(r);
-            insert_unique(&mut cat.relations, r.name.text.clone(), info, |x| x.span, "relation", r.name.span, d);
+            insert_unique(
+                &mut cat.relations,
+                r.name.text.clone(),
+                info,
+                |x| x.span,
+                "relation",
+                r.name.span,
+                d,
+            );
         }
         SchemaItem::View(v) => collect_view(v, cat, d),
         SchemaItem::Index(ix) => {
             if ix.anchor {
                 if let Some(rel) = cat.relations.get_mut(&ix.on.text) {
-                    rel.anchor_indices.push(ix.cols.iter().map(|c| c.text.clone()).collect());
+                    rel.anchor_indices
+                        .push(ix.cols.iter().map(|c| c.text.clone()).collect());
                 }
             }
         }
@@ -215,12 +235,20 @@ fn collect_view(v: &ViewDecl, cat: &mut Catalog, d: &mut Diagnostics) {
     let rung_word = word("consistency", "snapshot");
     let rung = Rung::parse(&rung_word).unwrap_or(Rung::Snapshot);
     if c.is_some() && Rung::parse(&rung_word).is_none() {
-        let span = c.and_then(|c| c.get("consistency")).map(|x| x.span()).unwrap_or(v.span);
+        let span = c
+            .and_then(|c| c.get("consistency"))
+            .map(|x| x.span())
+            .unwrap_or(v.span);
         let mut diag = Diagnostic::error("NL0200", format!("`{rung_word}` is not a consistency rung"))
             .primary(span, "unknown rung")
             .note("the ladder is: bounded, monotonic, read_your_writes, snapshot, serializable, ledger_consistent");
         if let Some(s) = closest(&rung_word, Rung::all().iter().map(|r| r.as_str())) {
-            diag = diag.suggest(span, s, format!("did you mean `{s}`?"), Applicability::MachineApplicable);
+            diag = diag.suggest(
+                span,
+                s,
+                format!("did you mean `{s}`?"),
+                Applicability::MachineApplicable,
+            );
         }
         d.push(diag);
     }
@@ -234,7 +262,15 @@ fn collect_view(v: &ViewDecl, cat: &mut Catalog, d: &mut Diagnostics) {
         span: v.span,
         tail_is_incremental: tail_stage(&v.body).map_or(true, |k| k.is_incremental()),
     };
-    insert_unique(&mut cat.views, v.name.text.clone(), info, |x| x.span, "view", v.name.span, d);
+    insert_unique(
+        &mut cat.views,
+        v.name.text.clone(),
+        info,
+        |x| x.span,
+        "view",
+        v.name.span,
+        d,
+    );
 }
 
 fn tail_stage(e: &Expr) -> Option<StageKind> {
@@ -259,10 +295,12 @@ fn relation_info(r: &RelDecl) -> RelationInfo {
     };
     for f in &r.fields {
         let money_currency = match &f.ty {
-            Ty::Path { path, args, .. } if path.last().text == "Money" => Some(match args.first() {
-                Some(Ty::Path { path, .. }) => Some(path.last().text.clone()),
-                _ => None,
-            }),
+            Ty::Path { path, args, .. } if path.last().text == "Money" => {
+                Some(match args.first() {
+                    Some(Ty::Path { path, .. }) => Some(path.last().text.clone()),
+                    _ => None,
+                })
+            }
             _ => None,
         };
         let confidential = f
@@ -278,7 +316,8 @@ fn relation_info(r: &RelDecl) -> RelationInfo {
             ty: f.ty.clone(),
             money_currency,
             confidential,
-            idem_window: f.default.is_some() && matches!(&f.ty, Ty::Path { path, .. } if path.last().text == "IdemKey"),
+            idem_window: f.default.is_some()
+                && matches!(&f.ty, Ty::Path { path, .. } if path.last().text == "IdemKey"),
             span: f.name.span,
         });
     }
@@ -365,18 +404,35 @@ fn check_relation(r: &RelDecl, cat: &Catalog, d: &mut Diagnostics) {
     // and should say so — the difference is the whole double-entry claim.
     if r.kind == RelKind::Ledger && info.conserve_keys.is_empty() {
         d.push(
-            Diagnostic::error("NL0211", format!("ledger `{}` declares no conservation rule", r.name.text))
-                .primary(r.name.span, "no `conserve per (..)`")
-                .note("a ledger is a base plus a conservation rule; without one, declare it as a `base`")
-                .suggest(r.span, "conserve per (txn, cur);", "add the double-entry rule", Applicability::HasPlaceholders),
+            Diagnostic::error(
+                "NL0211",
+                format!("ledger `{}` declares no conservation rule", r.name.text),
+            )
+            .primary(r.name.span, "no `conserve per (..)`")
+            .note(
+                "a ledger is a base plus a conservation rule; without one, declare it as a `base`",
+            )
+            .suggest(
+                r.span,
+                "conserve per (txn, cur);",
+                "add the double-entry rule",
+                Applicability::HasPlaceholders,
+            ),
         );
     }
     if r.kind != RelKind::Ledger && !info.conserve_keys.is_empty() {
         let span = info.conserve_span.unwrap_or(r.name.span);
         d.push(
-            Diagnostic::error("NL0212", format!("`{}` is a {} and cannot conserve", r.name.text, kind_word(r.kind)))
-                .primary(span, "conservation rule on a non-ledger")
-                .note("conservation is checked at the seal of an epoch; a table has no seal"),
+            Diagnostic::error(
+                "NL0212",
+                format!(
+                    "`{}` is a {} and cannot conserve",
+                    r.name.text,
+                    kind_word(r.kind)
+                ),
+            )
+            .primary(span, "conservation rule on a non-ledger")
+            .note("conservation is checked at the seal of an epoch; a table has no seal"),
         );
     }
 
@@ -385,10 +441,18 @@ fn check_relation(r: &RelDecl, cat: &Catalog, d: &mut Diagnostics) {
         if info.column(key).is_none() {
             let span = info.conserve_span.unwrap_or(r.name.span);
             let names: Vec<&str> = info.columns.iter().map(|c| c.name.as_str()).collect();
-            let mut diag = Diagnostic::error("NL0213", format!("`{key}` is not a column of `{}`", r.name.text))
-                .primary(span, "unknown column in the conservation key");
+            let mut diag = Diagnostic::error(
+                "NL0213",
+                format!("`{key}` is not a column of `{}`", r.name.text),
+            )
+            .primary(span, "unknown column in the conservation key");
             if let Some(s) = closest(key, names.into_iter()) {
-                diag = diag.suggest(span, s, format!("did you mean `{s}`?"), Applicability::MachineApplicable);
+                diag = diag.suggest(
+                    span,
+                    s,
+                    format!("did you mean `{s}`?"),
+                    Applicability::MachineApplicable,
+                );
             }
             d.push(diag);
         }
@@ -404,13 +468,19 @@ fn check_relation(r: &RelDecl, cat: &Catalog, d: &mut Diagnostics) {
                     .primary(c.span, format!("`Money<{cur}>` needs `currency {cur} {{ scale: n }}` in scope"))
                     .note("the minor-unit scale is part of the type: JPY is 0, BHD is 3, and defaulting to 2 would be a silent hundred-fold error");
                 if let Some(s) = closest(cur, names.into_iter()) {
-                    diag = diag.suggest(c.span, s, format!("did you mean `{s}`?"), Applicability::MachineApplicable);
+                    diag = diag.suggest(
+                        c.span,
+                        s,
+                        format!("did you mean `{s}`?"),
+                        Applicability::MachineApplicable,
+                    );
                 }
                 d.push(diag);
             }
         }
         // W19: an idempotency key without a window is not idempotent, merely unique.
-        if matches!(&c.ty, Ty::Path { path, .. } if path.last().text == "IdemKey") && !c.idem_window {
+        if matches!(&c.ty, Ty::Path { path, .. } if path.last().text == "IdemKey") && !c.idem_window
+        {
             d.push(
                 Diagnostic::error("NL0215", format!("`{}` is an `IdemKey` with no window", c.name))
                     .primary(c.span, "no `window` clause")
@@ -430,7 +500,9 @@ fn kind_word(k: RelKind) -> &'static str {
 }
 
 fn check_view(v: &ViewDecl, cat: &Catalog, d: &mut Diagnostics) {
-    let Some(info) = cat.views.get(&v.name.text) else { return };
+    let Some(info) = cat.views.get(&v.name.text) else {
+        return;
+    };
     let cspan = info.contract_span;
 
     // W9: a strictly-served view may not be backed by state whose read path is an I/O
@@ -447,9 +519,12 @@ fn check_view(v: &ViewDecl, cat: &Catalog, d: &mut Diagnostics) {
     // W10: a pinned view is by definition resident.
     if info.retain == "pinned" && info.materialize == "absent" {
         d.push(
-            Diagnostic::error("NL0221", format!("view `{}` cannot be `pinned` and `absent`", v.name.text))
-                .primary(cspan, "pinned state is resident by definition")
-                .note("`retain: pinned` says never evict; `materialize: absent` says never resident"),
+            Diagnostic::error(
+                "NL0221",
+                format!("view `{}` cannot be `pinned` and `absent`", v.name.text),
+            )
+            .primary(cspan, "pinned state is resident by definition")
+            .note("`retain: pinned` says never evict; `materialize: absent` says never resident"),
         );
     }
 
@@ -457,7 +532,8 @@ fn check_view(v: &ViewDecl, cat: &Catalog, d: &mut Diagnostics) {
     // Z-set without retaining the whole input. Serving such a view on demand at a strict
     // rung is not something the planner can honour, and promoting it silently to `full`
     // would breach the memory budget the contract implies.
-    if !info.tail_is_incremental && info.materialize == "demand" && info.rung >= Rung::Serializable {
+    if !info.tail_is_incremental && info.materialize == "demand" && info.rung >= Rung::Serializable
+    {
         d.push(
             Diagnostic::error("NL0222", format!("view `{}` ends in a non-incremental stage and cannot be demand-materialized at `{}`", v.name.text, info.rung))
                 .primary(cspan, "this contract cannot be honoured")
@@ -472,7 +548,10 @@ fn check_view(v: &ViewDecl, cat: &Catalog, d: &mut Diagnostics) {
     // magnitude in constant factor (thesis §9.4.1).
     if let Some((rel, keys, span)) = view_group_key(&v.body, cat) {
         if rel.is_base() && !keys.is_empty() {
-            let covered = rel.anchor_indices.iter().any(|ix| keys.iter().all(|k| ix.contains(k)));
+            let covered = rel
+                .anchor_indices
+                .iter()
+                .any(|ix| keys.iter().all(|k| ix.contains(k)));
             if !covered {
                 d.push(
                     Diagnostic::warning("NL0223", format!("no anchor index on `{}` covers ({})", rel.name, keys.join(", ")))
@@ -491,9 +570,18 @@ fn check_view(v: &ViewDecl, cat: &Catalog, d: &mut Diagnostics) {
 /// a wrong one.
 fn view_group_key<'a>(e: &Expr, cat: &'a Catalog) -> Option<(&'a RelationInfo, Vec<String>, Span)> {
     match e {
-        Expr::Stage { recv, kind: StageKind::GroupBy, args, span, .. } => {
+        Expr::Stage {
+            recv,
+            kind: StageKind::GroupBy,
+            args,
+            span,
+            ..
+        } => {
             let rel = root_relation(recv, cat)?;
-            let keys = args.first().map(|a| key_fields(&a.value)).unwrap_or_default();
+            let keys = args
+                .first()
+                .map(|a| key_fields(&a.value))
+                .unwrap_or_default();
             Some((rel, keys, *span))
         }
         Expr::Stage { recv, .. } => view_group_key(recv, cat),
@@ -529,7 +617,12 @@ fn unknown_name(d: &mut Diagnostics, n: &Name, what: &str, candidates: Vec<&str>
     let mut diag = Diagnostic::error("NL0202", format!("unknown {what} `{}`", n.text))
         .primary(n.span, format!("no {what} with this name is declared"));
     if let Some(s) = closest(&n.text, candidates.into_iter()) {
-        diag = diag.suggest(n.span, s, format!("did you mean `{s}`?"), Applicability::MachineApplicable);
+        diag = diag.suggest(
+            n.span,
+            s,
+            format!("did you mean `{s}`?"),
+            Applicability::MachineApplicable,
+        );
     }
     d.push(diag);
 }

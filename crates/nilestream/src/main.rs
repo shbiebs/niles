@@ -182,7 +182,10 @@ fn run(path: &str, view: &str, cfg: Config) -> Result<Stats, String> {
     let (_report, td) = niles_lang::typecheck::check_program(&prog, &cat);
     diags.extend(td);
     if diags.has_errors() {
-        return Err(format!("the program does not compile:\n{}", diags.render(&src, path)));
+        return Err(format!(
+            "the program does not compile:\n{}",
+            diags.render(&src, path)
+        ));
     }
     let (lowered, ld) = niles_lang::lower::lower_program(&prog, &cat);
     if ld.has_errors() {
@@ -209,8 +212,12 @@ fn run(path: &str, view: &str, cfg: Config) -> Result<Stats, String> {
     circuit.reset_access();
 
     // ---- 3. install on the REV runtime ------------------------------------------------
-    let mut rt = Runtime::install(circuit, cfg.budget, cfg.policy)
-        .map_err(|e| format!("this view cannot run on the current engine fragment: {}", e.explain()))?;
+    let mut rt = Runtime::install(circuit, cfg.budget, cfg.policy).map_err(|e| {
+        format!(
+            "this view cannot run on the current engine fragment: {}",
+            e.explain()
+        )
+    })?;
 
     // The accessed-field audit: if the runtime planned without reading a semantic
     // annotation, that is a hard error here, not a silently wrong answer later.
@@ -221,12 +228,18 @@ fn run(path: &str, view: &str, cfg: Config) -> Result<Stats, String> {
         .filter(|(n, _)| rt.views.iter().any(|v| v.node == *n))
         .collect();
     if !relevant.is_empty() {
-        return Err(format!("the runtime ignored semantic IR fields: {relevant:?}"));
+        return Err(format!(
+            "the runtime ignored semantic IR fields: {relevant:?}"
+        ));
     }
 
     // ---- 4. a ledger, and a workload over it -------------------------------------------
     let mut base = LedgerBase {
-        ledger: if cfg.checkpoint > 0 { Ledger::with_checkpoints(cfg.checkpoint) } else { Ledger::new() },
+        ledger: if cfg.checkpoint > 0 {
+            Ledger::with_checkpoints(cfg.checkpoint)
+        } else {
+            Ledger::new()
+        },
         cur: 0,
     };
     let mut writes = Zipf::new(cfg.accounts, cfg.skew, cfg.seed);
@@ -242,8 +255,20 @@ fn run(path: &str, view: &str, cfg: Config) -> Result<Stats, String> {
         let to = (writes.sample() as u64 + 1) % cfg.accounts as u64;
         let amt = 100 + (e as i128 % 900);
         let rows = vec![
-            Row::Post(Posting { txn: e, acct: from, cur: 0, amt: -amt, valid: e as i64 }),
-            Row::Post(Posting { txn: e, acct: to, cur: 0, amt, valid: e as i64 }),
+            Row::Post(Posting {
+                txn: e,
+                acct: from,
+                cur: 0,
+                amt: -amt,
+                valid: e as i64,
+            }),
+            Row::Post(Posting {
+                txn: e,
+                acct: to,
+                cur: 0,
+                amt,
+                valid: e as i64,
+            }),
         ];
         // Use the epoch the ledger actually sealed rather than the loop counter. They are
         // not the same: the ledger numbers epochs from zero, and an off-by-one here does
@@ -284,32 +309,64 @@ fn report(view: &str, cfg: &Config, s: &Stats) {
     println!("view                  {view}");
     println!(
         "budget                {}",
-        cfg.budget.map_or("none (full materialization)".into(), |b| b.to_string())
+        cfg.budget
+            .map_or("none (full materialization)".into(), |b| b.to_string())
     );
-    println!("policy                {:?}   checkpoint interval {}", cfg.policy, cfg.checkpoint);
-    println!("skew (Zipf s)         {}   key space {}", cfg.skew, cfg.accounts);
+    println!(
+        "policy                {:?}   checkpoint interval {}",
+        cfg.policy, cfg.checkpoint
+    );
+    println!(
+        "skew (Zipf s)         {}   key space {}",
+        cfg.skew, cfg.accounts
+    );
     println!();
     println!("reads                 {}", s.reads);
-    println!("hits / misses         {} / {}   (hit ratio {:.3})", s.hits, s.misses, s.hit_ratio());
+    println!(
+        "hits / misses         {} / {}   (hit ratio {:.3})",
+        s.hits,
+        s.misses,
+        s.hit_ratio()
+    );
     println!("upqueries             {}", s.upqueries);
     println!(
         "base rows read        {}   ({:.1} per upquery)",
         s.base_rows_read,
-        if s.upqueries == 0 { 0.0 } else { s.base_rows_read as f64 / s.upqueries as f64 }
+        if s.upqueries == 0 {
+            0.0
+        } else {
+            s.base_rows_read as f64 / s.upqueries as f64
+        }
     );
     println!("deltas applied        {}", s.deltas_applied);
-    println!("deltas skipped        {}   (the saving partiality buys)", s.deltas_skipped);
+    println!(
+        "deltas skipped        {}   (the saving partiality buys)",
+        s.deltas_skipped
+    );
     println!("evictions             {}", s.evictions);
     println!("peak resident         {}", s.peak_resident);
-    println!("resident entry-epochs {}   (the memory term: the integral, not the peak)", s.resident_entry_epochs);
+    println!(
+        "resident entry-epochs {}   (the memory term: the integral, not the peak)",
+        s.resident_entry_epochs
+    );
 }
 
 /// The phase diagram: sweep the budget, price each run under a range of memory prices, and
 /// print the CSV. Pricing after the fact is what lets one measured run be re-scored under
 /// many cost models without re-running anything.
 fn sweep(path: &str, view: &str, base_cfg: Config) -> Result<(), String> {
-    println!("budget,memory_price,resident_entry_epochs,deltas_applied,base_rows_read,cost,hit_ratio");
-    let budgets: Vec<Option<u64>> = vec![Some(250), Some(500), Some(1_000), Some(2_000), Some(4_000), Some(8_000), None];
+    println!(
+        "budget,memory_price,resident_entry_epochs,deltas_applied,base_rows_read,cost,hit_ratio"
+    );
+    let budgets: Vec<Option<u64>> = vec![
+        Some(250),
+        Some(500),
+        Some(1_000),
+        Some(2_000),
+        Some(4_000),
+        Some(8_000),
+        None,
+    ];
     for b in budgets {
         let mut cfg = base_cfg;
         cfg.budget = b;

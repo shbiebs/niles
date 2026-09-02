@@ -106,18 +106,51 @@ impl Args {
                 "--calibrate" => a.calibrate = true,
                 "--run" => a.run = true,
                 "--render" => a.render = true,
-                "--out" => { a.out = argv[i + 1].clone(); i += 1; }
-                "--pg-host" => { a.pg_host = argv[i + 1].clone(); i += 1; }
-                "--pg-port" => { a.pg_port = argv[i + 1].parse().unwrap_or(a.pg_port); i += 1; }
-                "--pg-user" => { a.pg_user = argv[i + 1].clone(); i += 1; }
-                "--pg-db" => { a.pg_db = argv[i + 1].clone(); i += 1; }
-                "--nls-port" => { a.nls_port = argv[i + 1].parse().unwrap_or(a.nls_port); i += 1; }
-                "--accounts" => { a.accounts = argv[i + 1].parse().unwrap_or(a.accounts); i += 1; }
-                "--operations" => { a.operations = argv[i + 1].parse().unwrap_or(a.operations); i += 1; }
-                "--runs" => { a.runs = argv[i + 1].parse().unwrap_or(a.runs); i += 1; }
+                "--out" => {
+                    a.out = argv[i + 1].clone();
+                    i += 1;
+                }
+                "--pg-host" => {
+                    a.pg_host = argv[i + 1].clone();
+                    i += 1;
+                }
+                "--pg-port" => {
+                    a.pg_port = argv[i + 1].parse().unwrap_or(a.pg_port);
+                    i += 1;
+                }
+                "--pg-user" => {
+                    a.pg_user = argv[i + 1].clone();
+                    i += 1;
+                }
+                "--pg-db" => {
+                    a.pg_db = argv[i + 1].clone();
+                    i += 1;
+                }
+                "--nls-port" => {
+                    a.nls_port = argv[i + 1].parse().unwrap_or(a.nls_port);
+                    i += 1;
+                }
+                "--accounts" => {
+                    a.accounts = argv[i + 1].parse().unwrap_or(a.accounts);
+                    i += 1;
+                }
+                "--operations" => {
+                    a.operations = argv[i + 1].parse().unwrap_or(a.operations);
+                    i += 1;
+                }
+                "--runs" => {
+                    a.runs = argv[i + 1].parse().unwrap_or(a.runs);
+                    i += 1;
+                }
                 "--host-nls" => a.host_nls = true,
-                "--nls-rounds" => { a.nls_rounds = argv[i + 1].parse().unwrap_or(a.nls_rounds); i += 1; }
-                "--nls-budget" => { a.nls_budget = argv[i + 1].parse().unwrap_or(a.nls_budget); i += 1; }
+                "--nls-rounds" => {
+                    a.nls_rounds = argv[i + 1].parse().unwrap_or(a.nls_rounds);
+                    i += 1;
+                }
+                "--nls-budget" => {
+                    a.nls_budget = argv[i + 1].parse().unwrap_or(a.nls_budget);
+                    i += 1;
+                }
                 other => eprintln!("bench: ignoring unknown argument `{other}`"),
             }
             i += 1;
@@ -146,13 +179,19 @@ fn connect_pg(args: &Args) -> Option<PgTarget> {
         Err(e) => {
             // No stand-in. A harness that fell back to something in-process would produce a
             // number that looks like a comparison and is not one.
-            eprintln!("bench: cannot reach PostgreSQL at {}:{} — {e}", args.pg_host, args.pg_port);
+            eprintln!(
+                "bench: cannot reach PostgreSQL at {}:{} — {e}",
+                args.pg_host, args.pg_port
+            );
             eprintln!();
             eprintln!("  This harness measures against a real PostgreSQL and will not");
             eprintln!("  substitute anything for it. To start one:");
             eprintln!();
             eprintln!("    initdb -D /var/lib/pgdata -U bench --auth=trust");
-            eprintln!("    pg_ctl -D /var/lib/pgdata -o '-p {} -c listen_addresses=127.0.0.1' start", args.pg_port);
+            eprintln!(
+                "    pg_ctl -D /var/lib/pgdata -o '-p {} -c listen_addresses=127.0.0.1' start",
+                args.pg_port
+            );
             eprintln!();
             None
         }
@@ -165,9 +204,8 @@ fn calibrate(args: &Args, pg: &mut PgTarget) -> bool {
     // What the storage charges for a durability barrier. Measured on the harness's own
     // filesystem, moments before the run — see `storage.rs` for why this is the denominator
     // rather than a published throughput figure.
-    let probe_dir = std::env::var("BENCH_FSYNC_DIR").unwrap_or_else(|_| {
-        std::env::temp_dir().to_string_lossy().into_owned()
-    });
+    let probe_dir = std::env::var("BENCH_FSYNC_DIR")
+        .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().into_owned());
     let cost = match bank_bench::storage::fsync_cost(&probe_dir, 200) {
         Ok(c) => c,
         Err(e) => {
@@ -224,7 +262,9 @@ fn calibrate(args: &Args, pg: &mut PgTarget) -> bool {
 }
 
 fn run(args: &Args) -> i32 {
-    let Some(mut pg) = connect_pg(args) else { return 3 };
+    let Some(mut pg) = connect_pg(args) else {
+        return 3;
+    };
     if !calibrate(args, &mut pg) {
         return 4;
     }
@@ -246,7 +286,13 @@ fn run(args: &Args) -> i32 {
             return 5;
         }
         for s in run_all(&mut pg, args, run_no) {
-            eprintln!("  {} run {} — {:.0} ops/s, p99 {:.0}µs", s.workload, s.run, s.ops_per_second(), s.p99.as_nanos() as f64 / 1000.0);
+            eprintln!(
+                "  {} run {} — {:.0} ops/s, p99 {:.0}µs",
+                s.workload,
+                s.run,
+                s.ops_per_second(),
+                s.p99.as_nanos() as f64 / 1000.0
+            );
             samples.push(s);
         }
     }
@@ -304,7 +350,9 @@ fn run(args: &Args) -> i32 {
                 for run_no in 1..=args.runs {
                     for s in run_all(&mut nls, args, run_no) {
                         match &s.not_run {
-                            Some(why) => eprintln!("  {} run {} — NOT RUN: {why}", s.workload, s.run),
+                            Some(why) => {
+                                eprintln!("  {} run {} — NOT RUN: {why}", s.workload, s.run)
+                            }
                             None => eprintln!(
                                 "  {} run {} — {:.0} ops/s, p99 {:.0}µs",
                                 s.workload,
@@ -328,7 +376,10 @@ fn run(args: &Args) -> i32 {
                         w,
                         "nilestream",
                         run_no,
-                        format!("nilestreamd was not reachable on 127.0.0.1:{}: {e}", args.nls_port),
+                        format!(
+                            "nilestreamd was not reachable on 127.0.0.1:{}: {e}",
+                            args.nls_port
+                        ),
                     ));
                 }
             }
@@ -350,7 +401,13 @@ fn run_all(t: &mut dyn Target, args: &Args, run_no: u32) -> Vec<Sample> {
         workloads::point(t, args.accounts, args.operations, run_no, seed),
         workloads::analytical(t, args.accounts, (args.operations / 20).max(5), run_no),
         workloads::oltp(t, args.accounts, args.operations, run_no, seed),
-        workloads::durable(t, args.accounts, (args.operations / 4).max(50), run_no, seed),
+        workloads::durable(
+            t,
+            args.accounts,
+            (args.operations / 4).max(50),
+            run_no,
+            seed,
+        ),
     ] {
         match r {
             Ok(s) => out.push(s),
@@ -390,11 +447,7 @@ fn write_all(
     Ok(())
 }
 
-fn document(
-    table: &str,
-    config: &[(String, Vec<(String, String)>)],
-    args: &Args,
-) -> String {
+fn document(table: &str, config: &[(String, Vec<(String, String)>)], args: &Args) -> String {
     let mut s = String::new();
     s.push_str("# E16 — The performance contract, measured\n\n");
     s.push_str(
@@ -509,6 +562,10 @@ fn parse_csv_line(line: &str) -> Option<Sample> {
         p50: std::time::Duration::from_nanos((f[5].parse::<f64>().ok()? * 1000.0) as u64),
         p99: std::time::Duration::from_nanos((f[6].parse::<f64>().ok()? * 1000.0) as u64),
         durable: f[8] == "true",
-        not_run: if f[9].is_empty() { None } else { Some(f[9].to_string()) },
+        not_run: if f[9].is_empty() {
+            None
+        } else {
+            Some(f[9].to_string())
+        },
     })
 }

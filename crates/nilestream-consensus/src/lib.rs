@@ -84,12 +84,20 @@ impl Entry {
         h.update(&term.to_le_bytes());
         h.update(&index.to_le_bytes());
         h.update(&payload);
-        Entry { term, index, hash: h.finalize(), parent, payload }
+        Entry {
+            term,
+            index,
+            hash: h.finalize(),
+            parent,
+            payload,
+        }
     }
     /// Whether this entry genuinely follows from `parent_hash`. This is the check Raft does
     /// with a term comparison and this design does with a recomputation.
     pub fn follows(&self, parent_hash: [u8; 32]) -> bool {
-        self.parent == parent_hash && Entry::seal(self.term, self.index, parent_hash, self.payload.clone()).hash == self.hash
+        self.parent == parent_hash
+            && Entry::seal(self.term, self.index, parent_hash, self.payload.clone()).hash
+                == self.hash
     }
 }
 
@@ -103,9 +111,23 @@ pub enum Role {
 /// Messages between nodes.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Msg {
-    RequestVote { term: Term, from: NodeId, last_index: Index, last_term: Term },
-    VoteGranted { term: Term, from: NodeId, to: NodeId },
-    VoteDenied { term: Term, from: NodeId, to: NodeId, reason: &'static str },
+    RequestVote {
+        term: Term,
+        from: NodeId,
+        last_index: Index,
+        last_term: Term,
+    },
+    VoteGranted {
+        term: Term,
+        from: NodeId,
+        to: NodeId,
+    },
+    VoteDenied {
+        term: Term,
+        from: NodeId,
+        to: NodeId,
+        reason: &'static str,
+    },
     AppendEntries {
         term: Term,
         from: NodeId,
@@ -114,8 +136,19 @@ pub enum Msg {
         entries: Vec<Entry>,
         leader_commit: Index,
     },
-    AppendOk { term: Term, from: NodeId, to: NodeId, match_index: Index },
-    AppendRejected { term: Term, from: NodeId, to: NodeId, hint: Index, reason: RejectReason },
+    AppendOk {
+        term: Term,
+        from: NodeId,
+        to: NodeId,
+        match_index: Index,
+    },
+    AppendRejected {
+        term: Term,
+        from: NodeId,
+        to: NodeId,
+        hint: Index,
+        reason: RejectReason,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,7 +214,10 @@ impl Node {
         if index == 0 {
             return [0u8; 32];
         }
-        self.log.iter().find(|e| e.index == index).map_or([0xffu8; 32], |e| e.hash)
+        self.log
+            .iter()
+            .find(|e| e.index == index)
+            .map_or([0xffu8; 32], |e| e.hash)
     }
 
     /// Begin an election.
@@ -208,20 +244,30 @@ impl Node {
         }
         let index = self.last_index() + 1;
         let parent = self.hash_at(self.last_index());
-        self.log.push(Entry::seal(self.term, index, parent, payload));
+        self.log
+            .push(Entry::seal(self.term, index, parent, payload));
         Some(index)
     }
 
     /// The `AppendEntries` a leader sends to one follower.
     pub fn replicate_to(&self, peer: NodeId) -> Msg {
-        let next = self.next_index.get(&peer).copied().unwrap_or(self.last_index() + 1);
+        let next = self
+            .next_index
+            .get(&peer)
+            .copied()
+            .unwrap_or(self.last_index() + 1);
         let prev_index = next.saturating_sub(1);
         Msg::AppendEntries {
             term: self.term,
             from: self.id,
             prev_index,
             prev_hash: self.hash_at(prev_index),
-            entries: self.log.iter().filter(|e| e.index >= next).cloned().collect(),
+            entries: self
+                .log
+                .iter()
+                .filter(|e| e.index >= next)
+                .cloned()
+                .collect(),
             leader_commit: self.commit_index,
         }
     }
@@ -245,12 +291,27 @@ impl Node {
         }
 
         match msg {
-            Msg::RequestVote { term, from, last_index, last_term } => {
+            Msg::RequestVote {
+                term,
+                from,
+                last_index,
+                last_term,
+            } => {
                 if term < self.term {
-                    return vec![Msg::VoteDenied { term: self.term, from: self.id, to: from, reason: "stale term" }];
+                    return vec![Msg::VoteDenied {
+                        term: self.term,
+                        from: self.id,
+                        to: from,
+                        reason: "stale term",
+                    }];
                 }
                 if self.voted_for.is_some() && self.voted_for != Some(from) {
-                    return vec![Msg::VoteDenied { term: self.term, from: self.id, to: from, reason: "already voted this term" }];
+                    return vec![Msg::VoteDenied {
+                        term: self.term,
+                        from: self.id,
+                        to: from,
+                        reason: "already voted this term",
+                    }];
                 }
                 // The up-to-date restriction. This is the whole of Raft's election safety:
                 // a candidate whose log is behind cannot win, so a leader always has every
@@ -258,10 +319,19 @@ impl Node {
                 let up_to_date = last_term > self.last_term()
                     || (last_term == self.last_term() && last_index >= self.last_index());
                 if !up_to_date {
-                    return vec![Msg::VoteDenied { term: self.term, from: self.id, to: from, reason: "candidate log is behind" }];
+                    return vec![Msg::VoteDenied {
+                        term: self.term,
+                        from: self.id,
+                        to: from,
+                        reason: "candidate log is behind",
+                    }];
                 }
                 self.voted_for = Some(from);
-                vec![Msg::VoteGranted { term: self.term, from: self.id, to: from }]
+                vec![Msg::VoteGranted {
+                    term: self.term,
+                    from: self.id,
+                    to: from,
+                }]
             }
 
             Msg::VoteGranted { term, from, to } => {
@@ -279,7 +349,14 @@ impl Node {
 
             Msg::VoteDenied { .. } => Vec::new(),
 
-            Msg::AppendEntries { term, from, prev_index, prev_hash, entries, leader_commit } => {
+            Msg::AppendEntries {
+                term,
+                from,
+                prev_index,
+                prev_hash,
+                entries,
+                leader_commit,
+            } => {
                 if term < self.term {
                     return vec![Msg::AppendRejected {
                         term: self.term,
@@ -330,10 +407,20 @@ impl Node {
                     self.commit_index = leader_commit.min(self.last_index());
                     self.record_committed();
                 }
-                vec![Msg::AppendOk { term: self.term, from: self.id, to: from, match_index: self.last_index() }]
+                vec![Msg::AppendOk {
+                    term: self.term,
+                    from: self.id,
+                    to: from,
+                    match_index: self.last_index(),
+                }]
             }
 
-            Msg::AppendOk { term, from, to, match_index } => {
+            Msg::AppendOk {
+                term,
+                from,
+                to,
+                match_index,
+            } => {
                 if to != self.id || self.role != Role::Leader || term != self.term {
                     return Vec::new();
                 }
@@ -343,7 +430,13 @@ impl Node {
                 Vec::new()
             }
 
-            Msg::AppendRejected { term, from, to, hint, reason } => {
+            Msg::AppendRejected {
+                term,
+                from,
+                to,
+                hint,
+                reason,
+            } => {
                 if to != self.id || self.role != Role::Leader || term != self.term {
                     return Vec::new();
                 }
@@ -393,7 +486,11 @@ impl Node {
 
     fn record_committed(&mut self) {
         let already = self.committed_history.len() as u64;
-        for e in self.log.iter().filter(|e| e.index > already && e.index <= self.commit_index) {
+        for e in self
+            .log
+            .iter()
+            .filter(|e| e.index > already && e.index <= self.commit_index)
+        {
             self.committed_history.push(e.clone());
         }
     }

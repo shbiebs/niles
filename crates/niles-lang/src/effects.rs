@@ -86,8 +86,12 @@ impl Rung {
     }
     pub fn all() -> &'static [Rung] {
         &[
-            Rung::Bounded, Rung::Monotonic, Rung::ReadYourWrites,
-            Rung::Snapshot, Rung::Serializable, Rung::LedgerConsistent,
+            Rung::Bounded,
+            Rung::Monotonic,
+            Rung::ReadYourWrites,
+            Rung::Snapshot,
+            Rung::Serializable,
+            Rung::LedgerConsistent,
         ]
     }
     /// Whether the rung is in the highly-available class. The top rung is provably in the
@@ -136,7 +140,10 @@ impl Effect {
     /// recoverable by compensation: an unauthorized overdraft has already left the
     /// institution exposed, and a declassification has already disclosed.
     pub fn requires_authority(&self) -> bool {
-        matches!(self, Effect::Authorize(_) | Effect::Declassify | Effect::Admin)
+        matches!(
+            self,
+            Effect::Authorize(_) | Effect::Declassify | Effect::Admin
+        )
     }
     pub fn parse(name: &str, at: Option<&str>, args: &[String]) -> Option<Effect> {
         let arg = || args.first().cloned().unwrap_or_else(|| "*".into());
@@ -155,7 +162,18 @@ impl Effect {
         })
     }
     pub fn all_names() -> &'static [&'static str] {
-        &["read", "append", "mutate", "debit", "credit", "hold", "authorize", "declassify", "emit", "admin"]
+        &[
+            "read",
+            "append",
+            "mutate",
+            "debit",
+            "credit",
+            "hold",
+            "authorize",
+            "declassify",
+            "emit",
+            "admin",
+        ]
     }
 }
 
@@ -202,7 +220,9 @@ impl Row {
     }
     pub fn union(&mut self, other: &Row) {
         for e in &other.set {
-            self.origins.entry(e.clone()).or_insert_with(|| other.origins[e]);
+            self.origins
+                .entry(e.clone())
+                .or_insert_with(|| other.origins[e]);
             self.set.insert(e.clone());
         }
     }
@@ -228,19 +248,25 @@ impl Row {
     /// assume; the weakest read is what bounds what the row can be served at, and that is
     /// [`Row::weakest_read`].
     pub fn strictest_read(&self) -> Option<Rung> {
-        self.set.iter().filter_map(|e| match e {
-            Effect::Read(r) => Some(*r),
-            _ => None,
-        }).max()
+        self.set
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Read(r) => Some(*r),
+                _ => None,
+            })
+            .max()
     }
 
     /// The weakest rung this row reads at. This is the ceiling on what a view containing
     /// it may promise: a computation is no fresher than its stalest input.
     pub fn weakest_read(&self) -> Option<Rung> {
-        self.set.iter().filter_map(|e| match e {
-            Effect::Read(r) => Some(*r),
-            _ => None,
-        }).min()
+        self.set
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Read(r) => Some(*r),
+                _ => None,
+            })
+            .min()
     }
 
     /// Row subsumption: is every effect of `self` permitted by `declared`?
@@ -250,7 +276,11 @@ impl Row {
     /// strongest guarantee the caller may rely on. Every other effect must match exactly,
     /// and a currency-parameterised effect is matched by the wildcard `*`.
     pub fn subsumed_by(&self, declared: &Row) -> Vec<Effect> {
-        self.set.iter().filter(|e| !declared_permits(declared, e)).cloned().collect()
+        self.set
+            .iter()
+            .filter(|e| !declared_permits(declared, e))
+            .cloned()
+            .collect()
     }
 }
 
@@ -259,7 +289,10 @@ fn declared_permits(declared: &Row, e: &Effect) -> bool {
         return true;
     }
     match e {
-        Effect::Read(r) => declared.set.iter().any(|d| matches!(d, Effect::Read(dr) if r <= dr)),
+        Effect::Read(r) => declared
+            .set
+            .iter()
+            .any(|d| matches!(d, Effect::Read(dr) if r <= dr)),
         Effect::Debit(_) => declared.set.contains(&Effect::Debit("*".into())),
         Effect::Credit(_) => declared.set.contains(&Effect::Credit("*".into())),
         Effect::Hold(_) => declared.set.contains(&Effect::Hold("*".into())),
@@ -488,7 +521,11 @@ mod tests {
         let ds = check_declaration("f", &inferred, &declared, sp(1));
         assert_eq!(ds.len(), 1);
         assert_eq!(ds[0].code, "NL0310");
-        assert_eq!(ds[0].labels.len(), 2, "must point at the site and the declaration");
+        assert_eq!(
+            ds[0].labels.len(),
+            2,
+            "must point at the site and the declaration"
+        );
     }
 
     #[test]
@@ -500,7 +537,11 @@ mod tests {
         let ds = check_declaration("pay", &inferred, &declared, sp(1));
         assert_eq!(ds.len(), 1);
         assert!(ds[0].msg.contains("debit<usd>"), "{}", ds[0].msg);
-        assert_eq!(ds[0].labels[0].span, sp(9), "must point at the debit, not the signature");
+        assert_eq!(
+            ds[0].labels[0].span,
+            sp(9),
+            "must point at the debit, not the signature"
+        );
     }
 
     #[test]
@@ -516,10 +557,20 @@ mod tests {
         // is not ledger-consistent, however the decision path was written.
         let mut body = Row::new();
         body.add(Effect::Read(Rung::Bounded), sp(20));
-        let ds = check_rung_monotonicity("available_balance", Rung::LedgerConsistent, &body, sp(1), sp(5));
+        let ds = check_rung_monotonicity(
+            "available_balance",
+            Rung::LedgerConsistent,
+            &body,
+            sp(1),
+            sp(5),
+        );
         assert_eq!(ds.len(), 1);
         assert_eq!(ds[0].code, "NL0311");
-        assert!(ds[0].msg.contains("ledger_consistent") && ds[0].msg.contains("bounded"), "{}", ds[0].msg);
+        assert!(
+            ds[0].msg.contains("ledger_consistent") && ds[0].msg.contains("bounded"),
+            "{}",
+            ds[0].msg
+        );
         // Both the read site and the contract must be shown.
         assert_eq!(ds[0].labels[0].span, sp(20));
         assert_eq!(ds[0].labels[1].span, sp(5));
@@ -530,7 +581,9 @@ mod tests {
         // The safe direction: a statement view may read a ledger-consistent balance.
         let mut body = Row::new();
         body.add(Effect::Read(Rung::LedgerConsistent), sp(20));
-        assert!(check_rung_monotonicity("statement", Rung::Bounded, &body, sp(1), sp(5)).is_empty());
+        assert!(
+            check_rung_monotonicity("statement", Rung::Bounded, &body, sp(1), sp(5)).is_empty()
+        );
     }
 
     #[test]
@@ -543,7 +596,10 @@ mod tests {
         assert_eq!(body.strictest_read(), Some(Rung::LedgerConsistent));
         // ... so the strictest contract this body can honestly carry is `bounded`.
         assert!(check_rung_monotonicity("v", Rung::Bounded, &body, sp(1), sp(5)).is_empty());
-        assert_eq!(check_rung_monotonicity("v", Rung::Snapshot, &body, sp(1), sp(5)).len(), 1);
+        assert_eq!(
+            check_rung_monotonicity("v", Rung::Snapshot, &body, sp(1), sp(5)).len(),
+            1
+        );
     }
 
     #[test]
@@ -564,35 +620,73 @@ mod tests {
     fn the_capability_set_is_deliberately_small() {
         // Every effect requiring authority is one whose misuse cannot be compensated.
         // Growing this set is a change to the thesis's claims, not a feature.
-        let requiring: Vec<&str> = ["read", "append", "mutate", "debit", "credit", "hold",
-                                    "authorize", "declassify", "emit", "admin"]
-            .into_iter()
-            .filter(|n| Effect::parse(n, Some("snapshot"), &["usd".into()])
-                .map_or(false, |e| e.requires_authority()))
-            .collect();
+        let requiring: Vec<&str> = [
+            "read",
+            "append",
+            "mutate",
+            "debit",
+            "credit",
+            "hold",
+            "authorize",
+            "declassify",
+            "emit",
+            "admin",
+        ]
+        .into_iter()
+        .filter(|n| {
+            Effect::parse(n, Some("snapshot"), &["usd".into()])
+                .map_or(false, |e| e.requires_authority())
+        })
+        .collect();
         assert_eq!(requiring, vec!["authorize", "declassify", "admin"]);
     }
 
     #[test]
     fn a_linear_value_must_be_consumed_exactly_once() {
-        let ok = LinearValue { name: "d".into(), kind: LinearKind::Debit, bound_at: sp(1), uses: vec![sp(2)] };
+        let ok = LinearValue {
+            name: "d".into(),
+            kind: LinearKind::Debit,
+            bound_at: sp(1),
+            uses: vec![sp(2)],
+        };
         assert!(check_linearity(&[ok]).is_empty());
 
-        let dropped = LinearValue { name: "d".into(), kind: LinearKind::Debit, bound_at: sp(1), uses: vec![] };
+        let dropped = LinearValue {
+            name: "d".into(),
+            kind: LinearKind::Debit,
+            bound_at: sp(1),
+            uses: vec![],
+        };
         let ds = check_linearity(&[dropped]);
         assert_eq!(ds[0].code, "NL0320");
         assert!(ds[0].notes.iter().any(|n| n.contains("lose the movement")));
 
-        let twice = LinearValue { name: "h".into(), kind: LinearKind::Hold, bound_at: sp(1), uses: vec![sp(2), sp(3)] };
+        let twice = LinearValue {
+            name: "h".into(),
+            kind: LinearKind::Hold,
+            bound_at: sp(1),
+            uses: vec![sp(2), sp(3)],
+        };
         let ds = check_linearity(&[twice]);
         assert_eq!(ds[0].code, "NL0321");
-        assert_eq!(ds[0].labels.len(), 3, "the second use, the first use, and the binding");
-        assert!(ds[0].notes.iter().any(|n| n.contains("release the same reservation twice")));
+        assert_eq!(
+            ds[0].labels.len(),
+            3,
+            "the second use, the first use, and the binding"
+        );
+        assert!(ds[0]
+            .notes
+            .iter()
+            .any(|n| n.contains("release the same reservation twice")));
     }
 
     #[test]
     fn effect_rows_display_stably() {
-        let r = Row::of([Effect::Append, Effect::Read(Rung::Snapshot), Effect::Debit("usd".into())]);
+        let r = Row::of([
+            Effect::Append,
+            Effect::Read(Rung::Snapshot),
+            Effect::Debit("usd".into()),
+        ]);
         // Ordering comes from the enum's declaration order, so a diagnostic reads the same
         // way every time — which matters because these strings appear in UI test
         // expectations and in the thesis.

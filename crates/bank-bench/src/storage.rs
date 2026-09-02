@@ -85,7 +85,11 @@ pub fn fsync_cost(dir: &str, calls: u32) -> std::io::Result<FsyncCost> {
             .map(|d| d.as_nanos())
             .unwrap_or(0)
     ));
-    let mut f = std::fs::OpenOptions::new().create(true).write(true).truncate(true).open(&path)?;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&path)?;
     let page = [0u8; 4096];
 
     // One untimed pass, so the first call's file creation and any lazy allocation are not
@@ -146,7 +150,11 @@ mod tests {
         let before: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| e.file_name().to_string_lossy().starts_with("bench-fsync-probe"))
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("bench-fsync-probe")
+            })
             .collect();
         assert!(before.is_empty(), "a previous run left a probe file behind");
 
@@ -157,7 +165,11 @@ mod tests {
         let after: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| e.file_name().to_string_lossy().starts_with("bench-fsync-probe"))
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("bench-fsync-probe")
+            })
             .collect();
         assert!(after.is_empty(), "the probe file was removed");
     }
@@ -167,7 +179,10 @@ mod tests {
         // The most common way a durability number is inflated: `synchronous_commit = off`
         // that nobody mentioned. With one connection there is no group commit to explain a
         // rate above the ceiling, so this is a hard refusal rather than a note.
-        let cost = FsyncCost { per_call_us: 1_000.0, calls: 100 }; // 1000/s ceiling
+        let cost = FsyncCost {
+            per_call_us: 1_000.0,
+            calls: 100,
+        }; // 1000/s ceiling
         let e = plausible(5_000.0, cost).unwrap_err();
         assert!(e.contains("not reaching storage"), "{e}");
         assert!(e.contains("synchronous_commit"), "{e}");
@@ -175,7 +190,10 @@ mod tests {
 
     #[test]
     fn a_rate_far_below_the_ceiling_is_refused_as_a_broken_harness() {
-        let cost = FsyncCost { per_call_us: 100.0, calls: 100 }; // 10,000/s ceiling
+        let cost = FsyncCost {
+            per_call_us: 100.0,
+            calls: 100,
+        }; // 10,000/s ceiling
         let e = plausible(50.0, cost).unwrap_err();
         assert!(e.contains("not doing the work"), "{e}");
     }
@@ -184,12 +202,24 @@ mod tests {
     fn a_plausible_rate_passes_on_both_fast_and_slow_storage() {
         // The property the published-figure calibration did not have: the same rule works on
         // a 3ms device and a 100µs one, because the denominator is the device.
-        let slow = FsyncCost { per_call_us: 3_000.0, calls: 100 }; // ~333/s
-        assert!(plausible(333.0, slow).is_ok(), "the published figure, on its own storage");
+        let slow = FsyncCost {
+            per_call_us: 3_000.0,
+            calls: 100,
+        }; // ~333/s
+        assert!(
+            plausible(333.0, slow).is_ok(),
+            "the published figure, on its own storage"
+        );
         assert!(plausible(300.0, slow).is_ok());
 
-        let fast = FsyncCost { per_call_us: 109.0, calls: 100 }; // ~9,170/s
-        assert!(plausible(5_325.0, fast).is_ok(), "and this machine, on its storage");
+        let fast = FsyncCost {
+            per_call_us: 109.0,
+            calls: 100,
+        }; // ~9,170/s
+        assert!(
+            plausible(5_325.0, fast).is_ok(),
+            "and this machine, on its storage"
+        );
         assert!(
             plausible(333.0, fast).is_err(),
             "while 333/s on fast storage is the harness being wrong, which is the point"
@@ -198,9 +228,29 @@ mod tests {
 
     #[test]
     fn the_device_class_names_what_a_reader_needs_to_compare_two_results() {
-        assert!(FsyncCost { per_call_us: 5.0, calls: 1 }.device_class().contains("power-loss"));
-        assert!(FsyncCost { per_call_us: 109.0, calls: 1 }.device_class().contains("NVMe"));
-        assert!(FsyncCost { per_call_us: 2_000.0, calls: 1 }.device_class().contains("consumer"));
-        assert!(FsyncCost { per_call_us: 9_000.0, calls: 1 }.device_class().contains("slow"));
+        assert!(FsyncCost {
+            per_call_us: 5.0,
+            calls: 1
+        }
+        .device_class()
+        .contains("power-loss"));
+        assert!(FsyncCost {
+            per_call_us: 109.0,
+            calls: 1
+        }
+        .device_class()
+        .contains("NVMe"));
+        assert!(FsyncCost {
+            per_call_us: 2_000.0,
+            calls: 1
+        }
+        .device_class()
+        .contains("consumer"));
+        assert!(FsyncCost {
+            per_call_us: 9_000.0,
+            calls: 1
+        }
+        .device_class()
+        .contains("slow"));
     }
 }

@@ -163,9 +163,7 @@ pub fn point(
     let started = Instant::now();
     for _ in 0..operations {
         let key = rng.skewed_key(accounts, 0.9);
-        let sql = format!(
-            "select acct, sum(amt) from postings where acct = {key} group by acct"
-        );
+        let sql = format!("select acct, sum(amt) from postings where acct = {key} group by acct");
         let at = Instant::now();
         t.run(&sql)?;
         latencies.push(at.elapsed());
@@ -339,7 +337,10 @@ mod tests {
         // different keys produce two numbers that cannot be compared, and a phase diagram
         // built from them would be measuring the sequence.
         let a: Vec<u64> = (0..50).map(|_| Rng::seeded(7).next_u64()).collect();
-        assert!(a.windows(2).all(|w| w[0] == w[1]), "same seed, same first draw");
+        assert!(
+            a.windows(2).all(|w| w[0] == w[1]),
+            "same seed, same first draw"
+        );
 
         let mut x = Rng::seeded(7);
         let mut y = Rng::seeded(7);
@@ -358,7 +359,11 @@ mod tests {
             let s = r.skewed_key(100, 0.9);
             assert!((1..=100).contains(&s), "{s}");
         }
-        assert_eq!(Rng::seeded(1).key(1), 1, "a single-account ledger still works");
+        assert_eq!(
+            Rng::seeded(1).key(1),
+            1,
+            "a single-account ledger still works"
+        );
     }
 
     #[test]
@@ -367,10 +372,18 @@ mod tests {
         // where partial materialisation is supposed to win would never be exercised.
         let mut r = Rng::seeded(42);
         let hot = |k: i64| k <= 10;
-        let skewed_hits = (0..10_000).filter(|_| hot(r.skewed_key(1_000, 0.9))).count();
+        let skewed_hits = (0..10_000)
+            .filter(|_| hot(r.skewed_key(1_000, 0.9)))
+            .count();
         let uniform_hits = (0..10_000).filter(|_| hot(r.key(1_000))).count();
-        assert!(skewed_hits > 8_000, "90% should land in the hot 1%: {skewed_hits}");
-        assert!(uniform_hits < 500, "and a uniform draw should not: {uniform_hits}");
+        assert!(
+            skewed_hits > 8_000,
+            "90% should land in the hot 1%: {skewed_hits}"
+        );
+        assert!(
+            uniform_hits < 500,
+            "and a uniform draw should not: {uniform_hits}"
+        );
     }
 
     #[test]
@@ -391,7 +404,10 @@ mod tests {
         l.extend((0..20).map(|_| Duration::from_secs(1)));
         let (p50, p99) = percentiles(l);
         assert_eq!(p50, Duration::from_micros(10));
-        assert!(p99 >= Duration::from_secs(1), "the tail is visible: {p99:?}");
+        assert!(
+            p99 >= Duration::from_secs(1),
+            "the tail is visible: {p99:?}"
+        );
 
         // And the boundary case, which is worth pinning down rather than discovering in a
         // results table: with *exactly* 1% of samples slow, p99 sits on the boundary and
@@ -410,11 +426,20 @@ mod tests {
 
     #[test]
     fn a_skipped_run_carries_its_reason_into_the_csv() {
-        let s = skipped("oltp", "nilestream", 3, "no write surface over the wire".into());
+        let s = skipped(
+            "oltp",
+            "nilestream",
+            3,
+            "no write surface over the wire".into(),
+        );
         let line = s.to_csv();
         assert!(line.starts_with("oltp,nilestream,3,0,"), "{line}");
         assert!(line.ends_with("no write surface over the wire"), "{line}");
-        assert_eq!(s.ops_per_second(), 0.0, "and reports no throughput rather than infinity");
+        assert_eq!(
+            s.ops_per_second(),
+            0.0,
+            "and reports no throughput rather than infinity"
+        );
     }
 
     #[test]
@@ -431,6 +456,10 @@ mod tests {
             not_run: None,
         };
         assert_eq!(s.to_csv().split(',').count(), 10);
-        assert!((s.ops_per_second() - 4_000.0).abs() < 1.0, "{}", s.ops_per_second());
+        assert!(
+            (s.ops_per_second() - 4_000.0).abs() < 1.0,
+            "{}",
+            s.ops_per_second()
+        );
     }
 }

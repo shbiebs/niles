@@ -78,7 +78,12 @@ const H0: [u32; 8] = [
 
 impl Hasher256 {
     pub fn new() -> Self {
-        Hasher256 { state: H0, buffer: [0u8; 64], buffered: 0, bits: 0 }
+        Hasher256 {
+            state: H0,
+            buffer: [0u8; 64],
+            buffered: 0,
+            bits: 0,
+        }
     }
 
     pub fn update(&mut self, bytes: &[u8]) -> &mut Self {
@@ -250,7 +255,9 @@ mod tests {
         // length does not, so a second block is required. An implementation that got the
         // boundary wrong passes "abc" and fails here.
         assert_eq!(
-            hex(&sha256(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")),
+            hex(&sha256(
+                b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
+            )),
             "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
         );
     }
@@ -309,7 +316,11 @@ mod tests {
         let first = h.finalize();
         assert_eq!(first, h.finalize(), "finalizing twice");
         h.update(b"def");
-        assert_eq!(h.finalize(), sha256(b"abcdef"), "and hashing continues from there");
+        assert_eq!(
+            h.finalize(),
+            sha256(b"abcdef"),
+            "and hashing continues from there"
+        );
     }
 
     // ── the placeholder is gone ─────────────────────────────────────────────────────
@@ -375,8 +386,10 @@ mod tests {
         // across 65,536 buckets with few coincidences, and a poorly-mixed one clusters.
         let bucket = |d: [u8; 32]| u16::from_be_bytes([d[0], d[1]]);
         let sha_buckets: HashSet<u16> = messages.iter().map(|m| bucket(sha256(m))).collect();
-        let old_buckets: HashSet<u16> =
-            messages.iter().map(|m| bucket(the_old_placeholder(m))).collect();
+        let old_buckets: HashSet<u16> = messages
+            .iter()
+            .map(|m| bucket(the_old_placeholder(m)))
+            .collect();
 
         assert!(
             sha_buckets.len() > old_buckets.len(),
@@ -398,8 +411,7 @@ mod tests {
         // but the property whose absence would mean the swap had not really happened.
         let a = sha256(b"the quick brown fox");
         let b = sha256(b"the quick brown fox!");
-        let differing_bits: u32 =
-            a.iter().zip(&b).map(|(x, y)| (x ^ y).count_ones()).sum();
+        let differing_bits: u32 = a.iter().zip(&b).map(|(x, y)| (x ^ y).count_ones()).sum();
         assert!(
             (96..=160).contains(&differing_bits),
             "about half of 256 bits should differ; {differing_bits} did"
@@ -439,7 +451,11 @@ mod tests {
         // Edit epoch 1 — the second of five — and the head differs.
         let mut tampered = bodies.clone();
         tampered[1] = b"B";
-        assert_ne!(walk(&tampered), honest, "an edit in the middle changed the head");
+        assert_ne!(
+            walk(&tampered),
+            honest,
+            "an edit in the middle changed the head"
+        );
 
         // Drop an epoch: also detectable, which is what makes truncation evidence rather than
         // an ordinary short read.

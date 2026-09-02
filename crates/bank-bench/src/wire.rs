@@ -40,7 +40,10 @@ pub enum WireError {
     /// "authentication failed" would send an operator to the wrong file.
     Auth(String),
     /// The server returned an `ErrorResponse`. Carries the SQLSTATE and the message.
-    Server { sqlstate: String, message: String },
+    Server {
+        sqlstate: String,
+        message: String,
+    },
     /// A message this client does not understand, or one that arrived out of order.
     Protocol(String),
 }
@@ -139,7 +142,11 @@ impl Client {
     fn startup(&mut self, user: &str, database: &str) -> Result<(), WireError> {
         let mut body = Vec::new();
         body.extend_from_slice(&196_608i32.to_be_bytes()); // protocol 3.0
-        for (k, v) in [("user", user), ("database", database), ("client_encoding", "UTF8")] {
+        for (k, v) in [
+            ("user", user),
+            ("database", database),
+            ("client_encoding", "UTF8"),
+        ] {
             body.extend_from_slice(k.as_bytes());
             body.push(0);
             body.extend_from_slice(v.as_bytes());
@@ -157,10 +164,12 @@ impl Client {
                 b'R' => {
                     let code = i32::from_be_bytes(body[0..4].try_into().unwrap());
                     match code {
-                        0 => {}  // AuthenticationOk
+                        0 => {} // AuthenticationOk
                         5 => return Err(WireError::Auth("MD5 password authentication".into())),
                         10 => return Err(WireError::Auth("SCRAM-SHA-256 authentication".into())),
-                        3 => return Err(WireError::Auth("cleartext password authentication".into())),
+                        3 => {
+                            return Err(WireError::Auth("cleartext password authentication".into()))
+                        }
                         other => {
                             return Err(WireError::Auth(format!("authentication method {other}")))
                         }
@@ -169,8 +178,8 @@ impl Client {
                 b'K' => {
                     self.backend_pid = i32::from_be_bytes(body[0..4].try_into().unwrap());
                 }
-                b'S' => {}                  // ParameterStatus
-                b'Z' => return Ok(()),      // ReadyForQuery
+                b'S' => {}             // ParameterStatus
+                b'Z' => return Ok(()), // ReadyForQuery
                 b'E' => return Err(error_from(&body)),
                 other => {
                     return Err(WireError::Protocol(format!(
@@ -248,7 +257,9 @@ impl Client {
         self.r.read_exact(&mut head)?;
         let len = i32::from_be_bytes(head[1..5].try_into().unwrap());
         if !(4..=64 * 1024 * 1024).contains(&len) {
-            return Err(WireError::Protocol(format!("implausible message length {len}")));
+            return Err(WireError::Protocol(format!(
+                "implausible message length {len}"
+            )));
         }
         let mut body = vec![0u8; (len - 4) as usize];
         self.r.read_exact(&mut body)?;
@@ -296,7 +307,10 @@ fn put_cstr(out: &mut Vec<u8>, s: &str) {
 }
 
 fn cstr_at(b: &[u8], from: usize) -> (String, usize) {
-    let end = b[from..].iter().position(|&c| c == 0).map_or(b.len(), |i| from + i);
+    let end = b[from..]
+        .iter()
+        .position(|&c| c == 0)
+        .map_or(b.len(), |i| from + i);
     (String::from_utf8_lossy(&b[from..end]).into_owned(), end + 1)
 }
 
@@ -414,7 +428,11 @@ mod tests {
         };
         assert_eq!(present.scalar(), Some(-4_200));
 
-        let no_rows = Rows { columns: vec!["sum".into()], rows: vec![], tag: "SELECT 0".into() };
+        let no_rows = Rows {
+            columns: vec!["sum".into()],
+            rows: vec![],
+            tag: "SELECT 0".into(),
+        };
         assert_eq!(no_rows.scalar(), None, "no row is not zero");
 
         let null = Rows {
@@ -441,11 +459,23 @@ mod tests {
 
         let nls = Rows {
             columns: vec!["key".into(), "value".into(), "anchor".into()],
-            rows: vec![vec![Some("42".into()), Some("-4200".into()), Some("7".into())]],
+            rows: vec![vec![
+                Some("42".into()),
+                Some("-4200".into()),
+                Some("7".into()),
+            ]],
             tag: "SELECT 1".into(),
         };
-        assert_eq!(nls.by_name("value"), Some(-4_200), "the same quantity, a different name");
-        assert_eq!(nls.by_name("sum"), None, "and asking for the wrong name yields nothing");
+        assert_eq!(
+            nls.by_name("value"),
+            Some(-4_200),
+            "the same quantity, a different name"
+        );
+        assert_eq!(
+            nls.by_name("sum"),
+            None,
+            "and asking for the wrong name yields nothing"
+        );
     }
 
     #[test]

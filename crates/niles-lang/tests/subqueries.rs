@@ -29,10 +29,10 @@
 //! below, because the second one in particular is the kind of defect that comes back the
 //! next time someone needs a "reasonable default".
 
-use niles_lang::ast::*;
-use niles_lang::{lower, parser, resolve};
 use niles_ir::circuit::Circuit;
 use niles_ir::operator::{ApplyKind, Op, Scalar, ScalarOp};
+use niles_lang::ast::*;
+use niles_lang::{lower, parser, resolve};
 
 const SCHEMA: &str = "schema s {\n  \
     base t { k: i64, x: i64, z: i64 }\n  \
@@ -67,7 +67,11 @@ fn a_correlated_exists_lowers_to_a_dependent_join() {
     assert!(!err);
     let (kind, corr) = the_apply(&c);
     assert!(matches!(kind, ApplyKind::Exists));
-    assert_eq!(corr, &vec![(0u16, 0u16)], "the correlation must be extracted, not left as a filter");
+    assert_eq!(
+        corr,
+        &vec![(0u16, 0u16)],
+        "the correlation must be extracted, not left as a filter"
+    );
 }
 
 #[test]
@@ -75,7 +79,10 @@ fn a_correlated_not_exists_lowers_to_a_dependent_join() {
     let (c, err) = circuit_of("select k from t where not exists (select 1 from u where u.k = t.k)");
     assert!(!err);
     let (kind, corr) = the_apply(&c);
-    assert!(matches!(kind, ApplyKind::NotExists), "`not exists` is `not` over `exists`");
+    assert!(
+        matches!(kind, ApplyKind::NotExists),
+        "`not exists` is `not` over `exists`"
+    );
     assert_eq!(corr, &vec![(0u16, 0u16)]);
 }
 
@@ -85,7 +92,10 @@ fn an_in_subquery_carries_both_the_probe_and_the_correlation() {
     assert!(!err);
     let (kind, corr) = the_apply(&c);
     // The probe is `t.x`, column 1 of the outer; the inner column is `u.y`, column 1 of u.
-    assert!(matches!(kind, ApplyKind::In { probe: 1, inner: 1 }), "{kind:?}");
+    assert!(
+        matches!(kind, ApplyKind::In { probe: 1, inner: 1 }),
+        "{kind:?}"
+    );
     assert_eq!(corr, &vec![(0u16, 0u16)]);
 }
 
@@ -94,8 +104,14 @@ fn an_uncorrelated_not_in_lowers_with_an_empty_correlation() {
     let (c, err) = circuit_of("select k from t where t.x not in (select u.y from u)");
     assert!(!err);
     let (kind, corr) = the_apply(&c);
-    assert!(matches!(kind, ApplyKind::NotIn { probe: 1, inner: 1 }), "{kind:?}");
-    assert!(corr.is_empty(), "no correlation was written, so none may be invented");
+    assert!(
+        matches!(kind, ApplyKind::NotIn { probe: 1, inner: 1 }),
+        "{kind:?}"
+    );
+    assert!(
+        corr.is_empty(),
+        "no correlation was written, so none may be invented"
+    );
 }
 
 // ── the correlation, and the defect a naive rule would have caused ───────────────────
@@ -109,7 +125,11 @@ fn the_qualifier_decides_which_side_a_correlation_column_is_on() {
     // and the `exists` becomes a no-op. That is what the first version did.
     let (c, _) = circuit_of("select k from t where exists (select 1 from u where u.k = t.k)");
     let (_, corr) = the_apply(&c);
-    assert_eq!(corr.len(), 1, "the correlation must be found even when both columns share a name");
+    assert_eq!(
+        corr.len(),
+        1,
+        "the correlation must be found even when both columns share a name"
+    );
 
     // And there must be no leftover filter on the inner side pretending to be the same
     // predicate. If one appeared, the correlation would be applied twice — once as a key
@@ -122,26 +142,43 @@ fn the_qualifier_decides_which_side_a_correlation_column_is_on() {
             _ => None,
         })
         .collect();
-    assert!(filters.is_empty(), "the correlation was also left behind as a filter: {filters:?}");
+    assert!(
+        filters.is_empty(),
+        "the correlation was also left behind as a filter: {filters:?}"
+    );
 }
 
 #[test]
 fn a_local_predicate_in_the_subquery_stays_on_the_inner_side() {
     // The other half of the split: `u.y > 5` mentions only the inner relation, so it is a
     // filter under the apply rather than a correlation.
-    let (c, err) = circuit_of("select k from t where exists (select 1 from u where u.k = t.k and u.y > 5)");
+    let (c, err) =
+        circuit_of("select k from t where exists (select 1 from u where u.k = t.k and u.y > 5)");
     assert!(!err);
     let (_, corr) = the_apply(&c);
     assert_eq!(corr, &vec![(0u16, 0u16)]);
     let has_local = c.nodes.iter().any(|n| {
-        matches!(&n.op, Op::Filter { predicate: Scalar::Binary { op: ScalarOp::Gt, .. } })
+        matches!(
+            &n.op,
+            Op::Filter {
+                predicate: Scalar::Binary {
+                    op: ScalarOp::Gt,
+                    ..
+                }
+            }
+        )
     });
-    assert!(has_local, "the local predicate must survive as a filter:\n{}", c.explain());
+    assert!(
+        has_local,
+        "the local predicate must survive as a filter:\n{}",
+        c.explain()
+    );
 }
 
 #[test]
 fn a_conjunct_beside_a_subquery_becomes_an_ordinary_filter() {
-    let (c, err) = circuit_of("select k from t where t.z > 1 and exists (select 1 from u where u.k = t.k)");
+    let (c, err) =
+        circuit_of("select k from t where t.z > 1 and exists (select 1 from u where u.k = t.k)");
     assert!(!err);
     let (_, corr) = the_apply(&c);
     assert_eq!(corr.len(), 1);
@@ -151,7 +188,11 @@ fn a_conjunct_beside_a_subquery_becomes_an_ordinary_filter() {
         matches!(&n.op, Op::Filter { predicate: Scalar::Binary { op: ScalarOp::Gt, lhs, .. } }
             if **lhs == Scalar::Column(2))
     });
-    assert!(ok, "the residual predicate's column index shifted:\n{}", c.explain());
+    assert!(
+        ok,
+        "the residual predicate's column index shifted:\n{}",
+        c.explain()
+    );
 }
 
 // ── what is refused ──────────────────────────────────────────────────────────────────
@@ -161,7 +202,8 @@ fn a_subquery_under_an_or_is_refused_rather_than_approximated() {
     // An `Apply` is a pipeline node; it cannot be one arm of a disjunction without first
     // becoming a semi-join and a union, which is a different rewrite and is not
     // implemented. Refusing loudly beats lowering something that is not the query written.
-    let (c, err) = circuit_of("select k from t where t.z > 1 or exists (select 1 from u where u.k = t.k)");
+    let (c, err) =
+        circuit_of("select k from t where t.z > 1 or exists (select 1 from u where u.k = t.k)");
     assert!(err, "this must be an error, not a silently different query");
     assert!(!c.nodes.iter().any(|n| matches!(n.op, Op::Apply { .. })));
 }
@@ -183,8 +225,12 @@ fn a_multi_column_in_subquery_is_refused_by_name() {
 fn equals_in_a_sql_where_clause_is_a_comparison_and_not_an_assignment() {
     // Defect 1. Before the fix this parsed as `Expr::Assign`.
     let (p, _) = parser::parse_program("view v = sql { select k from t where t.z = 1 };");
-    let Some(Item::View(v)) = p.items.first() else { panic!() };
-    let Expr::Sql { inner, .. } = &v.body else { panic!() };
+    let Some(Item::View(v)) = p.items.first() else {
+        panic!()
+    };
+    let Expr::Sql { inner, .. } = &v.body else {
+        panic!()
+    };
     let Expr::Select(s) = &**inner else { panic!() };
     assert!(
         matches!(s.filter, Some(Expr::Binary { op: BinOp::Eq, .. })),
@@ -219,11 +265,21 @@ fn a_where_clause_reaches_the_circuit_as_a_predicate() {
         .collect();
     assert_eq!(preds.len(), 1, "{}", c.explain());
     assert!(
-        matches!(preds[0], Scalar::Binary { op: ScalarOp::Eq, .. }),
+        matches!(
+            preds[0],
+            Scalar::Binary {
+                op: ScalarOp::Eq,
+                ..
+            }
+        ),
         "the `where` clause was discarded: {:?}",
         preds[0]
     );
-    assert_ne!(*preds[0], Scalar::LitBool(true), "the silent-true fallback is gone");
+    assert_ne!(
+        *preds[0],
+        Scalar::LitBool(true),
+        "the silent-true fallback is gone"
+    );
 }
 
 #[test]
@@ -237,7 +293,12 @@ fn an_unlowerable_predicate_is_an_error_and_not_a_default() {
     let (lo, d) = lower::lower_program(&p, &cat);
     assert!(d.items.iter().any(|x| x.code == "NL0501"), "{:?}", d.items);
     assert!(
-        !lo.circuit.nodes.iter().any(|n| matches!(&n.op, Op::Filter { predicate: Scalar::LitBool(true) })),
+        !lo.circuit.nodes.iter().any(|n| matches!(
+            &n.op,
+            Op::Filter {
+                predicate: Scalar::LitBool(true)
+            }
+        )),
         "an unlowerable predicate must not become `true`:\n{}",
         lo.circuit.explain()
     );
@@ -261,7 +322,10 @@ fn a_query_a_user_can_write_reaches_the_unnesting_rewrite() {
     assert_eq!(report.fired[0].name(), "exists-to-semi-join");
     assert!(flat.nodes.iter().any(|n| matches!(
         &n.op,
-        Op::Join { kind: niles_ir::operator::JoinKind::Semi, .. }
+        Op::Join {
+            kind: niles_ir::operator::JoinKind::Semi,
+            ..
+        }
     )));
     assert!(!flat.nodes.iter().any(|n| matches!(n.op, Op::Apply { .. })));
 }
@@ -269,10 +333,22 @@ fn a_query_a_user_can_write_reaches_the_unnesting_rewrite() {
 #[test]
 fn all_four_surface_forms_reach_a_rewrite() {
     let cases = [
-        ("select k from t where exists (select 1 from u where u.k = t.k)", "exists-to-semi-join"),
-        ("select k from t where not exists (select 1 from u where u.k = t.k)", "not-exists-to-anti-join"),
-        ("select k from t where t.x in (select u.y from u where u.k = t.k)", "in-to-semi-join"),
-        ("select k from t where t.x not in (select u.y from u)", "not-in-to-anti-join-with-null-witness"),
+        (
+            "select k from t where exists (select 1 from u where u.k = t.k)",
+            "exists-to-semi-join",
+        ),
+        (
+            "select k from t where not exists (select 1 from u where u.k = t.k)",
+            "not-exists-to-anti-join",
+        ),
+        (
+            "select k from t where t.x in (select u.y from u where u.k = t.k)",
+            "in-to-semi-join",
+        ),
+        (
+            "select k from t where t.x not in (select u.y from u)",
+            "not-in-to-anti-join-with-null-witness",
+        ),
     ];
     for (q, want) in cases {
         let (c, err) = circuit_of(q);

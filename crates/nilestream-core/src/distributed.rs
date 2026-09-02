@@ -62,7 +62,10 @@ pub struct ShardMap {
 impl ShardMap {
     /// A hash-partitioned map over `n` shards.
     pub fn hashed(n: u16, version: u64) -> ShardMap {
-        ShardMap { version, shards: (0..n).collect() }
+        ShardMap {
+            version,
+            shards: (0..n).collect(),
+        }
     }
 
     pub fn shard_count(&self) -> usize {
@@ -97,7 +100,11 @@ impl ShardMap {
 pub enum ReadError {
     /// A shard has not yet reached the requested anchor. It must catch up; the read cannot
     /// be answered from a prefix that does not exist yet.
-    Behind { shard: ShardId, frontier: Epoch, requested: Epoch },
+    Behind {
+        shard: ShardId,
+        frontier: Epoch,
+        requested: Epoch,
+    },
     /// The caller's shard map is stale. Refusing is the only safe response: reading the
     /// wrong node returns an answer that is correct for a prefix of the wrong history.
     StaleMap { caller: u64, current: u64 },
@@ -146,11 +153,24 @@ pub struct Cluster {
 
 impl Cluster {
     pub fn new(map: ShardMap) -> Cluster {
-        Cluster { map, shards: HashMap::new(), round_trips: 0, cache_hits: 0, cache: HashMap::new() }
+        Cluster {
+            map,
+            shards: HashMap::new(),
+            round_trips: 0,
+            cache_hits: 0,
+            cache: HashMap::new(),
+        }
     }
 
     pub fn add_shard(&mut self, id: ShardId, base: Box<dyn Base>) {
-        self.shards.insert(id, Shard { id, base, round_trips: 0 });
+        self.shards.insert(
+            id,
+            Shard {
+                id,
+                base,
+                round_trips: 0,
+            },
+        );
     }
 
     /// **The cluster-wide strict frontier: the minimum, not the maximum.**
@@ -161,7 +181,11 @@ impl Cluster {
     /// input", now with a network in between, and the reason rung 5 is more expensive in a
     /// cluster than on one node.
     pub fn strict_frontier(&self) -> Epoch {
-        self.shards.values().map(|s| s.base.frontier()).min().unwrap_or(0)
+        self.shards
+            .values()
+            .map(|s| s.base.frontier())
+            .min()
+            .unwrap_or(0)
     }
 
     /// The frontier a read touching only these shards may use.
@@ -186,7 +210,10 @@ impl Cluster {
         map_version: u64,
     ) -> Result<(Value, u64), ReadError> {
         if map_version != self.map.version {
-            return Err(ReadError::StaleMap { caller: map_version, current: self.map.version });
+            return Err(ReadError::StaleMap {
+                caller: map_version,
+                current: self.map.version,
+            });
         }
         // A frozen prefix cannot change, so a cached answer can never become wrong. This is
         // the one caching decision in the whole system that needs no invalidation rule.
@@ -200,7 +227,11 @@ impl Cluster {
         };
         let f = shard.base.frontier();
         if f < anchor {
-            return Err(ReadError::Behind { shard: owner, frontier: f, requested: anchor });
+            return Err(ReadError::Behind {
+                shard: owner,
+                frontier: f,
+                requested: anchor,
+            });
         }
         shard.round_trips += 1;
         self.round_trips += 1;
@@ -221,7 +252,10 @@ impl Cluster {
         map_version: u64,
     ) -> Result<(Vec<(Key, Value)>, Epoch), ReadError> {
         if map_version != self.map.version {
-            return Err(ReadError::StaleMap { caller: map_version, current: self.map.version });
+            return Err(ReadError::StaleMap {
+                caller: map_version,
+                current: self.map.version,
+            });
         }
         let anchor = self.frontier_for(keys);
         let routed = self.map.route(keys);
@@ -293,7 +327,11 @@ mod tests {
             (acc, n)
         }
         fn deltas_at(&mut self, e: Epoch) -> Vec<(Key, Value)> {
-            self.rows.iter().filter(|(re, _, _)| *re == e).map(|(_, k, v)| (k.clone(), *v)).collect()
+            self.rows
+                .iter()
+                .filter(|(re, _, _)| *re == e)
+                .map(|(_, k, v)| (k.clone(), *v))
+                .collect()
         }
     }
 
@@ -337,7 +375,10 @@ mod tests {
         for _ in 0..100 {
             c.reconstruct(&key, 30, 1).unwrap();
         }
-        assert_eq!(c.round_trips, before, "a frozen answer must never need re-fetching");
+        assert_eq!(
+            c.round_trips, before,
+            "a frozen answer must never need re-fetching"
+        );
         assert_eq!(c.cache_hits, 100);
     }
 
@@ -348,7 +389,11 @@ mod tests {
         let keys: Vec<Key> = (0..100i64).map(|k| vec![k]).collect();
         let (rows, _anchor) = c.snapshot_read(&keys, 1).unwrap();
         assert_eq!(rows.len(), 100);
-        assert!(c.round_trips <= 4, "expected at most one trip per shard, took {}", c.round_trips);
+        assert!(
+            c.round_trips <= 4,
+            "expected at most one trip per shard, took {}",
+            c.round_trips
+        );
     }
 
     #[test]
@@ -359,7 +404,10 @@ mod tests {
         assert_eq!(anchor, 60);
         // Every value is the same because every key has the same history in this fixture —
         // the point is that they were all folded at one epoch.
-        assert!(rows.iter().all(|(_, v)| *v == 600), "one anchor, one consistent set of answers");
+        assert!(
+            rows.iter().all(|(_, v)| *v == 600),
+            "one anchor, one consistent set of answers"
+        );
     }
 
     #[test]
@@ -379,7 +427,14 @@ mod tests {
         let mut c = Cluster::new(ShardMap::hashed(1, 1));
         c.add_shard(0, Box::new(VecBase::new(&[7], 10, 1)));
         let e = c.reconstruct(&vec![7], 50, 1).unwrap_err();
-        assert!(matches!(e, ReadError::Behind { frontier: 10, requested: 50, .. }));
+        assert!(matches!(
+            e,
+            ReadError::Behind {
+                frontier: 10,
+                requested: 50,
+                ..
+            }
+        ));
         assert!(e.explain().contains("does not exist yet"));
     }
 
@@ -391,9 +446,18 @@ mod tests {
         assert!(c.reconstruct(&vec![1], 10, 1).is_ok());
         c.rebalance(ShardMap::hashed(8, 2));
         let e = c.reconstruct(&vec![1], 10, 1).unwrap_err();
-        assert!(matches!(e, ReadError::StaleMap { caller: 1, current: 2 }));
+        assert!(matches!(
+            e,
+            ReadError::StaleMap {
+                caller: 1,
+                current: 2
+            }
+        ));
         assert!(e.explain().contains("wrong history"));
-        assert!(c.reconstruct(&vec![1], 10, 2).is_ok(), "the current map works");
+        assert!(
+            c.reconstruct(&vec![1], 10, 2).is_ok(),
+            "the current map works"
+        );
     }
 
     #[test]
@@ -407,7 +471,11 @@ mod tests {
         let hits_before = c.cache_hits;
         let (after, _) = c.reconstruct(&vec![6], 15, 2).unwrap();
         assert_eq!(before, after);
-        assert_eq!(c.cache_hits, hits_before + 1, "the cached answer survived the rebalance");
+        assert_eq!(
+            c.cache_hits,
+            hits_before + 1,
+            "the cached answer survived the rebalance"
+        );
     }
 
     #[test]
@@ -429,6 +497,9 @@ mod tests {
         // numbers stop being comparable across the two deployments.
         let mut c = cluster(2, 4, 25);
         let (_v, rows) = c.reconstruct(&vec![2], 25, 1).unwrap();
-        assert_eq!(rows, 25, "twenty-five epochs folded, counted the same way as on one node");
+        assert_eq!(
+            rows, 25,
+            "twenty-five epochs folded, counted the same way as on one node"
+        );
     }
 }

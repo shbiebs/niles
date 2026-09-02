@@ -72,13 +72,22 @@ pub struct Column {
 
 impl Column {
     pub fn int(name: &str) -> Column {
-        Column { name: name.into(), ty: ColType::LongLong }
+        Column {
+            name: name.into(),
+            ty: ColType::LongLong,
+        }
     }
     pub fn money(name: &str) -> Column {
-        Column { name: name.into(), ty: ColType::NewDecimal }
+        Column {
+            name: name.into(),
+            ty: ColType::NewDecimal,
+        }
     }
     pub fn text(name: &str) -> Column {
-        Column { name: name.into(), ty: ColType::VarString }
+        Column {
+            name: name.into(),
+            ty: ColType::VarString,
+        }
     }
 }
 
@@ -306,12 +315,26 @@ mod tests {
 
     #[test]
     fn length_encoded_integers_round_trip_at_every_width() {
-        for v in [0u64, 1, 250, 251, 0xffff, 0x1_0000, 0xff_ffff, 0x100_0000, u64::MAX] {
+        for v in [
+            0u64,
+            1,
+            250,
+            251,
+            0xffff,
+            0x1_0000,
+            0xff_ffff,
+            0x100_0000,
+            u64::MAX,
+        ] {
             let mut buf = Vec::new();
             put_lenenc(&mut buf, v);
             let mut at = 0;
             assert_eq!(get_lenenc(&buf, &mut at), Some(v), "failed at {v}");
-            assert_eq!(at, buf.len(), "decoder consumed the wrong number of bytes for {v}");
+            assert_eq!(
+                at,
+                buf.len(),
+                "decoder consumed the wrong number of bytes for {v}"
+            );
         }
     }
 
@@ -334,7 +357,10 @@ mod tests {
         assert_ne!(c.ty as u8, 0x05);
         let def = column_def(&c);
         assert!(def.contains(&0xf6));
-        assert!(*def.last().unwrap() == 0 && def[def.len() - 3] == 4, "decimals field set for money");
+        assert!(
+            *def.last().unwrap() == 0 && def[def.len() - 3] == 4,
+            "decimals field set for money"
+        );
     }
 
     #[test]
@@ -351,7 +377,9 @@ mod tests {
         let nonce = [7u8; 20];
         let h = handshake(42, &nonce);
         assert_eq!(h[0], 10, "protocol version 10");
-        assert!(h.windows(11).any(|w| w == b"Nilestream\0" || w.starts_with(b"Nilestream")));
+        assert!(h
+            .windows(11)
+            .any(|w| w == b"Nilestream\0" || w.starts_with(b"Nilestream")));
         assert!(h.ends_with(b"mysql_native_password\0"));
         // The nonce is split across the packet in two pieces; both must be present.
         assert!(h.windows(8).any(|w| w == &nonce[..8]));
@@ -360,7 +388,10 @@ mod tests {
 
     #[test]
     fn commands_decode_to_the_right_variants() {
-        assert_eq!(parse_command(b"\x03select 1"), Command::Query("select 1".into()));
+        assert_eq!(
+            parse_command(b"\x03select 1"),
+            Command::Query("select 1".into())
+        );
         assert_eq!(parse_command(b"\x01"), Command::Quit);
         assert_eq!(parse_command(b"\x0e"), Command::Ping);
         assert_eq!(parse_command(b"\x02bank"), Command::InitDb("bank".into()));
@@ -372,7 +403,11 @@ mod tests {
     fn an_error_packet_keeps_the_sqlstate_and_the_niles_code() {
         // Flattening a conservation error into a generic syntax error would tell the user
         // the one thing that is certainly false about their program.
-        let e = err(1064, "42000", "[NL0300] this transaction does not conserve `usd`");
+        let e = err(
+            1064,
+            "42000",
+            "[NL0300] this transaction does not conserve `usd`",
+        );
         assert_eq!(e[0], 0xff);
         assert_eq!(u16::from_le_bytes([e[1], e[2]]), 1064);
         assert_eq!(e[3], b'#');

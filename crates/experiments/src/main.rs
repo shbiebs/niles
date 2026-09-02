@@ -17,11 +17,10 @@
 use std::fmt::Write as _;
 use std::fs;
 
-use proto_engine::{
-    CostModel, EvictionPolicy, Ledger, Minor, PartialView, Posting, Reject, Row, ViewMode,
-    Zipf,
-};
 use proto_engine::workload::Lcg;
+use proto_engine::{
+    CostModel, EvictionPolicy, Ledger, Minor, PartialView, Posting, Reject, Row, ViewMode, Zipf,
+};
 
 const USD: u32 = 840;
 
@@ -36,7 +35,11 @@ fn median(mut v: Vec<f64>) -> f64 {
         return 0.0;
     }
     let n = v.len();
-    if n % 2 == 1 { v[n / 2] } else { (v[n / 2 - 1] + v[n / 2]) / 2.0 }
+    if n % 2 == 1 {
+        v[n / 2]
+    } else {
+        (v[n / 2 - 1] + v[n / 2]) / 2.0
+    }
 }
 
 fn minmax(v: &[f64]) -> (f64, f64) {
@@ -62,10 +65,24 @@ fn fund(ledger: &mut Ledger, n_accounts: u64, amount: Minor) {
         let hi = (a + batch).min(n_accounts);
         let mut rows = Vec::new();
         for x in a..hi {
-            rows.push(Row::Post(Posting { txn: 1_000_000 + x, acct: x, cur: USD, amt: amount, valid: 0 }));
-            rows.push(Row::Post(Posting { txn: 1_000_000 + x, acct: u64::MAX, cur: USD, amt: -amount, valid: 0 }));
+            rows.push(Row::Post(Posting {
+                txn: 1_000_000 + x,
+                acct: x,
+                cur: USD,
+                amt: amount,
+                valid: 0,
+            }));
+            rows.push(Row::Post(Posting {
+                txn: 1_000_000 + x,
+                acct: u64::MAX,
+                cur: USD,
+                amt: -amount,
+                valid: 0,
+            }));
         }
-        ledger.submit(&format!("fund-{b}"), rows).expect("funding must be admitted");
+        ledger
+            .submit(&format!("fund-{b}"), rows)
+            .expect("funding must be admitted");
         a = hi;
         b += 1;
     }
@@ -74,8 +91,20 @@ fn fund(ledger: &mut Ledger, n_accounts: u64, amount: Minor) {
 /// One transfer between two accounts, balanced per currency.
 fn transfer(ledger: &mut Ledger, key: &str, txn: u64, from: u64, to: u64, amt: Minor) -> bool {
     let rows = vec![
-        Row::Post(Posting { txn, acct: from, cur: USD, amt: -amt, valid: 0 }),
-        Row::Post(Posting { txn, acct: to, cur: USD, amt, valid: 0 }),
+        Row::Post(Posting {
+            txn,
+            acct: from,
+            cur: USD,
+            amt: -amt,
+            valid: 0,
+        }),
+        Row::Post(Posting {
+            txn,
+            acct: to,
+            cur: USD,
+            amt,
+            valid: 0,
+        }),
     ];
     ledger.submit(key, rows).is_ok()
 }
@@ -131,7 +160,13 @@ fn e1_correctness(seeds: &[u64]) -> Vec<E1Row> {
                 let replay = format!("t-{seed}-{}", i - 1);
                 let r = ledger.submit(
                     &replay,
-                    vec![Row::Post(Posting { txn: 0, acct: 0, cur: USD, amt: 0, valid: 0 })],
+                    vec![Row::Post(Posting {
+                        txn: 0,
+                        acct: 0,
+                        cur: USD,
+                        amt: 0,
+                        valid: 0,
+                    })],
                 );
                 if r == Err(Reject::Duplicate) {
                     idempotent_rejects += 1;
@@ -264,10 +299,14 @@ fn e2_duality(seeds: &[u64]) -> (u64, u64) {
                 rebuilt[*k] += *w;
             }
             // Canonical Z-set comparison at every epoch: equal supports and weights.
-            let a: Vec<(usize, i64)> =
-                (0..n_keys).filter(|k| s[*k] != 0).map(|k| (k, s[k])).collect();
-            let b: Vec<(usize, i64)> =
-                (0..n_keys).filter(|k| rebuilt[*k] != 0).map(|k| (k, rebuilt[k])).collect();
+            let a: Vec<(usize, i64)> = (0..n_keys)
+                .filter(|k| s[*k] != 0)
+                .map(|k| (k, s[k]))
+                .collect();
+            let b: Vec<(usize, i64)> = (0..n_keys)
+                .filter(|k| rebuilt[*k] != 0)
+                .map(|k| (k, rebuilt[k]))
+                .collect();
             if a != b {
                 mismatches += 1;
             }
@@ -332,14 +371,25 @@ fn run_workload(
 
     // Arrival rate proxy for the delayed-hit term: how many requests are expected to arrive
     // for the same key during one reconstruction. Zero unless a service time is configured.
-    let arrivals_during_fill = if service_time > 0.0 { service_time * read_fraction * 10.0 } else { 0.0 };
+    let arrivals_during_fill = if service_time > 0.0 {
+        service_time * read_fraction * 10.0
+    } else {
+        0.0
+    };
 
     for i in 0..n_ops {
         let is_read = rng.next_f64() < read_fraction;
         if is_read {
             let a = zipf.sample() as u64;
             let anchor = ledger.head();
-            view.read(&mut ledger, a, USD, anchor, service_time, arrivals_during_fill);
+            view.read(
+                &mut ledger,
+                a,
+                USD,
+                anchor,
+                service_time,
+                arrivals_during_fill,
+            );
         } else {
             let from = zipf.sample() as u64;
             let mut to = zipf.sample() as u64;
@@ -390,12 +440,28 @@ fn e3_memory_vs_skew(seeds: &[u64]) -> String {
         let mut hitrates = Vec::new();
         for &seed in seeds {
             let p = run_workload(
-                seed, n_accounts, s, n_ops, 0.9, ViewMode::Demand, budget, EvictionPolicy::Lru,
-                &cm, 0.0,
+                seed,
+                n_accounts,
+                s,
+                n_ops,
+                0.9,
+                ViewMode::Demand,
+                budget,
+                EvictionPolicy::Lru,
+                &cm,
+                0.0,
             );
             let f = run_workload(
-                seed, n_accounts, s, n_ops, 0.9, ViewMode::Full, usize::MAX,
-                EvictionPolicy::Lru, &cm, 0.0,
+                seed,
+                n_accounts,
+                s,
+                n_ops,
+                0.9,
+                ViewMode::Full,
+                usize::MAX,
+                EvictionPolicy::Lru,
+                &cm,
+                0.0,
             );
             let ratio = p.peak_resident as f64 / f.peak_resident.max(1) as f64;
             let hr = p.hits as f64 / (p.hits + p.misses).max(1) as f64;
@@ -446,12 +512,28 @@ fn e4_phase_diagram(seeds: &[u64]) -> String {
             let mut fs = Vec::new();
             for &seed in seeds {
                 ps.push(run_workload(
-                    seed, n_accounts, s, n_ops, 0.9, ViewMode::Demand, budget,
-                    EvictionPolicy::Lru, &CostModel::default(), 0.0,
+                    seed,
+                    n_accounts,
+                    s,
+                    n_ops,
+                    0.9,
+                    ViewMode::Demand,
+                    budget,
+                    EvictionPolicy::Lru,
+                    &CostModel::default(),
+                    0.0,
                 ));
                 fs.push(run_workload(
-                    seed, n_accounts, s, n_ops, 0.9, ViewMode::Full, usize::MAX,
-                    EvictionPolicy::Lru, &CostModel::default(), 0.0,
+                    seed,
+                    n_accounts,
+                    s,
+                    n_ops,
+                    0.9,
+                    ViewMode::Full,
+                    usize::MAX,
+                    EvictionPolicy::Lru,
+                    &CostModel::default(),
+                    0.0,
                 ));
             }
             grid.push((bf, s, ps, fs));
@@ -512,8 +594,13 @@ fn e4_phase_diagram(seeds: &[u64]) -> String {
             writeln!(
                 csv,
                 "{s},{bf},{},{},{},{},{},{},{},{hr:.4}",
-                seeds[i], p.resident_entry_epochs, f.resident_entry_epochs,
-                p.rows_touched, f.rows_touched, p.deltas_applied, f.deltas_applied
+                seeds[i],
+                p.resident_entry_epochs,
+                f.resident_entry_epochs,
+                p.rows_touched,
+                f.rows_touched,
+                p.deltas_applied,
+                f.deltas_applied
             )
             .ok();
         }
@@ -527,9 +614,8 @@ fn e4_phase_diagram(seeds: &[u64]) -> String {
 // ---------------------------------------------------------------------------------------
 
 fn e5_history_independence(seeds: &[u64]) -> String {
-    let mut csv = String::from(
-        "n_epochs,seed,indexed_rows_per_read,scan_rows_per_read,key_updates_mean\n",
-    );
+    let mut csv =
+        String::from("n_epochs,seed,indexed_rows_per_read,scan_rows_per_read,key_updates_mean\n");
     println!("\n  History-independence: base rows read per reconstruction, workload shape fixed");
     println!("     ledger epochs   indexed (median)   unindexed scan (median)");
 
@@ -606,13 +692,26 @@ fn e6_eviction_policies(seeds: &[u64]) -> String {
     println!("     service_time  policy        misses(median)  rows_touched(median)  aggregate_delay(median)");
     let cm = CostModel::default();
     for st in [0.0f64, 1.0, 4.0] {
-        for policy in [EvictionPolicy::Random, EvictionPolicy::Lru, EvictionPolicy::CostAware] {
+        for policy in [
+            EvictionPolicy::Random,
+            EvictionPolicy::Lru,
+            EvictionPolicy::CostAware,
+        ] {
             let mut misses = Vec::new();
             let mut rows = Vec::new();
             let mut delay = Vec::new();
             for &seed in seeds {
                 let r = run_workload(
-                    seed, 10_000, 0.9, 40_000, 0.9, ViewMode::Demand, 500, policy, &cm, st,
+                    seed,
+                    10_000,
+                    0.9,
+                    40_000,
+                    0.9,
+                    ViewMode::Demand,
+                    500,
+                    policy,
+                    &cm,
+                    st,
                 );
                 misses.push(r.misses as f64);
                 rows.push(r.rows_touched as f64);
@@ -659,14 +758,22 @@ fn e7_write_path(seeds: &[u64]) -> String {
         for hot_share in [0.0f64, 0.5, 0.9] {
             let mut rates = Vec::new();
             for &seed in seeds {
-                let mut ledger = if chaining { Ledger::new() } else { Ledger::without_chaining() };
+                let mut ledger = if chaining {
+                    Ledger::new()
+                } else {
+                    Ledger::without_chaining()
+                };
                 fund(&mut ledger, n_accounts as u64, 1_000_000_000);
                 let mut rng = Lcg::new(seed);
                 let t0 = Instant::now();
                 for i in 0..n_writes {
                     // A share of transfers touches a single hot settlement account — the
                     // structural hot key that double-entry creates at scale.
-                    let from = if rng.next_f64() < hot_share { 0 } else { rng.below(n_accounts) as u64 };
+                    let from = if rng.next_f64() < hot_share {
+                        0
+                    } else {
+                        rng.below(n_accounts) as u64
+                    };
                     let mut to = rng.below(n_accounts) as u64;
                     if to == from {
                         to = (to + 1) % n_accounts as u64;
@@ -684,7 +791,10 @@ fn e7_write_path(seeds: &[u64]) -> String {
                 )
                 .ok();
             }
-            println!("     {label:<14}  {hot_share:>8.1}   {:>20.0}", median(rates));
+            println!(
+                "     {label:<14}  {hot_share:>8.1}   {:>20.0}",
+                median(rates)
+            );
         }
     }
     csv
@@ -708,7 +818,11 @@ fn e8_consistency_rungs(seeds: &[u64]) -> String {
     let n_ops = 40_000usize;
     let budget = 500usize;
 
-    for (rung, k) in [("bounded(k=64)", 64u64), ("bounded(k=8)", 8), ("strict(k=0)", 0)] {
+    for (rung, k) in [
+        ("bounded(k=64)", 64u64),
+        ("bounded(k=8)", 8),
+        ("strict(k=0)", 0),
+    ] {
         let mut misses = Vec::new();
         let mut rows = Vec::new();
         let mut hitrates = Vec::new();
@@ -791,16 +905,19 @@ fn e8_consistency_rungs(seeds: &[u64]) -> String {
 // ---------------------------------------------------------------------------------------
 
 fn e9_history_refined(seeds: &[u64]) -> String {
-    let mut csv = String::from(
-        "n_writes,n_accounts,seed,rows_per_read,key_updates_mean,epochs\n",
-    );
+    let mut csv = String::from("n_writes,n_accounts,seed,rows_per_read,key_updates_mean,epochs\n");
     println!("\n  Refined test: key space grows with history, so per-key updates stay fixed");
-    println!("     writes    accounts   rows read/reconstruction (median)   per-key updates (median)");
+    println!(
+        "     writes    accounts   rows read/reconstruction (median)   per-key updates (median)"
+    );
 
     // writes / accounts held at a constant ratio, so mean per-key update count is constant.
-    for (n_writes, n_accounts) in
-        [(5_000usize, 500usize), (20_000, 2_000), (80_000, 8_000), (320_000, 32_000)]
-    {
+    for (n_writes, n_accounts) in [
+        (5_000usize, 500usize),
+        (20_000, 2_000),
+        (80_000, 8_000),
+        (320_000, 32_000),
+    ] {
         let mut per_read = Vec::new();
         let mut per_key = Vec::new();
         for &seed in seeds {
@@ -831,7 +948,12 @@ fn e9_history_refined(seeds: &[u64]) -> String {
             let ku = updates as f64 / n_probes as f64;
             per_read.push(rpr);
             per_key.push(ku);
-            writeln!(csv, "{n_writes},{n_accounts},{seed},{rpr:.2},{ku:.2},{}", ledger.len()).ok();
+            writeln!(
+                csv,
+                "{n_writes},{n_accounts},{seed},{rpr:.2},{ku:.2},{}",
+                ledger.len()
+            )
+            .ok();
         }
         println!(
             "     {n_writes:>6}    {n_accounts:>8}   {:>32.1}   {:>24.1}",
@@ -871,8 +993,11 @@ fn e10_checkpoints(seeds: &[u64]) -> String {
         for c in intervals {
             let mut per_read = Vec::new();
             for &seed in seeds {
-                let mut ledger =
-                    if c == 0 { Ledger::new() } else { Ledger::with_checkpoints(c) };
+                let mut ledger = if c == 0 {
+                    Ledger::new()
+                } else {
+                    Ledger::with_checkpoints(c)
+                };
                 fund(&mut ledger, n_accounts as u64, 1_000_000);
                 let mut zipf = Zipf::new(n_accounts, 0.9, seed);
                 let mut txn = 0u64;
@@ -917,27 +1042,35 @@ fn main() {
     println!("=======================================================================");
 
     if want("e1") {
-    println!("\n[E1] Correctness under adversarial interleaving");
-    let e1 = e1_correctness(&seeds);
-    let mut e1csv = String::from(
+        println!("\n[E1] Correctness under adversarial interleaving");
+        let e1 = e1_correctness(&seeds);
+        let mut e1csv = String::from(
         "seed,transfers,upqueries,evictions,view_oracle_divergences,conservation_ok,chain_ok,rebuild_mismatches,miss_not_zero_ok,idempotent_rejects\n",
     );
-    let mut all_ok = true;
-    for r in &e1 {
-        writeln!(
-            e1csv,
-            "{},{},{},{},{},{},{},{},{},{}",
-            r.seed, r.transfers, r.upqueries, r.evictions, r.divergences, r.conservation_ok,
-            r.chain_ok, r.rebuild_mismatches, r.miss_not_zero_ok, r.idempotent_rejects
-        )
-        .ok();
-        let ok = r.divergences == 0
-            && r.conservation_ok
-            && r.chain_ok
-            && r.rebuild_mismatches == 0
-            && r.miss_not_zero_ok;
-        all_ok &= ok;
-        println!(
+        let mut all_ok = true;
+        for r in &e1 {
+            writeln!(
+                e1csv,
+                "{},{},{},{},{},{},{},{},{},{}",
+                r.seed,
+                r.transfers,
+                r.upqueries,
+                r.evictions,
+                r.divergences,
+                r.conservation_ok,
+                r.chain_ok,
+                r.rebuild_mismatches,
+                r.miss_not_zero_ok,
+                r.idempotent_rejects
+            )
+            .ok();
+            let ok = r.divergences == 0
+                && r.conservation_ok
+                && r.chain_ok
+                && r.rebuild_mismatches == 0
+                && r.miss_not_zero_ok;
+            all_ok &= ok;
+            println!(
             "  seed {:>5}: {} transfers, {} upqueries, {} evictions | divergences={} conservation={} chain={} rebuild_mismatches={} miss!=0={} idem_rejects={}",
             r.seed, r.transfers, r.upqueries, r.evictions, r.divergences,
             if r.conservation_ok { "OK" } else { "FAIL" },
@@ -946,66 +1079,83 @@ fn main() {
             if r.miss_not_zero_ok { "OK" } else { "FAIL" },
             r.idempotent_rejects
         );
-    }
-    let tamper = e1_tamper();
-    println!("  tamper detection: {}", if tamper { "OK (chain broke on mutation)" } else { "FAIL" });
-    println!("  E1 verdict: {}", if all_ok && tamper { "ALL CHECKS PASSED" } else { "FAILURE PRESENT" });
-    out("e1_correctness.csv", &e1csv);
+        }
+        let tamper = e1_tamper();
+        println!(
+            "  tamper detection: {}",
+            if tamper {
+                "OK (chain broke on mutation)"
+            } else {
+                "FAIL"
+            }
+        );
+        println!(
+            "  E1 verdict: {}",
+            if all_ok && tamper {
+                "ALL CHECKS PASSED"
+            } else {
+                "FAILURE PRESENT"
+            }
+        );
+        out("e1_correctness.csv", &e1csv);
     }
 
     if want("e2") {
-    println!("\n[E2] Stream-relation duality (I and D round-trip, canonical Z-set equality)");
-    let (checked, mismatch) = e2_duality(&seeds);
-    println!("  epochs compared: {checked}   mismatches: {mismatch}");
-    out("e2_duality.csv", &format!("epochs_compared,mismatches\n{checked},{mismatch}\n"));
+        println!("\n[E2] Stream-relation duality (I and D round-trip, canonical Z-set equality)");
+        let (checked, mismatch) = e2_duality(&seeds);
+        println!("  epochs compared: {checked}   mismatches: {mismatch}");
+        out(
+            "e2_duality.csv",
+            &format!("epochs_compared,mismatches\n{checked},{mismatch}\n"),
+        );
     }
 
     if want("e3") {
-    println!("\n[E3] Resident state: partial vs full materialization across skew");
-    let e3 = e3_memory_vs_skew(&seeds);
-    out("e3_memory_vs_skew.csv", &e3);
+        println!("\n[E3] Resident state: partial vs full materialization across skew");
+        let e3 = e3_memory_vs_skew(&seeds);
+        out("e3_memory_vs_skew.csv", &e3);
     }
 
     if want("e4") {
-    println!("\n[E4] Phase diagram");
-    let e4 = e4_phase_diagram(&seeds);
-    out("e4_phase.csv", &e4);
+        println!("\n[E4] Phase diagram");
+        let e4 = e4_phase_diagram(&seeds);
+        out("e4_phase.csv", &e4);
     }
 
     if want("e5") {
-    println!("\n[E5] History-independence");
-    let e5 = e5_history_independence(&seeds);
-    out("e5_history.csv", &e5);
+        println!("\n[E5] History-independence");
+        let e5 = e5_history_independence(&seeds);
+        out("e5_history.csv", &e5);
     }
 
     if want("e6") {
-    println!("\n[E6] Eviction policies under reconstruction latency");
-    let e6 = e6_eviction_policies(&seeds);
-    out("e6_policies.csv", &e6);
+        println!("\n[E6] Eviction policies under reconstruction latency");
+        let e6 = e6_eviction_policies(&seeds);
+        out("e6_policies.csv", &e6);
     }
 
     if want("e7") {
-    println!("\n[E7] Write path");
-    let e7 = e7_write_path(&seeds);
-    out("e7_write_path.csv", &e7);
+        println!("\n[E7] Write path");
+        let e7 = e7_write_path(&seeds);
+        out("e7_write_path.csv", &e7);
     }
 
     if want("e10") {
-    println!("\n[E10] Checkpointed reconstruction");
-    let e10 = e10_checkpoints(&seeds);
-    out("e10_checkpoints.csv", &e10);
+        println!("\n[E10] Checkpointed reconstruction");
+        let e10 = e10_checkpoints(&seeds);
+        out("e10_checkpoints.csv", &e10);
     }
 
     if want("e9") {
-    println!("\n[E9] History-independence, refined");
-    let e9 = e9_history_refined(&seeds);
-    out("e9_history_refined.csv", &e9);
+        println!("\n[E9] History-independence, refined");
+        let e9 = e9_history_refined(&seeds);
+        out("e9_history_refined.csv", &e9);
     }
 
     if want("e8") {
-    println!("\n[E8] Consistency rungs");
-    let e8 = e8_consistency_rungs(&seeds);
-    out("e8_rungs.csv", &e8);
+        println!("\n[E8] Consistency rungs");
+        let e8 = e8_consistency_rungs(&seeds);
+        out("e8_rungs.csv", &e8);
     }
 
     println!("\nAll CSV artifacts written to results/.");

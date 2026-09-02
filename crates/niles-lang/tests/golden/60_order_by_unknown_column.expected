@@ -1,0 +1,6 @@
+# 60_order_by_unknown_column
+# **Refused, where it used to be ignored.** An `order by` key that resolves to nothing was
+# dropped by a `filter_map`, and the zip that fed it truncated every key after the first
+# unresolvable one — so `order by nope, k` ordered by nothing and said so nowhere. An
+# ordering the engine cannot perform is a different query from the one that was written.
+REFUSED NL0509

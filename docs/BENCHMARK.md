@@ -251,6 +251,14 @@ The coverage difference is printed under the results table, derived from the sam
 | `count(*)` | `*` is not a column, and the aggregate lowering resolves its argument as one (NL0502) |
 | `count(distinct acct)` | `distinct` is a stage in this fragment, not an aggregate modifier |
 
+`order by sum(amt) desc` used to be a third row here, and its removal is a defect report
+rather than a widening. The stated reason — "`order by` resolves against the input schema" —
+described the code truthfully and described its behaviour falsely: the key list came out
+*empty*, and `nilestreamd` answered the query with the wrong ten rows and no diagnostic. The
+benchmark skipped a statement the server was quietly getting wrong. `order by` now resolves
+against the output schema (so an aggregate and a projection alias both work) and refuses
+NL0509 when a key resolves to nothing, in both surfaces.
+
 Widening the fragment during a benchmark would be tuning the artifact to the measurement.
 Averaging over a statement one side cannot express is worse, because it looks like a
 comparison.

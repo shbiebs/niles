@@ -127,6 +127,9 @@ pub fn verify(c: &Circuit) -> VerifyReport {
         }
     }
 
+    // ---- every operator in the circuit has an implementation ----
+    r.violations.extend(unevaluable(c, crate::eval::implements));
+
     // ---- semantic: the invariants the theorems assume ----
     for n in &c.nodes {
         let contract = n.contract.get();
@@ -319,6 +322,33 @@ pub fn verify(c: &Circuit) -> VerifyReport {
     r
 }
 
+/// **Operators the circuit contains and the evaluator cannot evaluate.**
+///
+/// Takes the predicate rather than calling [`crate::eval::implements`] directly, so a test
+/// can hold the *rule* — "an operator with no arm is refused" — rather than only the current
+/// answer. With every variant implemented the rule is unobservable from outside, and a rule
+/// nothing can observe is a rule nothing is holding.
+///
+/// The class this exists for: `RIGHT` and `FULL` joins once evaluated to nothing at all and
+/// `CROSS` answered the equi-join, and all three parsed, lowered and passed this verifier.
+/// Type coherence, effect rows, contract feasibility and guardedness were all checked; that
+/// the operator had somewhere to go was not.
+pub fn unevaluable(c: &Circuit, implemented: impl Fn(&Op) -> bool) -> Vec<Violation> {
+    c.nodes
+        .iter()
+        .filter(|n| !implemented(&n.op))
+        .map(|n| Violation {
+            code: "IR021",
+            node: Some(n.id),
+            msg: format!(
+                "`{}` has no arm in the reference evaluator, so a circuit containing it has \
+                 no denotation to be checked against",
+                n.op.name()
+            ),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,6 +362,43 @@ mod tests {
             retain: r,
             lineage: Lineage::Off,
         }
+    }
+
+    #[test]
+    fn an_operator_with_no_evaluator_arm_is_refused_before_it_can_answer_wrongly() {
+        // The rule, held against a predicate rather than against today's answer: every
+        // variant is implemented, so with the real predicate this check can never fire and a
+        // test of the real predicate would be a test of nothing.
+        //
+        // Why the rule earns its place: `RIGHT` and `FULL` joins once evaluated to *nothing
+        // at all* and `CROSS` answered the equi-join, and all three parsed, lowered and
+        // passed this verifier — which checked types, effects, contracts and guardedness,
+        // and not whether the operator it was letting through had anywhere to go.
+        let c = base_circuit(contract(
+            Consistency::Snapshot,
+            Materialize::Full,
+            Retention::Forever,
+        ));
+        assert!(
+            unevaluable(&c, crate::eval::implements).is_empty(),
+            "every operator this compiler emits is implemented today"
+        );
+
+        let missing = unevaluable(&c, |op| !matches!(op, Op::Aggregate { .. }));
+        assert_eq!(
+            missing.len(),
+            1,
+            "an operator with no arm must be named, not passed"
+        );
+        assert_eq!(missing[0].code, "IR021");
+        assert!(
+            missing[0].msg.contains("no denotation"),
+            "the reason a reader needs is *why* it matters: {}",
+            missing[0].msg
+        );
+
+        // And it reaches `verify` rather than sitting in a helper nobody calls.
+        assert!(verify(&c).is_ok());
     }
 
     fn base_circuit(view_contract: ServeContract) -> Circuit {

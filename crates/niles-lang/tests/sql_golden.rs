@@ -307,9 +307,15 @@ fn the_two_surfaces_denote_the_same_zset_wherever_both_are_written() {
     // cases stopped being compared. The list is printed and its length is bounded, so
     // adding a case that silently opts out of the comparison fails here.
     assert!(
-        skipped.len() <= 32,
+        skipped.len() <= 34,
         "{} cases are skipped by this comparison, which is more than the corpus leaves \
-         uncompared today (32: thirty written in one surface, two refused in both):\n{}",
+         uncompared today (34: thirty-two written in one surface, two refused in both). The \
+         two most recent are `58_order_by_aggregate` and `59_order_by_alias`, and the reason \
+         is a gap in the *pipeline* surface rather than in the corpus: its `order_by` stage \
+         has no descending spelling — `key_of` maps every key to `(k, true)` — so the case \
+         that discriminates a working `order by` from a silently empty one cannot be \
+         written there. An ascending one cannot: the broken lowering and a correct \
+         ascending sort pick the same rows:\n{}",
         skipped.len(),
         skipped.join("\n")
     );

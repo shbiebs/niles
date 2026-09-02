@@ -89,4 +89,5 @@ pub fn truth(v: Value) -> Tri
 pub struct Violation
 pub struct VerifyReport
 pub fn verify(c: &Circuit) -> VerifyReport
+pub fn unevaluable(c: &Circuit, implemented: impl Fn(&Op) -> bool) -> Vec<Violation>
 ```

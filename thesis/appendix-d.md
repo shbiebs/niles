@@ -20,11 +20,11 @@ component is for is not derivable from its source.
 
 | Crate | Role | public items |
 |---|---|--:|
-| `bank-bench` | NilesBank generator, wall-clock harness, thesis drift tests | 25 |
+| `bank-bench` | NilesBank generator, wall-clock harness, thesis drift tests | 34 |
 | `conservation-suite` | Reference oracle and the conservation property tests | 23 |
 | `experiments` | The E-series measurement harness | 0 |
 | `niles-interp` | The imperative-subset interpreter `nilesc run` drives, and the ledger it posts to | 16 |
-| `niles-ir` | Typed IR: circuit types, verifier, reference interpreter, upquery paths | 39 |
+| `niles-ir` | Typed IR: circuit types, verifier, reference interpreter, upquery paths | 40 |
 | `niles-lang` | Stage-0 compiler: lexer, parser, type/effect checker, lowering; SQL surface | 133 |
 | `nilesc` | The compiler driver: `check`, `verify`, `run` | 0 |
 | `nilestream` | The engine binary: sweep and serve | 0 |
@@ -137,6 +137,7 @@ pub fn truth(v: Value) -> Tri
 pub struct Violation
 pub struct VerifyReport
 pub fn verify(c: &Circuit) -> VerifyReport
+pub fn unevaluable(c: &Circuit, implemented: impl Fn(&Op) -> bool) -> Vec<Violation>
 ```
 
 <!-- END:appendix-d-api -->

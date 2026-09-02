@@ -382,13 +382,16 @@ pub const ANALYTICAL_BLOCKED: &[(&str, &str)] = &[
         "`distinct` inside an aggregate is a second aggregation over a de-duplicated \
          multiset; the fragment has `distinct` as a stage and not as an aggregate modifier.",
     ),
-    (
-        "top_ten_by_sum",
-        "ordering by an aggregate names an output column the `order by` lowering resolves \
-         against the *input* schema, which is the choice that lets `order by` name a column \
-         the query does not select.",
-    ),
 ];
+
+// **The entry that used to sit here is the finding.** `order by sum(amt) desc` was listed as
+// outside the lowered fragment, with the reason "the `order by` lowering resolves against the
+// *input* schema, which is the choice that lets `order by` name a column the query does not
+// select". That was a true description of the code and a false description of what the code
+// did: the key list came out *empty*, the `limit` above it took rows in the rows' own
+// lexicographic order, and `nilestreamd` answered the query with the wrong ten rows and no
+// diagnostic at all. A benchmark skipping a statement is a coverage note; a server answering
+// it wrongly is a defect, and both wore this entry.
 
 /// Why a statement is not in the common set, or `None` if it is.
 pub fn analytical_blocked_reason(id: &str) -> Option<&'static str> {

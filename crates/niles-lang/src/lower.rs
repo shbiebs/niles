@@ -541,11 +541,45 @@ impl<'a> Lx<'a> {
             }
             StageKind::Distinct | StageKind::DistinctBy => (Op::Distinct, in_schema.clone()),
             StageKind::OrderBy => {
-                let keys = self
-                    .key_of(input, args)
-                    .into_iter()
-                    .map(|k| (k, true))
-                    .collect();
+                // **Resolve or refuse, exactly as the SQL surface does.** `key_of`
+                // `filter_map`s away a name it cannot resolve, so `t.order_by(|r| r.nope)`
+                // produced an ordering stage with no ordering and a `limit` above it took
+                // rows in the rows' own lexicographic order — the wrong rows, with no
+                // diagnostic. The two surfaces must lower identically or the generality
+                // claim is marketing, and that includes how they fail.
+                let mut names = Vec::new();
+                if let Some(a) = args.first() {
+                    collect_field_names(&a.value, &mut names);
+                }
+                if names.is_empty() {
+                    self.d.push(
+                        Diagnostic::error("NL0509", "`order_by` names no column")
+                            .primary(name.span, "no column can be resolved from this key")
+                            .note(
+                                "the stage orders by columns of its input; an arbitrary \
+                                 expression would have to be mapped first",
+                            ),
+                    );
+                    return None;
+                }
+                let mut keys = Vec::with_capacity(names.len());
+                for n in &names {
+                    let Some(i) = self.col_index(input, n) else {
+                        self.d.push(
+                            Diagnostic::error(
+                                "NL0509",
+                                format!("`order_by` names no column `{n}`"),
+                            )
+                            .primary(name.span, "not a column of this stage's input")
+                            .note(format!(
+                                "the columns available here are: {}",
+                                in_schema.join(", ")
+                            )),
+                        );
+                        return None;
+                    };
+                    keys.push((i, true));
+                }
                 (Op::OrderBy { keys }, in_schema.clone())
             }
             StageKind::Limit => {
@@ -997,7 +1031,15 @@ impl<'a> Lx<'a> {
         // `sum(v)` lowered to an uncertified UDF call: `select sum(v) from t` answered
         // `0` once per row.
         let has_aggregate = s.projections.iter().any(|(e, _)| aggregate_of(e).is_some());
+        // `(aggregate, argument) -> output column`, for an `order by` that names an
+        // aggregate rather than a column. Empty for a query with no aggregate.
+        let mut agg_columns: Vec<((Agg, Scalar), ColIdx)> = Vec::new();
+        // The node the aggregate's arguments were lowered against. `order by sum(amt)` has
+        // to lower `amt` the same way, or the two `Scalar`s would not compare equal and a
+        // key that names an aggregate the query does compute would be refused.
+        let mut agg_input = cur;
         if !s.group_by.is_empty() || has_aggregate {
+            agg_input = cur;
             let in_schema = self.schema_of(cur).to_vec();
             let mut names = Vec::new();
             for g in &s.group_by {
@@ -1009,11 +1051,20 @@ impl<'a> Lx<'a> {
                 .collect();
             // The aggregate in the projection list.
             let mut aggs = Vec::new();
-            for (e, _) in &s.projections {
+            // The name each aggregate column carries in the output schema, in the same order
+            // as `aggs`. An alias when the projection wrote one, so `sum(amt) as total`
+            // produces a column called `total` — which is both what a client should be sent
+            // and what an `order by total` has to be able to resolve against.
+            let mut agg_names: Vec<String> = Vec::new();
+            for (e, alias) in &s.projections {
                 if let Expr::Call { args, .. } = e {
                     {
                         let agg = aggregate_of(e);
                         if let Some(a) = agg {
+                            agg_names.push(match alias {
+                                Some(n) => n.text.clone(),
+                                None => a.as_str().to_string(),
+                            });
                             // The SQL surface's copy of the same defect the pipeline
                             // surface had: `unwrap_or(Scalar::Column(0))` aggregated the
                             // first column of the input and labelled the result `sum`.
@@ -1049,7 +1100,15 @@ impl<'a> Lx<'a> {
                 .iter()
                 .filter_map(|i| in_schema.get(*i as usize).cloned())
                 .collect();
-            out.extend(aggs.iter().map(|(a, _)| a.as_str().to_string()));
+            let key_width = out.len();
+            out.extend(agg_names.iter().cloned());
+            // Remembered for `order by`, which has to be able to say *which* aggregate a key
+            // names when two of them share a kind.
+            agg_columns = aggs
+                .iter()
+                .enumerate()
+                .map(|(i, (a, v))| ((*a, v.clone()), (key_width + i) as ColIdx))
+                .collect();
             let id = self
                 .circuit
                 .add(Op::Aggregate { group_key, aggs }, vec![cur], c, "group by");
@@ -1070,16 +1129,95 @@ impl<'a> Lx<'a> {
         // decision rather than a change of denotation; `limit` follows the projection,
         // which is where it belongs.
         if !s.order_by.is_empty() {
-            let mut names = Vec::new();
-            for (e, _) in &s.order_by {
+            // **Every key resolves, or the query is refused.**
+            //
+            // This built a name list with `collect_field_names`, zipped it against the keys
+            // and `filter_map`ped away whatever did not resolve. `collect_field_names`
+            // yields nothing for a call expression, so `order by sum(amt) desc` produced
+            // `OrderBy { keys: [] }` — an ordering stage with no ordering — the `Limit` above
+            // it then took the first ten rows in the rows' own lexicographic order, and the
+            // server returned *the wrong ten rows with no diagnostic*. The zip made it worse
+            // than a dropped key: one unresolvable key truncated every key after it.
+            //
+            // A silent fallback is the one failure this project's read of "honest refusal"
+            // forbids outright, so the choice here is resolve or refuse, and nothing between.
+            let mut keys: Vec<(ColIdx, bool)> = Vec::with_capacity(s.order_by.len());
+            for (e, asc) in &s.order_by {
+                // An aggregate key names an *output* column: `order by sum(amt)` is the
+                // column the aggregate produced, matched by kind and by argument so that
+                // `order by sum(fee)` cannot resolve to `sum(amt)` when a query has both.
+                if let Some(a) = aggregate_of(e) {
+                    let arg = match e {
+                        Expr::Call { args, .. } => args.first().map(|x| &x.value),
+                        _ => None,
+                    };
+                    let lowered = arg.and_then(|x| self.scalar(agg_input, x));
+                    let found = lowered.and_then(|v| {
+                        agg_columns
+                            .iter()
+                            .find(|((ka, kv), _)| *ka == a && *kv == v)
+                            .map(|(_, i)| *i)
+                    });
+                    match found {
+                        Some(i) => {
+                            keys.push((i, *asc));
+                            continue;
+                        }
+                        None => {
+                            self.d.push(
+                                Diagnostic::error(
+                                    "NL0509",
+                                    format!(
+                                        "`order by {}(…)` names an aggregate this query does \
+                                         not compute",
+                                        a.as_str()
+                                    ),
+                                )
+                                .primary(e.span(), "no output column holds this aggregate")
+                                .note(
+                                    "ordering by an aggregate is ordering by a column of the \
+                                     result, so the same aggregate over the same expression \
+                                     must appear in the projection",
+                                ),
+                            );
+                            return None;
+                        }
+                    }
+                }
+                // Otherwise a name: an output column first — which is where an alias lives —
+                // then an input column, because SQL permits ordering by a column the query
+                // does not select and that permission is the reason this stage sits before
+                // the projection.
+                let mut names = Vec::new();
                 collect_field_names(e, &mut names);
+                let Some(n) = names.first() else {
+                    self.d.push(
+                        Diagnostic::error(
+                            "NL0509",
+                            "this `order by` key is not a column or an aggregate",
+                        )
+                        .primary(e.span(), "no column can be resolved from this expression")
+                        .note(
+                            "the fragment orders by columns and by aggregates the query \
+                             computes; an arbitrary expression would have to be projected \
+                             first",
+                        ),
+                    );
+                    return None;
+                };
+                let Some(i) = self.col_index(cur, n) else {
+                    self.d.push(
+                        Diagnostic::error("NL0509", format!("`order by {n}` names no column"))
+                            .primary(e.span(), "not a column of this query's result or input")
+                            .note(format!(
+                                "the columns available here are: {}",
+                                self.schema_of(cur).join(", ")
+                            )),
+                    );
+                    return None;
+                };
+                keys.push((i, *asc));
             }
-            let keys: Vec<(ColIdx, bool)> = s
-                .order_by
-                .iter()
-                .zip(names.iter())
-                .filter_map(|((_, asc), n)| self.col_index(cur, n).map(|i| (i, *asc)))
-                .collect();
             let id = self
                 .circuit
                 .add(Op::OrderBy { keys }, vec![cur], c, "order by");

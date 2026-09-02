@@ -1,0 +1,7 @@
+# 59_order_by_alias
+# The same ordering, named through the projection's alias. Two things had to be true for
+# this to work: the aggregate's output column now carries the alias the query wrote (it was
+# called `sum` whatever the query said, so a client was sent a column name nobody asked
+# for), and `order by` resolves against the output schema before the input one.
+1 20 x1
+3 30 x1

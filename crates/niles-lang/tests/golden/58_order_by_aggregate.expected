@@ -1,0 +1,15 @@
+# 58_order_by_aggregate
+# **`order by <aggregate>`, which used to lower to an ordering stage with no keys.**
+#
+# `collect_field_names` yields nothing for a call expression, so the key list came out
+# empty, the `limit` above it took rows in the rows' own lexicographic order, and the query
+# returned the wrong two rows with no diagnostic at all. On this data that is the difference
+# between `k = 3` (the largest sum) and `k = 1` (the smallest key).
+#
+# sums are k=1 -> 20, k=2 -> 20, k=3 -> 30; ordered by the sum descending the first is
+# k = 3, and the tie between k = 1 and k = 2 is broken by the reference semantics' stated
+# rule — the rows' own lexicographic order — so the second is k = 1. The rows are rendered
+# in the Z-set's own order, which is why `k = 1` is printed first: what this case pins down
+# is *which two rows survive the limit*, and before the repair they were k = 1 and k = 2.
+1 20 x1
+3 30 x1

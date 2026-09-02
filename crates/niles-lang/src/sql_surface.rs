@@ -89,6 +89,9 @@ pub static MAPPING: &[Mapping] = &[
     Mapping { sql: "NOT IN with nulls", niles: "(no pipeline spelling)", status: Status::Lowered },         // 39
     Mapping { sql: "EXISTS (correlated)", niles: "(no pipeline spelling)", status: Status::Lowered },       // 37
     Mapping { sql: "ORDER BY x LIMIT n [OFFSET m]", niles: ".order_by(|r| r.x).limit(n)", status: Status::Equivalent }, // 22, 23
+    Mapping { sql: "ORDER BY <aggregate>", niles: "(no pipeline spelling: `order_by` has no descending form)", status: Status::Lowered }, // 58
+    Mapping { sql: "ORDER BY <projection alias>", niles: "(no pipeline spelling: the stages have no aliases)", status: Status::Lowered }, // 59
+    Mapping { sql: "ORDER BY <unknown column>", niles: ".order_by(|r| r.unknown)", status: Status::Refused("NL0509") }, // 60
     Mapping { sql: "LIMIT <non-literal>", niles: ".limit(<non-literal>)", status: Status::Refused("NL0504") }, // 24
     Mapping { sql: "a scalar subquery in the projection list", niles: "(none)", status: Status::Refused("NL0508") }, // 38
     Mapping { sql: "a set operation between different arities", niles: "(none)", status: Status::Refused("NL0512") }, // 27

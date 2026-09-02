@@ -164,6 +164,44 @@ impl std::fmt::Display for EvalError {
 
 impl std::error::Error for EvalError {}
 
+/// **Whether this evaluator has an arm for `op`.**
+///
+/// An exhaustive match, and that is the whole mechanism: adding a variant to [`Op`] does not
+/// compile until someone has said, here, whether the reference semantics can evaluate it.
+/// [`crate::verify`] refuses a circuit containing an operator this returns `false` for, so
+/// the answer is a *gate* rather than a fact about this file that a reader has to go and
+/// check.
+///
+/// The audit that asked for this found three operators the evaluator answered wrongly rather
+/// than not at all — `RIGHT` and `FULL` joins evaluated to nothing, `CROSS` answered the
+/// equi-join — and every one of them parsed, lowered and **passed the verifier**. The
+/// verifier checked types, effects, contracts and guardedness, and nothing about whether an
+/// operator it was letting through had an implementation on the other side. A circuit whose
+/// operator has no arm is not a slow query or a wrong plan: it is a wrong answer with a
+/// clean bill of health, which is the most expensive defect this repository can ship.
+pub fn implements(op: &Op) -> bool {
+    match op {
+        Op::Source { .. }
+        | Op::Filter { .. }
+        | Op::Map { .. }
+        | Op::Join { .. }
+        | Op::Aggregate { .. }
+        | Op::Distinct
+        | Op::Union
+        | Op::Negate
+        | Op::Apply { .. }
+        | Op::Fixpoint { .. }
+        | Op::Delay
+        | Op::OrderBy { .. }
+        | Op::Limit { .. }
+        | Op::Index { .. }
+        | Op::AsOf { .. }
+        | Op::ValidAt { .. }
+        | Op::Integrate
+        | Op::Differentiate => true,
+    }
+}
+
 /// Evaluate a named output and report the counted work.
 pub fn run(c: &Circuit, output: &str, sources: &BTreeMap<String, ZSet>) -> (ZSet, u64) {
     let id = *c

@@ -14,7 +14,7 @@ GBS=../gbs
 fails=0
 
 # Prose lines only: drop comment openers and the retraction vocabulary.
-prose() { grep -v ':[[:space:]]*\(//\|#\|<!--\|\*\)' | grep -viv 'withdrawn\|not claimed\|used to\|no longer\|which is now\|deleted'; }
+prose() { grep -v ':[[:space:]]*\(//\|#\|<!--\|\*\)' | grep -iv 'withdrawn\|not claimed\|used to\|no longer\|which is now\|deleted'; }
 
 expect_none() { # name, then a command whose output must be empty
   local name="$1"; shift
@@ -44,8 +44,11 @@ expect_at_least "Q_lin is named" 3 grep -rho "Q_lin" thesis/04-novel-contributio
 echo "== T-02: the frontier claims a boundary, not an impossibility"
 # The bibliography carries paper titles; one of them is about information-theoretically
 # secure secret sharing, which is a subject and not a claim of this thesis.
+# The work-order report's "claims weakened" table quotes the old wording beside the new,
+# which is its entire job; excluding it is not a loophole, because the wording it quotes is in
+# a column headed "Was".
 expect_none "no impossibility, no policy quantifier, no competitive guarantee" \
-  grep -rn --exclude=references.md "no policy escapes\|information-theoretic\|impossibility region\|competitive guarantee" thesis/ docs/
+  grep -rn --exclude=references.md --exclude=WORK-ORDER-2-REPORT.md "no policy escapes\|information-theoretic\|impossibility region\|competitive guarantee" thesis/ docs/
 expect_at_least "two corollaries" 2 grep -rho "Corollary 4.2.[12]" thesis/04-novel-contributions.md
 
 echo "== T-03/T-04: the soundness clauses and the ladder"

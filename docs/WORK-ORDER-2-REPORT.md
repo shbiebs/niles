@@ -8,7 +8,7 @@ the tips below, both gates green, `make reproduce` clean.
 | | niles | gbs |
 |---|---|---|
 | Branch | `review/thesis` | `review/F-18` |
-| Tip | `27eb990` | `2671f97` |
+| Tip | `review/thesis` head — the last three commits are this report, the GBS tip correction and a fix to the grep script; `git log --oneline -4` shows them | `2671f97` |
 | Workspace tests | **757 pass / 0 fail / 5 ignored** (was 730/0/5) | **443 / 0 / 1** (was 432/0/1) |
 | Adapter (`gbs-nilestream`) | — | **40 / 0** (was 38/0) |
 | `make gate` | exit 0 | exit 0 |

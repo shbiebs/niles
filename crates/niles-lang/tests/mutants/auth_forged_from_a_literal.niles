@@ -1,0 +1,11 @@
+// RULE: T-Overdraw, authority clause. `Auth<E>` has no expression that introduces it.
+// WHY IT MATTERS: `let auth: Auth<authorize<usd>> = 42;` used to pass with no diagnostic,
+// which made "unforgeable" a claim about the prose rather than about the checker.
+// EXPECT: NL0330
+// STAGE: check
+fn f(a: Id<Account>, m: Money<usd>) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    let auth: Auth<authorize<usd>> = 42;
+    txn idem("f", window: 30.days) { post(debit(a, m)?, credit(a, m)) }
+}

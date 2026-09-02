@@ -189,33 +189,31 @@ impl Provenance {
             _ => Provenance::StraightLine,
         }
     }
-    /// Whether a non-zero decided entry may be reported as a definite violation.
-    ///
-    /// **This is now always true, and the reason is worth recording**, because the first
-    /// version of this module got it wrong in both directions in turn.
-    ///
-    /// The worry provenance was introduced to answer is: *can a row that came through a
-    /// control-flow merge be trusted as a statement about every execution?* With a
-    /// **top-preserving join** the answer is yes, and by construction. An entry only
-    /// survives [`Row::join`] if every arm agreed on it; where the arms disagree the entry
-    /// is poisoned with a fresh symbol and the verdict becomes `Undecided`. So a decided,
-    /// non-zero entry after a merge is one that *every* arm produced — which is precisely a
-    /// must-violation.
-    ///
-    /// Gating `Violates` on `StraightLine` therefore threw away real precision: a
-    /// transaction losing ten dollars down every path was downgraded to a warning. The
-    /// abort case, which was the other motivation, is handled at the source instead: a
-    /// `txn` is sealed atomically, so a path that leaves early commits nothing and is
-    /// dropped rather than merged.
-    ///
-    /// The type is retained because it records *how* a row was built, which the diagnostic
-    /// uses to say "every path through this transaction" rather than "this transaction",
-    /// and because a future precision-preserving join — an affine hull in the manner of
-    /// Karr, rather than top-on-disagreement — would reintroduce exactly the question this
-    /// answers.
-    pub fn supports_must_violation(self) -> bool {
-        true
-    }
+    // **Why there is no `supports_must_violation` here.**
+    //
+    // There was one, and it returned `true` unconditionally while `check_conservation`
+    // branched on it — a soundness decision routed through a constant. Both the predicate
+    // and the branch are gone; what remains is the reasoning that makes the unconditional
+    // answer right, because the first version of this module got it wrong in both
+    // directions in turn.
+    //
+    // The worry provenance was introduced to answer is: *can a row that came through a
+    // control-flow merge be trusted as a statement about every execution?* With a
+    // top-preserving join the answer is yes, and by construction. An entry only survives
+    // `Row::join` if every arm agreed on it; where the arms disagree it is poisoned with a
+    // fresh symbol and the verdict becomes `Undecided`. So a decided, non-zero entry after
+    // a merge is one that *every* arm produced — which is precisely a must-violation.
+    //
+    // Gating `Violates` on `StraightLine` threw away real precision: a transaction losing
+    // ten dollars down every path was downgraded to a warning. The abort case, the other
+    // motivation, is handled at the source instead — a `txn` is sealed atomically, so a
+    // path that leaves early commits nothing and is dropped rather than merged.
+    //
+    // `Provenance` is retained because it records *how* a row was built, which the
+    // diagnostic uses to say "every path through this transaction" rather than "this
+    // transaction", and because a future precision-preserving join — an affine hull in the
+    // manner of Karr, rather than top-on-disagreement — would reintroduce exactly the
+    // question this answered.
 
     /// How to describe the paths this row covers, in a diagnostic.
     pub fn describe(self) -> &'static str {
@@ -506,20 +504,18 @@ pub fn check_conservation(row: &Row) -> Vec<Verdict> {
         if a.is_zero() {
             continue;
         } else if a.is_decided() {
-            if row.provenance.supports_must_violation() {
-                out.push(Verdict::Violates {
-                    currency: name,
-                    residue: a.clone(),
-                    span,
-                });
-            } else {
-                out.push(Verdict::MayViolate {
-                    currency: name,
-                    residue: a.clone(),
-                    span,
-                    why: row.provenance,
-                });
-            }
+            // A decided, non-zero entry is a must-violation whatever the provenance, and
+            // the `if` that used to stand here consulted a predicate that returned `true`
+            // unconditionally. A soundness decision routed through a constant is not a
+            // decision; it is the `_ => true` of GC-04 with a name on it. The reasoning
+            // that makes the unconditional answer correct is on `Provenance` itself: the
+            // join is top-preserving, so an entry that survives a merge is one *every* arm
+            // produced, and an abort path is dropped at the source rather than merged.
+            out.push(Verdict::Violates {
+                currency: name,
+                residue: a.clone(),
+                span,
+            });
         } else {
             out.push(Verdict::Undecided {
                 currency: name,

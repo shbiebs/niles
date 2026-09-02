@@ -1,0 +1,11 @@
+// RULE: general typing. `"x" + true` has no reading, and an annotation does not give it
+// one.
+// WHY IT MATTERS: `nilesc check` reported this file as `ok`, with zero errors and zero
+// runtime obligations. A soundness theorem quantified over well-typed programs, checked by
+// something that accepts this, is a theorem about the empty set.
+// EXPECT: NL0252
+// STAGE: check
+fn f() -> Result<TxnId, TxnError> {
+    let x: Money<usd> = "hello" + true;
+    Ok(x)
+}

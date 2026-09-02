@@ -1,0 +1,10 @@
+// RULE: T-Overdraw, authority clause. The same rule against a different literal, because a
+// check that refused integers and accepted strings would be a check on the wrong thing.
+// EXPECT: NL0330
+// STAGE: check
+fn f(a: Id<Account>, m: Money<usd>) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    let auth: Auth<authorize<usd>> = "granted by the branch manager";
+    txn idem("f", window: 30.days) { post(debit(a, m)?, credit(a, m)) }
+}

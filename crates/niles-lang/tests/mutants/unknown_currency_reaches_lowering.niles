@@ -1,0 +1,8 @@
+// RULE: GC-04 — a literal in an undeclared currency has no lowering.
+// WHY IT MATTERS: the currency index defaulted to 0, so the literal entered the circuit
+// denominated in whichever currency sorts first. The typechecker's NL0241 said the currency
+// was unknown; the circuit went on holding a number in a real one.
+// EXPECT: NL0506
+// STAGE: lower
+view large_postings = postings.where(|p| p.amt > 100.00 xbt)
+    serve { consistency: snapshot, materialize: auto };

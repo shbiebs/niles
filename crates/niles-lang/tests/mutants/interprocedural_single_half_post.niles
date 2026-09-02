@@ -1,0 +1,18 @@
+// RULE: T-Posting / conservation, across a call. A callee that posts one half of a movement
+// leaves the caller's transaction unbalanced by exactly that half.
+// WHY IT MATTERS: this used to be counted as *nothing*: not proved, not discharged to the
+// runtime, not reported. The obligation did not move; it disappeared.
+// EXPECT: NL0300
+// STAGE: check
+fn post_one_half(a: Id<Account>) -> Result<(), TxnError>
+    ! { append, debit<usd> }
+{
+    let d = debit(a, 10.00 usd)?;
+    post(d)
+}
+
+fn caller(a: Id<Account>) -> Result<TxnId, TxnError>
+    ! { append, debit<usd> }
+{
+    txn idem("leak", window: 30.days) { post_one_half(a) }
+}

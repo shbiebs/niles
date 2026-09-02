@@ -1,0 +1,8 @@
+// RULE: the operator set is closed. Every theorem in Chapters 3 and 4 quantifies over it,
+// so a stage outside it is a stage outside the results.
+// WHY IT MATTERS: an unrecognised stage lowered to the identity, so the circuit silently
+// did less than the source said and verified cleanly.
+// EXPECT: NL0505
+// STAGE: lower
+view smoothed = postings.rolling_median(|p| p.amt)
+    serve { consistency: snapshot, materialize: auto };

@@ -1,0 +1,5 @@
+// RULE: W14, in the direction that under-declares. The other half of the same rule, kept as
+// its own mutant so that a change collapsing one direction into the other is visible.
+// EXPECT: NL0310
+// STAGE: check
+fn under_declare() -> Money<usd> ! { read@bounded } { fresh_balance.get(1) }

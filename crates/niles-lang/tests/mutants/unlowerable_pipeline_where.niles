@@ -1,0 +1,7 @@
+// RULE: GC-04 — a predicate that cannot be lowered is refused, not defaulted.
+// WHY IT MATTERS: this lowered to `Filter{LitBool(true)}` on the pipeline surface, so the
+// view returned every row. Thesis §11.5.7 said the site was pinned; only the SQL half was.
+// EXPECT: NL0501
+// STAGE: lower
+view every_posting = postings.where(|p| p.no_such_column == 1)
+    serve { consistency: snapshot, materialize: auto };

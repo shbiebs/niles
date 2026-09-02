@@ -1,0 +1,9 @@
+// RULE: GC-04 — a bound on rows is a value, not a default.
+// WHY IT MATTERS: a `limit` the lowering could not read became `u64::MAX`, which returns
+// every row: the answer least likely to be noticed as wrong and the most expensive when it
+// is. It also breaks reproducibility — an evicted entry reconstructed against a different
+// bound holds a different number.
+// EXPECT: NL0504
+// STAGE: lower
+view top_postings = postings.order_by(|p| p.amt).limit(some_count)
+    serve { consistency: snapshot, materialize: auto };

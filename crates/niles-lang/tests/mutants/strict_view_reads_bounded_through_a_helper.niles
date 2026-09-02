@@ -1,0 +1,11 @@
+// RULE: rung monotonicity. A view served at rung l may not read below l — including
+// through a function call, which is the door the check did not look at.
+// WHY IT MATTERS: this is the supervisory failure the calculus exists to make unspellable —
+// two derived views of one ledger disagreeing at the moment a decision is made — and one
+// helper function was enough to walk past it.
+// EXPECT: NL0311
+// STAGE: check
+fn helper() -> Money<usd> ! { read@bounded } { stale_balance.get(1) }
+
+view decision_balance = helper()
+    serve { consistency: ledger_consistent, materialize: demand, lineage: key };

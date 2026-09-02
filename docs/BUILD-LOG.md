@@ -630,3 +630,133 @@ intent should be stated rather than inherited from a default. Now explicit.
 
 `niles` 600/0/3 → 600/0/3. Format: 1,274 diffs → 0. Clippy: ~55 warnings + 1 deny-level
 error → 0.
+
+### [T-11] 2026-09-02T09:05Z RESULT F-11 confirmed in every part, by running the mutants before writing the fixes
+
+Each pointer reproduced. `nilesc check` on a file containing only the offending line:
+
+| F-11 | mutant | before |
+|---|---|---|
+| (a) no general typing | `let x: Money<usd> = "hello" + true;` | `ok:` — 0 errors, 0 obligations |
+| (b) `Auth` is forgeable | `let auth: Auth<authorize<usd>> = 42;` | `ok:` |
+| (d) callee rows never reach the caller | a `ledger_consistent` view whose body calls a helper that reads a `bounded` view | `ok:` |
+| (e) interprocedural money vanishes | `txn { leak_half(a, m) }`, callee posts one half | `ok:` — **0 proved and 0 discharged** |
+
+(e) is the one worth stating twice. The obligation did not become a runtime check and did
+not become a warning. It was not counted: `report.inferred_effects` was written and never
+read, so a call contributed nothing to its caller in either dimension.
+
+(g) is **STALE-F-11g**. `supports_must_violation` is indeed unconditionally `true`, but its
+doc comment now argues for exactly that rather than "saying otherwise". The defect is a
+different one: `check_conservation` branched on a predicate that is a constant, which is
+`_ => true` in a soundness decision with a name on it. Both the predicate and the branch are
+gone; the reasoning that makes the unconditional answer correct is kept as a comment on
+`Provenance`.
+
+### [T-11] 2026-09-02T09:10Z MISMATCH-T-11-overdraw Theorem 4.4 clause (3) as written is not implementable on this AST
+
+**The thesis says** (§4.5, T-Overdraw; Theorem 4.4 clause 3), verbatim in substance: a
+well-typed program *cannot overdraw without authorization* — read as a static guarantee that
+no path reduces a balance below zero unless authorised.
+
+**The code says** nothing of the kind, and cannot. There is no balance-bound analysis in
+`niles-lang`, no abstract domain over account balances, and no representation of a balance
+at a program point: `Amount` is a linear form over opaque symbols, so "is this balance
+negative after this posting" is not a question the domain can express. Implementing it would
+need an interval or affine-inequality domain over per-account state and a way to relate a
+posting to the account it lands in — a different analysis, not a missing case in this one.
+
+**What is implemented instead, and is enforced from this commit:** the capability discipline.
+`Auth<E>` has exactly two introduction forms (a parameter, a `grant`) and no expression
+produces one; a `let` annotated `Auth<E>` over any other expression is NL0330; an `Auth<E>`
+argument position accepts only an `Auth` of the same effect (NL0331); and the `authorize<c>`
+effect now propagates through calls, so a caller two hops from the `authorize` still needs the
+capability (NL0312). The mutant `overdraw_without_authorize.niles` has *two* functions and
+both are refused — before, a one-line wrapper laundered an unauthorised overdraft, because
+the wrapper's row did not mention the effect.
+
+**Proposed replacement wording for T-17**, §4.5 clause (3) and Theorem 4.4 clause (3):
+
+> no overdraw redex is typed without a capability introduced by `authorize`
+
+and a sentence after it stating what that does and does not buy: it guarantees that a path
+which *can* reduce a balance below zero holds authority; it does not bound the balance, and
+Proposition 3.2 already says the floor is not coordination-free. The stronger reading should
+not appear anywhere in the thesis.
+
+### [T-11] 2026-09-02T09:20Z DECISION Read effects match the declaration exactly, in both directions
+
+`effects.rs::declared_permits` permitted an inferred `Read(r)` under any declared `Read(r')`
+with `r <= r'`, and a unit test asserted it: *"declaring `read@snapshot` and doing
+`read@bounded` is safe, because the declaration is a promise about the strongest guarantee a
+caller may rely on."*
+
+The direction is backwards, and the consequence is the exact failure rung monotonicity
+exists to prevent. A `read@ℓ` states the **freshness of what the function returns** — a
+computation is no fresher than its stalest input — not a permission the function asked for.
+A function declaring `read@ledger_consistent` while reading a `bounded` view returns a
+bounded-stale answer and tells every caller it is fresh; a `ledger_consistent` view calling
+it passed rung monotonicity, because the check consulted the declaration.
+
+Reads now match exactly. The unit test is inverted, and the inversion is the finding. Two
+sources had to be corrected, both genuinely wrong:
+
+* `examples/demo_bank.niles` — `main` declared `read@ledger_consistent` and also calls
+  `explain`, which reads at `snapshot`.
+* `gbs/niles/gbs.niles` — the same `main`, plus the two money effects it inherits from
+  `transfer` now that rows are transitive. Committed on `review/F-11-F-13` in gbs.
+
+### [T-11] 2026-09-02T09:30Z RESULT The lowering defaults, and a defect the first honest refusal found
+
+Nine `unwrap_or` sites in `lower.rs` became diagnostics (F-37, F-47). The first run of the
+new `where` rule failed `the_worked_example_compiles_clean_and_verifies`, and the reason is a
+defect rather than a strictness problem: `where(|p| p.value_date >= v@2026-08-01)` had no
+`Scalar` form, so on the pipeline surface it became `Filter{LitBool(true)}`.
+`examples/available_balance.niles`'s `balance_as_of_2026_q1` returned **every posting in the
+ledger** and presented it as a balance as of a date. `niles_ir::value::days_since_epoch` now
+gives a date literal one canonical reading, used by both the scalar form and `valid_at`, so
+the two surfaces cannot disagree about what a date is.
+
+`StageKind::ValidAt` was `Op::ValidAt { instant: None }` unconditionally — the valid-time
+axis, half of the bitemporality claim, discarded at the door whatever date was written.
+
+### [T-11] 2026-09-02T09:40Z LC-6 Is there any expression the checker accepts whose static currency row is unknown yet counted as proved?
+
+**No; every unknown movement is `Undecided` and counted as discharged to the runtime.**
+
+The three places an unknown could enter, and what each does:
+
+1. An opaque call returning money — a fresh symbol, so the entry is undecided unless the
+   same symbol cancels. `Amount::is_decided` is false whenever any coefficient survives.
+2. A call to a function in the same program — the callee's net row, instantiated with the
+   caller's amounts. Symbols the caller cannot supply become *fresh caller* symbols, so two
+   unrelated calls never look like the same amount.
+3. A callee whose summary could not be computed (recursion, or the fixpoint's round budget)
+   — marked `havoc`, and a havoc summary adds a fresh symbol to every entry it contributes,
+   so it cannot produce a decided one however the arithmetic comes out.
+
+`Report::conservation_proved` counts only `Verdict::Conserves`, which requires every entry
+`is_zero`. `runtime_obligations` counts `Undecided` and `MayViolate`. The E18 interprocedural
+group measures both cases 2 and 3 explicitly: `recursive_amortisation` is `Undecided`.
+
+### [T-11] 2026-09-02T09:45Z TESTS niles 600/0/3 -> 610/0/3
+
+New: `tests/calculus_mutants.rs` (5 tests over **17 mutants**, each asserting its own
+diagnostic code), `the_interprocedural_group_reaches_the_caller`, and three tests on the
+now-exhaustive IR predicates.
+
+Acceptance checks from the work order:
+
+```
+cargo test -p niles-lang --test calculus_mutants   -> 5 passed, 17 mutants refused
+cargo test -p niles-lang -p niles-ir               -> 0 failed
+grep -n "unwrap_or(Scalar::" crates/niles-lang/src/lower.rs   -> prose only
+grep -n "_ => true" crates/niles-ir/src/operator.rs           -> prose only
+nilesc check .../mutants/auth_forged_from_a_literal.niles; echo $?   -> 1
+cd gbs && make schema                              -> ok (after the gbs.niles fix above)
+```
+
+`results/E18-solver-verdicts.md` regenerated: the single-function distribution is unchanged
+(0% of correct functions undecided, all five defects caught), and the new interprocedural
+group reports **6 of 8** conserving cases proved across the call boundary, 2 undecided, and
+both deliberate defects refuted. GC-01: the numbers are whatever the run produced.

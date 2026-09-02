@@ -138,7 +138,19 @@ view sql_balances = sql {
     group by acct, cur
 } serve { consistency: snapshot, materialize: auto };
 
-fn main() -> Result<(), TxnError> ! { append, read@ledger_consistent } {
+// Two reads at two rungs, and the row names both. `explain` reads at `snapshot` — it
+// asks what a value was derived from, which is a question about a materialised state
+// rather than about the ledger — and `available_balance.get` reads at
+// `ledger_consistent`. The row used to name only the second, and the checker accepted it
+// because a weaker read was permitted under a stricter declaration. It is not: a caller
+// reading this row would believe everything here is ledger-consistent, and the `explain`
+// is not.
+// `debit<usd>` and `credit<usd>` are here because `pay_rent` has them. Effect rows are
+// transitive, and they were not: a callee's row never reached its caller, so this
+// signature used to say `main` moves no money while the first line of its body moves rent.
+fn main() -> Result<(), TxnError>
+    ! { append, debit<usd>, credit<usd>, read@ledger_consistent, read@snapshot }
+{
     let _t = pay_rent(acct(1001), acct(2002))?;
     let b = available_balance.get((acct(1001), usd))?;
     explain b;

@@ -1,0 +1,9 @@
+// RULE: W14, in the direction that over-promises. A function declaring
+// `read@ledger_consistent` while reading a `bounded` view returns a stale answer and tells
+// every caller it is fresh.
+// WHY IT MATTERS: this was *accepted* until now, on the reasoning that a weaker read is
+// covered by a stricter declaration. The direction is backwards: a read effect states the
+// freshness of the result, not a permission the function asked for.
+// EXPECT: NL0310
+// STAGE: check
+fn over_promise() -> Money<usd> ! { read@ledger_consistent } { stale_balance.get(1) }

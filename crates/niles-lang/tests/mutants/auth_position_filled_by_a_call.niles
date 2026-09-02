@@ -1,0 +1,19 @@
+// RULE: T-Overdraw, authority clause, at a call boundary. Refusing a forged `let` and then
+// accepting any expression in an `Auth<E>` argument position would move the forging one
+// level out: a function named `granted` would confer authority.
+// EXPECT: NL0331
+// STAGE: check
+fn force_debit(a: Id<Account>, m: Money<usd>, auth: Auth<authorize<usd>>)
+    -> Result<(), TxnError>
+    ! { append, authorize<usd>, debit<usd> }
+{
+    authorize(a, m);
+    let d = debit(a, m)?;
+    post(d)
+}
+
+fn caller(a: Id<Account>, m: Money<usd>, auth: Auth<authorize<usd>>) -> Result<(), TxnError>
+    ! { append, authorize<usd>, debit<usd> }
+{
+    force_debit(a, m, granted())
+}

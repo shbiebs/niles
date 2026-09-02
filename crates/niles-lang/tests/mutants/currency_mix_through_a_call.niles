@@ -1,0 +1,17 @@
+// RULE: T-Money-Add / W7, at a call boundary. `Money<a>` and `Money<b>` do not unify, and
+// a parameter position is an equation like any other.
+// WHY IT MATTERS: this is the one place the rule was not enforced. The argument shapes
+// were computed and discarded, so a currency conversion could be spelled as a call.
+// EXPECT: NL0255
+// STAGE: check
+fn pay(from: Id<Account>, to: Id<Account>, m: Money<usd>) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("pay", window: 30.days) { post(debit(from, m)?, credit(to, m)) }
+}
+
+fn settle(a: Id<Account>, b: Id<Account>) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    pay(a, b, 10.00 eur)
+}

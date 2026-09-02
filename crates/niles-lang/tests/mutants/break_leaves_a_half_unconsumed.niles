@@ -1,0 +1,20 @@
+// RULE: W8 linearity, on every path. A ledger half must be consumed exactly once on each
+// path out of the scope that created it, and `break` is a path.
+// WHY IT MATTERS: linear uses were counted as a maximum across arms, so the half is
+// consumed on the path that falls off the end of the body and dropped on the one that does
+// not — and the checker only looked at the first.
+// EXPECT: NL0322
+// STAGE: check
+fn sweep(a: Id<Account>, b: Id<Account>, stop: bool) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("sweep", window: 30.days) {
+        loop {
+            let d = debit(a, 5.00 usd)?;
+            if stop { break; }
+            let c = credit(b, 5.00 usd);
+            post(d, c)
+        }
+        Ok(())
+    }
+}

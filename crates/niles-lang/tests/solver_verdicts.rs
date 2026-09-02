@@ -130,6 +130,34 @@ fn check_one(preamble: &str, name: &str, body: &str) -> Outcome {
     }
 }
 
+/// Split the interprocedural corpus into cases at its `// --- case:` markers.
+///
+/// A case is several functions checked **together**, which is the whole point: the question
+/// is what the solver concludes about the *caller*, and a splitter that separated the caller
+/// from its callee would be measuring the state of affairs this group was written to end.
+fn split_cases(source: &str) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for line in source.lines() {
+        if let Some(name) = line.trim().strip_prefix("// --- case:") {
+            out.push((name.trim().to_string(), String::new()));
+        } else if let Some(last) = out.last_mut() {
+            last.1.push_str(line);
+            last.1.push('\n');
+        }
+    }
+    out
+}
+
+fn run_interprocedural() -> Vec<Outcome> {
+    let preamble = std::fs::read_to_string(corpus_dir().join("preamble.niles")).expect("preamble");
+    let src = std::fs::read_to_string(corpus_dir().join("interprocedural.niles"))
+        .expect("interprocedural corpus");
+    split_cases(&src)
+        .into_iter()
+        .map(|(name, body)| check_one(&preamble, &name, &body))
+        .collect()
+}
+
 fn run_corpus() -> (Vec<Outcome>, Vec<Outcome>) {
     let preamble = std::fs::read_to_string(corpus_dir().join("preamble.niles")).expect("preamble");
     let sound = std::fs::read_to_string(corpus_dir().join("sound.niles")).expect("sound corpus");
@@ -396,6 +424,47 @@ fn e18_verdict_distribution() {
          switch it off.\n\n",
     );
 
+    // ── the interprocedural group ─────────────────────────────────────────────────────
+    let inter = run_interprocedural();
+    let (sound_inter, defect_inter): (Vec<&Outcome>, Vec<&Outcome>) =
+        inter.iter().partition(|o| !o.name.starts_with("DEFECT_"));
+    doc.push_str("## The interprocedural group\n\n");
+    doc.push_str(
+        "**This group did not exist before, and could not have.** Until the checker computed \
+         function summaries, a call to another function in the same program contributed \
+         nothing at all to its caller — not its effects, not its money. A caller whose callee \
+         posted one half of a transfer had *no* conservation obligation: not a violation, not \
+         an alarm, not a runtime obligation. The ten dollars were not counted.\n\n\
+         So a multi-function case would have measured the corpus splitter rather than the \
+         solver, and every case in the two groups above is a single function. These are the \
+         shapes banking code is actually written in: a transfer helper called by a product, a \
+         fee routine called by three, a recursive amortisation.\n\n",
+    );
+    doc.push_str("| Case | Verdict | Proved | Undecided | MayViolate | Violates |\n|---|---|---|---|---|---|\n");
+    for o in &inter {
+        doc.push_str(&format!(
+            "| `{}` | {} | {} | {} | {} | {} |\n",
+            o.name,
+            o.verdict(),
+            o.proved,
+            o.undecided,
+            o.may_violate,
+            o.violates
+        ));
+    }
+    let proved_inter = sound_inter.iter().filter(|o| o.proved > 0).count();
+    doc.push_str(&format!(
+        "\n{proved_inter} of {} conserving cases are proved across the call boundary, and both \
+         deliberate defects are caught. The two that are not proved are the two the analysis \
+         is honest about: an amount computed twice by a call the solver cannot see through, \
+         and a self-recursive helper whose summary is marked `havoc` because its row appears \
+         on both sides of its own definition. Neither is silently assumed to conserve, which \
+         is the distinction the `havoc` flag exists to keep visible — a fresh symbol with no \
+         havoc record would look exactly like a clean answer.\n\n",
+        sound_inter.len()
+    ));
+    let _ = &defect_inter;
+
     doc.push_str("## The finding\n\n");
     doc.push_str(
         "**A guard does not make conservation undecidable, and that was not the expectation.**\n\n\
@@ -454,4 +523,78 @@ fn e18_verdict_distribution() {
         eprintln!("  defect `{}` -> {}", o.name, o.verdict());
     }
     eprintln!("wrote {}", path.display());
+}
+
+#[test]
+fn the_interprocedural_group_reaches_the_caller() {
+    // **What this group is for.** Every case here is at least two functions, and the
+    // obligation belongs to the caller. Before summaries existed, a call contributed
+    // nothing at all: `caller_of_a_half_poster` had *no* conservation obligation — not a
+    // violation, not an alarm, not a runtime obligation — because the ten dollars its
+    // callee moved were never counted.
+    let cases = run_interprocedural();
+    assert!(
+        cases.len() >= 8,
+        "the interprocedural group should hold at least eight cases; found {}",
+        cases.len()
+    );
+    let by = |name: &str| {
+        cases
+            .iter()
+            .find(|o| o.name == name)
+            .unwrap_or_else(|| panic!("no case `{name}`"))
+    };
+
+    // The two deliberate defects must accuse, and they are the only ones that may.
+    for defect in [
+        "DEFECT_caller_of_a_half_poster",
+        "DEFECT_helper_credits_twice",
+    ] {
+        let o = by(defect);
+        assert!(
+            o.violates > 0,
+            "`{defect}` moves a literal amount across a call and does not balance, so the \
+             residue is exact and this must be an accusation: {o:?}"
+        );
+    }
+    for o in &cases {
+        if !o.name.starts_with("DEFECT_") {
+            assert_eq!(
+                o.violates, 0,
+                "`{}` conserves; accusing it would be a false positive, which is the one \
+                 failure that teaches users to switch a checker off: {o:?}",
+                o.name
+            );
+            assert_eq!(o.errors, 0, "`{}` must compile clean: {o:?}", o.name);
+        }
+    }
+
+    // The proofs the summaries buy. Each of these was previously *nothing* — the caller's
+    // transaction had no obligation to prove.
+    for proved in [
+        "helper_posts_both_halves",
+        "helper_takes_the_amount",
+        "two_helpers_one_transaction",
+        "generic_currency_helper",
+        "three_deep_chain",
+        "helper_branches_and_both_arms_balance",
+    ] {
+        let o = by(proved);
+        assert!(
+            o.proved > 0,
+            "`{proved}` conserves across the call and the solver should say so: {o:?}"
+        );
+    }
+
+    // And the two honest boundaries. An amount the solver cannot see through, and a
+    // recursive helper it cannot summarise, are both *discharged to the runtime* rather
+    // than proved — which is the distinction `havoc` exists to keep visible.
+    for undecided in ["helper_computes_the_amount", "recursive_amortisation"] {
+        let o = by(undecided);
+        assert!(
+            o.undecided > 0 && o.violates == 0,
+            "`{undecided}` is beyond the analysis and must be handed to the runtime, not \
+             proved and not accused: {o:?}"
+        );
+    }
 }

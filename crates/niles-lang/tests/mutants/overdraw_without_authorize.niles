@@ -1,0 +1,22 @@
+// RULE: T-Overdraw as this checker realises it — no path that can reduce a balance below
+// zero is typed unless it holds a capability. See MISMATCH-T-11-overdraw in the build log:
+// the static balance-bound reading of §4.5 clause (3) is not implemented and is not
+// implementable on this AST, so what is enforced is the capability, not the bound.
+// WHY IT MATTERS: two functions, and *both* must be refused. `charge_overdraft` exercises
+// the effect; `sweep_to_zero` only calls it. Before effect rows were transitive the caller
+// was clean — a wrapper one line long was enough to launder an unauthorised overdraft.
+// EXPECT: NL0312
+// STAGE: check
+fn charge_overdraft(a: Id<Account>, m: Money<usd>) -> Result<(), TxnError>
+    ! { append, authorize<usd>, debit<usd> }
+{
+    authorize(a, m);
+    let d = debit(a, m)?;
+    post(d)
+}
+
+fn sweep_to_zero(a: Id<Account>, m: Money<usd>) -> Result<(), TxnError>
+    ! { append, authorize<usd>, debit<usd> }
+{
+    charge_overdraft(a, m)
+}

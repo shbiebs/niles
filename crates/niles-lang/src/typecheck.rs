@@ -29,6 +29,66 @@ use crate::lexer::Span;
 use crate::resolve::Catalog;
 use std::collections::HashMap;
 
+/// A scalar the checker can name.
+///
+/// Not a type system — there is no inference here and no user types. It is the smallest
+/// set that lets the checker say **no** to the two things a money-shaped analysis must not
+/// wave through: arithmetic between values that have no arithmetic, and a `Money<c>`
+/// annotation over an initializer that is plainly not money.
+///
+/// Before this existed, `let x: Money<usd> = "hello" + true;` passed `nilesc check`
+/// reporting zero errors and zero runtime obligations, because both operands classified as
+/// `Opaque` and `binary` returned `Opaque` without looking. A soundness theorem about
+/// well-typed programs, over a checker that accepts that, is a theorem about the empty set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScalarKind {
+    Int,
+    Float,
+    Text,
+    Bool,
+    Bytes,
+    Unit,
+    Duration,
+    Instant,
+    Epoch,
+}
+
+impl ScalarKind {
+    fn name(self) -> &'static str {
+        match self {
+            ScalarKind::Int => "Int",
+            ScalarKind::Float => "Float",
+            ScalarKind::Text => "Text",
+            ScalarKind::Bool => "Bool",
+            ScalarKind::Bytes => "Bytes",
+            ScalarKind::Unit => "()",
+            ScalarKind::Duration => "Duration",
+            ScalarKind::Instant => "Instant",
+            ScalarKind::Epoch => "Epoch",
+        }
+    }
+    /// Whether `+` and `-` are defined on two of these. Deliberately narrow: `Int + Int`
+    /// and `Instant + Duration` and nothing else, because every other pair someone might
+    /// want is a coercion, and a coercion in a ledger language is a silent conversion.
+    fn adds_to(self, other: ScalarKind) -> bool {
+        use ScalarKind::*;
+        matches!(
+            (self, other),
+            (Int, Int)
+                | (Float, Float)
+                | (Instant, Duration)
+                | (Duration, Instant)
+                | (Duration, Duration)
+                | (Epoch, Int)
+                | (Epoch, Epoch)
+        )
+    }
+    /// Whether the two may be compared. Same kind, or the two clock-shaped pairs.
+    fn compares_to(self, other: ScalarKind) -> bool {
+        self == other || matches!((self, other), (ScalarKind::Epoch, ScalarKind::Int))
+    }
+}
+
 /// The classification an expression is given. Small on purpose.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Shape {
@@ -36,8 +96,29 @@ pub enum Shape {
     Money(Cur, Amount),
     /// A linear ledger half or hold, which must be consumed exactly once.
     Linear(LinearKind),
-    /// Anything else the checker does not need to look inside.
+    /// A capability. **Unforgeable**, which here means: this shape has exactly two
+    /// introduction forms — an `Auth<E>` parameter, and a `grant` — and no expression
+    /// produces one. The string is the effect it authorises, as written.
+    Auth(String),
+    /// A scalar the checker can name.
+    Scalar(ScalarKind),
+    /// Anything else the checker does not need to look inside. Still `Opaque`, and still
+    /// the honest answer for a user type or a call it cannot follow — but no longer the
+    /// answer for a string literal.
     Opaque,
+}
+
+impl Shape {
+    /// A short description for a diagnostic.
+    fn describe(&self) -> String {
+        match self {
+            Shape::Money(c, _) => format!("`Money<{c}>`"),
+            Shape::Linear(_) => "a ledger half".into(),
+            Shape::Auth(e) => format!("`Auth<{e}>`"),
+            Shape::Scalar(k) => format!("`{}`", k.name()),
+            Shape::Opaque => "a value the checker cannot see inside".into(),
+        }
+    }
 }
 
 /// What a check concluded, beyond the diagnostics.
@@ -69,18 +150,188 @@ pub struct Report {
     pub view_rungs: HashMap<String, Option<Rung>>,
 }
 
+/// What one function does, as seen from a call site.
+///
+/// **The object F-11(d) and F-11(e) were about.** Before this existed, a call to a function
+/// declared in the same file contributed *nothing* to its caller: not its reads, so a
+/// `ledger_consistent` view reading a `bounded` view through one helper passed rung
+/// monotonicity; not its money, so `txn { leak_half(a, m) }` — whose callee posts one half
+/// of a transfer — was neither proved conserving nor discharged to the runtime. It was not
+/// counted at all. The obligation did not become a runtime check; it disappeared.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParamKind {
+    /// `Money<usd>`, or currency-generic `Money`.
+    Money(Option<String>),
+    /// `Auth<E>`, as written.
+    Auth(String),
+    /// A shape the checker does not look inside. Not "anything goes" — it is the honest
+    /// statement that this parameter's type is outside the money-shaped analysis, so no
+    /// judgement is made about it here.
+    Other,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct FnSummary {
+    /// Effects the body incurs, including everything inherited from its own callees.
+    pub effects: EffRow,
+    /// The body's net currency row, in terms of the parameter symbols below.
+    net: CurRow,
+    /// The `(currency, amount-symbol)` given to each money parameter, by position. `None`
+    /// for a parameter that is not money.
+    param_money: Vec<Option<(Cur, u32)>>,
+    /// What each parameter's declared type is, in the shapes the checker can name, and
+    /// the name it was declared under.
+    ///
+    /// A call site checks its arguments against this. Nothing did before: `call` collected
+    /// the argument *shapes* and threw them away except to look for one money value, so
+    /// `transfer(a, b, 10.00 eur)` against `m: Money<usd>` was accepted, and so was an
+    /// `Auth` position filled by a call returning anything at all.
+    params: Vec<ParamKind>,
+    /// **Havoc.** Set when the summary could not be computed: the call graph has a cycle
+    /// through this function, or the fixpoint did not settle inside its round budget.
+    ///
+    /// A havoc summary contributes an undecided movement rather than a proof, and the flag
+    /// is what makes that visible instead of it looking like a clean answer. A fresh symbol
+    /// with no havoc record is exactly the fabrication this whole pass is against.
+    pub havoc: bool,
+}
+
 pub fn check_program(prog: &Program, cat: &Catalog) -> (Report, Diagnostics) {
-    let mut cx = Cx {
-        cat,
-        d: Diagnostics::new(),
-        report: Report::default(),
-        unifier: Unifier::new(),
-        next_symbol: 0,
-    };
+    // Every function in the program, including those nested in `mod`s and `impl`s, by
+    // name. Name collisions are the resolver's business (NL0101); here the last wins,
+    // which matches what the resolver reports on.
+    let mut decls: Vec<FnDecl> = Vec::new();
+    for item in &prog.items {
+        collect_fns(item, &mut decls);
+    }
+    let order: Vec<String> = decls.iter().map(|f| f.name.text.clone()).collect();
+
+    // **The fixpoint.** Summaries start empty and are recomputed until they stop changing.
+    // Effects are a finite lattice so that half always converges; the currency row can
+    // grow through a recursive call, which is what the round budget is for. A function
+    // still moving when the budget runs out is marked havoc — recorded, not assumed.
+    let mut summaries: HashMap<String, FnSummary> = HashMap::new();
+    let budget = order.len() + 2;
+    let mut settled = false;
+    for _ in 0..budget {
+        let mut next: HashMap<String, FnSummary> = HashMap::new();
+        for f in &decls {
+            let mut cx = Cx::new(cat, summaries.clone());
+            let s = cx.summarise(f);
+            next.insert(f.name.text.clone(), s);
+        }
+        if summary_effects_equal(&summaries, &next) {
+            summaries = next;
+            settled = true;
+            break;
+        }
+        summaries = next;
+    }
+    if !settled {
+        for name in &order {
+            if let Some(s) = summaries.get_mut(name) {
+                s.havoc = true;
+            }
+        }
+    }
+    // A function that calls itself, directly or through others, cannot be summarised by
+    // this scheme: its own row appears on both sides. Marked rather than guessed at.
+    for name in mutually_recursive(&decls) {
+        if let Some(s) = summaries.get_mut(&name) {
+            s.havoc = true;
+        }
+    }
+
+    // The reporting pass. Same walk, same summaries, diagnostics on.
+    let mut cx = Cx::new(cat, summaries);
+    cx.emit = true;
     for item in &prog.items {
         cx.item(item);
     }
     (cx.report, cx.d)
+}
+
+/// What each parameter's declared type is, in the shapes the checker can name.
+fn param_kinds(f: &FnDecl) -> Vec<ParamKind> {
+    f.params
+        .iter()
+        .map(
+            |p| match (money_currency_of(&p.ty), auth_effect_of(&p.ty)) {
+                (Some(cur), _) => ParamKind::Money(cur),
+                (_, Some(eff)) => ParamKind::Auth(eff),
+                _ => ParamKind::Other,
+            },
+        )
+        .collect()
+}
+
+fn collect_fns(item: &Item, out: &mut Vec<FnDecl>) {
+    match item {
+        Item::Fn(f) => out.push(f.clone()),
+        Item::Mod { items, .. } => items.iter().for_each(|i| collect_fns(i, out)),
+        Item::Impl(i) => out.extend(i.items.iter().cloned()),
+        _ => {}
+    }
+}
+
+/// Convergence is judged on the **effect rows**, which are the half that has a finite
+/// lattice and therefore the half a fixpoint can be said to reach. The currency rows ride
+/// along; a function whose row is still growing is caught by the round budget and by the
+/// recursion check, both of which set `havoc`.
+fn summary_effects_equal(a: &HashMap<String, FnSummary>, b: &HashMap<String, FnSummary>) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .all(|(k, v)| b.get(k).is_some_and(|w| w.effects == v.effects))
+}
+
+/// Every function on a cycle of the call graph, by name.
+///
+/// The call graph is read from the syntax: a name in call position that is also a declared
+/// function is an edge. That over-approximates — a shadowed local of the same name would
+/// count — and over-approximating here costs precision (`havoc`) rather than soundness,
+/// which is the direction this whole file errs in.
+fn mutually_recursive(decls: &[FnDecl]) -> Vec<String> {
+    let names: std::collections::BTreeSet<&str> =
+        decls.iter().map(|f| f.name.text.as_str()).collect();
+    let mut edges: HashMap<String, Vec<String>> = HashMap::new();
+    for f in decls {
+        let mut called = Vec::new();
+        if let Some(b) = &f.body {
+            calls_in_block(b, &mut called);
+        }
+        called.retain(|c| names.contains(c.as_str()));
+        edges.insert(f.name.text.clone(), called);
+    }
+    // Transitive closure, then anything reaching itself. The graphs here are one file's
+    // worth of functions, so the cubic step is not worth avoiding.
+    let mut reach: HashMap<String, std::collections::BTreeSet<String>> = edges
+        .iter()
+        .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
+        .collect();
+    for _ in 0..decls.len() {
+        let mut changed = false;
+        let keys: Vec<String> = reach.keys().cloned().collect();
+        for k in keys {
+            let current: Vec<String> = reach[&k].iter().cloned().collect();
+            for m in current {
+                if let Some(more) = reach.get(&m).cloned() {
+                    for x in more {
+                        if reach.get_mut(&k).is_some_and(|s| s.insert(x)) {
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    reach
+        .into_iter()
+        .filter(|(k, v)| v.contains(k))
+        .map(|(k, _)| k)
+        .collect()
 }
 
 struct Cx<'a> {
@@ -89,6 +340,12 @@ struct Cx<'a> {
     report: Report,
     unifier: Unifier,
     next_symbol: u32,
+    /// Summaries of every function in the program, from the fixpoint above.
+    summaries: HashMap<String, FnSummary>,
+    /// Whether diagnostics from this walk are kept. Off during the fixpoint rounds, where
+    /// the same body is walked several times and reporting each pass would multiply every
+    /// error by the number of rounds.
+    emit: bool,
 }
 
 /// Per-scope state: the currency row being accumulated, the effects incurred, and the
@@ -107,6 +364,18 @@ struct Scope {
     /// `debit<usd>` as unsatisfied. The resulting diagnostic is technically true and
     /// completely useless, which is the usual shape of an under-powered checker's output.
     bindings: HashMap<String, Shape>,
+    /// Inside a loop body: how many linear values were already in flight when the body was
+    /// entered, so an exit path knows which of them the body itself created.
+    ///
+    /// `None` outside a loop, which is what makes `break` outside a loop a parse-level
+    /// question rather than one this file answers.
+    loop_base: Option<usize>,
+    /// The row as it stood at each `break`.
+    ///
+    /// A `break` leaves the loop with a *prefix* of the body's movements, and the prefix is
+    /// an alternative path through the loop. Before this, `break` returned `Opaque` and the
+    /// row it left behind was folded in as though the whole body had run.
+    exits: Vec<CurRow>,
 }
 
 impl Scope {
@@ -117,6 +386,7 @@ impl Scope {
         Scope {
             conserving: true,
             bindings: self.bindings.clone(),
+            loop_base: self.loop_base,
             ..Default::default()
         }
     }
@@ -136,6 +406,17 @@ impl Scope {
             linear: self.linear.clone(),
             conserving: self.conserving,
             bindings: self.bindings.clone(),
+            loop_base: self.loop_base,
+            exits: Vec::new(),
+        }
+    }
+
+    /// A scope for a loop body: a branch that also records where the loop's own linear
+    /// values start.
+    fn loop_body(&self) -> Scope {
+        Scope {
+            loop_base: Some(self.linear.len()),
+            ..self.branch()
         }
     }
 }
@@ -174,6 +455,7 @@ fn merge_branches(
     arms: Vec<Scope>,
     at: Span,
     branch_alarms: &mut usize,
+    scale_of: &dyn Fn(&str) -> Option<u32>,
 ) -> Vec<Diagnostic> {
     let mut diags = Vec::new();
     if arms.is_empty() {
@@ -203,6 +485,7 @@ fn merge_branches(
             {
                 // Downgraded: the arithmetic is definitely wrong, and whether this arm runs is
                 // not something the checker can decide, so it is an alarm rather than a proof.
+                let alarm_currency = currency.clone();
                 let alarm = rows::Verdict::MayViolate {
                     currency,
                     residue,
@@ -210,7 +493,13 @@ fn merge_branches(
                     why: rows::Provenance::Merged,
                 };
                 *branch_alarms += 1;
-                if let Some(d) = rows::diagnose(&alarm, 2) {
+                // The currency's *declared* scale, not 2. A hard-coded 2 printed a JPY
+                // residue of 1000 as "10.00" — a wrong number in a diagnostic a reader is
+                // meant to reconcile against.
+                let Some(scale) = scale_of(&alarm_currency) else {
+                    continue;
+                };
+                if let Some(d) = rows::diagnose(&alarm, scale) {
                     diags.push(d.note(
                         "this branch does not balance on its own. Whether it executes is not \
                          decidable here, so this is a warning rather than an error — but the \
@@ -233,6 +522,61 @@ fn merge_branches(
 }
 
 impl<'a> Cx<'a> {
+    fn new(cat: &'a Catalog, summaries: HashMap<String, FnSummary>) -> Cx<'a> {
+        Cx {
+            cat,
+            d: Diagnostics::new(),
+            report: Report::default(),
+            unifier: Unifier::new(),
+            next_symbol: 0,
+            summaries,
+            emit: false,
+        }
+    }
+
+    /// Push a diagnostic, unless this is a fixpoint round.
+    fn push(&mut self, d: Diagnostic) {
+        if self.emit {
+            self.d.push(d);
+        }
+    }
+
+    /// Walk one function's body and return what a caller needs to know about it.
+    ///
+    /// The *same* walk the reporting pass uses, deliberately: a summary computed by a
+    /// second, simpler traversal would be a second semantics, and the two would disagree
+    /// on exactly the constructs that matter.
+    fn summarise(&mut self, f: &FnDecl) -> FnSummary {
+        let Some(body) = &f.body else {
+            // A declaration without a body — a trait method, an extern. Its declared row
+            // is all a caller has, and it is the honest thing to use.
+            return FnSummary {
+                effects: f.effects.as_ref().map(to_eff_row).unwrap_or_default(),
+                net: CurRow::default(),
+                param_money: Vec::new(),
+                params: param_kinds(f),
+                havoc: f.effects.is_none(),
+            };
+        };
+        let mut sc = Scope::default();
+        let param_money = self.seed_params(f, &mut sc);
+        // The body's net row is accumulated in a conserving scope so that `debit` and
+        // `credit` reach it. This is not an assertion that the function conserves — it is
+        // the record of what it moves, which is precisely what a caller inside its own
+        // `txn` needs in order to decide whether *it* conserves.
+        sc.conserving = true;
+        self.block(body, &mut sc);
+        let mut net = std::mem::take(&mut sc.row);
+        net.substitute(&self.unifier);
+        FnSummary {
+            effects: sc.effects,
+            net,
+            param_money,
+            params: param_kinds(f),
+            havoc: false,
+        }
+    }
+
     fn fresh_symbol(&mut self) -> u32 {
         self.next_symbol += 1;
         self.next_symbol
@@ -260,48 +604,76 @@ impl<'a> Cx<'a> {
 
     // ---------------- functions ----------------
 
-    fn function(&mut self, f: &FnDecl) {
-        let Some(body) = &f.body else { return };
-        let mut sc = Scope::default();
-        // Seed the scope from the signature. A parameter declared `Money<usd>` is money in
-        // USD everywhere in the body, which is the point of writing the type.
+    /// Seed a scope from a signature, and report the money each parameter carries.
+    ///
+    /// A parameter declared `Money<usd>` is money in USD everywhere in the body, which is
+    /// the point of writing the type. The returned vector is positional, and it is what
+    /// makes a call site able to substitute the *caller's* amounts into the callee's row.
+    fn seed_params(&mut self, f: &FnDecl, sc: &mut Scope) -> Vec<Option<(Cur, u32)>> {
+        let mut out = Vec::with_capacity(f.params.len());
         for p in &f.params {
-            if let (Some(cur), Some(name)) = (money_currency_of(&p.ty), first_binding(&p.pat)) {
-                let sym = self.fresh_symbol();
-                let c = match cur {
-                    Some(c) => Cur::Known(c),
-                    None => self.unifier.fresh(),
-                };
-                sc.bindings
-                    .insert(name, Shape::Money(c, Amount::symbol(sym)));
+            let money = match (money_currency_of(&p.ty), first_binding(&p.pat)) {
+                (Some(cur), Some(name)) => {
+                    let sym = self.fresh_symbol();
+                    let c = match cur {
+                        Some(c) => Cur::Known(c),
+                        None => self.unifier.fresh(),
+                    };
+                    sc.bindings
+                        .insert(name, Shape::Money(c.clone(), Amount::symbol(sym)));
+                    Some((c, sym))
+                }
+                _ => None,
+            };
+            out.push(money);
+            // A capability is bound as a *value* the checker can follow, not only as a
+            // fact about the signature. Without the binding there was no way to tell a
+            // genuine `Auth` from anything else, and therefore no way to refuse a forged
+            // one.
+            if let (Some(eff), Some(name)) = (auth_effect_of(&p.ty), first_binding(&p.pat)) {
+                sc.bindings.insert(name, Shape::Auth(eff));
             }
         }
-        // Capabilities a function holds are the `Auth<E>` parameters it takes. They cannot
-        // be constructed, only received or granted, which is what makes them unforgeable.
+        out
+    }
+
+    /// The capabilities a function holds: its `Auth<E>` parameters. They cannot be
+    /// constructed, only received or granted, which is what makes them unforgeable.
+    fn capabilities_of(&self, f: &FnDecl) -> EffRow {
         let mut caps = EffRow::new();
         for p in &f.params {
-            if let Ty::Path { path, args, .. } = &p.ty {
-                if path.last().text == "Auth" {
-                    if let Some(Ty::Path {
-                        path: e,
-                        args: eargs,
-                        ..
-                    }) = args.first()
-                    {
-                        let names: Vec<String> = eargs
-                            .iter()
-                            .filter_map(|t| match t {
-                                Ty::Path { path, .. } => Some(path.last().text.clone()),
-                                _ => None,
-                            })
-                            .collect();
-                        if let Some(eff) = Effect::parse(&e.last().text, None, &names) {
-                            caps.add(eff, p.span);
-                        }
-                    }
+            let Ty::Path { path, args, .. } = &p.ty else {
+                continue;
+            };
+            if path.last().text != "Auth" {
+                continue;
+            }
+            if let Some(Ty::Path {
+                path: e,
+                args: eargs,
+                ..
+            }) = args.first()
+            {
+                let names: Vec<String> = eargs
+                    .iter()
+                    .filter_map(|t| match t {
+                        Ty::Path { path, .. } => Some(path.last().text.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                if let Some(eff) = Effect::parse(&e.last().text, None, &names) {
+                    caps.add(eff, p.span);
                 }
             }
         }
+        caps
+    }
+
+    fn function(&mut self, f: &FnDecl) {
+        let Some(body) = &f.body else { return };
+        let mut sc = Scope::default();
+        self.seed_params(f, &mut sc);
+        let caps = self.capabilities_of(f);
         self.block(body, &mut sc);
 
         let decl_span = f.effects.as_ref().map(|r| r.span).unwrap_or(f.name.span);
@@ -311,7 +683,7 @@ impl<'a> Cx<'a> {
             for diag in
                 effects::check_declaration(&f.name.text, &sc.effects, &declared_row, decl_span)
             {
-                self.d.push(diag);
+                self.push(diag);
             }
         } else {
             // Undeclared effects are a warning, not an error: inference exists, and forcing
@@ -325,7 +697,7 @@ impl<'a> Cx<'a> {
                 .map(|e| e.to_string())
                 .collect();
             if !interesting.is_empty() {
-                self.d.push(
+                self.push(
                     Diagnostic::warning(
                         "NL0313",
                         format!("`{}` has undeclared effects {}", f.name.text, sc.effects),
@@ -344,11 +716,11 @@ impl<'a> Cx<'a> {
 
         // W15/W16: authority.
         for diag in effects::check_authority(&f.name.text, &sc.effects, &caps, decl_span) {
-            self.d.push(diag);
+            self.push(diag);
         }
         // W8: linearity.
         for diag in effects::check_linearity(&sc.linear) {
-            self.d.push(diag);
+            self.push(diag);
         }
         self.report
             .inferred_effects
@@ -372,7 +744,7 @@ impl<'a> Cx<'a> {
             v.body.span(),
             info.contract_span,
         ) {
-            self.d.push(diag);
+            self.push(diag);
         }
         self.report
             .view_rungs
@@ -393,13 +765,66 @@ impl<'a> Cx<'a> {
     fn stmt(&mut self, s: &Stmt, sc: &mut Scope) {
         match s {
             Stmt::Let { pat, ty, init, .. } => {
-                let mut shape = init
-                    .as_ref()
-                    .map(|e| self.expr(e, sc))
-                    .unwrap_or(Shape::Opaque);
+                let init_shape = init.as_ref().map(|e| self.expr(e, sc));
+                let mut shape = init_shape.clone().unwrap_or(Shape::Opaque);
+
+                // **The capability rule.** `Auth<E>` has no introduction form that is an
+                // expression: it arrives as a parameter or from a `grant`, and nothing
+                // else produces one. Without this, `let auth: Auth<authorize<usd>> = 42;`
+                // passed `nilesc check` with no diagnostic at all — so the "unforgeable"
+                // in Theorem 4.4's authority clause was a claim about the prose.
+                if let Some(eff) = ty.as_ref().and_then(auth_effect_of) {
+                    match &init_shape {
+                        Some(Shape::Auth(_)) | None => {}
+                        Some(other) => {
+                            self.push(
+                                Diagnostic::error(
+                                    "NL0330",
+                                    format!("`Auth<{eff}>` cannot be constructed"),
+                                )
+                                .primary(
+                                    init.as_ref().map(|e| e.span()).unwrap_or_default(),
+                                    format!("this is {}", other.describe()),
+                                )
+                                .note("a capability is unforgeable: it is received as a parameter or granted, never built from a value")
+                                .note("that is the whole of what `unforgeable` means here — an annotation that could be satisfied by a literal would make the authority clause of the soundness theorem vacuous")
+                                .suggest(
+                                    pat.span(),
+                                    format!("auth: Auth<{eff}>"),
+                                    "take it as a parameter of the enclosing function",
+                                    crate::diagnostics::Applicability::HasPlaceholders,
+                                ),
+                            );
+                        }
+                    }
+                    shape = Shape::Auth(eff);
+                }
+
                 // An explicit annotation wins over inference: `let x: Money<jpy> = f();`
-                // is the programmer telling the checker something it could not see.
+                // is the programmer telling the checker something it could not see. It
+                // does not win over an initializer the checker *can* see and that is
+                // plainly something else — that is an annotation contradicting its own
+                // right-hand side, and taking the annotation's word for it is how
+                // `let x: Money<usd> = "hello";` type-checked.
                 if let Some(Some(cur)) = ty.as_ref().map(money_currency_of) {
+                    if let Some(Shape::Scalar(k)) = &init_shape {
+                        self.push(
+                            Diagnostic::error(
+                                "NL0253",
+                                format!("this is `{}`, not money", k.name()),
+                            )
+                            .primary(
+                                init.as_ref().map(|e| e.span()).unwrap_or_default(),
+                                format!("`{}`", k.name()),
+                            )
+                            .secondary(
+                                ty.as_ref().map(|t| t.span()).unwrap_or_default(),
+                                "annotated as money here",
+                            )
+                            .note("an annotation tells the checker what it could not see; it does not overrule what it can")
+                            .note("a money value carries its currency and scale: write `10.00 usd`, or convert explicitly"),
+                        );
+                    }
                     let sym = self.fresh_symbol();
                     let c = match cur {
                         Some(c) => Cur::Known(c),
@@ -407,7 +832,7 @@ impl<'a> Cx<'a> {
                     };
                     shape = Shape::Money(c, Amount::symbol(sym));
                 }
-                if let Shape::Money(..) = &shape {
+                if matches!(&shape, Shape::Money(..) | Shape::Auth(_) | Shape::Scalar(_)) {
                     for n in pat.bindings() {
                         sc.bindings.insert(n.text.clone(), shape.clone());
                     }
@@ -455,7 +880,7 @@ impl<'a> Cx<'a> {
                     } else {
                         "append a compensating entry"
                     };
-                    self.d.push(
+                    self.push(
                         Diagnostic::error("NL0230", format!("`{verb}` is not legal against {kind} `{}`", name.text))
                             .primary(span, format!("`{}` is immutable and fully retained", name.text))
                             .secondary(rel.span, format!("declared as a {kind} here"))
@@ -486,6 +911,17 @@ impl<'a> Cx<'a> {
 
     fn expr(&mut self, e: &Expr, sc: &mut Scope) -> Shape {
         match e {
+            // ---- scalars the checker can name ----
+            Expr::Int(..) => Shape::Scalar(ScalarKind::Int),
+            Expr::Float(..) => Shape::Scalar(ScalarKind::Float),
+            Expr::Bool(..) => Shape::Scalar(ScalarKind::Bool),
+            Expr::Str(..) => Shape::Scalar(ScalarKind::Text),
+            Expr::Bytes(..) => Shape::Scalar(ScalarKind::Bytes),
+            Expr::Unit(..) => Shape::Scalar(ScalarKind::Unit),
+            Expr::Duration { .. } => Shape::Scalar(ScalarKind::Duration),
+            Expr::Instant { .. } => Shape::Scalar(ScalarKind::Instant),
+            Expr::Epoch(..) => Shape::Scalar(ScalarKind::Epoch),
+
             // ---- money ----
             Expr::Money {
                 minor,
@@ -496,7 +932,7 @@ impl<'a> Cx<'a> {
                 // W6: the literal's own scale must equal the currency's declared scale.
                 if let Some(info) = self.cat.currencies.get(&currency.text) {
                     if info.scale != *scale {
-                        self.d.push(
+                        self.push(
                             Diagnostic::error(
                                 "NL0240",
                                 format!("this literal has {scale} decimal places but `{}` has scale {}", currency.text, info.scale),
@@ -507,7 +943,7 @@ impl<'a> Cx<'a> {
                         );
                     }
                 } else {
-                    self.d.push(
+                    self.push(
                         Diagnostic::error(
                             "NL0241",
                             format!("currency `{}` is not declared", currency.text),
@@ -546,7 +982,7 @@ impl<'a> Cx<'a> {
                 if let Some(r) = rate {
                     self.expr(r, sc);
                 } else {
-                    self.d.push(
+                    self.push(
                         Diagnostic::error("NL0242", "an `fx` form must record its rate")
                             .primary(*span, "no `rate:` given")
                             .note("the rate is what makes the two legs auditable as one conversion rather than two unrelated transactions"),
@@ -710,8 +1146,10 @@ impl<'a> Cx<'a> {
                     // it would let a one-armed `if` look unconditional.
                     None => arms.push(sc.branch()),
                 }
-                for d in merge_branches(sc, arms, *span, &mut self.report.may_violate) {
-                    self.d.push(d);
+                let cat = self.cat;
+                let scale = move |c: &str| cat.currencies.get(c).map(|x| x.scale);
+                for d in merge_branches(sc, arms, *span, &mut self.report.may_violate, &scale) {
+                    self.push(d);
                 }
                 Shape::Opaque
             }
@@ -735,8 +1173,10 @@ impl<'a> Cx<'a> {
                     // an arm like any other.
                     None => branches.push(sc.branch()),
                 }
-                for d in merge_branches(sc, branches, *span, &mut self.report.may_violate) {
-                    self.d.push(d);
+                let cat = self.cat;
+                let scale = move |c: &str| cat.currencies.get(c).map(|x| x.scale);
+                for d in merge_branches(sc, branches, *span, &mut self.report.may_violate, &scale) {
+                    self.push(d);
                 }
                 Shape::Opaque
             }
@@ -755,8 +1195,10 @@ impl<'a> Cx<'a> {
                     self.expr(&a.body, &mut b);
                     branches.push(b);
                 }
-                for d in merge_branches(sc, branches, *span, &mut self.report.may_violate) {
-                    self.d.push(d);
+                let cat = self.cat;
+                let scale = move |c: &str| cat.currencies.get(c).map(|x| x.scale);
+                for d in merge_branches(sc, branches, *span, &mut self.report.may_violate, &scale) {
+                    self.push(d);
                 }
                 Shape::Opaque
             }
@@ -772,13 +1214,13 @@ impl<'a> Cx<'a> {
             // discipline a batch-posting loop should follow: balance each iteration.
             Expr::While { cond, body, span } => {
                 self.expr(cond, sc);
-                let mut b = sc.branch();
+                let mut b = sc.loop_body();
                 self.block(body, &mut b);
                 self.close_loop(sc, b, *span);
                 Shape::Opaque
             }
             Expr::Loop { body, span } => {
-                let mut b = sc.branch();
+                let mut b = sc.loop_body();
                 self.block(body, &mut b);
                 self.close_loop(sc, b, *span);
                 Shape::Opaque
@@ -787,7 +1229,7 @@ impl<'a> Cx<'a> {
                 iter, body, span, ..
             } => {
                 self.expr(iter, sc);
-                let mut b = sc.branch();
+                let mut b = sc.loop_body();
                 self.block(body, &mut b);
                 self.close_loop(sc, b, *span);
                 Shape::Opaque
@@ -839,9 +1281,42 @@ impl<'a> Cx<'a> {
             // abandoned transaction commits nothing.
             Expr::Return { value: Some(v), .. } => self.expr(v, sc),
             Expr::Return { value: None, .. } => Shape::Opaque,
-            // `break` and `continue` leave a *loop*, not the transaction. The loop rule
-            // handles what that does to the row; the transaction still commits.
-            Expr::Break(_) | Expr::Continue(_) => Shape::Opaque,
+            // `break` and `continue` leave a *loop*, not the transaction: the transaction
+            // still commits, so what the path did to the ledger still counts.
+            //
+            // Both used to return `Opaque` and nothing else, which meant the row as it
+            // stood at the exit was folded in as though the whole body had run, and any
+            // ledger half the body had created but not yet consumed was judged only at the
+            // end of the body — a point this path never reaches. So
+            // `loop { let d = debit(a, m)?; if p { break; } post(d, credit(b, m)); }`
+            // passed: the half is consumed on the path the checker looked at, and dropped
+            // on the one it did not.
+            Expr::Break(span) | Expr::Continue(span) => {
+                if let Some(base) = sc.loop_base {
+                    // The exit's prefix row, as an alternative path through the loop.
+                    sc.exits.push(sc.row.clone());
+                    // And the linear discipline on this path: anything the body created
+                    // and has not yet consumed is dropped here.
+                    let unconsumed: Vec<LinearValue> = sc.linear[base.min(sc.linear.len())..]
+                        .iter()
+                        .filter(|v| v.uses.is_empty())
+                        .cloned()
+                        .collect();
+                    for v in unconsumed {
+                        self.push(
+                            Diagnostic::error(
+                                "NL0322",
+                                format!("`{}` is not consumed on this exit path", v.name),
+                            )
+                            .primary(*span, "the loop is left here")
+                            .secondary(v.bound_at, "created in this iteration")
+                            .note("a ledger half must be consumed exactly once on *every* path, not on the path that falls off the end of the body")
+                            .note("dropping it would lose the movement silently, which is the failure mode double-entry exists to prevent"),
+                        );
+                    }
+                }
+                Shape::Opaque
+            }
             Expr::Explain { target, span } | Expr::Impact { target, span } => {
                 self.expr(target, sc);
                 sc.effects.add(Effect::Read(Rung::Snapshot), *span);
@@ -957,9 +1432,23 @@ impl<'a> Cx<'a> {
                 Shape::Opaque
             }
             _ => {
-                // An unknown call producing money contributes an *undecided* amount: the
-                // checker cannot see the value, so it records a fresh symbol rather than
-                // assuming zero. This is the mechanism that keeps `is_decided` honest.
+                // **A call to a function this program declares.** Its effects become the
+                // caller's, and its net movement becomes part of the caller's row.
+                //
+                // Neither happened before. `report.inferred_effects` was written and never
+                // read, so a `ledger_consistent` view reading a `bounded` view through one
+                // helper passed rung monotonicity; and a callee that posted one half of a
+                // transfer contributed nothing at all to the caller's conservation
+                // obligation — not a violation, not an undecided, *nothing*. The obligation
+                // did not move to the runtime. It ceased to exist.
+                if let Some(summary) = self.summaries.get(name).cloned() {
+                    self.check_arguments(name, &summary, shapes, args, span);
+                    self.apply_summary(&summary, shapes, span, sc);
+                }
+                // A call producing money contributes an *undecided* amount: the checker
+                // cannot see the returned value even when it knows what the callee moved,
+                // so it records a fresh symbol rather than assuming zero. This is the
+                // mechanism that keeps `is_decided` honest.
                 if let Some((c, _)) = money {
                     let s = self.fresh_symbol();
                     return Shape::Money(c, Amount::symbol(s));
@@ -969,7 +1458,261 @@ impl<'a> Cx<'a> {
         }
     }
 
+    /// Check a call's arguments against the callee's parameters.
+    ///
+    /// Only the shapes this checker can name are judged; a parameter it cannot see inside
+    /// is `ParamKind::Other` and nothing is claimed about it. Within that boundary the
+    /// judgement is total, and it is new: arguments used to be evaluated for their effects
+    /// and then discarded except for a scan for the first money value, so
+    /// `transfer(a, b, 10.00 eur)` against `m: Money<usd>` passed, and an `Auth<E>`
+    /// position could be filled by any expression at all.
+    fn check_arguments(
+        &mut self,
+        callee: &str,
+        s: &FnSummary,
+        shapes: &[Shape],
+        args: &[Arg],
+        span: Span,
+    ) {
+        if shapes.len() != s.params.len() {
+            // Arity. Reported once, and the shape check is skipped, because pairing
+            // arguments with parameters positionally after a count mismatch produces a
+            // cascade of confident nonsense.
+            self.push(
+                Diagnostic::error(
+                    "NL0254",
+                    format!(
+                        "`{callee}` takes {} argument(s), but {} were given",
+                        s.params.len(),
+                        shapes.len()
+                    ),
+                )
+                .primary(span, "wrong number of arguments"),
+            );
+            return;
+        }
+        for (i, (kind, shape)) in s.params.iter().zip(shapes).enumerate() {
+            let at = args.get(i).map(|a| a.value.span()).unwrap_or(span);
+            match (kind, shape) {
+                // A currency mismatch through a call. This is the interprocedural half of
+                // W7, and the reason `Money<c>` on a signature is worth writing.
+                (ParamKind::Money(Some(want)), Shape::Money(Cur::Known(got), _)) if got != want => {
+                    self.push(
+                        Diagnostic::error(
+                            "NL0255",
+                            format!("`{callee}` takes `Money<{want}>` here, not `Money<{got}>`"),
+                        )
+                        .primary(at, format!("this is `Money<{got}>`"))
+                        .note("currencies do not convert implicitly at a call boundary any more than at an operator: an implicit one would be a silent conversion at an unrecorded rate")
+                        .note("to move value between currencies, use an `fx { leg .., leg .., rate: .. }` form, which conserves each currency separately and records the rate"),
+                    );
+                }
+                (ParamKind::Money(_), Shape::Scalar(k)) => {
+                    self.push(
+                        Diagnostic::error(
+                            "NL0254",
+                            format!("`{callee}` takes money here, not `{}`", k.name()),
+                        )
+                        .primary(at, format!("`{}`", k.name()))
+                        .note("a money value carries its currency and scale: write `10.00 usd`"),
+                    );
+                }
+                // **The capability position.** An `Auth<E>` parameter accepts an `Auth`
+                // and nothing else — not a literal, not the result of a call the checker
+                // cannot see into. Accepting an opaque value here would put the forging
+                // back one level: `force_debit(a, m, granted())` would hold authority
+                // because a function called `granted` exists.
+                (ParamKind::Auth(want), got) => {
+                    let ok = matches!(got, Shape::Auth(have) if have == want || have == "_");
+                    if !ok {
+                        self.push(
+                            Diagnostic::error(
+                                "NL0331",
+                                format!("`{callee}` requires `Auth<{want}>` here"),
+                            )
+                            .primary(at, format!("this is {}", got.describe()))
+                            .note("a capability is unforgeable: it is received as a parameter or granted, never produced by an expression")
+                            .note("passing it on is the only way to delegate it, and that is what makes an authorised path traceable to the parameter that authorised it"),
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Join a callee's summary into the caller's scope at a call site.
+    ///
+    /// Two things travel, and each has its own rule.
+    ///
+    /// * **Effects** union in, attributed to the call rather than to a line inside the
+    ///   callee: the caller's declaration is what does not admit them, and the call is
+    ///   where the caller acquired them.
+    /// * **The net row** is instantiated. The callee's parameter symbols are replaced by
+    ///   the caller's argument amounts, its currency variables by the arguments'
+    ///   currencies, and every remaining symbol — a callee local, an amount neither side
+    ///   can see — by a *fresh caller symbol*, which keeps the entry undecided.
+    ///
+    /// A `havoc` summary contributes an undecided movement in each currency it touches,
+    /// never a decided one. That is the difference between "the checker handed this to the
+    /// runtime" and "the checker forgot about it", and it is the whole reason `havoc` is
+    /// recorded rather than inferred from a fresh symbol appearing.
+    fn apply_summary(&mut self, s: &FnSummary, args: &[Shape], span: Span, sc: &mut Scope) {
+        // Callee symbol -> caller amount, for the parameters that are money.
+        let mut amounts: std::collections::BTreeMap<u32, Amount> = Default::default();
+        let mut currencies: std::collections::BTreeMap<u32, Cur> = Default::default();
+        for (i, pm) in s.param_money.iter().enumerate() {
+            let Some((callee_cur, callee_sym)) = pm else {
+                continue;
+            };
+            match args.get(i) {
+                Some(Shape::Money(c, a)) => {
+                    amounts.insert(*callee_sym, a.clone());
+                    if let Cur::Var(v) = callee_cur {
+                        currencies.insert(*v, c.clone());
+                    }
+                }
+                // An argument the caller cannot see either. A fresh caller symbol, so the
+                // entry is undecided here rather than carrying the callee's symbol, which
+                // would make two unrelated calls look like the same amount.
+                _ => {
+                    let fresh = self.fresh_symbol();
+                    amounts.insert(*callee_sym, Amount::symbol(fresh));
+                }
+            }
+        }
+        // **Effects are instantiated too.** A currency-generic helper's inferred row says
+        // `debit<?c0>`; at a call site that binds `?c0` to `eur`, the caller's row must say
+        // `debit<eur>`, or the caller has to declare a variable it never wrote. An unbound
+        // variable stays unknown — spelled `*` — which a caller can only cover by declaring
+        // the wildcard, and that is the honest requirement: it really does not know which
+        // currency moves.
+        let rename: HashMap<String, String> = currencies
+            .iter()
+            .map(|(v, c)| (format!("?c{v}"), c.to_string()))
+            .collect();
+        let mut effects = EffRow::new();
+        for e in s.effects.iter() {
+            let at = s.effects.origin(e).unwrap_or(span);
+            effects.add(instantiate_effect(e, &rename), at);
+        }
+        sc.effects.union_at(&effects, span);
+        if !sc.conserving || s.net.is_empty() {
+            return;
+        }
+
+        let mut instantiated = CurRow::default();
+        for c in s.net.currencies().cloned().collect::<Vec<_>>() {
+            let amount = s.net.get(&c);
+            // The **call site**, not the line inside the callee. The transaction whose
+            // conservation is in question is the caller's, so that is the line a reader
+            // needs to look at; the callee's own body is reachable from its name.
+            let at = span;
+            let cur = match &c {
+                Cur::Var(v) => match currencies.get(v) {
+                    Some(known) => known.clone(),
+                    None => self.unifier.fresh(),
+                },
+                known => known.clone(),
+            };
+            let mut a = Amount::zero();
+            a.constant = amount.constant;
+            for (sym, coeff) in &amount.symbols {
+                match amounts.get(sym) {
+                    Some(sub) => a = a.add(&sub.scale(*coeff)),
+                    None => {
+                        let fresh = self.fresh_symbol();
+                        a = a.add(&Amount::symbol(fresh).scale(*coeff));
+                    }
+                }
+            }
+            if s.havoc {
+                // Poisoned on purpose: a summary that could not be computed must not be
+                // able to produce a decided entry, however the arithmetic came out.
+                let fresh = self.fresh_symbol();
+                a = a.add(&Amount::symbol(fresh));
+            }
+            instantiated.movement(cur, a, at);
+        }
+        sc.row.merge(&instantiated);
+    }
+
     fn binary(&mut self, op: BinOp, a: Shape, b: Shape, span: Span, lsp: Span, rsp: Span) -> Shape {
+        let arithmetic = matches!(op, BinOp::Add | BinOp::Sub);
+        let scaling = matches!(op, BinOp::Mul | BinOp::Div | BinOp::Rem);
+        let comparison = matches!(
+            op,
+            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+        );
+
+        // Money and a named scalar. `Money * Int` is scaling and is how a rate is applied;
+        // `Money + Int` is a category error that used to classify as `Opaque` and vanish.
+        match (&a, &b) {
+            (Shape::Money(c, amt), Shape::Scalar(k)) | (Shape::Scalar(k), Shape::Money(c, amt))
+                if arithmetic || comparison =>
+            {
+                self.push(
+                    Diagnostic::error(
+                        "NL0252",
+                        format!("cannot {} `Money<{c}>` and `{}`", verb(op), k.name()),
+                    )
+                    .primary(span, "these are not the same kind of thing")
+                    .secondary(lsp, a.describe())
+                    .secondary(rsp, b.describe())
+                    .note("money is closed under addition and subtraction *within a currency*, and under integer scaling; there is no operation joining it to a plain number")
+                    .note("a number that is an amount of money should be written as one: `10.00 usd`, not `1000`"),
+                );
+                let _ = amt;
+                return Shape::Opaque;
+            }
+            (Shape::Money(c, amt), Shape::Scalar(ScalarKind::Int)) if scaling => {
+                // Scaling by an unknown integer: the currency survives, the amount does
+                // not — `n · x` is a product of two symbolic values and outside the
+                // domain, so a fresh symbol, which is what keeps `is_decided` honest.
+                let (c, _) = (c.clone(), amt);
+                let s = self.fresh_symbol();
+                return Shape::Money(c, Amount::symbol(s));
+            }
+            (Shape::Scalar(x), Shape::Scalar(y)) => {
+                let ok = if arithmetic {
+                    x.adds_to(*y)
+                } else if comparison {
+                    x.compares_to(*y)
+                } else if scaling {
+                    matches!(
+                        (x, y),
+                        (ScalarKind::Int, ScalarKind::Int) | (ScalarKind::Float, ScalarKind::Float)
+                    )
+                } else {
+                    // `and`/`or`/`like`: booleans and text respectively.
+                    match op {
+                        BinOp::And | BinOp::Or => *x == ScalarKind::Bool && *y == ScalarKind::Bool,
+                        BinOp::Like => *x == ScalarKind::Text && *y == ScalarKind::Text,
+                        _ => true,
+                    }
+                };
+                if !ok {
+                    self.push(
+                        Diagnostic::error(
+                            "NL0252",
+                            format!("cannot {} `{}` and `{}`", verb(op), x.name(), y.name()),
+                        )
+                        .primary(span, "no such operation")
+                        .secondary(lsp, a.describe())
+                        .secondary(rsp, b.describe())
+                        .note("there are no implicit conversions between kinds: one would be a silent coercion, and a silent coercion in a ledger language is a rounding nobody wrote"),
+                    );
+                    return Shape::Opaque;
+                }
+                return if comparison || matches!(op, BinOp::And | BinOp::Or | BinOp::Like) {
+                    Shape::Scalar(ScalarKind::Bool)
+                } else {
+                    Shape::Scalar(*x)
+                };
+            }
+            _ => {}
+        }
+
         let (Shape::Money(ca, aa), Shape::Money(cb, ab)) = (&a, &b) else {
             return Shape::Opaque;
         };
@@ -987,7 +1730,7 @@ impl<'a> Cx<'a> {
                         Shape::Money(c, amt)
                     }
                     Err((x, y)) => {
-                        self.d.push(
+                        self.push(
                             Diagnostic::error(
                                 "NL0250",
                                 format!("cannot {} `Money<{x}>` and `Money<{y}>`", if op == BinOp::Add { "add" } else { "subtract" }),
@@ -1005,7 +1748,7 @@ impl<'a> Cx<'a> {
             }
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
                 if let Err((x, y)) = self.unifier.unify(ca, cb) {
-                    self.d.push(
+                    self.push(
                         Diagnostic::error("NL0251", format!("cannot compare `Money<{x}>` with `Money<{y}>`"))
                             .primary(span, "different currencies are not ordered relative to each other")
                             .secondary(lsp, format!("`Money<{x}>`"))
@@ -1028,7 +1771,7 @@ impl<'a> Cx<'a> {
         // count, which is the same problem in the linear discipline as `n · m` is in the
         // arithmetic one.
         for d in effects::check_linearity(&body_local) {
-            self.d.push(d);
+            self.push(d);
         }
         sc.effects.union(&body.effects);
         // A linear value consumed *inside* a loop is consumed an unknown number of times.
@@ -1041,7 +1784,16 @@ impl<'a> Cx<'a> {
                 sc.linear[i].uses.extend(extra);
             }
         }
-        let iterated = body.row.iterate(at);
+        // **The exit paths.** A `break` leaves the loop with a prefix of the body's
+        // movements, so the loop's contribution is the join of the full body with each
+        // prefix — alternatives, not a sequence. Where they disagree the join goes to top
+        // and the verdict becomes undecided, which is the honest statement: which path ran
+        // is not decidable here.
+        let mut row = std::mem::take(&mut body.row);
+        for exit in std::mem::take(&mut body.exits) {
+            row = row.join(exit, at);
+        }
+        let iterated = row.iterate(at);
         sc.row.merge(&iterated);
     }
 
@@ -1052,6 +1804,18 @@ impl<'a> Cx<'a> {
                 v.uses.push(at);
             }
         }
+    }
+
+    /// The declared minor-unit scale of a currency, for rendering a residue.
+    ///
+    /// `None` when the currency is not declared — and the caller then says nothing rather
+    /// than printing the residue at an assumed scale. `unwrap_or(2)` rendered a JPY
+    /// residue of 1000 as "10.00", and the currency being undeclared is already reported
+    /// (NL0241): a second diagnostic carrying a wrong number is worse than none, because a
+    /// reader reconciling against it would be reconciling against a figure the compiler
+    /// invented.
+    fn scale_of(&self, currency: &str) -> Option<u32> {
+        self.cat.currencies.get(currency).map(|c| c.scale)
     }
 
     /// Close an open conservation obligation and report the verdict.
@@ -1071,24 +1835,18 @@ impl<'a> Cx<'a> {
                 Verdict::MayViolate { currency, .. } => {
                     self.report.runtime_obligations += 1;
                     self.report.may_violate += 1;
-                    let scale = self
-                        .cat
-                        .currencies
-                        .get(currency)
-                        .map(|c| c.scale)
-                        .unwrap_or(2);
+                    let Some(scale) = self.scale_of(currency) else {
+                        continue;
+                    };
                     if let Some(d) = rows::diagnose(&v, scale) {
-                        self.d.push(d);
+                        self.push(d);
                     }
                 }
                 Verdict::Violates { currency, .. } => {
                     self.report.violates += 1;
-                    let scale = self
-                        .cat
-                        .currencies
-                        .get(currency)
-                        .map(|c| c.scale)
-                        .unwrap_or(2);
+                    let Some(scale) = self.scale_of(currency) else {
+                        continue;
+                    };
                     if let Some(mut d) = rows::diagnose_with(&v, scale, prov) {
                         if let Some(name) = leg {
                             d = d.secondary(span, format!("in leg `{name}` of this `fx` form"));
@@ -1112,7 +1870,7 @@ impl<'a> Cx<'a> {
                                 );
                             }
                         }
-                        self.d.push(d);
+                        self.push(d);
                     }
                 }
             }
@@ -1136,7 +1894,7 @@ impl<'a> Cx<'a> {
             collect_fields(&a.value, &mut used);
             for (name, span_of_use) in used {
                 if let Some((_, level, decl)) = confidential.iter().find(|(c, _, _)| *c == name) {
-                    self.d.push(
+                    self.push(
                         Diagnostic::error("NL0260", format!("`{name}` is `@confidential({level})` and cannot be used here"))
                             .primary(span_of_use, "the engine cannot compute on this column")
                             .secondary(*decl, format!("declared `@confidential({level})` here"))
@@ -1177,6 +1935,35 @@ fn collect_fields(e: &Expr, out: &mut Vec<(String, Span)>) {
     }
 }
 
+/// `Auth<authorize<usd>>` -> `Some("authorize<usd>")`; anything else -> `None`.
+///
+/// The effect is rendered rather than parsed, because the string is for a human reading a
+/// diagnostic. Whether the effect *exists* is decided in [`Cx::function`], where the same
+/// type is turned into an [`Effect`] by [`Effect::parse`].
+fn auth_effect_of(t: &Ty) -> Option<String> {
+    match t {
+        Ty::Path { path, args, .. } if path.last().text == "Auth" => match args.first() {
+            Some(Ty::Path { path: e, args, .. }) => {
+                let inner: Vec<String> = args
+                    .iter()
+                    .filter_map(|a| match a {
+                        Ty::Path { path, .. } => Some(path.last().text.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                Some(if inner.is_empty() {
+                    e.last().text.clone()
+                } else {
+                    format!("{}<{}>", e.last().text, inner.join(", "))
+                })
+            }
+            _ => Some("_".into()),
+        },
+        Ty::Ref { inner, .. } => auth_effect_of(inner),
+        _ => None,
+    }
+}
+
 /// `Money<usd>` -> `Some(Some("usd"))`; `Money` -> `Some(None)`; anything else -> `None`.
 fn money_currency_of(t: &Ty) -> Option<Option<String>> {
     match t {
@@ -1204,4 +1991,179 @@ fn to_eff_row(row: &EffectRow) -> EffRow {
         }
     }
     out
+}
+
+/// The verb a binary operator is described by in a diagnostic.
+fn verb(op: BinOp) -> &'static str {
+    match op {
+        BinOp::Add => "add",
+        BinOp::Sub => "subtract",
+        BinOp::Mul => "multiply",
+        BinOp::Div => "divide",
+        BinOp::Rem => "take the remainder of",
+        BinOp::And => "conjoin",
+        BinOp::Or => "disjoin",
+        BinOp::Like => "match",
+        _ => "compare",
+    }
+}
+
+/// Every name appearing in call position in a block, for the call-graph edge set.
+fn calls_in_block(b: &Block, out: &mut Vec<String>) {
+    for s in &b.stmts {
+        match s {
+            Stmt::Let { init: Some(e), .. } | Stmt::Expr(e) | Stmt::Semi(e) => {
+                calls_in_expr(e, out)
+            }
+            _ => {}
+        }
+    }
+    if let Some(t) = &b.tail {
+        calls_in_expr(t, out);
+    }
+}
+
+fn calls_in_expr(e: &Expr, out: &mut Vec<String>) {
+    if let Expr::Call { callee, args, .. } = e {
+        if let Expr::Path(p) = &**callee {
+            out.push(p.last().text.clone());
+        }
+        args.iter().for_each(|a| calls_in_expr(&a.value, out));
+        return;
+    }
+    let (mut kids, mut blocks) = (Vec::new(), Vec::new());
+    each_child(e, &mut kids, &mut blocks);
+    kids.into_iter().for_each(|c| calls_in_expr(c, out));
+    blocks.into_iter().for_each(|b| calls_in_block(b, out));
+}
+
+/// Walk the immediate sub-expressions and sub-blocks of an expression.
+///
+/// Written once so that the call-graph walk cannot fall behind the AST: a new `Expr`
+/// variant that carries a body and is not added here would make a call inside it invisible
+/// to the recursion check, and an unnoticed cycle is exactly what `havoc` exists to catch.
+fn each_child<'e>(e: &'e Expr, exprs: &mut Vec<&'e Expr>, blocks: &mut Vec<&'e Block>) {
+    match e {
+        Expr::Call { callee, args, .. } => {
+            exprs.push(callee);
+            args.iter().for_each(|a| exprs.push(&a.value));
+        }
+        Expr::Hold { args, .. } | Expr::Authorize { args, .. } | Expr::Declassify { args, .. } => {
+            args.iter().for_each(|a| exprs.push(&a.value))
+        }
+        Expr::Stage { recv, args, .. } => {
+            exprs.push(recv);
+            args.iter().for_each(|a| exprs.push(&a.value));
+        }
+        Expr::Txn { body, .. } => blocks.push(body),
+        Expr::Fx { legs, rate, .. } => {
+            legs.iter().for_each(|(_, l)| exprs.push(l));
+            if let Some(r) = rate {
+                exprs.push(r);
+            }
+        }
+        Expr::Resolve { hold, outcome, .. } => {
+            exprs.push(hold);
+            if let ResolveOutcome::Post(a) = outcome {
+                exprs.push(a);
+            }
+        }
+        Expr::Fixpoint {
+            recv,
+            step,
+            measure,
+            ..
+        } => {
+            exprs.push(recv);
+            exprs.push(step);
+            exprs.push(measure);
+        }
+        Expr::Binary { lhs, rhs, .. } => {
+            exprs.push(lhs);
+            exprs.push(rhs);
+        }
+        Expr::Unary { operand, .. } => exprs.push(operand),
+        Expr::Block(b) => blocks.push(b),
+        Expr::If {
+            cond, then, els, ..
+        } => {
+            exprs.push(cond);
+            blocks.push(then);
+            if let Some(e) = els {
+                exprs.push(e);
+            }
+        }
+        Expr::Case { arms, els, .. } => {
+            arms.iter().for_each(|(c, v)| {
+                exprs.push(c);
+                exprs.push(v);
+            });
+            if let Some(e) = els {
+                exprs.push(e);
+            }
+        }
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            exprs.push(scrutinee);
+            for a in arms {
+                if let Some(gd) = &a.guard {
+                    exprs.push(gd);
+                }
+                exprs.push(&a.body);
+            }
+        }
+        Expr::While { cond, body, .. } => {
+            exprs.push(cond);
+            blocks.push(body);
+        }
+        Expr::Loop { body, .. } => blocks.push(body),
+        Expr::For { iter, body, .. } => {
+            exprs.push(iter);
+            blocks.push(body);
+        }
+        Expr::Closure { body, .. } => exprs.push(body),
+        Expr::Try { expr, .. } | Expr::Cast { expr, .. } => exprs.push(expr),
+        Expr::Field { base, .. } | Expr::Index { base, .. } => exprs.push(base),
+        Expr::Tuple { elems, .. } | Expr::Array { elems, .. } => {
+            elems.iter().for_each(|x| exprs.push(x))
+        }
+        Expr::StructLit { fields, .. } => fields.iter().for_each(|(_, v)| exprs.push(v)),
+        Expr::Assign { target, value, .. } => {
+            exprs.push(target);
+            exprs.push(value);
+        }
+        Expr::Return { value: Some(v), .. } => exprs.push(v),
+        Expr::Explain { target, .. } | Expr::Impact { target, .. } => exprs.push(target),
+        Expr::Reproduce { target, at, .. } => {
+            exprs.push(target);
+            if let Some(a) = at {
+                exprs.push(a);
+            }
+        }
+        Expr::Sql { inner, .. } => exprs.push(inner),
+        _ => {}
+    }
+}
+
+/// Rewrite a currency-parameterised effect's currency through a call site's bindings.
+///
+/// A currency that is still a variable becomes `*` — unknown — rather than keeping the
+/// callee's internal variable name, which no caller could ever declare and which would leak
+/// one function's numbering into another's signature.
+fn instantiate_effect(e: &Effect, rename: &HashMap<String, String>) -> Effect {
+    let map = |c: &String| -> String {
+        match rename.get(c) {
+            Some(known) => known.clone(),
+            None if c.starts_with("?c") => "*".to_string(),
+            None => c.clone(),
+        }
+    };
+    match e {
+        Effect::Debit(c) => Effect::Debit(map(c)),
+        Effect::Credit(c) => Effect::Credit(map(c)),
+        Effect::Hold(c) => Effect::Hold(map(c)),
+        Effect::Authorize(c) => Effect::Authorize(map(c)),
+        other => other.clone(),
+    }
 }

@@ -1,0 +1,209 @@
+// **The group E18 could not measure, because the analysis did not exist.**
+//
+// Every case in `sound.niles` and `defective.niles` is a single function. That was not a
+// choice about coverage: until this run, a call to another function in the same program
+// contributed *nothing* to its caller — not its effects, not its money — so a
+// multi-function case would have measured the splitter rather than the solver. A caller
+// whose callee posted one half of a transfer was reported as having no conservation
+// obligation at all.
+//
+// These cases are the shapes real banking code is written in: a transfer helper called by a
+// product, a fee routine called by three, a recursive amortisation. Each is delimited by a
+// `// --- case:` line and checked as one unit, because the question is what the solver says
+// about the *caller*.
+//
+// The last two are deliberately defective, and are the only ones expected to accuse.
+
+// --- case: helper_posts_both_halves
+// The base case. A helper that posts a balanced pair, wrapped in the caller's transaction.
+// Nothing here is beyond the solver — the point is that it is now *reached*.
+fn move_pair(from: Id<Account>, to: Id<Account>) -> Result<(), TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    post(debit(from, 100.00 usd)?, credit(to, 100.00 usd))
+}
+
+fn settle_pair(a: Id<Account>, b: Id<Account>) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("settle-pair", window: 30.days) { move_pair(a, b) }
+}
+
+// --- case: helper_takes_the_amount
+// The parameter substitution. The callee's row is written in terms of its own symbol for
+// `m`; the caller's amount replaces it, so the two halves cancel at the call site rather
+// than only inside the callee.
+fn move_amount(from: Id<Account>, to: Id<Account>, m: Money<usd>) -> Result<(), TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    post(debit(from, m)?, credit(to, m))
+}
+
+fn settle_amount(a: Id<Account>, b: Id<Account>, m: Money<usd>) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("settle-amount", window: 30.days) { move_amount(a, b, m) }
+}
+
+// --- case: two_helpers_one_transaction
+// The shape a fee actually takes: two independent helpers, each posting one balanced pair,
+// composed inside one transaction. The caller's row is the sum of two summaries.
+fn charge_principal(from: Id<Account>, to: Id<Account>, m: Money<usd>) -> Result<(), TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    post(debit(from, m)?, credit(to, m))
+}
+
+fn charge_fee(from: Id<Account>, income: Id<Account>) -> Result<(), TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    post(debit(from, 1.50 usd)?, credit(income, 1.50 usd))
+}
+
+fn settle_with_fee(a: Id<Account>, b: Id<Account>, income: Id<Account>, m: Money<usd>)
+    -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("settle-fee", window: 30.days) {
+        charge_principal(a, b, m);
+        charge_fee(a, income)
+    }
+}
+
+// --- case: helper_computes_the_amount
+// The boundary, and the honest verdict on it.
+//
+// Note what is *not* the boundary: binding the computed amount once and using the binding
+// on both sides conserves for any value, and the solver proves it — an opaque call is a
+// symbol, and a symbol cancels with itself. The undecidable case is the one below, where
+// the two sides are two separate computations. They may well agree at runtime; nothing
+// here can say so, and claiming otherwise would be claiming to solve arithmetic.
+fn accrue(from: Id<Account>, to: Id<Account>, principal: Money<usd>) -> Result<(), TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    post(debit(from, daily_accrual(principal))?, credit(to, daily_accrual(principal)))
+}
+
+fn book_accrual(a: Id<Account>, b: Id<Account>, p: Money<usd>) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("accrual", window: 30.days) { accrue(a, b, p) }
+}
+
+// --- case: generic_currency_helper
+// A currency-generic helper called at a concrete currency. The callee's row carries a
+// currency *variable*; the call site binds it to `usd`, which is what makes one helper
+// serve every currency without monomorphising the checker.
+fn move_generic(from: Id<Account>, to: Id<Account>, m: Money) -> Result<(), TxnError>
+    ! { append, debit, credit }
+{
+    post(debit(from, m)?, credit(to, m))
+}
+
+fn settle_generic(a: Id<Account>, b: Id<Account>, m: Money<eur>) -> Result<TxnId, TxnError>
+    ! { append, debit<eur>, credit<eur> }
+{
+    txn idem("settle-generic", window: 30.days) { move_generic(a, b, m) }
+}
+
+// --- case: three_deep_chain
+// Transitivity through more than one hop, because a summary that composed once and not
+// twice would pass every two-function case in this file.
+fn leg(from: Id<Account>, to: Id<Account>, m: Money<usd>) -> Result<(), TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    post(debit(from, m)?, credit(to, m))
+}
+
+fn hop(from: Id<Account>, to: Id<Account>, m: Money<usd>) -> Result<(), TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    leg(from, to, m)
+}
+
+fn route(a: Id<Account>, b: Id<Account>, m: Money<usd>) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("route", window: 30.days) { hop(a, b, m) }
+}
+
+// --- case: helper_branches_and_both_arms_balance
+// A callee with control flow. The join happens inside the summary, so the caller sees one
+// row rather than a branch it has to re-analyse.
+fn route_by_class(from: Id<Account>, retail: Id<Account>, corporate: Id<Account>,
+                  m: Money<usd>, is_retail: bool) -> Result<(), TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    if is_retail {
+        post(debit(from, m)?, credit(retail, m))
+    } else {
+        post(debit(from, m)?, credit(corporate, m))
+    }
+}
+
+fn book_by_class(a: Id<Account>, r: Id<Account>, c: Id<Account>, m: Money<usd>, retail: bool)
+    -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("by-class", window: 30.days) { route_by_class(a, r, c, m, retail) }
+}
+
+// --- case: recursive_amortisation
+// **The havoc case.** A helper that calls itself has a row on both sides of its own
+// definition, so the fixpoint cannot summarise it. The summary is marked `havoc` and
+// contributes an undecided movement — which is the point: the caller gets a runtime
+// obligation and a reader can see *why*, rather than a proof the checker was not entitled
+// to.
+fn amortise(from: Id<Account>, to: Id<Account>, m: Money<usd>, periods: Int)
+    -> Result<(), TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    post(debit(from, m)?, credit(to, m));
+    if periods > 1 {
+        amortise(from, to, m, periods - 1)
+    } else {
+        Ok(())
+    }
+}
+
+fn book_schedule(a: Id<Account>, b: Id<Account>, m: Money<usd>) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("schedule", window: 30.days) { amortise(a, b, m, 12) }
+}
+
+// --- case: DEFECT_caller_of_a_half_poster
+// The defect the whole group exists to catch. `post_one_half` moves ten dollars out and
+// nothing in; the caller's transaction is short by exactly that. Before summaries, this was
+// not an alarm, not a proof, and not a runtime obligation — it was not counted.
+fn post_one_half(a: Id<Account>) -> Result<(), TxnError>
+    ! { append, debit<usd> }
+{
+    let d = debit(a, 10.00 usd)?;
+    post(d)
+}
+
+fn caller_of_a_half_poster(a: Id<Account>) -> Result<TxnId, TxnError>
+    ! { append, debit<usd> }
+{
+    txn idem("half", window: 30.days) { post_one_half(a) }
+}
+
+// --- case: DEFECT_helper_credits_twice
+// The other direction, and the harder one to see by reading: the helper is balanced on its
+// face and the caller adds a second credit of the same amount, so the transaction creates
+// five dollars. The residue is exact because both amounts are literals.
+fn credit_once(to: Id<Account>) -> Result<(), TxnError>
+    ! { append, credit<usd> }
+{
+    post(credit(to, 5.00 usd))
+}
+
+fn double_credit(a: Id<Account>, b: Id<Account>) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("double", window: 30.days) {
+        post(debit(a, 5.00 usd)?, credit(b, 5.00 usd));
+        credit_once(b)
+    }
+}

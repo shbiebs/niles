@@ -1,0 +1,8 @@
+// RULE: general typing. An annotation tells the checker what it could not see; it does not
+// overrule what it can.
+// EXPECT: NL0253
+// STAGE: check
+fn f() -> Result<TxnId, TxnError> {
+    let x: Money<usd> = 1000;
+    Ok(x)
+}

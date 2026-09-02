@@ -74,6 +74,27 @@ All five are caught. Without this control the numbers above would establish only
 
 The split between `Refuted` and `MayViolate` is the analysis's honesty rather than a detail: an accusation is a **must**-statement, sound only where the body is straight-line and abort-free, and the same arithmetic reached across a merge is an alarm. A checker that accused a program it could not follow would teach its users to switch it off.
 
+## The interprocedural group
+
+**This group did not exist before, and could not have.** Until the checker computed function summaries, a call to another function in the same program contributed nothing at all to its caller — not its effects, not its money. A caller whose callee posted one half of a transfer had *no* conservation obligation: not a violation, not an alarm, not a runtime obligation. The ten dollars were not counted.
+
+So a multi-function case would have measured the corpus splitter rather than the solver, and every case in the two groups above is a single function. These are the shapes banking code is actually written in: a transfer helper called by a product, a fee routine called by three, a recursive amortisation.
+
+| Case | Verdict | Proved | Undecided | MayViolate | Violates |
+|---|---|---|---|---|---|
+| `helper_posts_both_halves` | Proved | 1 | 0 | 0 | 0 |
+| `helper_takes_the_amount` | Proved | 1 | 0 | 0 | 0 |
+| `two_helpers_one_transaction` | Proved | 1 | 0 | 0 | 0 |
+| `helper_computes_the_amount` | Undecided | 0 | 1 | 0 | 0 |
+| `generic_currency_helper` | Proved | 1 | 0 | 0 | 0 |
+| `three_deep_chain` | Proved | 1 | 0 | 0 | 0 |
+| `helper_branches_and_both_arms_balance` | Proved | 1 | 0 | 0 | 0 |
+| `recursive_amortisation` | Undecided | 0 | 1 | 0 | 0 |
+| `DEFECT_caller_of_a_half_poster` | Refuted | 0 | 0 | 0 | 1 |
+| `DEFECT_helper_credits_twice` | Refuted | 0 | 0 | 0 | 1 |
+
+6 of 8 conserving cases are proved across the call boundary, and both deliberate defects are caught. The two that are not proved are the two the analysis is honest about: an amount computed twice by a call the solver cannot see through, and a self-recursive helper whose summary is marked `havoc` because its row appears on both sides of its own definition. Neither is silently assumed to conserve, which is the distinction the `havoc` flag exists to keep visible — a fresh symbol with no havoc record would look exactly like a clean answer.
+
 ## The finding
 
 **A guard does not make conservation undecidable, and that was not the expectation.**

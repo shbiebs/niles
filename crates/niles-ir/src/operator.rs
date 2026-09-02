@@ -167,7 +167,20 @@ impl Scalar {
             Scalar::Binary { lhs, rhs, .. } => {
                 lhs.is_reproducible(certified_udfs) && rhs.is_reproducible(certified_udfs)
             }
-            _ => true,
+            // A column read, a literal of any kind, and the anchor. Each is a *value*: it
+            // is the same on every evaluation of the same row at the same epoch, which is
+            // the whole of what reproducibility asks. Enumerated rather than defaulted,
+            // because this predicate decides whether a node may sit on a reconstruction
+            // path — and a new `Scalar` variant that reads a clock, a random source or a
+            // session would inherit "yes" from a wildcard and quietly make the
+            // reconstruction-equivalence theorem false.
+            Scalar::Column(_)
+            | Scalar::LitInt(_)
+            | Scalar::LitBool(_)
+            | Scalar::LitText(_)
+            | Scalar::LitMoney { .. }
+            | Scalar::LitNull
+            | Scalar::Anchor => true,
         }
     }
 
@@ -379,7 +392,27 @@ impl Op {
             // maintainable, at the cost of an ordered multiset per group. The distinction
             // is `is_additive`, not this predicate, and conflating them would either
             // over-reject `min` or under-charge it.
-            _ => true,
+            Op::Aggregate { .. } => true,
+            // The rest, enumerated. W11 turns on this predicate — it is what the planner
+            // consults before promising a demand-materialized view at a strict rung — so
+            // an operator that is *not* maintainable over a delta must not be able to
+            // inherit "yes" from a wildcard. `Fixpoint` is here because it is maintainable
+            // in the DBSP sense: the recursion is over deltas, which is what the `Delay`
+            // in its cycle is for.
+            Op::Source { .. }
+            | Op::Filter { .. }
+            | Op::Map { .. }
+            | Op::Join { .. }
+            | Op::Distinct
+            | Op::Union
+            | Op::Negate
+            | Op::Fixpoint { .. }
+            | Op::Delay
+            | Op::Integrate
+            | Op::Differentiate
+            | Op::Index { .. }
+            | Op::AsOf { .. }
+            | Op::ValidAt { .. } => true,
         }
     }
 

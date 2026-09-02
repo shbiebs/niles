@@ -871,10 +871,32 @@ impl<'a> Lx<'a> {
                             _ => None,
                         };
                         if let Some(a) = agg {
-                            let v = args
-                                .first()
-                                .and_then(|x| self.scalar(cur, &x.value))
-                                .unwrap_or(Scalar::Column(0));
+                            // The SQL surface's copy of the same defect the pipeline
+                            // surface had: `unwrap_or(Scalar::Column(0))` aggregated the
+                            // first column of the input and labelled the result `sum`.
+                            // The two surfaces must lower identically or the generality
+                            // claim is marketing, and that includes how they fail.
+                            let Some(x) = args.first() else {
+                                self.d.push(
+                                    Diagnostic::error(
+                                        "NL0502",
+                                        format!("`{}` takes an argument", a.as_str()),
+                                    )
+                                    .primary(e.span(), "no expression to aggregate"),
+                                );
+                                return None;
+                            };
+                            let Some(v) = self.scalar(cur, &x.value) else {
+                                self.d.push(
+                                    Diagnostic::error(
+                                        "NL0502",
+                                        format!("the expression `{}` aggregates has no lowering", a.as_str()),
+                                    )
+                                    .primary(x.value.span(), "cannot be expressed in the circuit")
+                                    .note("there is no safe default: aggregating the first column instead would report some other quantity under this aggregate's name"),
+                                );
+                                return None;
+                            };
                             aggs.push((a, v));
                         }
                     }

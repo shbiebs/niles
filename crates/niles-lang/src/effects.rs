@@ -226,6 +226,19 @@ impl Row {
             self.set.insert(e.clone());
         }
     }
+
+    /// Union another row in, attributing every effect it brings to `at`.
+    ///
+    /// For a **callee's** row joined into a caller's. The origin span is what a diagnostic
+    /// points at, and pointing into the callee's body would be pointing at a line that is
+    /// not wrong: the caller's declaration is the thing that does not admit the effect, and
+    /// the call is where the caller acquired it.
+    pub fn union_at(&mut self, other: &Row, at: Span) {
+        for e in &other.set {
+            self.origins.entry(e.clone()).or_insert(at);
+            self.set.insert(e.clone());
+        }
+    }
     pub fn contains(&self, e: &Effect) -> bool {
         self.set.contains(e)
     }
@@ -271,10 +284,28 @@ impl Row {
 
     /// Row subsumption: is every effect of `self` permitted by `declared`?
     ///
-    /// A `Read(r)` is permitted by a declared `Read(r')` whenever `r <= r'` — reading at a
-    /// *weaker* rung than declared is safe, since the declaration is a promise about the
-    /// strongest guarantee the caller may rely on. Every other effect must match exactly,
-    /// and a currency-parameterised effect is matched by the wildcard `*`.
+    /// Every effect must be named by the declaration; a currency-parameterised effect is
+    /// matched by the wildcard `*`.
+    ///
+    /// # Reads match exactly, and the change is a correction
+    ///
+    /// This used to permit an inferred `Read(r)` under any declared `Read(r')` with
+    /// `r <= r'`, on the reasoning that "the declaration is a promise about the strongest
+    /// guarantee the caller may rely on". That reasoning has the direction backwards, and
+    /// the consequence is the exact failure rung monotonicity exists to prevent.
+    ///
+    /// A `read@ℓ` in a row is not a permission the function asked for. It is a statement
+    /// about the *freshness of what the function returns*: a computation is no fresher than
+    /// its stalest input. So a function that declares `read@ledger_consistent` and in fact
+    /// reads a `bounded` view returns a bounded-stale answer while telling every caller it
+    /// is ledger-consistent — and a `ledger_consistent` view calling it passed rung
+    /// monotonicity, because the check looked at the declaration. The staleness entered two
+    /// hops upstream and no downstream contract removed it, which is the supervisory
+    /// failure §4.5 names.
+    ///
+    /// Matching exactly makes both directions of the mistake an error: reading stricter
+    /// than declared over-demands a capability, and reading weaker than declared
+    /// over-promises freshness. Neither is a declaration a reader can rely on.
     pub fn subsumed_by(&self, declared: &Row) -> Vec<Effect> {
         self.set
             .iter()
@@ -289,10 +320,8 @@ fn declared_permits(declared: &Row, e: &Effect) -> bool {
         return true;
     }
     match e {
-        Effect::Read(r) => declared
-            .set
-            .iter()
-            .any(|d| matches!(d, Effect::Read(dr) if r <= dr)),
+        // Exactly. See `Row::subsumed_by` for why this is not `r <= dr`.
+        Effect::Read(_) => false,
         Effect::Debit(_) => declared.set.contains(&Effect::Debit("*".into())),
         Effect::Credit(_) => declared.set.contains(&Effect::Credit("*".into())),
         Effect::Hold(_) => declared.set.contains(&Effect::Hold("*".into())),
@@ -329,10 +358,27 @@ pub fn check_declaration(
             .primary(site, format!("`{e}` incurred here"))
             .secondary(decl_span, format!("declared effects are {declared}"));
             if let Effect::Read(r) = &e {
+                let declared_reads: Vec<String> = declared
+                    .iter()
+                    .filter_map(|x| match x {
+                        Effect::Read(dr) => Some(dr.to_string()),
+                        _ => None,
+                    })
+                    .collect();
                 d = d.note(format!(
-                    "a read at `{r}` is not covered by a declaration of a weaker rung: \
-                     declaring less than you do would let a caller rely on a guarantee you never made"
+                    "reads match the declaration exactly, in both directions. This body reads at `{r}`, and the declaration names {}",
+                    if declared_reads.is_empty() {
+                        "no read at all".to_string()
+                    } else {
+                        format!("`{}`", declared_reads.join("`, `"))
+                    }
                 ));
+                d = d.note(
+                    "a `read@ℓ` is a statement about the freshness of what this function \
+                     returns, not a permission it asked for: declaring a stricter rung than \
+                     you read hands a caller staleness it was told it would not get, and \
+                     declaring a weaker one demands a guarantee you do not use",
+                );
             }
             d.suggest(
                 decl_span,
@@ -504,16 +550,28 @@ mod tests {
     }
 
     #[test]
-    fn a_read_at_a_weaker_rung_is_permitted_by_a_stricter_declaration() {
-        // Declaring `read@snapshot` and doing `read@bounded` is safe: the declaration is a
-        // promise about the strongest guarantee a caller may rely on.
+    fn a_read_at_a_weaker_rung_is_not_permitted_by_a_stricter_declaration() {
+        // **This assertion is the opposite of the one it replaces, and the inversion is
+        // the finding.** The old test said declaring `read@snapshot` while reading
+        // `read@bounded` is safe, "because the declaration is a promise about the
+        // strongest guarantee a caller may rely on". A caller relying on that promise gets
+        // a bounded-stale answer — which is precisely the failure rung monotonicity is
+        // there to make unspellable, arriving through the one door the check did not look
+        // at.
         let declared = Row::of([Effect::Read(Rung::Snapshot), Effect::Append]);
         let inferred = Row::of([Effect::Read(Rung::Bounded), Effect::Append]);
-        assert!(inferred.subsumed_by(&declared).is_empty());
+        assert_eq!(
+            inferred.subsumed_by(&declared),
+            vec![Effect::Read(Rung::Bounded)]
+        );
+        // And declaring what you actually read is accepted, so the rule is exactness
+        // rather than a blanket refusal.
+        let honest = Row::of([Effect::Read(Rung::Bounded), Effect::Append]);
+        assert!(inferred.subsumed_by(&honest).is_empty());
     }
 
     #[test]
-    fn a_read_at_a_stricter_rung_is_not() {
+    fn a_read_at_a_stricter_rung_is_not_either() {
         let declared = Row::of([Effect::Read(Rung::Bounded)]);
         let inferred = Row::of([Effect::Read(Rung::LedgerConsistent)]);
         let missing = inferred.subsumed_by(&declared);

@@ -123,6 +123,15 @@ fn no_bare_hypothesis_identifiers() {
         if path.extension().and_then(|s| s.to_str()) != Some("md") {
             continue;
         }
+        // **Not the bibliography.** A reference carries titles and product names that this
+        // test's namespace has no claim over, and it did real damage: `[90] F1 Lightning:
+        // HTAP as a service` was flagged here as a bare `F1` and *fixed* by prefixing it,
+        // so the thesis cited a paper called "H-F1 Lightning" — a naming convention
+        // rewriting a book title, which nothing downstream could have caught because the
+        // citation apparatus was not checked at all until this cycle.
+        if path.file_name().and_then(|s| s.to_str()) == Some("references.md") {
+            continue;
+        }
         let text = std::fs::read_to_string(&path).expect("readable");
         for (n, line) in text.lines().enumerate() {
             for id in bad
@@ -530,5 +539,155 @@ fn bounded_reconstruction_quantifies_correctly() {
     assert!(
         s.contains("log(n/C)"),
         "the checkpoint lookup the counted-work unit does not charge must be named"
+    );
+}
+
+/// **Every identifier Appendix D names exists in the workspace.**
+///
+/// D.2 and D.3 listed an engine API in the present tense: `LedgerHandle::append_batch`,
+/// `ReadModel::serve`, `StorageTier`, a `Rev::explain` returning a `Lineage`. None of them
+/// were in `crates/`. An appendix is the last place a reader looks before believing
+/// something is built, so this checks the backticked `Type::method` and `Type` names in it
+/// against the source.
+///
+/// The generated blocks are the fix; this is the guard on the hand-written prose around
+/// them, which is where the fictional names were.
+#[test]
+fn appendix_d_names_only_things_that_exist() {
+    let appendix = thesis("appendix-d.md");
+    let mut sources = String::new();
+    let crates_dir = repo_root().join("crates");
+    let mut stack = vec![crates_dir];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                if p.file_name().and_then(|s| s.to_str()) == Some("target") {
+                    continue;
+                }
+                stack.push(p);
+            } else if p.extension().and_then(|s| s.to_str()) == Some("rs") {
+                sources.push_str(&std::fs::read_to_string(&p).unwrap_or_default());
+            }
+        }
+    }
+
+    let mut missing = Vec::new();
+    for token in appendix.split('`').skip(1).step_by(2) {
+        // `Type::method` or `Type::CONST`: the shape the fictional API was written in.
+        let Some((ty, item)) = token.split_once("::") else {
+            continue;
+        };
+        if !ty.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+            || !ty.chars().all(|c| c.is_ascii_alphanumeric())
+            || item.is_empty()
+            || !item.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            continue;
+        }
+        // The type must exist and the member must appear somewhere in the crates. A looser
+        // check than "this method is on that type", and enough to have caught every one of
+        // the names that were not there at all.
+        let ty_present = sources.contains(&format!("struct {ty}"))
+            || sources.contains(&format!("enum {ty}"))
+            || sources.contains(&format!("trait {ty}"));
+        if !ty_present || !sources.contains(item) {
+            missing.push(token.to_string());
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "Appendix D names {} item(s) that are not in the workspace: {missing:?}\n\
+         An appendix that describes an API nobody can call is a design note in a reference \
+         manual's typography.",
+        missing.len()
+    );
+}
+
+/// **No `unsafe`, asserted rather than observed.**
+///
+/// §3.17, §5.8 and §9.10 describe a three-layer verification programme of which one layer
+/// exists: the type-level one, discharged by the compiler. "The prototype contains no
+/// `unsafe` blocks" was a sentence about a state of the tree at some past moment, which is
+/// the kind of claim one line makes false. It is the only part of that programme this thesis
+/// can currently stand behind, so it is the part that gets a test.
+#[test]
+fn the_workspace_contains_no_unsafe_block() {
+    let mut offenders = Vec::new();
+    let mut stack = vec![repo_root().join("crates")];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                if p.file_name().and_then(|s| s.to_str()) == Some("target") {
+                    continue;
+                }
+                stack.push(p);
+                continue;
+            }
+            if p.extension().and_then(|s| s.to_str()) != Some("rs") {
+                continue;
+            }
+            // This file names the keyword in order to look for it, and `keywords.rs`
+            // registers it as reserved-and-refused in Niles. Both are mentions, not uses.
+            if p.ends_with("tests/thesis_drift.rs") || p.ends_with("src/keywords.rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&p).unwrap_or_default();
+            for (n, line) in text.lines().enumerate() {
+                let t = line.trim();
+                // A use site, not a mention: the keyword opening a block or a function.
+                let keyword = "un".to_string() + "safe";
+                if t.starts_with(&format!("{keyword} ")) || t.contains(&format!(" {keyword} {{")) {
+                    offenders.push(format!("{}:{}: {t}", p.display(), n + 1));
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "§9.10 says the workspace has no `unsafe` block and that this is the one layer of \
+         the memory-model programme that is discharged. Found:\n  {}",
+        offenders.join("\n  ")
+    );
+}
+
+/// **Every document in `docs/` is reachable from the README.**
+///
+/// `docs/VALIDATION-RUN.md` — the validation protocol of an earlier cycle, run, with the two
+/// items it did not meet — was linked from nothing and named by nothing. A document nobody
+/// can find is a document nobody reads, and its two unmet items were as good as unrecorded.
+#[test]
+fn no_document_is_reachable_from_nothing() {
+    let readme = std::fs::read_to_string(repo_root().join("README.md")).expect("README.md");
+    let mut orphans = Vec::new();
+    for e in std::fs::read_dir(repo_root().join("docs"))
+        .expect("docs/")
+        .flatten()
+    {
+        let p = e.path();
+        if p.extension().and_then(|s| s.to_str()) != Some("md") {
+            continue;
+        }
+        let name = p
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        if !readme.contains(&format!("docs/{name}")) {
+            orphans.push(name);
+        }
+    }
+    orphans.sort();
+    assert!(
+        orphans.is_empty(),
+        "{orphans:?} are in `docs/` and named nowhere in the README. Add a row to the \
+         document table, or delete the file."
     );
 }

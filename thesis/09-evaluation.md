@@ -450,7 +450,15 @@ Stated explicitly, because the gaps are as informative as the results.
 
 ## 9.10 Immutability and Memory Safety
 
-Unchanged in design from §5.8: type-level enforcement (no mutable reference to sealed data exists in the surface), exhaustive-interleaving model checking of the two mutable structures, sanitizer runs, and crash-recovery drills verifying frontier reconstruction. The prototype contributes one relevant data point: it contains **no `unsafe` blocks**, and sealed epochs are reached only through shared references, so its portion of the claim is discharged by the compiler. Acceptance for the full system remains zero races at all three layers.
+One of the three layers of §5.8 is done, one is half done, and one is not started, and the honest summary is that the strongest thing this thesis can say about data races is a compiler's.
+
+**Discharged, and tested.** The workspace contains **no `unsafe` block**, and sealed epochs are reached only through shared references. A drift test asserts the first at every build, in both repositories, because "no unsafe" is the kind of claim that is true until one line makes it false.
+
+**Half done.** Crash-recovery drills run (§9.14 and GBS's G3), and verify that a reopened ledger's read model agrees both with the live process and with a fold of the recovered journal.
+
+**Not started.** Exhaustive-interleaving model checking of the two mutable structures, and sanitizer runs over a concurrency suite. There is no `loom` or `shuttle` dependency in either workspace and no sanitizer job in the gate.
+
+The residual surface is also smaller than "two mutable structures" implies, and for a reason that is a limitation rather than an achievement: the daemon serves every query under a single `Arc<Mutex<RevEngine>>` (§9.14.1), so the engine is concurrent in its connections and serial in its work. There is at present one lock to reason about, and the claim that the surface is small is not yet a claim that it has been checked. Acceptance for the full system remains zero races at all three layers.
 
 ## 9.11 Language Scope
 

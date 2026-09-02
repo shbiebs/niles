@@ -254,6 +254,7 @@ EXTRACTORS = {
     "statustable": status_table,
     "statussummary": status_summary,
     "statusrow": status_row,
+    "verbatim": lambda t: t.strip(),
     "policytable": policy_table,
     "policydeltas": policy_deltas,
 }

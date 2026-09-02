@@ -253,7 +253,7 @@ the index.
 expressions over Herbrand atoms, restricted to a single accumulator per currency*. Two
 components, and separating them matters because they fail differently.
 
-The relationship to Karr's algorithm is best stated as an **encoding rather than a
+The relationship to Karr's algorithm [Karr, Acta Informatica 1976] is best stated as an **encoding rather than a
 specialization**. Introduce a ghost variable `net_c` per currency, model `debit` as
 `net_c := net_c − m` and `credit` as `net_c := net_c + m`, and model each opaque money
 source as a nondeterministic assignment. Then "this transaction conserves *c*" is exactly
@@ -285,7 +285,7 @@ over ℚ or ℤ is unsound with respect to overflow, so overflow-freedom is a si
 this thesis discharges by construction (i128 minor units against realistic magnitudes) and
 does not prove.
 
-**The third verdict is forced, not conceded.** Müller-Olm and Seidl show by reduction from
+**The third verdict is forced, not conceded.** Müller-Olm and Seidl [Müller-Olm & Seidl, ICALP 2004] show by reduction from
 Post's Correspondence Problem that in affine programs *with affine equality guards*, whether
 a given affine relation holds at a program point is **undecidable**. `Undecided` is therefore
 not an engineering weakness that more effort would remove; it is the shape of the problem,
@@ -337,20 +337,20 @@ to `m`. Conversely the row solver would accept `credit(b, m); credit(c, m)` from
 external `m` — coefficient `2m`, verdict `Undecided`. Niles carries both disciplines, and
 the thesis previously blurred them.
 
-**The comparison to Move, corrected.** Earlier drafts stated that Move guarantees resources
+**The comparison to Move, corrected.** Earlier drafts stated that Move [Blackshear et al., 2020] guarantees resources
 cannot be created or destroyed. Move's own paper says the opposite: it guarantees no copying,
 no implicit discarding and no reuse after move — *resource safety* — and then states
 explicitly that "the Move type system cannot catch all implementation mistakes inside the
 module. For example, the type system will not ensure that the total value of all Coins in
 existence is preserved." Conservation in Move is a specification obligation discharged by
 the Move Prover with hand-written invariants and an SMT backend. The same correction applies
-to Nomos, whose linearity holds *modulo minting and burning* by design.
+to Nomos [Das et al., CSF 2021], whose linearity holds *modulo minting and burning* by design.
 
 This correction **strengthens** the contribution rather than weakening it: the property
 Move's type system explicitly declines to check is the one this solver checks
 automatically, without user-written specs and without an SMT call.
 
-**The closest prior art** is SolType, which gives Solidity refinement types with a `sum`
+**The closest prior art** is SolType [Tan et al., POPL 2022], which gives Solidity refinement types with a `sum`
 abstraction over mappings and can express `sum(balances) == totalSupply`. It is heavier
 (refinement types plus SMT, so less predictable than normalization), it targets overflow
 safety with the sum invariant as a means rather than an end, and it is single-asset — there

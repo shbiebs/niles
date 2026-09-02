@@ -64,13 +64,13 @@ H-F1–H-F4 are not benchmarked into truth; each has the method declared in Sect
 
 ## 5.8 Method for the Memory-Model and Immutability Findings
 
-The claims of Sections 3.17 and 6.11 — that sealed data is race-free by construction and that the residual concurrency surface is two structures — are validated in three layers.
+The claims of Sections 3.17 and 6.11 — that sealed data is race-free by construction and that the residual concurrency surface is two structures — are stated as three layers, of which **the first is done and the other two are planned**. §9.10 reports which.
 
 **By construction.** The implementation encodes immutability in types: sealed epochs are immutable values reachable only through shared references, and no mutable reference to prefix data exists in the type surface, so the compiler discharges the bulk of the claim. The formal warrant for taking that seriously is RustBelt's machine-checked result that well-typed programs in the λRust model exhibit no undefined behaviour, data races or memory-safety violations, with the central invariant that aliasing and mutation cannot occur simultaneously on a location — including for library types that use `unsafe` internally, provided they satisfy verifiable conditions [Jung et al., POPL '18]. Every `unsafe` block in Nilestream is therefore inventoried with the obligation it must discharge, and the inventory is published.
 
-**By model checking.** The admission-queue and resident-map disciplines are extracted into models checked exhaustively over interleavings within the tool's bounds, with state-space coverage reported.
+**By model checking — planned, not run.** The admission-queue and resident-map disciplines would be extracted into models checked exhaustively over interleavings within the tool's bounds, with state-space coverage reported. No model-checking harness exists.
 
-**By dynamic verification.** Sanitizer and interpreter runs over the concurrency suite, plus crash-recovery fault injection verifying that recovery re-derives frontiers exactly and that rebuilt views match the oracle byte-for-byte — recovery being, by Theorem 4.1, simply a large eviction.
+**By dynamic verification — half done.** Crash-recovery fault injection *is* run: `gbs-nilestream`'s G3 sweep reopens a segment at a mid-history anchor and compares the recovered read model both with what a live process observed and with a fold of the recovered journal. Sanitizer and interpreter runs over a concurrency suite are planned; there is no concurrency suite, for the reason §9.10 gives.
 
 **Acceptance criterion.** Zero races reported at all three layers, and every `unsafe` obligation either discharged by a written argument or eliminated. A partial result is reported as partial.
 

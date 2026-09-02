@@ -141,6 +141,26 @@ Headline measured findings:
 | `examples/` | Niles programs |
 | `docs/`, `targets/`, `bench/` | ADRs, target models, scenarios |
 
+### The documents in `docs/`, and what each is for
+
+Listed because one of them was reachable from nothing. A document nobody links is a document
+nobody reads, and the check `bank-bench`'s drift tests run is that every file here appears in
+this table.
+
+| File | What it is |
+|---|---|
+| `docs/SPEC-LANGUAGE.md` | The normative Niles specification. Part V's conformance table is generated from the compiler. |
+| `docs/SPEC-ENGINE.md` | The normative engine specification, with a status line per requirement. |
+| `docs/keywords.md` | The keyword reference, generated from the compiler's registry. |
+| `docs/ROADMAP.md` | What is planned, what was cut, and what was deleted from the workspace. |
+| `docs/REQUIREMENTS.md` | The requirements the two specifications answer to. |
+| `docs/BENCHMARK.md` | How to run the wall-clock harness, with the recipe a test reproduces. |
+| `docs/BUILD-LOG.md` | What each work cycle changed, in order, including what it got wrong. |
+| `docs/HANDOFF-OPUS.md` | The handoff blueprint an earlier cycle worked from. |
+| `docs/VALIDATION-RUN.md` | That blueprint's validation protocol, run, with the two items it did not meet. A record of a past run, kept rather than deleted. |
+| `docs/adr/` | Architecture decision records. |
+| `docs/research/` | The searches and landscape reviews the design rests on. |
+
 ## Quick start
 
 ```sh

@@ -17,7 +17,8 @@
 use crate::ast::*;
 use crate::diagnostics::{Diagnostic, Diagnostics};
 use crate::effects::Rung;
-use crate::resolve::{Catalog, RelationInfo};
+use crate::lexer::Span;
+use crate::resolve::{Catalog, RelationInfo, Staleness};
 use niles_ir::circuit::{Circuit, NodeId};
 use niles_ir::operator::{Agg, ApplyKind, ColIdx, JoinKind as IrJoin, Op, Scalar, ScalarOp};
 use niles_ir::{Consistency, Lineage, Materialize, Retention, ServeContract};
@@ -104,10 +105,17 @@ impl<'a> Lx<'a> {
         };
         ServeContract {
             consistency: match info.rung {
-                Rung::Bounded => Consistency::Bounded {
-                    epochs: 4,
-                    millis: 1_000,
-                },
+                // The numbers the *source* gave, which is the whole content of a bounded
+                // contract. This arm used to read `{ epochs: 4, millis: 1_000 }`
+                // unconditionally, so a view written `bounded(epochs: 8)` was served at
+                // four and the IR held no trace that eight had ever been asked for.
+                Rung::Bounded => {
+                    let s = info.staleness.unwrap_or(Staleness::UNPARAMETERISED);
+                    Consistency::Bounded {
+                        epochs: s.epochs,
+                        millis: s.millis,
+                    }
+                }
                 Rung::Monotonic => Consistency::Monotonic,
                 Rung::ReadYourWrites => Consistency::ReadYourWrites,
                 Rung::Snapshot => Consistency::Snapshot,
@@ -161,7 +169,21 @@ impl<'a> Lx<'a> {
             }
             Expr::Fixpoint { recv, measure, .. } => {
                 let input = self.expr(recv, c)?;
-                let m = self.scalar(input, measure).unwrap_or(Scalar::LitInt(0));
+                // The measure is what lets the runtime stop, so a measure the lowering
+                // cannot express is the one thing a fixpoint may not be given a default
+                // for. `LitInt(0)` is a measure that never decreases, which is a
+                // termination argument that proves nothing — and a fixpoint that could
+                // diverge stalls an epoch, and a stalled epoch stalls the visibility
+                // timeline for every reader in the system.
+                let Some(m) = self.scalar(input, measure) else {
+                    self.d.push(
+                        Diagnostic::error("NL0507", "this fixpoint's measure has no lowering")
+                            .primary(measure.span(), "cannot be expressed in the circuit")
+                            .note("the measure is the termination argument; a constant one is not an argument")
+                            .note("guarded recursion is a requirement of the operator set, not a convenience: an unbounded fixpoint stalls the epoch and every reader waiting on it"),
+                    );
+                    return None;
+                };
                 let id = self.circuit.add(
                     Op::Fixpoint {
                         measure: m,
@@ -239,17 +261,24 @@ impl<'a> Lx<'a> {
         let in_schema = self.schema_of(input).to_vec();
         let (op, out_schema): (Op, Vec<String>) = match kind {
             StageKind::Where | StageKind::Having => {
-                let p = args
-                    .first()
-                    .and_then(|a| self.scalar(input, &a.value))
-                    .unwrap_or(Scalar::LitBool(true));
+                // The pipeline surface, which used to read
+                // `.unwrap_or(Scalar::LitBool(true))` — the same defect the SQL surface's
+                // `predicate` helper was written to remove, left in place on the other
+                // path. Thesis §11.5.7 claimed the site was pinned; only the SQL half was,
+                // and `postings.where(|p| p.nonexistent == 1)` lowered to
+                // `Filter{LitBool(true)}` and returned every posting.
+                let clause = if kind == StageKind::Where {
+                    "where"
+                } else {
+                    "having"
+                };
+                let arg = self.required_arg(args, name.span, clause, "a predicate")?;
+                let p = self.predicate(input, &arg, clause)?;
                 (Op::Filter { predicate: p }, in_schema.clone())
             }
             StageKind::Map | StageKind::Select => {
-                let exprs: Vec<Scalar> = args
-                    .first()
-                    .map(|a| self.scalar_list(input, &a.value))
-                    .unwrap_or_default();
+                let arg = self.required_arg(args, name.span, "map", "a projection")?;
+                let exprs: Vec<Scalar> = self.scalar_list(input, &arg)?;
                 let names = (0..exprs.len().max(1)).map(|i| format!("c{i}")).collect();
                 (Op::Map { exprs }, names)
             }
@@ -278,10 +307,25 @@ impl<'a> Lx<'a> {
                     Op::Index { key } => key.clone(),
                     _ => self.circuit.node(input).key.clone().unwrap_or_default(),
                 };
-                let value = args
-                    .first()
-                    .and_then(|a| self.scalar(input, &a.value))
-                    .unwrap_or(Scalar::Column(0));
+                // The aggregated expression. `unwrap_or(Scalar::Column(0))` summed
+                // whatever happened to be in the first column — an account id, a
+                // timestamp — and reported it as a balance.
+                let arg =
+                    self.required_arg(args, name.span, agg.as_str(), "the value to aggregate")?;
+                let value = match self.scalar(input, &arg) {
+                    Some(v) => v,
+                    None => {
+                        self.d.push(
+                            Diagnostic::error(
+                                "NL0502",
+                                format!("the expression `{}` aggregates has no lowering", agg.as_str()),
+                            )
+                            .primary(arg.span(), "cannot be expressed in the circuit")
+                            .note("there is no safe default: aggregating the first column instead would report some other quantity under this aggregate's name"),
+                        );
+                        return None;
+                    }
+                };
                 let mut names: Vec<String> = group_key
                     .iter()
                     .filter_map(|i| in_schema.get(*i as usize).cloned())
@@ -326,12 +370,22 @@ impl<'a> Lx<'a> {
                 };
                 let residual = args.get(1).and_then(|a| self.scalar(input, &a.value));
                 let lk = self.circuit.node(input).key.clone().unwrap_or_default();
-                let rk = self
-                    .circuit
-                    .node(rhs)
-                    .key
-                    .clone()
-                    .unwrap_or_else(|| lk.clone());
+                // The right key defaulting to the left key joined two relations on
+                // whatever column positions the left happened to use. Position agreement
+                // is not key agreement, and the resulting join was silently wrong rather
+                // than empty.
+                let rk = match self.circuit.node(rhs).key.clone() {
+                    Some(k) => k,
+                    None => {
+                        self.d.push(
+                            Diagnostic::error("NL0503", "the right side of this join has no key")
+                                .primary(name.span, "nothing says which columns to join on")
+                                .note("the left side's key is not a default: two relations agreeing on a column *position* is not the same as agreeing on a column")
+                                .note("declare an anchor index on the right relation, or group it by the join key first"),
+                        );
+                        return None;
+                    }
+                };
                 let mut names = in_schema.clone();
                 names.extend(self.schema_of(rhs).iter().cloned());
                 let id = self.circuit.add(
@@ -378,12 +432,17 @@ impl<'a> Lx<'a> {
                 // every theorem quantifies over that set.
                 let rhs = args.first().and_then(|a| self.expr(&a.value, c))?;
                 let lk = self.circuit.node(input).key.clone().unwrap_or_default();
-                let rk = self
-                    .circuit
-                    .node(rhs)
-                    .key
-                    .clone()
-                    .unwrap_or_else(|| lk.clone());
+                let rk = match self.circuit.node(rhs).key.clone() {
+                    Some(k) => k,
+                    None => {
+                        self.d.push(
+                            Diagnostic::error("NL0503", "the right side of this `intersect` has no key")
+                                .primary(name.span, "nothing says which columns to match on")
+                                .note("the left side's key is not a default: two relations agreeing on a column *position* is not the same as agreeing on a column"),
+                        );
+                        return None;
+                    }
+                };
                 let id = self.circuit.add(
                     Op::Join {
                         kind: IrJoin::Semi,
@@ -408,10 +467,11 @@ impl<'a> Lx<'a> {
                 (Op::OrderBy { keys }, in_schema.clone())
             }
             StageKind::Limit => {
-                let n = match args.first().map(|a| &a.value) {
-                    Some(Expr::Int(v, _)) => *v as u64,
-                    _ => u64::MAX,
-                };
+                // A non-literal bound became `u64::MAX`, so `limit(n)` returned
+                // everything. The row count a view returns is not a place for a default:
+                // "all of them" is the answer least likely to be noticed as wrong and the
+                // most expensive when it is.
+                let n = self.literal_count(args, name.span, "limit")?;
                 (
                     Op::Limit {
                         count: n,
@@ -421,10 +481,7 @@ impl<'a> Lx<'a> {
                 )
             }
             StageKind::Offset => {
-                let n = match args.first().map(|a| &a.value) {
-                    Some(Expr::Int(v, _)) => *v as u64,
-                    _ => 0,
-                };
+                let n = self.literal_count(args, name.span, "offset")?;
                 (
                     Op::Limit {
                         count: u64::MAX,
@@ -434,22 +491,128 @@ impl<'a> Lx<'a> {
                 )
             }
             StageKind::AsOf => {
+                // No argument means the frontier, which is a real reading. An argument the
+                // lowering cannot read is not: it used to fall through to the frontier too,
+                // so `as_of(#4200)` written with a typo silently became `as_of(now)` — the
+                // one answer an as-of read must never give.
                 let e = match args.first().map(|a| &a.value) {
+                    None => None,
                     Some(Expr::Epoch(v, _)) => Some(*v),
-                    _ => None,
+                    Some(other) => {
+                        self.d.push(
+                            Diagnostic::error("NL0510", "`as_of` takes an epoch")
+                                .primary(other.span(), "not an epoch literal")
+                                .note("the system axis is ordered by epoch, and an epoch is written `#4200`")
+                                .note("omitting the argument reads at the frontier; an argument that cannot be read does not")
+                        );
+                        return None;
+                    }
                 };
                 (Op::AsOf { epoch: e }, in_schema.clone())
             }
-            StageKind::ValidAt => (Op::ValidAt { instant: None }, in_schema.clone()),
+            StageKind::ValidAt => {
+                // This arm was `Op::ValidAt { instant: None }` unconditionally: whatever
+                // date was written, the circuit pinned to nothing. The valid-time axis is
+                // half of the bitemporality claim and it was being discarded at the door.
+                let i = match args.first().map(|a| &a.value) {
+                    None => None,
+                    Some(Expr::Instant { text, span, .. }) => {
+                        match niles_ir::value::days_since_epoch(text) {
+                            Some(d) => Some(d),
+                            None => {
+                                self.d.push(
+                                    Diagnostic::error("NL0509", format!("`{text}` is not a date"))
+                                        .primary(*span, "expected `YYYY-MM-DD`"),
+                                );
+                                return None;
+                            }
+                        }
+                    }
+                    Some(other) => {
+                        self.d.push(
+                            Diagnostic::error("NL0510", "`valid_at` takes a date")
+                                .primary(other.span(), "not a valid-time literal")
+                                .note("the world axis is written `v@2026-08-01`"),
+                        );
+                        return None;
+                    }
+                };
+                (Op::ValidAt { instant: i }, in_schema.clone())
+            }
             StageKind::Get | StageKind::Range => {
                 let key = self.circuit.node(input).key.clone().unwrap_or_default();
                 (Op::Index { key }, in_schema.clone())
             }
-            StageKind::Fold | StageKind::Fixpoint | StageKind::Unknown => return Some(input),
+            // `Fold` and `Fixpoint` reach here only as *stages*; the `Expr::Fixpoint` form
+            // is lowered in `expr`. Neither has an operator, and the old arm returned the
+            // input unchanged — an identity, so a `fold` that computed something and a
+            // stage the parser did not recognise both produced a circuit that quietly did
+            // less than the source said.
+            StageKind::Fold | StageKind::Fixpoint | StageKind::Unknown => {
+                self.d.push(
+                    Diagnostic::error(
+                        "NL0505",
+                        format!("the stage `{}` has no lowering", name.text),
+                    )
+                    .primary(name.span, "not an operator the circuit has")
+                    .note("this used to lower to the identity, which is a circuit that silently does less than the source says")
+                    .note("the operator set is closed on purpose: every theorem in the thesis quantifies over it, so a stage outside it is a stage outside the results"),
+                );
+                return None;
+            }
         };
         let id = self.circuit.add(op, vec![input], c, name.text.clone());
         self.schemas.insert(id, out_schema);
         Some(id)
+    }
+
+    /// The argument a stage requires, or a diagnostic saying which stage wanted what.
+    ///
+    /// Every caller used to write `args.first().and_then(..).unwrap_or(<something>)`, so a
+    /// stage written with no argument at all lowered to a node with a fabricated one.
+    fn required_arg(&mut self, args: &[Arg], at: Span, stage: &str, wanted: &str) -> Option<Expr> {
+        match args.first() {
+            Some(a) => Some(a.value.clone()),
+            None => {
+                self.d.push(
+                    Diagnostic::error("NL0500", format!("`{stage}` takes {wanted}"))
+                        .primary(at, "no argument given")
+                        .note("there is no default for this: a stage with a fabricated argument computes something nobody wrote"),
+                );
+                None
+            }
+        }
+    }
+
+    /// A row-count bound, which must be a literal.
+    fn literal_count(&mut self, args: &[Arg], at: Span, stage: &str) -> Option<u64> {
+        match args.first().map(|a| &a.value) {
+            Some(Expr::Int(v, _)) if *v >= 0 => Some(*v as u64),
+            Some(Expr::Int(v, sp)) => {
+                self.d.push(
+                    Diagnostic::error("NL0504", format!("`{stage}` cannot take {v}"))
+                        .primary(*sp, "a negative row count")
+                        .note("a bound on rows is a natural number; a negative one has no reading"),
+                );
+                None
+            }
+            Some(other) => {
+                self.d.push(
+                    Diagnostic::error("NL0504", format!("`{stage}` requires a literal bound"))
+                        .primary(other.span(), "not a literal")
+                        .note("this used to become `u64::MAX`, so a `limit` the lowering could not read returned every row — the answer least likely to be noticed as wrong and the most expensive when it is")
+                        .note("a view boundary must be reproducible: an evicted entry reconstructed against a different bound would hold a different number"),
+                );
+                None
+            }
+            None => {
+                self.d.push(
+                    Diagnostic::error("NL0504", format!("`{stage}` takes a bound"))
+                        .primary(at, "no argument given"),
+                );
+                None
+            }
+        }
     }
 
     /// The column indices a `|r| (r.a, r.b)` closure names.
@@ -475,18 +638,50 @@ impl<'a> Lx<'a> {
             Expr::Str(s, _) => Scalar::LitText(s.clone()),
             Expr::Money {
                 minor, currency, ..
-            } => Scalar::LitMoney {
-                minor: *minor,
+            } => {
                 // The currency travels with the value into the IR. An index into the
                 // catalog's currency list, so the engine never has to parse a string to
                 // know which money it is holding.
-                currency: self
-                    .cat
-                    .currencies
-                    .keys()
-                    .position(|k| k == &currency.text)
-                    .unwrap_or(0) as u32,
+                //
+                // `unwrap_or(0)` made an undeclared currency into *whichever currency
+                // happens to sort first* — so a literal written in an unknown currency
+                // entered the circuit denominated in a real one. The typechecker reports
+                // the undeclared currency (NL0241); this refuses to lower it, because a
+                // circuit that survived the error would carry the wrong denomination.
+                let Some(ix) = self.cat.currencies.keys().position(|k| k == &currency.text) else {
+                    self.d.push(
+                        Diagnostic::error(
+                            "NL0506",
+                            format!("currency `{}` is not declared, so this literal has no lowering", currency.text),
+                        )
+                        .primary(e.span(), "unknown currency")
+                        .note("this used to become the first declared currency, which silently redenominated the literal"),
+                    );
+                    return None;
+                };
+                Scalar::LitMoney {
+                    minor: *minor,
+                    currency: ix as u32,
+                }
+            }
+            // A date literal is an integer in the IR — days since 1970-01-01, read by the
+            // one function both this and `valid_at` use. Without a form here,
+            // `where p.value_date >= v@2026-08-01` had no lowering, and on the pipeline
+            // surface that meant `Filter{LitBool(true)}`: the worked example's
+            // `balance_as_of_2026_q1` returned every posting in the ledger and called
+            // itself a balance as of March.
+            Expr::Instant { text, span, .. } => match niles_ir::value::days_since_epoch(text) {
+                Some(d) => Scalar::LitInt(d as i128),
+                None => {
+                    self.d.push(
+                        Diagnostic::error("NL0509", format!("`{text}` is not a date"))
+                            .primary(*span, "expected `YYYY-MM-DD`")
+                            .note("dates are not read leniently: a literal parsed into the wrong day is worse than a compile error, because nothing downstream can tell"),
+                    );
+                    return None;
+                }
             },
+            Expr::Epoch(v, _) => Scalar::LitInt(*v as i128),
             Expr::Field { name, .. } => Scalar::Column(self.col_index(input, &name.text)?),
             Expr::Path(p) => Scalar::Column(self.col_index(input, &p.last().text)?),
             Expr::Unary {
@@ -582,13 +777,44 @@ impl<'a> Lx<'a> {
         }
     }
 
-    fn scalar_list(&mut self, input: NodeId, e: &Expr) -> Vec<Scalar> {
+    /// A projection list, all of it or none of it.
+    ///
+    /// The `filter_map` this replaces dropped every element it could not lower, so
+    /// `map(|p| (p.acct, f(p.amt)))` produced a one-column projection and the money column
+    /// was gone — with no diagnostic, and a circuit that verified.
+    fn scalar_list(&mut self, input: NodeId, e: &Expr) -> Option<Vec<Scalar>> {
         match e {
             Expr::Closure { body, .. } => self.scalar_list(input, body),
             Expr::Tuple { elems, .. } => {
-                elems.iter().filter_map(|x| self.scalar(input, x)).collect()
+                let mut out = Vec::with_capacity(elems.len());
+                for (i, x) in elems.iter().enumerate() {
+                    match self.scalar(input, x) {
+                        Some(s) => out.push(s),
+                        None => {
+                            self.d.push(
+                                Diagnostic::error(
+                                    "NL0508",
+                                    format!("element {} of this projection has no lowering", i + 1),
+                                )
+                                .primary(x.span(), "cannot be expressed in the circuit")
+                                .note("the whole projection is refused rather than the element dropped: a projection missing a column produces a view with a different schema from the one that was written"),
+                            );
+                            return None;
+                        }
+                    }
+                }
+                Some(out)
             }
-            other => self.scalar(input, other).into_iter().collect(),
+            other => match self.scalar(input, other) {
+                Some(s) => Some(vec![s]),
+                None => {
+                    self.d.push(
+                        Diagnostic::error("NL0508", "this projection has no lowering")
+                            .primary(other.span(), "cannot be expressed in the circuit"),
+                    );
+                    None
+                }
+            },
         }
     }
 

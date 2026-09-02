@@ -23,7 +23,7 @@
 use crate::ast::*;
 use crate::diagnostics::{closest, Applicability, Diagnostic, Diagnostics};
 use crate::effects::Rung;
-use crate::lexer::Span;
+use crate::lexer::{Span, TimeUnit};
 use std::collections::HashMap;
 
 /// The epoch a catalog was read at. A resolution is a statement about the schema *as of*
@@ -74,10 +74,40 @@ pub struct ColumnInfo {
     pub span: Span,
 }
 
+/// The two numbers a `bounded(..)` rung is parameterised by.
+///
+/// Carried from the source into the IR. They used to be discarded twice over — `resolve`
+/// kept only the *word* `bounded` from a `ContractValue::Call`, and `lower` then wrote
+/// `{ epochs: 4, millis: 1000 }` into every bounded contract in the language. So
+/// `bounded(epochs: 8)` and `bounded(1.epochs, 1.s)` produced byte-identical circuits, and
+/// the staleness a view promised its readers had no relation to the staleness it was
+/// written with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Staleness {
+    pub epochs: u64,
+    pub millis: u64,
+}
+
+impl Staleness {
+    /// What a bare `bounded` means: the rung with no parameters given.
+    ///
+    /// Stated once, here, rather than typed into the lowering — and *named*, so a reader
+    /// can tell a default from a measurement. Any view that says `bounded(..)` overrides
+    /// both numbers.
+    pub const UNPARAMETERISED: Staleness = Staleness {
+        epochs: 4,
+        millis: 1_000,
+    };
+}
+
 #[derive(Debug, Clone)]
 pub struct ViewInfo {
     pub name: String,
     pub rung: Rung,
+    /// Present exactly when `rung == Rung::Bounded`. `None` on every other rung, because
+    /// the other rungs are not parameterised and carrying a bound on them would invite a
+    /// reader to believe one was honoured.
+    pub staleness: Option<Staleness>,
     pub materialize: String,
     pub retain: String,
     pub lineage: String,
@@ -221,6 +251,107 @@ fn collect_schema_item(si: &SchemaItem, cat: &mut Catalog, d: &mut Diagnostics) 
     }
 }
 
+/// Read `bounded(epochs: 4, millis: 200)` — or `bounded(10.epochs, 30.s)`, or
+/// `bounded(epochs: 8)` — into the two numbers the engine needs.
+///
+/// Both spellings are in the repository's own examples, so both are read here rather than
+/// one being quietly preferred. An argument that is neither is refused: the previous
+/// behaviour discarded the whole argument list, so every one of these forms produced the
+/// same contract and nothing said so.
+fn staleness_of(
+    args: &[(Option<Name>, ContractValue)],
+    span: Span,
+    view: &str,
+    d: &mut Diagnostics,
+) -> Staleness {
+    let mut out = Staleness::UNPARAMETERISED;
+    let (mut saw_epochs, mut saw_millis) = (false, false);
+    for (key, value) in args {
+        // Which of the two numbers this is: from the label if there is one, and otherwise
+        // from the unit, because `10.epochs` and `30.s` name themselves.
+        let (is_epochs, n, at) = match (key.as_ref().map(|k| k.text.as_str()), value) {
+            (Some("epochs"), ContractValue::Int(n, s)) => (true, *n, *s),
+            (Some("millis"), ContractValue::Int(n, s)) => (false, *n, *s),
+            (
+                _,
+                ContractValue::Duration {
+                    value: n,
+                    unit: TimeUnit::Epochs,
+                    span: s,
+                },
+            ) => (true, *n, *s),
+            (
+                _,
+                ContractValue::Duration {
+                    value: n,
+                    unit,
+                    span: s,
+                },
+            ) => match unit.millis() {
+                Some(m) => (false, n * m, *s),
+                None => (true, *n, *s),
+            },
+            (Some(other), v) => {
+                d.push(
+                    Diagnostic::error("NL0202", format!("`bounded` has no parameter `{other}`"))
+                        .primary(v.span(), "unknown parameter")
+                        .note("`bounded` takes `epochs` and `millis`, in either order, by name or by unit"),
+                );
+                continue;
+            }
+            (None, v) => {
+                d.push(
+                    Diagnostic::error("NL0202", "this bound has no unit")
+                        .primary(v.span(), "cannot tell epochs from milliseconds")
+                        .note("write `epochs: 8` or `8.epochs`, `millis: 200` or `200.ms`")
+                        .note("a bare number here used to be discarded silently, along with the rest of the argument list"),
+                );
+                continue;
+            }
+        };
+        if n < 0 {
+            d.push(
+                Diagnostic::error("NL0202", "a staleness bound cannot be negative")
+                    .primary(at, format!("`{n}`"))
+                    .note("the bound is how far *behind* the frontier a read may be; a negative one would be a promise to read the future"),
+            );
+            continue;
+        }
+        let n = u64::try_from(n).unwrap_or(u64::MAX);
+        if is_epochs {
+            out.epochs = n;
+            saw_epochs = true;
+        } else {
+            out.millis = n;
+            saw_millis = true;
+        }
+    }
+    // A bound given on one axis only leaves the other at its unparameterised value, which
+    // is a real decision and not obviously the one intended — so it is said out loud.
+    if (saw_epochs || saw_millis) && !(saw_epochs && saw_millis) {
+        let (given, missing, keep) = if saw_epochs {
+            ("epochs", "millis", out.millis)
+        } else {
+            ("millis", "epochs", out.epochs)
+        };
+        d.push(
+            Diagnostic::warning(
+                "NL0203",
+                format!("`{view}` bounds `{given}` but not `{missing}`"),
+            )
+            .primary(span, format!("`{missing}` stays at {keep}"))
+            .note("a bounded rung is bounded on both axes: whichever is reached first is the one that binds")
+            .suggest(
+                span,
+                format!("bounded({given}: .., {missing}: {keep})"),
+                "state both, so the one that binds is visible",
+                Applicability::MaybeIncorrect,
+            ),
+        );
+    }
+    out
+}
+
 fn collect_view(v: &ViewDecl, cat: &mut Catalog, d: &mut Diagnostics) {
     let c = v.contract.as_ref();
     let word = |key: &str, default: &str| -> String {
@@ -252,9 +383,36 @@ fn collect_view(v: &ViewDecl, cat: &mut Catalog, d: &mut Diagnostics) {
         }
         d.push(diag);
     }
+    // The `bounded(..)` parameters, read here rather than discarded here.
+    let staleness = if rung == Rung::Bounded {
+        Some(match c.and_then(|c| c.get("consistency")) {
+            Some(ContractValue::Call { args, span, .. }) => {
+                staleness_of(args, *span, &v.name.text, d)
+            }
+            _ => Staleness::UNPARAMETERISED,
+        })
+    } else {
+        // A parameterised rung other than `bounded` is a contract that reads as if it
+        // constrains something it does not. Refused rather than ignored.
+        if let Some(ContractValue::Call { name, span, .. }) = c.and_then(|c| c.get("consistency")) {
+            if Rung::parse(&name.text).is_some() {
+                d.push(
+                    Diagnostic::error(
+                        "NL0201",
+                        format!("`{}` takes no parameters", name.text),
+                    )
+                    .primary(*span, "parameters given here")
+                    .note("only `bounded` is parameterised: it is the one rung defined by how far behind the frontier a read may be")
+                    .note("the others are defined by an ordering property, which has no knob"),
+                );
+            }
+        }
+        None
+    };
     let info = ViewInfo {
         name: v.name.text.clone(),
         rung,
+        staleness,
         materialize: word("materialize", "auto"),
         retain: word("retain", "evictable"),
         lineage: word("lineage", "off"),

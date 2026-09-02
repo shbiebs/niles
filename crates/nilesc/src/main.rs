@@ -46,7 +46,11 @@ fn main() -> ExitCode {
     let (report, tdiags) = typecheck::check_program(&prog, &cat);
     diags.extend(tdiags);
 
-    let failed = diags.has_errors();
+    // Mutable because lowering runs later and its diagnostics are diagnostics: a driver
+    // that printed an error and exited 0 told every script that called it the file was
+    // fine. `nilesc explain` on a view with an unlowerable `where` clause did exactly
+    // that, and the `make schema` gate that ran it was green for as long as it existed.
+    let mut failed = diags.has_errors();
     if !diags.items.is_empty() {
         eprint!("{}", diags.render(&src, path));
     }
@@ -124,6 +128,7 @@ fn main() -> ExitCode {
             if !ldiags.items.is_empty() {
                 eprint!("{}", ldiags.render(&src, path));
             }
+            failed |= ldiags.has_errors();
             match cmd {
                 "explain" => {
                     println!("circuit ({} nodes):", lowered.circuit.nodes.len());

@@ -244,3 +244,111 @@ mod tests {
         assert_eq!(Tri::of(Value::Int(0).is_null()).definite(), Value::Int(0));
     }
 }
+
+// ===================== instants =====================
+
+/// The canonical reading of a date literal: **days since 1970-01-01**, proleptic Gregorian.
+///
+/// One function, because there were two places that needed it and a system in which
+/// `where p.value_date >= v@2026-08-01` and `.valid_at(v@2026-08-01)` disagreed about what
+/// that date *is* would be a system whose bitemporal answers depend on which surface asked.
+///
+/// `None` on anything that is not exactly `YYYY-MM-DD`, and the caller reports it. There is
+/// no "best effort" reading of a date: a literal parsed leniently into the wrong day is a
+/// worse outcome than a compile error, and an as-of read is where that would first be
+/// noticed — months later, in a reconciliation.
+///
+/// No clock is consulted, which is the property the IR verifier's IR013 rule is about: a
+/// view boundary must be a value, so that an evicted entry reconstructs to the number it
+/// held rather than to the number today would give.
+pub fn days_since_epoch(text: &str) -> Option<i64> {
+    let b = text.as_bytes();
+    if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
+        return None;
+    }
+    let num = |s: &str| -> Option<i64> {
+        if s.bytes().all(|c| c.is_ascii_digit()) {
+            s.parse().ok()
+        } else {
+            None
+        }
+    };
+    let (y, m, d) = (num(&text[0..4])?, num(&text[5..7])?, num(&text[8..10])?);
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    if d > days_in_month(y, m) {
+        return None;
+    }
+    // Howard Hinnant's `days_from_civil`: exact, branch-free of any calendar table, and
+    // correct for the whole proleptic Gregorian range rather than for a window around now.
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400; // [0, 399]
+    let mp = (m + 9) % 12; // March = 0
+    let doy = (153 * mp + 2) / 5 + d - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    Some(era * 146_097 + doe - 719_468)
+}
+
+fn days_in_month(y: i64, m: i64) -> i64 {
+    match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod instant_tests {
+    use super::*;
+
+    #[test]
+    fn the_epoch_itself_is_day_zero_and_the_arithmetic_is_exact() {
+        assert_eq!(days_since_epoch("1970-01-01"), Some(0));
+        assert_eq!(days_since_epoch("1970-01-02"), Some(1));
+        assert_eq!(days_since_epoch("1969-12-31"), Some(-1));
+        // A leap day, and the day after it, on both sides of the century rule.
+        assert_eq!(days_since_epoch("2000-02-29"), Some(11_016));
+        assert_eq!(days_since_epoch("2000-03-01"), Some(11_017));
+        assert_eq!(days_since_epoch("2026-08-01"), Some(20_666));
+        // Consecutive days differ by one, across a month, a year and a leap year.
+        for (a, b) in [
+            ("2026-01-31", "2026-02-01"),
+            ("2026-12-31", "2027-01-01"),
+            ("2024-02-28", "2024-02-29"),
+            ("2024-02-29", "2024-03-01"),
+        ] {
+            assert_eq!(
+                days_since_epoch(b).unwrap() - days_since_epoch(a).unwrap(),
+                1,
+                "{a} -> {b}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_date_that_is_not_a_date_is_refused_rather_than_read_leniently() {
+        // Every one of these has a "reasonable" reading, and every reasonable reading is a
+        // different day from the one written. A literal parsed into the wrong day is worse
+        // than a compile error, because nothing downstream can tell.
+        for bad in [
+            "2026-02-30", // no such day
+            "2023-02-29", // not a leap year
+            "1900-02-29", // the century rule
+            "2026-13-01", // no such month
+            "2026-00-10", // no such month
+            "2026-08-00", // no such day
+            "2026-8-01",  // not zero-padded
+            "26-08-01",   // two-digit year
+            "2026/08/01", // wrong separator
+            "2026-08-01T00:00:00Z",
+            "",
+            "today",
+        ] {
+            assert_eq!(days_since_epoch(bad), None, "`{bad}` must be refused");
+        }
+    }
+}

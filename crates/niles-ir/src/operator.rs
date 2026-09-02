@@ -390,6 +390,21 @@ impl Op {
     /// conserved ledger to a view is conservation-preserving exactly when every operator
     /// on it is transparent; where one is not, the view is a *projection* of the ledger
     /// rather than a restatement of it, and must not be presented as a control total.
+    ///
+    /// # Why the match is exhaustive, and stays exhaustive
+    ///
+    /// This predicate used to end in `_ => true`, and the default was the wrong way round
+    /// on four operators at once. `Map` can drop the money column outright; `min`, `max`
+    /// and `avg` are not sums of what entered; `Fixpoint` reaches a value that has no
+    /// stated relation to its input's total; `OrderBy` is transparent but only because it
+    /// permutes. A soundness predicate that answers "yes, conserved" for an operator
+    /// nobody considered is the shape of defect GC-04 names: a reasonable default for an
+    /// absence is a wrong answer wearing a plausible shape.
+    ///
+    /// So there is no wildcard arm. Adding an operator to [`Op`] now fails to compile
+    /// here, and whoever adds it has to say which of the two it is — which is a question
+    /// about the algebra, and belongs to the person introducing the operator rather than
+    /// to whoever next reads the verifier's output.
     pub fn is_conservation_transparent(&self) -> bool {
         match self {
             // Drops rows: money leaves the view without leaving the ledger. Not a bug —
@@ -407,7 +422,61 @@ impl Op {
             // Clamps weights: two identical postings become one.
             Op::Distinct => false,
             Op::Negate => false,
-            _ => true,
+
+            // A projection is transparent only if the money column passes through
+            // *unchanged*. `Map` cannot answer that from the operator alone — it holds a
+            // list of scalar expressions and no notion of which column is money — so the
+            // honest answer is no, and a caller that wants the finer judgement must ask
+            // [`Op::map_passes_through`] with the column it cares about. Answering `true`
+            // here made `postings.map(|p| (p.acct, 0))` a control total.
+            Op::Map { .. } => false,
+
+            // `sum` and `count` are the additive aggregates: over a conserved input, the
+            // sum of the parts is the total that entered, and a count is transparent in
+            // the degenerate sense that it moves no money at all. `min`, `max` and `avg`
+            // each return a value that is *not* the total, so a view built on one is a
+            // statistic about the ledger, never a restatement of it.
+            Op::Aggregate { aggs, .. } => {
+                aggs.iter().all(|(a, _)| matches!(a, Agg::Sum | Agg::Count))
+            }
+
+            // A fixpoint's result is whatever the recursion reaches. Nothing in the IR
+            // relates that to the total that entered, and inventing a relation is exactly
+            // the fabrication this predicate exists to prevent.
+            Op::Fixpoint { .. } => false,
+
+            // Reorders rows; the multiset, and therefore every total over it, is
+            // unchanged. Transparent, and for a reason rather than by default.
+            Op::OrderBy { .. } => true,
+
+            // The leaf itself, the DBSP core, the index, and the two temporal pins. A
+            // source *is* the conserved relation; `Delay`, `Integrate` and `Differentiate`
+            // are the identities of Theorem 2.20 up to time; `Index` is a physical
+            // decision with no logical content; and `AsOf`/`ValidAt` select a prefix of
+            // history, over which conservation holds because it held at every epoch.
+            Op::Source { .. }
+            | Op::Delay
+            | Op::Integrate
+            | Op::Differentiate
+            | Op::Index { .. }
+            | Op::AsOf { .. }
+            | Op::ValidAt { .. }
+            | Op::Union => true,
+        }
+    }
+
+    /// Whether a [`Op::Map`] passes column `col` of its input through unchanged.
+    ///
+    /// The finer question [`Op::is_conservation_transparent`] refuses to guess at. A map
+    /// is conservation-transparent *for a given money column* exactly when some output
+    /// expression is that column and nothing else — not scaled, not summed with another,
+    /// not rounded.
+    pub fn map_passes_through(&self, col: ColIdx) -> bool {
+        match self {
+            Op::Map { exprs } => exprs
+                .iter()
+                .any(|e| matches!(e, Scalar::Column(c) if *c == col)),
+            _ => false,
         }
     }
 
@@ -523,10 +592,66 @@ mod tests {
         .is_conservation_transparent());
         assert!(Op::Aggregate {
             group_key: vec![0],
-            aggs: vec![]
+            aggs: vec![(Agg::Sum, Scalar::Column(1))]
         }
         .is_conservation_transparent());
-        assert!(Op::Map { exprs: vec![] }.is_conservation_transparent());
+
+        // A `Map` is no longer transparent by default, and the change is the finding: the
+        // assertion this replaces said `Op::Map { exprs: vec![] }` — a projection that
+        // emits *nothing* — restates the ledger's total. Transparency for a map is a
+        // question about a particular column, and `map_passes_through` is where it is
+        // asked.
+        assert!(!Op::Map { exprs: vec![] }.is_conservation_transparent());
+        assert!(Op::Map {
+            exprs: vec![Scalar::Column(0), Scalar::Column(3)]
+        }
+        .map_passes_through(3));
+        assert!(!Op::Map {
+            exprs: vec![Scalar::Column(0)]
+        }
+        .map_passes_through(3));
+    }
+
+    #[test]
+    fn only_the_additive_aggregates_restate_the_total() {
+        // `min`, `max` and `avg` return a value that is not the total that entered, so a
+        // view built on one is a statistic about the ledger rather than a restatement of
+        // it. Each of the three answered "transparent" under the old `_ => true`.
+        let agg = |a| Op::Aggregate {
+            group_key: vec![0],
+            aggs: vec![(a, Scalar::Column(1))],
+        };
+        assert!(agg(Agg::Sum).is_conservation_transparent());
+        assert!(agg(Agg::Count).is_conservation_transparent());
+        for a in [Agg::Min, Agg::Max, Agg::Avg] {
+            assert!(
+                !agg(a).is_conservation_transparent(),
+                "{} is not a control total",
+                a.as_str()
+            );
+        }
+        // Mixed: one non-additive aggregate is enough.
+        assert!(!Op::Aggregate {
+            group_key: vec![0],
+            aggs: vec![(Agg::Sum, Scalar::Column(1)), (Agg::Max, Scalar::Column(1))]
+        }
+        .is_conservation_transparent());
+    }
+
+    #[test]
+    fn a_fixpoint_is_not_a_control_total_and_an_order_by_is() {
+        // The two remaining operators the old default got wrong in opposite directions.
+        assert!(!Op::Fixpoint {
+            measure: Scalar::Column(0),
+            max_rounds: 8
+        }
+        .is_conservation_transparent());
+        // `OrderBy` permutes the multiset, so every total over it is unchanged — true for
+        // a reason, which is the difference between this arm and a wildcard.
+        assert!(Op::OrderBy {
+            keys: vec![(0, true)]
+        }
+        .is_conservation_transparent());
     }
 
     #[test]

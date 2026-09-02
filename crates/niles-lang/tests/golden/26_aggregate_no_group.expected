@@ -1,0 +1,5 @@
+# 26_aggregate_no_group
+# A global aggregate: sum over the whole relation. Without a `group by` this used to take
+# the projection path, where `sum` lowered to an uncertified user function and the query
+# answered `0` once per row.
+70 x1

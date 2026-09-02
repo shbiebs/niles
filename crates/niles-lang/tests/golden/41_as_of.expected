@@ -1,0 +1,9 @@
+# 41_as_of
+# `as_of` pins a read to a system-time epoch. In the reference semantics a Z-set is a
+# snapshot already, so the operator is the identity here and the epoch is a fact about
+# *which* snapshot the engine hands it — which is one level below this one, and is where
+# the anchoring tests live.
+1 10 100 x1
+1 10 null x1
+2 20 200 x1
+3 30 null x1

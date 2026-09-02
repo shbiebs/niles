@@ -167,7 +167,12 @@ impl<'a> Lx<'a> {
                 let input = self.expr(recv, c)?;
                 self.stage(input, *kind, name, args, c)
             }
-            Expr::Fixpoint { recv, measure, .. } => {
+            Expr::Fixpoint {
+                recv,
+                step,
+                measure,
+                span,
+            } => {
                 let input = self.expr(recv, c)?;
                 // The measure is what lets the runtime stop, so a measure the lowering
                 // cannot express is the one thing a fixpoint may not be given a default
@@ -184,12 +189,56 @@ impl<'a> Lx<'a> {
                     );
                     return None;
                 };
+                // **The step, lowered into the circuit.** It used to be dropped: the node
+                // held a measure and no body, so the recursion existed in the surface
+                // syntax and nowhere else — verifiable, and not evaluable, which is why the
+                // reference evaluator panicked on it and C6(b)'s completeness claim had no
+                // runnable witness.
+                //
+                // The step is written as a closure over the accumulator, and the
+                // accumulator is a `Delay`: the one operator permitted to close a cycle.
+                // Binding the closure's parameter to that node is what turns "the step
+                // reads what the previous round produced" from prose into an edge.
+                let Expr::Closure { params, body, .. } = &**step else {
+                    self.d.push(
+                        Diagnostic::error("NL0513", "a fixpoint's step must be a closure over the accumulator")
+                            .primary(step.span(), "expected `|acc| <pipeline over acc>`")
+                            .note("the accumulator is what the previous round produced; a step that cannot name it cannot be a recursion")
+                            .note("this argument used to be discarded, so `fixpoint(anything)` lowered to a node with a guard and no body"),
+                    );
+                    return None;
+                };
+                let Some(param) = params.first().and_then(|(pat, _)| first_pat_name(pat)) else {
+                    self.d.push(
+                        Diagnostic::error(
+                            "NL0513",
+                            "a fixpoint's step takes the accumulator as its one parameter",
+                        )
+                        .primary(step.span(), "no parameter to bind the accumulator to"),
+                    );
+                    return None;
+                };
+                let delay = self.circuit.add(Op::Delay, vec![input], c, "accumulator");
+                self.schemas.insert(delay, self.schema_of(input).to_vec());
+                self.sources.insert(param.clone(), delay);
+                let produced = self.expr(body, c);
+                self.sources.remove(&param);
+                let produced = produced?;
+                if self.schema_of(produced).len() != self.schema_of(input).len() {
+                    self.d.push(
+                        Diagnostic::error("NL0514", "a fixpoint's step must produce the same shape it consumes")
+                            .primary(body.span(), format!("this produces {} column(s)", self.schema_of(produced).len()))
+                            .secondary(*span, format!("the seed has {}", self.schema_of(input).len()))
+                            .note("the accumulator and the step's output are unioned each round; two shapes cannot be unioned"),
+                    );
+                    return None;
+                }
                 let id = self.circuit.add(
                     Op::Fixpoint {
                         measure: m,
                         max_rounds: 1_000,
                     },
-                    vec![input],
+                    vec![input, produced],
                     c,
                     "fixpoint",
                 );
@@ -416,12 +465,26 @@ impl<'a> Lx<'a> {
                 return Some(id);
             }
             StageKind::Except => {
+                // Same clamping as the SQL surface's `EXCEPT`, and for the same reason: the
+                // two surfaces must denote the same thing or the generality claim is
+                // marketing. A bare `Union(l, Negate(r))` reports rows present only on the
+                // right with weight −1.
                 let rhs = args.first().and_then(|a| self.expr(&a.value, c))?;
-                let neg = self.circuit.add(Op::Negate, vec![rhs], c, "negate");
-                self.schemas.insert(neg, self.schema_of(rhs).to_vec());
-                let id = self
+                let dl = self
                     .circuit
-                    .add(Op::Union, vec![input, neg], c, name.text.clone());
+                    .add(Op::Distinct, vec![input], c, "distinct left");
+                self.schemas.insert(dl, in_schema.clone());
+                let dr = self
+                    .circuit
+                    .add(Op::Distinct, vec![rhs], c, "distinct right");
+                self.schemas.insert(dr, self.schema_of(rhs).to_vec());
+                let neg = self.circuit.add(Op::Negate, vec![dr], c, "negate");
+                self.schemas.insert(neg, self.schema_of(rhs).to_vec());
+                let u = self
+                    .circuit
+                    .add(Op::Union, vec![dl, neg], c, name.text.clone());
+                self.schemas.insert(u, in_schema.clone());
+                let id = self.circuit.add(Op::Distinct, vec![u], c, "distinct");
                 self.schemas.insert(id, in_schema);
                 return Some(id);
             }
@@ -443,7 +506,7 @@ impl<'a> Lx<'a> {
                         return None;
                     }
                 };
-                let id = self.circuit.add(
+                let j = self.circuit.add(
                     Op::Join {
                         kind: IrJoin::Semi,
                         left_key: lk,
@@ -454,6 +517,10 @@ impl<'a> Lx<'a> {
                     c,
                     name.text.clone(),
                 );
+                self.schemas.insert(j, in_schema.clone());
+                // Distinct, like SQL's `INTERSECT`: a semi-join alone preserves the left's
+                // multiplicities, which is `INTERSECT ALL`.
+                let id = self.circuit.add(Op::Distinct, vec![j], c, "distinct");
                 self.schemas.insert(id, in_schema);
                 return Some(id);
             }
@@ -682,6 +749,7 @@ impl<'a> Lx<'a> {
                 }
             },
             Expr::Epoch(v, _) => Scalar::LitInt(*v as i128),
+            Expr::Null(_) => Scalar::LitNull,
             Expr::Field { name, .. } => Scalar::Column(self.col_index(input, &name.text)?),
             Expr::Path(p) => Scalar::Column(self.col_index(input, &p.last().text)?),
             Expr::Unary {
@@ -694,6 +762,34 @@ impl<'a> Lx<'a> {
                 operand,
                 ..
             } => Scalar::Neg(Box::new(self.scalar(input, operand)?)),
+            // `x is null` / `x is not null`. Definite booleans about a value, never
+            // themselves unknown — which is exactly why the IR has `IsNull` rather than
+            // leaving the question to the three-valued comparison operators, which cannot
+            // answer it. Neither form had a lowering, so on the pipeline surface
+            // `where(|r| r.x is null)` became the constant `true`.
+            Expr::Binary {
+                op: op @ (BinOp::Is | BinOp::IsNot),
+                lhs,
+                rhs,
+                span,
+            } => {
+                if !matches!(&**rhs, Expr::Null(_)) {
+                    self.d.push(
+                        Diagnostic::error("NL0515", "`is` compares against `null` and nothing else")
+                            .primary(rhs.span(), "expected `null`")
+                            .note("`is` is an identity test, not an equality: `x is y` for values is `x = y`, and SQL spells identity only against null")
+                            .note("this used to have no lowering at all, so on the pipeline surface the whole predicate became `true`"),
+                    );
+                    let _ = span;
+                    return None;
+                }
+                let inner = Scalar::IsNull(Box::new(self.scalar(input, lhs)?));
+                if *op == BinOp::IsNot {
+                    Scalar::Not(Box::new(inner))
+                } else {
+                    inner
+                }
+            }
             Expr::Binary { op, lhs, rhs, .. } => {
                 let sop = match op {
                     BinOp::Add => ScalarOp::Add,
@@ -828,7 +924,40 @@ impl<'a> Lx<'a> {
     /// which is the argument for it; the SQL surface writes SQL's order and is rearranged
     /// here.
     fn select(&mut self, s: &SelectStmt, c: ServeContract) -> Option<NodeId> {
-        let mut cur = self.table_ref(s.from.first()?, c)?;
+        let Some(first) = s.from.first() else {
+            self.d.push(
+                Diagnostic::error("NL0511", "this `select` has no `from`")
+                    .primary(s.span, "nothing to read")
+                    .note("a circuit is rooted in a relation; a `select` with no source has no node to be"),
+            );
+            return None;
+        };
+        let mut cur = self.table_ref(first, c)?;
+        // **The rest of the from-list.** `s.from.first()` was the whole of it, so
+        // `select ... from t, u` silently dropped `u` and answered from `t` alone. A
+        // comma-separated from-list is a cross join, and it is written as one — which also
+        // means the `where` clause that was meant to be the join condition now has both
+        // schemas to resolve against.
+        for extra in s.from.iter().skip(1) {
+            let r = self.table_ref(extra, c)?;
+            let mut names = self.schema_of(cur).to_vec();
+            names.extend(self.schema_of(r).iter().cloned());
+            let lk = self.circuit.node(cur).key.clone().unwrap_or_default();
+            let id = self.circuit.add(
+                Op::Join {
+                    kind: IrJoin::Inner,
+                    left_key: Vec::new(),
+                    right_key: Vec::new(),
+                    residual: None,
+                },
+                vec![cur, r],
+                c,
+                "cross join",
+            );
+            let _ = lk;
+            self.schemas.insert(id, names);
+            cur = id;
+        }
         if let Some(f) = &s.filter {
             // Subquery predicates become `Apply` nodes in the pipeline; whatever is left
             // becomes the `where` filter. Splitting first is what lets a correlated
@@ -847,7 +976,13 @@ impl<'a> Lx<'a> {
                 cur = id;
             }
         }
-        if !s.group_by.is_empty() {
+        // A `select` whose projection list holds an aggregate is an aggregate query, with
+        // or without a `group by`. Without one the group key is empty — a *global*
+        // aggregate — and that case used to fall through to the projection path, where
+        // `sum(v)` lowered to an uncertified UDF call: `select sum(v) from t` answered
+        // `0` once per row.
+        let has_aggregate = s.projections.iter().any(|(e, _)| aggregate_of(e).is_some());
+        if !s.group_by.is_empty() || has_aggregate {
             let in_schema = self.schema_of(cur).to_vec();
             let mut names = Vec::new();
             for g in &s.group_by {
@@ -860,16 +995,9 @@ impl<'a> Lx<'a> {
             // The aggregate in the projection list.
             let mut aggs = Vec::new();
             for (e, _) in &s.projections {
-                if let Expr::Call { callee, args, .. } = e {
-                    if let Expr::Path(p) = &**callee {
-                        let agg = match p.last().text.as_str() {
-                            "sum" => Some(Agg::Sum),
-                            "count" => Some(Agg::Count),
-                            "min" => Some(Agg::Min),
-                            "max" => Some(Agg::Max),
-                            "avg" => Some(Agg::Avg),
-                            _ => None,
-                        };
+                if let Expr::Call { args, .. } = e {
+                    {
+                        let agg = aggregate_of(e);
                         if let Some(a) = agg {
                             // The SQL surface's copy of the same defect the pipeline
                             // surface had: `unwrap_or(Scalar::Column(0))` aggregated the
@@ -921,6 +1049,11 @@ impl<'a> Lx<'a> {
             self.schemas.insert(id, self.schema_of(cur).to_vec());
             cur = id;
         }
+        // `order by` is placed *before* the projection so that it can name a column the
+        // query does not select — which SQL permits, and which a strict output-schema-only
+        // reading would refuse. A Z-set is unordered, so `OrderBy` is a materialization
+        // decision rather than a change of denotation; `limit` follows the projection,
+        // which is where it belongs.
         if !s.order_by.is_empty() {
             let mut names = Vec::new();
             for (e, _) in &s.order_by {
@@ -935,6 +1068,48 @@ impl<'a> Lx<'a> {
             let id = self
                 .circuit
                 .add(Op::OrderBy { keys }, vec![cur], c, "order by");
+            self.schemas.insert(id, self.schema_of(cur).to_vec());
+            cur = id;
+        }
+        // **The projection.** `select acct from postings` used to emit no `Map` at all: the
+        // projection list was read only to find aggregates, so a non-aggregate `select`
+        // returned every column of the source and the circuit's schema disagreed with the
+        // query's. `select *` is the identity and correctly emits nothing.
+        if !s.group_by.is_empty() || has_aggregate {
+            // The aggregate above already produced the output schema.
+        } else if !is_star(&s.projections) {
+            let mut exprs = Vec::with_capacity(s.projections.len());
+            let mut names = Vec::with_capacity(s.projections.len());
+            for (i, (e, alias)) in s.projections.iter().enumerate() {
+                let Some(v) = self.scalar(cur, e) else {
+                    self.d.push(
+                        Diagnostic::error(
+                            "NL0508",
+                            format!("element {} of this projection has no lowering", i + 1),
+                        )
+                        .primary(e.span(), "cannot be expressed in the circuit")
+                        .note("the whole projection is refused rather than the element dropped: a projection missing a column produces a view with a different schema from the one that was written"),
+                    );
+                    return None;
+                };
+                names.push(match alias {
+                    Some(a) => a.text.clone(),
+                    None => projection_name(e).unwrap_or_else(|| format!("c{i}")),
+                });
+                exprs.push(v);
+            }
+            let id = self
+                .circuit
+                .add(Op::Map { exprs }, vec![cur], c, "projection");
+            self.schemas.insert(id, names);
+            cur = id;
+        }
+        // `SELECT DISTINCT` — read for the first time. `SelectStmt::distinct` was parsed and
+        // never consulted, so the keyword was accepted and ignored, and a query asking for
+        // distinct rows got duplicates. In Z-set terms `distinct` clamps every weight to 0
+        // or 1, which is `Op::Distinct`.
+        if s.distinct {
+            let id = self.circuit.add(Op::Distinct, vec![cur], c, "distinct");
             self.schemas.insert(id, self.schema_of(cur).to_vec());
             cur = id;
         }
@@ -954,6 +1129,98 @@ impl<'a> Lx<'a> {
             );
             self.schemas.insert(id, self.schema_of(cur).to_vec());
             cur = id;
+        } else if s.limit.is_some() {
+            self.d.push(
+                Diagnostic::error("NL0504", "`limit` requires a literal bound")
+                    .primary(
+                        s.limit.as_ref().map(|e| e.span()).unwrap_or(s.span),
+                        "not a literal",
+                    )
+                    .note("this used to be ignored entirely, so the query returned every row"),
+            );
+            return None;
+        }
+        // **The set operation.** `SelectStmt::set_op` was parsed and never read, so
+        // `a UNION b` lowered to `a` and the second query vanished. In Z-set terms:
+        // `UNION ALL` is addition, `EXCEPT` is addition after negating the right,
+        // `INTERSECT` is a semi-join, and `UNION` is `UNION ALL` followed by `distinct`.
+        if let Some((op, next)) = &s.set_op {
+            let rhs = self.select(next, c)?;
+            let lhs_schema = self.schema_of(cur).to_vec();
+            if lhs_schema.len() != self.schema_of(rhs).len() {
+                self.d.push(
+                    Diagnostic::error("NL0512", "the two sides of this set operation have different arities")
+                        .primary(next.span, format!("{} column(s) here", self.schema_of(rhs).len()))
+                        .secondary(s.span, format!("{} column(s) here", lhs_schema.len()))
+                        .note("a set operation is over one relation's worth of rows; two shapes is two relations"),
+                );
+                return None;
+            }
+            cur = match op {
+                SetOp::UnionAll => {
+                    let id = self.circuit.add(Op::Union, vec![cur, rhs], c, "union all");
+                    self.schemas.insert(id, lhs_schema);
+                    id
+                }
+                SetOp::Union => {
+                    let u = self.circuit.add(Op::Union, vec![cur, rhs], c, "union");
+                    self.schemas.insert(u, lhs_schema.clone());
+                    let d = self.circuit.add(Op::Distinct, vec![u], c, "distinct");
+                    self.schemas.insert(d, lhs_schema);
+                    d
+                }
+                // **SQL's `EXCEPT` is set difference, not Z-set subtraction.** The
+                // difference shows on the corpus: `t EXCEPT u` as a bare
+                // `Union(l, Negate(r))` reported rows that exist only on the *right* with
+                // weight −1, which SQL does not produce and no reader would expect. Both
+                // sides are clamped first and the result is clamped again, which is
+                // exactly "the distinct rows of the left that are not in the right".
+                SetOp::Except => {
+                    let dl = self
+                        .circuit
+                        .add(Op::Distinct, vec![cur], c, "distinct left");
+                    self.schemas.insert(dl, lhs_schema.clone());
+                    let dr = self
+                        .circuit
+                        .add(Op::Distinct, vec![rhs], c, "distinct right");
+                    self.schemas.insert(dr, self.schema_of(rhs).to_vec());
+                    let n = self.circuit.add(Op::Negate, vec![dr], c, "negate");
+                    self.schemas.insert(n, self.schema_of(rhs).to_vec());
+                    let u = self.circuit.add(Op::Union, vec![dl, n], c, "except");
+                    self.schemas.insert(u, lhs_schema.clone());
+                    let id = self.circuit.add(Op::Distinct, vec![u], c, "distinct");
+                    self.schemas.insert(id, lhs_schema);
+                    id
+                }
+                // And `INTERSECT` is distinct too. A semi-join alone preserved the left's
+                // multiplicities, so a row appearing twice on the left appeared twice in
+                // the intersection — which is `INTERSECT ALL`, a form this fragment does
+                // not claim.
+                SetOp::Intersect => {
+                    let lk = self.circuit.node(cur).key.clone().unwrap_or_default();
+                    let rk = self
+                        .circuit
+                        .node(rhs)
+                        .key
+                        .clone()
+                        .unwrap_or_else(|| lk.clone());
+                    let j = self.circuit.add(
+                        Op::Join {
+                            kind: IrJoin::Semi,
+                            left_key: lk,
+                            right_key: rk,
+                            residual: None,
+                        },
+                        vec![cur, rhs],
+                        c,
+                        "intersect",
+                    );
+                    self.schemas.insert(j, lhs_schema.clone());
+                    let id = self.circuit.add(Op::Distinct, vec![j], c, "distinct");
+                    self.schemas.insert(id, lhs_schema);
+                    id
+                }
+            };
         }
         Some(cur)
     }
@@ -1118,28 +1385,49 @@ impl<'a> Lx<'a> {
                     JoinKind::Full => IrJoin::FullOuter,
                     _ => IrJoin::Inner,
                 };
-                let residual = on.as_ref().and_then(|o| self.scalar(l, o));
-                let lk = self.circuit.node(l).key.clone().unwrap_or_default();
-                let rk = self
-                    .circuit
-                    .node(r)
-                    .key
-                    .clone()
-                    .unwrap_or_else(|| lk.clone());
+                // **The `ON` clause resolves against both sides.** It used to be
+                // `self.scalar(l, o)` — the *left* schema only — so `on t.k = u.k` could
+                // not find `u.k`, `scalar` returned `None`, and `and_then` turned that into
+                // "no residual": the join ran unconstrained and the query returned the
+                // cross product. Silently, with a circuit that verified.
+                //
+                // A join's residual is an expression over the concatenated schema, so the
+                // concatenated schema is what it is resolved against.
                 let mut names = self.schema_of(l).to_vec();
                 names.extend(self.schema_of(r).iter().cloned());
+                let lk = self.circuit.node(l).key.clone().unwrap_or_default();
+                let rk = match self.circuit.node(r).key.clone() {
+                    Some(k) => k,
+                    None => {
+                        self.d.push(
+                            Diagnostic::error("NL0503", "the right side of this join has no key")
+                                .primary(t.span(), "nothing says which columns to join on")
+                                .note("the left side's key is not a default: two relations agreeing on a column *position* is not the same as agreeing on a column"),
+                        );
+                        return None;
+                    }
+                };
                 let id = self.circuit.add(
                     Op::Join {
                         kind: jk,
                         left_key: lk,
                         right_key: rk,
-                        residual,
+                        residual: None,
                     },
                     vec![l, r],
                     c,
                     "join",
                 );
                 self.schemas.insert(id, names);
+                if let Some(o) = on {
+                    // Resolved after the node exists, because `scalar` resolves column
+                    // names against a node's schema and the joined schema is this node's.
+                    let residual = self.predicate(id, o, "join on")?;
+                    if let Op::Join { residual: slot, .. } = &mut self.circuit.nodes[id as usize].op
+                    {
+                        *slot = Some(residual);
+                    }
+                }
                 Some(id)
             }
         }
@@ -1272,4 +1560,49 @@ fn collect_field_names(e: &Expr, out: &mut Vec<String>) {
         Expr::Closure { body, .. } => collect_field_names(body, out),
         _ => {}
     }
+}
+
+/// Whether a projection list is `*` — the identity, which emits no `Map`.
+fn is_star(projections: &[(Expr, Option<Name>)]) -> bool {
+    projections.is_empty()
+        || projections
+            .iter()
+            .all(|(e, _)| matches!(e, Expr::Path(p) if p.last().text == "*"))
+}
+
+/// The output column name a projection element carries when no alias is written.
+fn projection_name(e: &Expr) -> Option<String> {
+    match e {
+        Expr::Field { name, .. } => Some(name.text.clone()),
+        Expr::Path(p) => Some(p.last().text.clone()),
+        _ => None,
+    }
+}
+
+/// The single name a closure parameter binds, if it binds exactly one.
+fn first_pat_name(p: &Pat) -> Option<String> {
+    p.bindings().first().map(|n| n.text.clone())
+}
+
+/// The aggregate a projection element names, if it names one.
+///
+/// One place, so the test for "is this an aggregate query" and the code that builds the
+/// `Aggregate` node cannot disagree — which they did: a global aggregate was an aggregate
+/// to the second and not to the first, so `select sum(v) from t` took the projection path
+/// and lowered `sum` as a user function.
+fn aggregate_of(e: &Expr) -> Option<Agg> {
+    let Expr::Call { callee, .. } = e else {
+        return None;
+    };
+    let Expr::Path(p) = &**callee else {
+        return None;
+    };
+    Some(match p.last().text.as_str() {
+        "sum" => Agg::Sum,
+        "count" => Agg::Count,
+        "min" => Agg::Min,
+        "max" => Agg::Max,
+        "avg" => Agg::Avg,
+        _ => return None,
+    })
 }

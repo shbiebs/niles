@@ -1,0 +1,15 @@
+# 19_two_table_from
+# A comma-separated from-list is a cross join. `from.first()` was the whole of it, so this
+# query silently answered from `t` alone.
+1 10 100 1 1 x1
+1 10 100 2 2 x1
+1 10 100 4 4 x1
+1 10 null 1 1 x1
+1 10 null 2 2 x1
+1 10 null 4 4 x1
+2 20 200 1 1 x1
+2 20 200 2 2 x1
+2 20 200 4 4 x1
+3 30 null 1 1 x1
+3 30 null 2 2 x1
+3 30 null 4 4 x1

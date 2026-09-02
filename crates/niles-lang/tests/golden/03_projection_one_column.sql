@@ -1,0 +1,1 @@
+select k from t

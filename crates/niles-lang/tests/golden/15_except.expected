@@ -1,0 +1,7 @@
+# 15_except
+# SQL's `EXCEPT` is set difference. A bare Z-set subtraction reports rows present only on
+# the *right* with weight -1, which SQL never produces; both sides are clamped and the
+# result is clamped again.
+1 10 x1
+2 20 x1
+3 30 x1

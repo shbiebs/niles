@@ -371,7 +371,13 @@ impl Op {
     pub fn arity(&self) -> usize {
         match self {
             Op::Source { .. } => 0,
-            Op::Join { .. } | Op::Union | Op::Apply { .. } => 2,
+            // A fixpoint takes the seed and the step's output. The step reads the
+            // accumulator through the `Delay` that closes the cycle, so the recursion has a
+            // representation in the circuit rather than living in the surface syntax — and
+            // an evaluator can therefore run it. With one input the operator held a
+            // termination guard and no body: it could be verified but not evaluated, which
+            // is why `eval.rs` panicked on it.
+            Op::Join { .. } | Op::Union | Op::Apply { .. } | Op::Fixpoint { .. } => 2,
             _ => 1,
         }
     }

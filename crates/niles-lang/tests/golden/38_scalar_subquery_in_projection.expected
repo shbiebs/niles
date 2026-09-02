@@ -1,0 +1,5 @@
+# 38_scalar_subquery_in_projection
+# Outside the fragment, and refused rather than approximated. `sql_surface.rs` lists
+# correlated subqueries in arbitrary position as a deliberate exclusion; this is what that
+# exclusion looks like when somebody writes one.
+REFUSED NL0508

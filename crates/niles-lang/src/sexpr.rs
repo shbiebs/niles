@@ -451,6 +451,7 @@ pub fn expr(e: &Expr) -> String {
         Bool(v, _) => format!("(bool {v})"),
         Str(s, _) => format!("(str {})", quote(s)),
         Unit(_) => "(unit)".into(),
+        Null(_) => "(null)".into(),
         Money {
             minor,
             scale,

@@ -1,0 +1,6 @@
+# 16_intersect
+# Distinct, like SQL's `INTERSECT`. A semi-join alone preserves the left's multiplicities,
+# which is `INTERSECT ALL` — a form this fragment does not claim.
+1 10 x1
+2 20 x1
+3 30 x1

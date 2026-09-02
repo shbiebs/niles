@@ -564,6 +564,13 @@ pub enum Expr {
     Str(String, Span),
     Bytes(Vec<u8>, Span),
     Unit(Span),
+    /// `null` — the SQL null, and the only absence with a *value* form.
+    ///
+    /// It had no expression form at all, so `where(|r| r.n is null)` did not parse: the
+    /// keyword was reserved, listed in the registry with `is null` as its own example, and
+    /// unspellable. Kept distinct from `Option::None` and from an evicted `Hole` — the three
+    /// absences the lattice of §3.3 turns on keeping apart.
+    Null(Span),
     /// `10.00 usd` — the minor value at the literal's own scale, plus that scale. The
     /// scale is kept separate from the currency so that `10.001 usd` is a *scale* error
     /// naming both numbers, rather than a silent rounding.
@@ -860,6 +867,16 @@ pub enum TableRef {
     },
 }
 
+impl TableRef {
+    pub fn span(&self) -> Span {
+        match self {
+            TableRef::Named { span, .. }
+            | TableRef::Join { span, .. }
+            | TableRef::Sub { span, .. } => *span,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JoinKind {
     Inner,
@@ -1058,6 +1075,7 @@ impl Expr {
             | Str(_, s)
             | Bytes(_, s)
             | Unit(s)
+            | Null(s)
             | Epoch(_, s)
             | Break(s)
             | Continue(s)

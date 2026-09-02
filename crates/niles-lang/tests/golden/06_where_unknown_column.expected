@@ -1,0 +1,4 @@
+# 06_where_unknown_column
+# A predicate naming a column that does not exist has no lowering. It used to become
+# `LitBool(true)` on the pipeline surface, so the view returned every row.
+REFUSED NL0501

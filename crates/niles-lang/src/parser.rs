@@ -1813,6 +1813,10 @@ impl<'a> Parser<'a> {
             Tok::Caret => BinOp::BitXor,
             Tok::Kw(Kw::And) => BinOp::And,
             Tok::Kw(Kw::Or) => BinOp::Or,
+            // `is not` is a *different operator* from `is`, and the negation has to reach
+            // the AST. It used to be consumed and dropped, so `x is not null` and
+            // `x is null` produced the same tree and the two had the same answer.
+            Tok::Kw(Kw::Is) if matches!(self.nth(1), Tok::Kw(Kw::Not)) => BinOp::IsNot,
             Tok::Kw(Kw::Is) => BinOp::Is,
             Tok::Kw(Kw::In) => BinOp::In,
             Tok::Kw(Kw::Like) => BinOp::Like,
@@ -1828,7 +1832,10 @@ impl<'a> Parser<'a> {
             BinOp::NotIn => {
                 self.bump();
             }
-            BinOp::Is if self.at_kw(Kw::Not) => {
+            // `is not` was consumed and thrown away, so `x is not null` produced the same
+            // tree as `x is null` — the negation was in the source and nowhere else. The
+            // caller re-reads the operator, so it is corrected there.
+            BinOp::IsNot => {
                 self.bump();
             }
             _ => {}
@@ -2073,6 +2080,10 @@ impl<'a> Parser<'a> {
             Tok::Bool(v) => Expr::Bool(v, self.bump()),
             Tok::Str(s) => Expr::Str(s, self.bump()),
             Tok::Bytes(b) => Expr::Bytes(b, self.bump()),
+            // `null`. Reserved in the registry, documented there with `is null` as its
+            // example, and until now unspellable: there was no primary-expression arm for
+            // it, so `r.n is null` did not parse.
+            Tok::Kw(Kw::Null) => Expr::Null(self.bump()),
             Tok::EpochLit(e) => Expr::Epoch(e, self.bump()),
             Tok::Money {
                 minor,

@@ -1,0 +1,32 @@
+// The one schema every golden case is written against.
+//
+// Small on purpose, and shaped so the interesting SQL cases have somewhere to land: two
+// relations that join, a nullable column so the three-valued cases are real, and an `edges`
+// relation for the transitive closure.
+
+schema g {
+    currency usd { scale: 2 }
+
+    base t {
+        k: Int,
+        v: Int,
+        n: Int,
+        retain forever;
+    }
+
+    base u {
+        k: Int,
+        w: Int,
+        retain forever;
+    }
+
+    base edges {
+        src: Int,
+        dst: Int,
+        retain forever;
+    }
+
+    index ix_t on t (k) anchor;
+    index ix_u on u (k) anchor;
+    index ix_edges on edges (src) anchor;
+}

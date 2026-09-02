@@ -842,3 +842,108 @@ and a second source. No warnings.
 0 failed. `NILES_ROOT=/nonexistent` → fails, naming the path and both places it looked.
 A missing checkout with no `GBS_SKIP_NILES=1` is now a failure rather than a printed skip:
 these checks used to report `ok` for work they had not done.
+
+### [T-13] 2026-09-02T11:30Z RESULT F-12 confirmed in every part, and the corpus found four more
+
+`grep -ri golden crates` → nothing, so thesis §4.7(c) and §9.7's "golden-file α-equivalence
+tests" described a file that did not exist. Every pointer in F-12 reproduced, and writing the
+corpus turned up four the review had not named:
+
+| form | what it did |
+|---|---|
+| `select acct from postings` | emitted no `Map`; the view returned every column |
+| `select distinct k from t` | `distinct` parsed and never read; duplicates returned |
+| `a UNION b` | `set_op` parsed and never read; the second query vanished |
+| `from t, u` | `from.first()` was the whole list; answered from `t` alone |
+| `join u on t.k = u.k` | `ON` resolved against the *left* schema only, so `u.k` was not found, `and_then` turned that into "no residual", and the join ran unconstrained — a cross product, silently |
+| `where n is null` | **did not parse**: `null` is a reserved keyword with `is null` as its registry example and had no expression form at all |
+| `x is not null` | the `not` was consumed and dropped, so it produced the same tree, and the same answer, as `is null` |
+| `select sum(v) from t` | a *global* aggregate took the projection path, where `sum` lowered to an uncertified UDF: the query answered `0` once per row |
+| `t EXCEPT u` | Z-set subtraction, so rows present only on the *right* came back with weight −1 — which SQL never produces |
+| `t INTERSECT u` | a semi-join, which preserves the left's multiplicities: that is `INTERSECT ALL` |
+
+### [T-13] 2026-09-02T11:35Z DECISION the corpus states denotations, not circuit shapes
+
+The thesis says α-equivalence of circuits. The corpus is stronger and the reason is not
+pedantry: two circuits can be structurally different and denote the same Z-set, and
+structurally identical while both being wrong — which is exactly the state the SQL surface
+was in, since the pipeline surface it was compared against had the same defects. So each of
+the **41 cases** carries a `.expected` file holding the Z-set the query denotes on a fixed
+dataset (`tests/golden/DATA.md`), and both spellings are evaluated by `niles_ir::eval` and
+compared against it. 18 cases are written in both surfaces and must agree.
+
+### [T-13] 2026-09-02T11:40Z RESULT the reference evaluator gained three operators
+
+`Fixpoint` panicked ("the reference evaluator does not cover fixpoint"), so C6(b)'s
+completeness claim had no runnable witness at all; `OrderBy` and `Limit` panicked too.
+
+* **`Fixpoint`** now runs to a least fixpoint and `Op::Fixpoint` takes two inputs — the seed
+  and the step's output — with the step reading the accumulator through the `Delay` that
+  closes the cycle. The step used to be *discarded at lowering*: the node held a termination
+  guard and no body, which is verifiable and not evaluable. Non-convergence inside the round
+  budget is `EvalError::NonTerminating { rounds, tail }`, reported rather than answered.
+* **`OrderBy`** is the identity, because a Z-set has no order to change. Stated rather than
+  omitted.
+* **`Limit`** forces a choice: "the first n rows" of an unordered collection is not a
+  denotation, and SQL's `LIMIT` without `ORDER BY` genuinely has no defined answer. The
+  reference semantics picks — nearest upstream `order by` keys, then lexicographic — and
+  writes the choice down, so an engine that answers differently is disagreeing with
+  something a test can check.
+
+### [T-13] 2026-09-02T11:45Z MISMATCH-T-13-fixpoint C6(b) "fixpoint completeness": the machinery converges, the syntax cannot express a closure
+
+**The thesis says** (§4.7, C6(b)) that the fragment is complete for fixpoint queries, with
+`WITH RECURSIVE` mapped to `.fixpoint(step) guard measure(m)`.
+
+**The code says** the fixpoint *runs*: case `31_fixpoint_identity_converges` reaches closure,
+and `a_non_terminating_fixpoint_is_refused_rather_than_answered` shows a growing step being
+refused with the round count and the accumulator's last sizes. What cannot be written is a
+transitive closure, and case `36_fixpoint_transitive_closure` records the refusal (NL0514).
+
+Two pieces of surface syntax are missing, and both are needed:
+
+1. **A join cannot state its key.** `.join(u)` takes the two sides' anchor keys, so the step
+   can only join the accumulator's `src` to `edges`' `src`; a closure needs `acc.dst` to
+   `edges.src`.
+2. **A projection cannot name a duplicated column.** After a join the schema is
+   `[src, dst, src, dst]` and `col_index` returns the first match, so the outer `src` with
+   the inner `dst` — the pair a closure step must produce — has no spelling.
+
+So the step cannot produce the shape it consumes and NL0514 refuses it, which is the right
+refusal for the wrong reason: the arity check is doing the work that a missing feature should
+be reported by.
+
+**Proposed for T-17:** `WITH RECURSIVE` stays `Status::Specified` (it already is), and
+Appendix H's completeness statement for C6(b) is narrowed to *"the fixpoint operator
+evaluates to a least fixpoint and refuses non-convergence; the surface syntax needed to
+express a transitive closure — an explicit join key and qualified column references — is not
+in stage 0"*, with `36_fixpoint_transitive_closure.expected` cited.
+
+### [T-13] 2026-09-02T11:50Z RESULT the status table is generated, and every row is backed
+
+`Status` gained two variants that did not exist because nothing could have filled them:
+`Refused(code)` — a form the compiler refuses, named with the code that refuses it, which is
+what narrowing the fragment looks like from inside the code — and `Untested(why)` for the DML
+and TCL rows, which lower and have nothing checking what they compute. Calling those
+`Lowered` beside forms with a corpus case behind them made the word mean two things.
+
+`the_status_of_every_form_is_backed_by_a_corpus_case` reads `sql_surface.rs` and fails if a
+non-excluded row claims a status with no case named on its line, or names a case that does
+not exist. `cargo run -q -p niles-lang --bin gen-sql-surface -- --check` regenerates the
+SPEC-LANGUAGE L-5/L-23 status sentence from `MAPPING` and fails if the committed copy
+differs; it is in `make gate` as the new `generated` target.
+
+**The fragment, as generated:** 34 forms — 8 equivalent, 13 lowered, 4 refused, 2 untested,
+2 specified, 5 excluded. The previous sentence read "**Status: Built** for the declared
+fragment" and had said so since before the fragment was checkable.
+
+### [T-13] 2026-09-02T11:55Z TESTS niles 610/0/3 -> 615/0/3; golden corpus 41 cases
+
+```
+cargo test -p niles-lang --test sql_golden              -> 5 passed, 41 cases
+nilesc explain <select acct from postings>              -> shows a `map` node
+cargo run -q -p niles-lang --bin gen-sql-surface -- --check -> exit 0
+cd gbs && NILES_ROOT=../niles make schema               -> ok, 25 nodes verified
+```
+
+`make gate` green in both repositories.

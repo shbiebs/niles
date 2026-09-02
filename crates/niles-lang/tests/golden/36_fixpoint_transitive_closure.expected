@@ -1,0 +1,9 @@
+# 36_fixpoint_transitive_closure
+# **A narrowing of the fragment, recorded rather than papered over.** A transitive closure
+# needs the step to join the accumulator's `dst` to `edges`' `src` and project the outer
+# `src` with the inner `dst`. The surface cannot say either: a `join` stage takes no
+# explicit key, and a projection cannot name the second of two identically-named columns.
+# So the step cannot produce the shape it consumes, and NL0514 says so. See
+# MISMATCH-T-13-fixpoint: the machinery converges (case 31, and the divergence control in
+# the harness); the *syntax* to express a closure is missing.
+REFUSED NL0514

@@ -1,0 +1,1 @@
+t.group_by(|r| r.k).max(|r| r.v)

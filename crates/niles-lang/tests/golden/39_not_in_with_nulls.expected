@@ -1,0 +1,5 @@
+# 39_not_in_with_nulls
+# **Empty, and that is correct.** `t.n` contains a null, so `k NOT IN (...)` is UNKNOWN for
+# every probe that did not match, and a `where` keeps a row only when the predicate is
+# *true*. This is the single most frequently mis-implemented rule in query rewriting.
+

@@ -1,0 +1,1 @@
+t.order_by(|r| r.v).limit(2)

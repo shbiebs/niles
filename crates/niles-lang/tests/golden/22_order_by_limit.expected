@@ -1,0 +1,6 @@
+# 22_order_by_limit
+# `limit` over an ordered input. A Z-set has no order, so the reference semantics makes a
+# stated choice: rows in the nearest upstream `order by`'s key order, then lexicographic.
+# An engine answering differently disagrees with the reference, which a test can catch.
+1 10 100 x1
+1 10 null x1

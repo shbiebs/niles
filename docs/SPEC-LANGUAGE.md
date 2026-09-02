@@ -188,10 +188,29 @@ an unported program keeps working and gains the new checks incrementally.
 There is no compatibility layer with its own execution path, because two ways to compute an
 answer is two answers that can disagree.
 
-*Acceptance test.* `crates/niles-lang/tests/end_to_end.rs` — a SQL surface query and its
-pipeline equivalent MUST lower to structurally identical circuits. **Status: Built** for the
-declared fragment; the fragment MUST be published rather than implied, and narrowing it is a
-public act.
+*Acceptance test.* `crates/niles-lang/tests/golden/` — 41 cases, each stating what a query
+*denotes* on a fixed dataset, with both spellings evaluated by `niles_ir::eval` and compared
+against it. `crates/niles-lang/tests/end_to_end.rs` keeps the structural check as well. The
+fragment MUST be published rather than implied, and narrowing it is a public act.
+
+<!-- BEGIN:sql-surface -->
+*Status, generated from `sql_surface::MAPPING` by `cargo run -q -p niles-lang --bin gen-sql-surface`. Do not edit between the markers.*
+
+The stated fragment has **34 forms**. Of those, **8** are
+*equivalent* — the SQL and pipeline spellings denote the same Z-set on the golden
+corpus's dataset, which is a stronger claim than the structural circuit equality
+this line used to rest on: two circuits can differ and denote the same thing, and
+agree while both are wrong. **13** are *lowered* with a golden case fixing
+what they denote but written in one surface only. **4** are *refused*, each
+with the diagnostic code that refuses it — that is what narrowing the fragment looks
+like from inside the compiler. **2** are lowered with nothing checking what
+they compute, and say so. **2** are specified and not built.
+**5** are deliberate exclusions, each carrying its reason.
+
+Every non-excluded row names a case in `crates/niles-lang/tests/golden/`, and
+`the_status_of_every_form_is_backed_by_a_corpus_case` fails the build if one does
+not.
+<!-- END:sql-surface -->
 
 ---
 

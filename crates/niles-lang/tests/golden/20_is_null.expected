@@ -1,0 +1,5 @@
+# 20_is_null
+# `null` had no expression form at all until now, so this did not parse. Two rows of `t`
+# have a null `n`.
+1 10 null x1
+3 30 null x1

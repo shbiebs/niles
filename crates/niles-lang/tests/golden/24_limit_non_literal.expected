@@ -1,0 +1,4 @@
+# 24_limit_non_literal
+# A bound the lowering cannot read used to become `u64::MAX` — every row, which is the
+# answer least likely to be noticed as wrong and the most expensive when it is.
+REFUSED NL0504

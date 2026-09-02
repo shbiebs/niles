@@ -1,0 +1,5 @@
+# 21_is_not_null
+# `is not` was consumed and dropped by the parser, so this produced the same tree — and
+# therefore the same answer — as `is null`.
+1 10 100 x1
+2 20 200 x1

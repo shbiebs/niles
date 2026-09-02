@@ -124,7 +124,45 @@ pub struct Eval<'a> {
     sources: &'a BTreeMap<String, ZSet>,
     /// Row-level operations performed. See the module docs.
     pub work: u64,
+    /// The accumulator a `Delay` reads inside a running fixpoint, innermost last.
+    ///
+    /// A stack rather than a field, because a fixpoint may appear inside a fixpoint and the
+    /// inner one's `Delay` must read the inner accumulator. One shared slot would silently
+    /// give the inner recursion the outer's rows.
+    fix_stack: Vec<ZSet>,
+    /// Set when a fixpoint did not converge inside its round budget. Carried rather than
+    /// panicked, so a caller can report it as the diagnostic it is.
+    non_terminating: Option<EvalError>,
 }
+
+/// Why an evaluation could not produce an answer.
+///
+/// One variant so far, and it is the one that matters: a recursion that does not converge.
+/// A fixpoint that could diverge stalls an epoch, and a stalled epoch stalls the visibility
+/// timeline for every reader in the system — so "ran out of rounds" is a result the caller
+/// must see, never a value it can mistake for an answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EvalError {
+    NonTerminating {
+        rounds: u32,
+        /// The size of the accumulator at each of the last few rounds, so a reader can see
+        /// whether it was still growing or oscillating.
+        tail: Vec<usize>,
+    },
+}
+
+impl std::fmt::Display for EvalError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EvalError::NonTerminating { rounds, tail } => write!(
+                f,
+                "the fixpoint did not converge in {rounds} rounds; the accumulator held {tail:?} rows over the last rounds"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for EvalError {}
 
 /// Evaluate a named output and report the counted work.
 pub fn run(c: &Circuit, output: &str, sources: &BTreeMap<String, ZSet>) -> (ZSet, u64) {
@@ -137,13 +175,43 @@ pub fn run(c: &Circuit, output: &str, sources: &BTreeMap<String, ZSet>) -> (ZSet
 
 /// Evaluate one node and report the counted work.
 pub fn run_node(c: &Circuit, id: NodeId, sources: &BTreeMap<String, ZSet>) -> (ZSet, u64) {
+    match try_run_node(c, id, sources) {
+        Ok(v) => v,
+        Err(e) => panic!("{e}"),
+    }
+}
+
+/// Evaluate one node, reporting a non-terminating fixpoint rather than panicking on it.
+pub fn try_run_node(
+    c: &Circuit,
+    id: NodeId,
+    sources: &BTreeMap<String, ZSet>,
+) -> Result<(ZSet, u64), EvalError> {
     let mut e = Eval {
         circuit: c,
         sources,
         work: 0,
+        fix_stack: Vec::new(),
+        non_terminating: None,
     };
     let z = e.node(id);
-    (z, e.work)
+    match e.non_terminating {
+        Some(err) => Err(err),
+        None => Ok((z, e.work)),
+    }
+}
+
+/// Evaluate a named output, reporting a non-terminating fixpoint.
+pub fn try_run(
+    c: &Circuit,
+    output: &str,
+    sources: &BTreeMap<String, ZSet>,
+) -> Result<(ZSet, u64), EvalError> {
+    let id = *c
+        .outputs
+        .get(output)
+        .unwrap_or_else(|| panic!("no output named `{output}`"));
+    try_run_node(c, id, sources)
 }
 
 impl<'a> Eval<'a> {
@@ -237,13 +305,139 @@ impl<'a> Eval<'a> {
             // Pass-throughs at this level of abstraction: the reference semantics is about
             // *what* a circuit denotes, and these operators change when or how it is
             // computed rather than what comes out.
+            // **Guarded recursion, evaluated.** This arm used to be absent, so the
+            // reference evaluator panicked on `Fixpoint` — which meant C6(b)'s
+            // "fixpoint completeness" claim had no runnable witness at all.
+            //
+            // The rule is the least-fixpoint one: start from the seed, apply the step to
+            // the accumulator, add what it produced, and stop when nothing new arrives.
+            // `Op::Distinct` semantics are used for the accumulator (weights clamped),
+            // because a transitive closure is a *set* of reachable pairs and a Z-set that
+            // kept multiplicities would grow without bound on a cyclic graph and never
+            // converge — the recursion would be non-terminating for a reason that has
+            // nothing to do with the query.
+            Op::Fixpoint {
+                measure,
+                max_rounds,
+            } => {
+                let seed = self.node(n.inputs[0]);
+                let mut acc: ZSet = seed
+                    .iter()
+                    .filter(|(_, w)| **w > 0)
+                    .map(|(r, _)| (r.clone(), 1))
+                    .collect();
+                let mut sizes = Vec::new();
+                let mut converged = false;
+                for _ in 0..*max_rounds {
+                    self.fix_stack.push(acc.clone());
+                    let produced = self.node(n.inputs[1]);
+                    self.fix_stack.pop();
+                    let before = acc.len();
+                    for (r, w) in &produced {
+                        self.work += 1;
+                        if *w > 0 {
+                            acc.entry(r.clone()).or_insert(1);
+                        }
+                    }
+                    sizes.push(acc.len());
+                    if acc.len() == before {
+                        converged = true;
+                        break;
+                    }
+                }
+                if !converged {
+                    // The measure is carried in the IR precisely so a reader can be told
+                    // *what* was supposed to decrease. It is reported rather than
+                    // evaluated: the guard is a static obligation, and an evaluator that
+                    // re-derived it would be checking the wrong thing here.
+                    let _ = measure;
+                    let tail = sizes.split_off(sizes.len().saturating_sub(4));
+                    self.non_terminating = Some(EvalError::NonTerminating {
+                        rounds: *max_rounds,
+                        tail,
+                    });
+                }
+                acc
+            }
+            // Inside a running fixpoint, the delay *is* the accumulator: it is the back
+            // edge, and reading it is how the step sees what the previous round produced.
+            // Outside one it is the identity, which is what it means at the top level of a
+            // circuit with no cycle.
+            Op::Delay => match self.fix_stack.last() {
+                Some(acc) => {
+                    self.work += acc.len() as u64;
+                    acc.clone()
+                }
+                None => self.node(n.inputs[0]),
+            },
+            // **Ordering is not part of a Z-set's denotation.** A Z-set is a map from rows
+            // to weights; it has no order to change. `OrderBy` is therefore the identity
+            // here, and that is a statement about the semantics rather than an omission:
+            // what `order by` decides is how a *result set* is presented, which is a
+            // question one level below this one.
+            Op::OrderBy { .. } => self.node(n.inputs[0]),
+
+            // **`limit`, and the choice it forces.** "The first n rows" of an unordered
+            // collection is not a denotation, and in SQL a `LIMIT` without an `ORDER BY`
+            // genuinely has no defined answer. The reference semantics has to pick one or
+            // refuse the operator, and it picks — because a fragment that cannot say what
+            // `limit 2` means cannot claim `limit` at all.
+            //
+            // The choice, stated so an engine can be held to it: rows are taken in the
+            // order given by the nearest upstream `OrderBy`'s keys, and where there is
+            // none, in the rows' own lexicographic order. Multiplicities are consumed one
+            // at a time, so `limit 2` over a row of weight 3 yields that row twice.
+            Op::Limit { count, offset } => {
+                let inp = self.node(n.inputs[0]);
+                let keys = self.upstream_order(n.inputs[0]);
+                let mut rows: Vec<(Row, i128)> = inp.into_iter().filter(|(_, w)| *w > 0).collect();
+                rows.sort_by(|a, b| order_rows(&a.0, &b.0, &keys));
+                let mut out = ZSet::new();
+                let (mut skipped, mut taken) = (0u64, 0u64);
+                for (r, w) in rows {
+                    for _ in 0..w {
+                        self.work += 1;
+                        if skipped < *offset {
+                            skipped += 1;
+                            continue;
+                        }
+                        if taken >= *count {
+                            return out;
+                        }
+                        add(&mut out, r.clone(), 1);
+                        taken += 1;
+                    }
+                }
+                out
+            }
             Op::Index { .. }
             | Op::AsOf { .. }
             | Op::ValidAt { .. }
             | Op::Integrate
-            | Op::Differentiate
-            | Op::Delay => self.node(n.inputs[0]),
-            other => panic!("the reference evaluator does not cover {}", other.name()),
+            | Op::Differentiate => self.node(n.inputs[0]),
+        }
+    }
+
+    /// The ordering keys of the nearest upstream `OrderBy`, if there is one.
+    ///
+    /// Only through operators that neither reorder nor reshape rows, which is why the walk
+    /// stops at anything else: an `order by` on the far side of an aggregate is an ordering
+    /// of a different relation.
+    fn upstream_order(&self, mut id: NodeId) -> Vec<(ColIdx, bool)> {
+        loop {
+            let Some(n) = self.circuit.nodes.iter().find(|n| n.id == id) else {
+                return Vec::new();
+            };
+            match &n.op {
+                Op::OrderBy { keys } => return keys.clone(),
+                Op::Filter { .. } | Op::Distinct | Op::AsOf { .. } | Op::ValidAt { .. } => {
+                    match n.inputs.first() {
+                        Some(i) => id = *i,
+                        None => return Vec::new(),
+                    }
+                }
+                _ => return Vec::new(),
+            }
         }
     }
 
@@ -531,6 +725,26 @@ pub fn fold(a: Agg, vals: &[(Value, i128)]) -> Value {
             }
         }
     }
+}
+
+/// Compare two rows by an ordering key, falling back to the whole row.
+///
+/// The fallback is what makes `limit` deterministic where the query does not say. It is a
+/// *choice*, and it is written down here rather than left to whatever order a hash map
+/// happened to produce — an engine that answered `limit 2` differently from this would be
+/// disagreeing with the reference semantics, which is a thing a test can catch.
+fn order_rows(a: &Row, b: &Row, keys: &[(ColIdx, bool)]) -> std::cmp::Ordering {
+    for (c, asc) in keys {
+        let (x, y) = (
+            a.get(*c as usize).copied().unwrap_or(Value::Null),
+            b.get(*c as usize).copied().unwrap_or(Value::Null),
+        );
+        let ord = if *asc { x.cmp(&y) } else { y.cmp(&x) };
+        if ord != std::cmp::Ordering::Equal {
+            return ord;
+        }
+    }
+    a.cmp(b)
 }
 
 #[cfg(test)]

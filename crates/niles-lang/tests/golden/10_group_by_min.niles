@@ -1,0 +1,1 @@
+t.group_by(|r| r.k).min(|r| r.v)

@@ -1,0 +1,3 @@
+# 27_set_op_arity_mismatch
+# A set operation is over one relation's worth of rows; two shapes is two relations.
+REFUSED NL0512

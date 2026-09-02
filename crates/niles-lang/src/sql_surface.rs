@@ -33,10 +33,22 @@ pub struct Mapping {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
-    /// Both spellings lower to the same circuit, checked by a test.
+    /// Both spellings denote the same Z-set on the golden corpus's dataset, checked by
+    /// `tests/sql_golden.rs`. **Stronger than the circuit equality this used to mean:** two
+    /// circuits can be structurally different and denote the same thing, and structurally
+    /// identical while both being wrong.
     Equivalent,
-    /// Accepted by the parser and lowered, but no equality test yet.
+    /// Lowered and evaluated, with a golden case fixing what it denotes — but written in
+    /// one surface only, so there is no cross-surface claim to make.
     Lowered,
+    /// **Refused**, with the diagnostic code that refuses it. This is what narrowing the
+    /// fragment looks like from inside the code: a form nobody can write by accident,
+    /// because the compiler says no and says which rule.
+    Refused(&'static str),
+    /// Lowered, and **nothing checks what it denotes**. The reason is recorded, and the
+    /// status exists because the alternative was to call these `Lowered` alongside forms
+    /// that have a corpus case behind them — which is how a table stops meaning anything.
+    Untested(&'static str),
     /// In the fragment's specification but not implemented in stage 0.
     Specified,
     /// Deliberately outside the fragment, with the reason recorded.
@@ -46,24 +58,54 @@ pub enum Status {
 /// **The stated fragment.** This is the normative list Appendix B.17 prints, and the thing
 /// the generality result quantifies over. Nothing outside it is claimed.
 pub static MAPPING: &[Mapping] = &[
-    Mapping { sql: "SELECT a, b FROM t", niles: "t.map(|r| (r.a, r.b))", status: Status::Lowered },
-    Mapping { sql: "SELECT * FROM t WHERE p", niles: "t.where(|r| p)", status: Status::Equivalent },
-    Mapping { sql: "SELECT k, sum(v) FROM t GROUP BY k", niles: "t.group_by(|r| r.k).sum(|r| r.v)", status: Status::Equivalent },
-    Mapping { sql: "GROUP BY k HAVING h", niles: ".group_by(|r| r.k).having(|g| h)", status: Status::Lowered },
-    Mapping { sql: "JOIN u ON c", niles: ".join(u, |t, u| c)", status: Status::Lowered },
-    Mapping { sql: "LEFT JOIN u ON c", niles: ".left_join(u, |t, u| c)", status: Status::Lowered },
-    Mapping { sql: "UNION", niles: ".union(u)", status: Status::Lowered },
-    Mapping { sql: "UNION ALL", niles: ".union_all(u)", status: Status::Lowered },
-    Mapping { sql: "EXCEPT", niles: ".except(u)", status: Status::Lowered },
-    Mapping { sql: "INTERSECT", niles: ".intersect(u)", status: Status::Lowered },
-    Mapping { sql: "DISTINCT", niles: ".distinct()", status: Status::Lowered },
-    Mapping { sql: "ORDER BY x DESC LIMIT n", niles: ".order_by(|r| desc(r.x)).limit(n)", status: Status::Lowered },
-    Mapping { sql: "WITH RECURSIVE", niles: ".fixpoint(step) guard measure(m)", status: Status::Specified },
-    Mapping { sql: "CREATE MATERIALIZED VIEW", niles: "view .. serve { materialize: full }", status: Status::Lowered },
-    Mapping { sql: "AS OF SYSTEM TIME", niles: ".as_of(#e)", status: Status::Lowered },
+    // Every status below is named by a case in `tests/golden/`, and
+    // `the_status_of_every_form_is_backed_by_a_corpus_case` fails if one is not.
+    Mapping { sql: "SELECT a, b FROM t", niles: "t.map(|r| (r.a, r.b))", status: Status::Equivalent },      // 02, 03
+    Mapping { sql: "SELECT * FROM t", niles: "t", status: Status::Equivalent },                             // 01
+    Mapping { sql: "SELECT * FROM t WHERE p", niles: "t.where(|r| p)", status: Status::Equivalent },        // 04, 05
+    Mapping { sql: "SELECT k, sum(v) FROM t GROUP BY k", niles: "t.group_by(|r| r.k).sum(|r| r.v)", status: Status::Equivalent }, // 08
+    Mapping { sql: "count / min / max / avg", niles: ".count(..) / .min(..) / .max(..) / .avg(..)", status: Status::Equivalent }, // 09, 10, 11, 40
+    Mapping { sql: "SELECT sum(v) FROM t", niles: "(no pipeline spelling)", status: Status::Lowered },      // 26
+    Mapping { sql: "GROUP BY k HAVING h", niles: ".group_by(|r| r.k).having(|g| h)", status: Status::Lowered },  // 12
+    Mapping { sql: "JOIN u ON c", niles: ".join(u)", status: Status::Lowered },                             // 17
+    Mapping { sql: "LEFT JOIN u ON c", niles: ".left_join(u)", status: Status::Lowered },                   // 18
+    Mapping { sql: "FROM t, u", niles: "(no pipeline spelling)", status: Status::Lowered },                 // 19
+    Mapping { sql: "UNION", niles: ".union(u)", status: Status::Lowered },                                  // 14
+    Mapping { sql: "UNION ALL", niles: ".union_all(u)", status: Status::Lowered },                          // 13
+    Mapping { sql: "EXCEPT", niles: ".except(u)", status: Status::Lowered },                                // 15
+    Mapping { sql: "INTERSECT", niles: ".intersect(u)", status: Status::Lowered },                          // 16
+    Mapping { sql: "DISTINCT", niles: ".distinct()", status: Status::Equivalent },                          // 07, 29
+    Mapping { sql: "IS NULL / IS NOT NULL", niles: "is null / is not null", status: Status::Equivalent },   // 20, 21
+    Mapping { sql: "NOT IN with nulls", niles: "(no pipeline spelling)", status: Status::Lowered },         // 39
+    Mapping { sql: "EXISTS (correlated)", niles: "(no pipeline spelling)", status: Status::Lowered },       // 37
+    Mapping { sql: "ORDER BY x LIMIT n [OFFSET m]", niles: ".order_by(|r| r.x).limit(n)", status: Status::Equivalent }, // 22, 23
+    Mapping { sql: "LIMIT <non-literal>", niles: ".limit(<non-literal>)", status: Status::Refused("NL0504") }, // 24
+    Mapping { sql: "a scalar subquery in the projection list", niles: "(none)", status: Status::Refused("NL0508") }, // 38
+    Mapping { sql: "a set operation between different arities", niles: "(none)", status: Status::Refused("NL0512") }, // 27
+    Mapping { sql: "SELECT with no FROM", niles: "(none)", status: Status::Refused("NL0511") },             // 35
+    Mapping { sql: "WITH RECURSIVE", niles: ".fixpoint(|acc| ..) guard measure(m)", status: Status::Specified },  // 31, 36
+    Mapping { sql: "CREATE MATERIALIZED VIEW", niles: "view .. serve { materialize: full }", status: Status::Lowered }, // 01
+    Mapping { sql: "AS OF SYSTEM TIME", niles: ".as_of(#e)", status: Status::Lowered }, // 41
     Mapping { sql: "FOR SYSTEM_TIME", niles: ".recorded_at / .valid_at / bitemporal", status: Status::Specified },
-    Mapping { sql: "INSERT / UPDATE / DELETE", niles: "same, on `table` only", status: Status::Lowered },
-    Mapping { sql: "BEGIN / COMMIT", niles: "txn { .. } (base) / begin..commit (table)", status: Status::Lowered },
+    Mapping {
+        sql: "INSERT / UPDATE / DELETE",
+        niles: "same, on `table` only",
+        status: Status::Untested(
+            "these lower, and nothing in this repository checks what they compute. DML \
+             denotation is out of the golden corpus's scope, which is queries; saying \
+             `lowered` beside forms that have a case behind them would make the word \
+             mean two things",
+        ),
+    },
+    Mapping {
+        sql: "BEGIN / COMMIT",
+        niles: "txn { .. } (base) / begin..commit (table)",
+        status: Status::Untested(
+            "transaction control is a property of the write path, and the golden corpus \
+             evaluates read models. What a `txn` does is tested in the kernel and in the \
+             conservation suite, not here",
+        ),
+    },
     // --- deliberate exclusions, each with its reason ---
     Mapping {
         sql: "NULL three-valued logic in aggregates",
@@ -155,8 +197,13 @@ pub fn render_table() -> String {
     let mut s = String::from("| SQL | Niles | Status |\n|---|---|---|\n");
     for m in MAPPING {
         let status = match m.status {
-            Status::Equivalent => "**equivalent** (lowering-equality tested)".to_string(),
-            Status::Lowered => "lowered".to_string(),
+            Status::Equivalent => {
+                "**equivalent** — both surfaces denote the same Z-set on the golden corpus"
+                    .to_string()
+            }
+            Status::Lowered => "lowered, with a golden case fixing what it denotes".to_string(),
+            Status::Refused(code) => format!("**refused** — `{code}`"),
+            Status::Untested(why) => format!("lowered, *untested* — {why}"),
             Status::Specified => "specified, not in stage 0".to_string(),
             Status::Excluded(why) => format!("*excluded* — {why}"),
         };
@@ -218,11 +265,18 @@ mod tests {
     #[test]
     fn the_rendered_table_marks_status_honestly() {
         let t = render_table();
-        assert!(t.contains("**equivalent** (lowering-equality tested)"));
+        assert!(t.contains("**equivalent** — both surfaces denote the same Z-set"));
         assert!(t.contains("*excluded*"));
         assert!(
             t.contains("specified, not in stage 0"),
             "the table must not present unbuilt rows as built"
+        );
+        // And the status that did not exist before: a form the compiler refuses, named
+        // with the code that refuses it. A fragment with no refusals is one nobody has
+        // tried to leave.
+        assert!(
+            t.contains("**refused**"),
+            "the table must say which forms are refused, and with what"
         );
     }
 }

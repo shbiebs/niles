@@ -1,0 +1,1 @@
+t.where(|r| r.v > 10).map(|r| (r.k, r.v))

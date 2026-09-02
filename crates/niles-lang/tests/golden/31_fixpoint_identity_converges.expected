@@ -1,0 +1,8 @@
+# 31_fixpoint_identity_converges
+# The fixpoint runs to convergence. The reference evaluator used to panic on `Fixpoint`,
+# so C6(b)'s completeness claim had no runnable witness at all.
+1 2 x1
+2 3 x1
+3 4 x1
+5 6 x1
+6 5 x1

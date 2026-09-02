@@ -1,0 +1,1 @@
+t.rolling_median(|r| r.v)

@@ -1,0 +1,3 @@
+# 35_select_no_from
+# A circuit is rooted in a relation. A `select` with no source has no node to be.
+REFUSED NL0511

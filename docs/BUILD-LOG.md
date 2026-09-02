@@ -1435,3 +1435,123 @@ that produced it. `--render` re-derives the table *from* the committed CSVs, whi
 that must not drift, and the durable run's own reproduction recipe is in `BENCHMARK.md`.
 
 `cd niles && make reproduce` → **exit 0** on a clean tree.
+
+### [T-18] 2026-09-02T14:30Z DECISION `txn` is evaluated; `hold`, `resolve` and `fx` are not
+
+F-25's agreement half is that conformance compared *renderings*. Fixing it needs a Niles
+function to be executable, and executing one needs a dynamic semantics for `txn`, `debit`,
+`credit` and `post`.
+
+They are **builtins**, not language features: entries in the interpreter's free-function table
+alongside `print` and `len`, with no change to the grammar and none to `niles-lang`. The forms
+were already Niles forms, checked statically by the effect calculus; what was missing was an
+evaluator, and an evaluator is what an interpreter is. Adding syntax here would have meant the
+language the interpreter runs is not the language the compiler checks.
+
+`hold`, `resolve`, `fx` and `fixpoint` stay refused by name, and a test asserts it, so that
+opening `txn` did not quietly open the others.
+
+### [T-18] 2026-09-02T14:35Z DECISION two tests inverted, and both inversions are the finding
+
+`the_relational_tier_is_refused_by_name_and_never_approximated` asserted that `txn` was
+refused, for the stated reason that *"a program could appear to conserve money while nothing
+checked it"*. That was the right worry and refusing the form was the wrong answer to it: a form
+nobody can execute is a form nobody can compare against a second implementation, which is how a
+conformance suite ends up comparing renderings. The worry is now answered by the seal — an
+unbalanced set is refused by currency with its residual named — and the test asserts that
+property instead of the refusal of the syntax.
+
+`bootstrap_stages.rs`'s version now checks the second half by **running** the bootstrap lexer
+and asserting it sealed nothing. The grep it replaced would have called the sample program
+inside a string literal in `bootstrap/lexer.niles` a breach.
+
+### [T-18] 2026-09-02T14:40Z MISMATCH-T-18-normalised-fields the contract said two fields, the languages need three
+
+*Work order §5, T-18, interface contract, verbatim:*
+
+> `// conformance.rs: NORMALISED_FIELDS: &[&str] = &["stamp.system_epoch", "entry_id"]  — the
+> only fields removed before comparison; any other difference is a failure.`
+
+*What the code needs:*
+
+> `pub const NORMALISED_FIELDS: &[&str] = &["entry.id", "entry.stamp.system_epoch",
+> "entry.narrative"];`
+
+*Proposed replacement, and why.* `entry.narrative` is a per-leg free-text annotation.
+`gbs-products` sets one on most legs — `"drawdown under fac-1"`, `"novation of t1 to the
+clearing house"` — and **the schema has no syntax for one at all.** With two normalised fields
+the comparison fails on every narrated product for a reason that is not about money.
+
+The alternative was to invent a narrative form in Niles so that a test would pass, which is a
+language change made to satisfy an assertion and is the class of move this review exists to
+catch. It is normalised instead, listed in the constant, written into the fixture files so a
+fixture generated under a different normalisation is refused, and stated in `ARCHITECTURE.md`
+§7. It remains a gap: two implementations that agree on every posting and disagree about what
+the posting *says* are not the same document, and a hash chain covering the narrative would
+diverge.
+
+### [T-18] 2026-09-02T15:10Z RESULT Every transaction in `gbs.niles` had one identity
+
+The finding, and the reason for the whole task. Seven of the nine functions hard-coded a
+constant idempotency key:
+
+```
+txn idem("draw-gbs-1", window: 30.days)      // syndicated_drawdown
+txn idem("close-gbs-1", window: 30.days)     // close_offering
+txn idem("novate-gbs-1", window: 30.days)    // novate
+```
+
+The Rust products derive theirs from the business event: `draw-fac-1-req-1` names the facility
+and the request, `close-ipo-1` names the offering, `novate-t1` names the trade.
+
+**Idempotency is the ledger's, and a constant key destroys it.** A second drawdown under any
+facility carries the identity of the first and is refused as a duplicate — the transaction is
+correct, conserves, passes every static obligation, and cannot be committed. The failure mode
+is worse than losing money: it is silently refusing a legitimate one and telling the caller it
+has already happened.
+
+Nothing had noticed because nothing could look. The shape comparison this replaces reported
+legs — direction, account, amount — and the transaction identity is not a leg. The legs matched
+**byte for byte in all seven**; the whole divergence was in the field the old comparison had no
+way to read.
+
+The seven now take the identity as a parameter (`request: str`), which `nilesc check` accepts
+and proves conservation over unchanged: 12 functions, 11 obligations proved statically, 0
+discharged to the runtime.
+
+### [T-18] 2026-09-02T15:20Z RESULT 7 of 9 conform by execution; the two that do not
+
+`the_two_implementations_seal_the_same_document` runs each transaction on both sides and
+compares the canonical encoding. Seven agree byte for byte. Two diverge, each on one named
+field, and both are gaps in what the schema can say rather than defects in the products:
+
+* **`MISMATCH-T-18-close_offering` — `entry 0.consumes`.** Rust:
+  `Some("hold:sub-ipo-1-anchor")`. Niles: `None`. `Offering::close` consumes three subscription
+  holds, which is what makes a closing atomic against the encumbrances it releases; the
+  schema's `close_offering` moves the money and resolves nothing, so it declares a closing
+  after which three subscribers are still encumbered. **Proposed replacement:** the schema's
+  `close_offering` resolves each subscription hold inside the `txn`. That needs `resolve`,
+  which the interpreter refuses by name, so applying the fix converts this entry into
+  `BLOCKED-T-18-close_offering` naming `resolve` rather than into agreement. Not applied here:
+  it is a change to the schema's semantics, and T-18's scope is the comparison.
+* **`MISMATCH-T-18-position_account` — `entry 0.value_date`.** Rust: `35`. Niles: `0`. The
+  cash-management run stamps a value date; `liquidity.rs`'s own comment says *when the balance
+  was read* is the entire difference between cash management and a sweep. **Niles has no form
+  for a per-leg value date inside a `txn`**, so the one thing distinguishing this product line
+  is the one thing the schema cannot declare. **Proposed replacement:** a value-date form on a
+  leg — `credit(funding, amount) valid @day` or similar — is a language addition and belongs in
+  Appendix B, not in a conformance fix.
+
+Both are pinned in `KNOWN_DIVERGENCES` with their exact field. That list is not a suppression
+list and a test enforces it: an unexpected divergence fails, a recorded one on a different
+field fails, and a recorded one that *disappears* fails — so the good news cannot land
+silently either.
+
+### [T-18] 2026-09-02T15:25Z TESTS niles 615/0/4 -> 634/0/4; `-p nilesc --test run` 8 new
+
+`cargo test -p nilesc --test run` → 8 passed, one per exit path.
+`cargo test -p niles-interp` → 71 passed (41 lib + 16 + 14).
+`cd gbs && NILES_ROOT=../niles cargo test -p gbs-products --test conformance` → 7 passed,
+printing `7 of 9 conform by execution; 2 diverge as recorded`.
+
+### [T-18] 2026-09-02T15:26Z DONE F-25 (agreement half) closed — the commit below, and the GBS side on `review/F-11-F-13` there

@@ -12,4 +12,6 @@ path = "src/main.rs"
 [dependencies]
 niles-lang = { path = "../niles-lang" }
 niles-ir = { path = "../niles-ir" }
+# `run` executes a function; the interpreter is the thing that executes it.
+niles-interp = { path = "../niles-interp" }
 nilestream-optimizer = { path = "../nilestream-optimizer" }

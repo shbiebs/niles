@@ -58,3 +58,42 @@ fn the_check_can_actually_fail() {
         "a generated block must say so, or a reader cannot tell it from a hand-written one"
     );
 }
+
+/// The two tables T-05 made generated. A block that stops being generated is how a
+/// measurement quietly stops describing the run it names.
+#[test]
+fn the_corrected_e1_and_e8_tables_are_generated_blocks() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let ch = std::fs::read_to_string(root.join("thesis/09-evaluation.md")).unwrap();
+    for marker in [
+        "<!-- BEGIN:E1-correctness results/E1-correctness.md#table -->",
+        "<!-- BEGIN:E8-rungs results/E8-rungs.md#table -->",
+    ] {
+        assert!(ch.contains(marker), "missing generated block: {marker}");
+    }
+    for f in ["results/E1-correctness.md", "results/E8-rungs.md"] {
+        assert!(root.join(f).exists(), "{f} is not committed");
+    }
+}
+
+/// The refuted rung figures must survive in Appendix J, not be deleted with the claim.
+#[test]
+fn the_refuted_rung_table_is_retained_in_appendix_j() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let j = std::fs::read_to_string(root.join("thesis/appendix-j.md")).unwrap();
+    assert!(j.contains("## J.16"), "J.16 is missing");
+    for old in ["55", "408", "19,714"] {
+        assert!(
+            j.contains(old),
+            "the refuted figure {old} must be retained, not deleted"
+        );
+    }
+}

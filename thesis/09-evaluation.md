@@ -141,6 +141,57 @@ Each cell is the median over five seeds of cost(partial) / cost(full) on identic
 
 **Finding 1 — There is a real boundary, and it is set by the memory price, not by skew.** At memory price 0, partial materialization loses in every cell, by up to 7.5×. At 0.01 it wins in every cell but the saturated ones. The crossover sits between roughly 0.0005 and 0.002 in these units. That is the frontier the thesis predicts, located empirically for the first time.
 
+```text
+PROPOSED — MISMATCH-F-08. Not applied to the sentence above.
+
+"That is the frontier the thesis predicts" claims more than the theorem supports, and H-S2
+claims more still: it says the crossover falls "within the band predicted by the
+Eviction–Consistency Frontier Theorem". Theorem 4.2(ii) has a Θ(Z) term and states no
+constant for it, so **no band is derivable** — the theorem asserts that a threshold exists
+for every (c_u, w, λ, Z), which is an existence claim, and an existence claim cannot be
+agreed or disagreed with by a located crossover.
+
+THE REPLACEMENT WORDING
+
+  §9.12, Finding 1, final sentence:
+    "A crossover in the memory price exists and was located, between roughly 0.0005 and
+     0.002 in these units. Theorem 4.2(ii) predicts that such a crossover exists; it does
+     not predict where, because the constant inside its Θ(Z) term is unstated. The located
+     value is therefore a measurement the theorem is consistent with, not a confirmation of
+     a predicted band."
+
+  §1.6 H-S2, the claim:
+    "As the demanded consistency level rises, and/or skew flattens, and/or the delayed-hit
+     ratio Z grows, the measured cost of partial materialization crosses that of full
+     materialization. The Eviction–Consistency Frontier Theorem predicts that the crossover
+     exists; its band is not derivable from the theorem as stated, so this hypothesis is
+     confirmed by locating a crossover and refuted by finding none."
+
+  §1.6 H-S2, Status:
+    "measured (§9.3, §9.13.2): a crossover exists and was located. The theorem's band was
+     not derived and is not tested. results/E16-band.md, written and committed before the
+     durable run, registers the one side of it that *is* derivable — a lower bound on miss*
+     with Θ(Z) set to zero — and states which constant is missing and why."
+
+  §11.3, the C2 row:
+    C2 drops from a predictive claim to an existence claim. A measurement that located no
+    crossover anywhere in the swept price range would refute it; a measurement that located
+    one at an unexpected price would not.
+
+WHAT IS NOW SATISFIED
+
+  §5.5's rule — "a crossover without Z is not interpretable" — was not satisfied when this
+  finding was written: neither e4_phase.csv nor e12_phase_compiled.csv had a Z column. Both
+  do now (T-15), defined identically in the two writers as base rows per reconstruction over
+  deltas per read, the counted-work analogue of the delayed-hit factor. E4 reports Z from 5.3
+  to 307 across the grid, so the crossover above is interpretable in a way it was not.
+
+  P3 of results/E16-band.md is the interesting outcome: a measurement showing partial
+  materialization losing below the registered threshold would not contradict Theorem 4.2 —
+  it would locate the missing constant, and §4.3 would gain it as a measured quantity rather
+  than an asymptotic one.
+```
+
 **Finding 2 — The optimal budget is interior, not extremal.** At memory price 0.002 and *s* = 0.5 the ratio runs 0.90 (50% budget) → 0.80 (25%) → **0.79 (10%)** → 0.82 (5%) → 0.87 (2%) → 0.90 (1%). Too large a budget wastes memory; too small a budget thrashes, and reconstruction cost explodes faster than memory savings accrue. The existence of an interior optimum is what makes an adaptive materialization optimizer a necessity rather than an ornament — a fixed policy at either extreme is measurably wrong.
 
 **Finding 3 — the refutation.** Hypothesis H0/S1, as stated in Chapter 1 of the previous draft, held that *"partiality pays on skew"* and that the advantage *grows* with skew. **The measurements contradict this.** Table 9.2 shows why: as *s* rises, full materialization touches fewer distinct keys, so its own footprint shrinks — resident-entry-epochs for full fall from 17.6 M at *s* = 0.5 to 3.9 M at *s* = 1.3, while partial's stay near 1.45 M. The *ratio* therefore gets **worse** for partial as skew increases, from 12:1 down to 2.7:1 (Table 9.2), and the corresponding memory-ratio measurement in §9.3.5 shows the same monotone deterioration. Skew simultaneously reduces partial's reconstruction penalty (36,690 → 4,480 rows read), so the two effects oppose one another and the net result depends on the memory price — which is precisely why the diagram must be swept over price rather than plotted at one.
@@ -395,7 +446,44 @@ The hand-written harness measured 6.8 → 8.3 → 8.0 → 8.5 for *C* = 16. The 
 
 Three things are visible, and the third is the one that matters.
 
-First, **the optimum is strictly interior wherever it is not at the swept boundary**: at price 0.0001 the best budget is 2,000, not 250 and not full. That is the corrected claim §9.3.4 arrived at after the first phase diagram turned out to be an artifact of charging peak residency rather than the residency integral.
+First, **the optimum is strictly interior wherever it is not at the swept boundary**: at price 0.0001 the best budget is 2,000, not 250 and not full.
+
+```text
+PROPOSED — MISMATCH-F-09. Not applied to the sentence above.
+
+"strictly interior wherever it is not at the swept boundary" cannot be refuted by any
+measurement: an optimum at an extreme *is* at the swept boundary by definition, so the
+sentence excludes its own counterexample. The E12 table shows extremal optima at both price
+ends, and the restated hypothesis has to survive that rather than define it away.
+
+THE REPLACEMENT WORDING
+
+  §1.6 H-S1, final clause:
+    "…and there is a memory-price interval within which the cost-minimizing budget is
+     strictly interior — neither the smallest swept nor full materialization. On the E12
+     sweep that interval is **[0.0005, 0.002]** in units of one base-row read per resident
+     entry per epoch, read from results/e12_phase_compiled.csv; outside it the optimum is
+     extremal, and that is expected rather than excluded: at a memory price of zero,
+     residency is free and full materialization is optimal by construction."
+
+  The falsifier, stated so it can fire:
+    "H-S1 is refuted by a **monotone** cost-versus-budget curve at any price inside
+     [0.0005, 0.002] — that is, by a price in the stated interval at which the cheapest
+     budget is the smallest swept or full materialization. An extremal optimum outside the
+     interval refutes nothing."
+
+  §9.13.2, this sentence:
+    "At price 0.0001 the best budget is 2,000 — neither the smallest swept (250) nor full.
+     At prices outside [0.0005, 0.002] the optimum moves to a boundary, which is the
+     behaviour the restated H-S1 expects rather than the behaviour it excludes."
+
+WHY THE INTERVAL AND THE CROSSOVER ARE THE SAME NUMBERS
+
+  They are the same measurement read two ways: the price range in which partial and full
+  materialization are within a factor of each other is the range in which the optimum can be
+  interior. Stating it once and citing it twice is the honest form; deriving the second from
+  the first without saying so would make one measurement look like two.
+``` That is the corrected claim §9.3.4 arrived at after the first phase diagram turned out to be an artifact of charging peak residency rather than the residency integral.
 
 Second, **the boundary sits between 0.0005 and 0.002**, which is the band the hand-written harness located.
 
@@ -481,9 +569,18 @@ Every measurement in §§9.1–9.4 and §9.13 reported *counted work* inside the
 
 <!-- END:E16-contract -->
 
-Both sides are driven over the PostgreSQL wire protocol *through the same client*, so neither is spared the protocol cost the other pays. Three rows are `NOT RUN` and say why in the results file: `nilestreamd` exposes no write surface over the wire, and its read surface serves per-key balances rather than scans. A row reported as a prediction next to a row reported as a measurement is how a specification becomes marketing, so the unmeasured rows are labelled and left empty.
+Both sides are driven over the PostgreSQL wire protocol *through the same client*, over the same protocol path (recorded per CSV row), so neither is spared the protocol cost the other pays. **All four rows are measured on both targets.** They were not: three of them read `NOT RUN` against reasons — "no write surface over the wire", "a scan-and-group-by surface is not exposed" — that were true when they were written and had stopped being true, so three quarters of this table reported a gap in the engine that was a gap in the harness's beliefs about it.
 
-The `point` row is an engine result rather than a protocol one: it is served by a partial view over a hash-chained ledger, answering an anchored read and reconstructing on a miss. **The miss rate is reported with it and belongs with it.** Parity at a 0% miss rate would say a warm view is fast; the measured runs sit at 8–14% misses, each one a real upquery touching real base rows, and the latency holds across them. That is the claim this thesis actually makes, and reporting the latency alone would have let the more interesting half disappear.
+**Two rows say NOT MET, and that is the result.** The engine is 0.93× PostgreSQL on durable OLTP against a contract of 5–10×, and 0.13× on the analytical workload against a contract of 10–12×. Both are attributed in `docs/BENCHMARK.md`'s enumerated *Known limitations of the Nilestream path*, and neither is attributed to the engine's correctness:
+
+* **OLTP** — items 3 and 6. The simple query path compiles every statement afresh (parse, resolve, typecheck, lower, verify), and this machine has two cores against a contract written for a 48-core baseline figure. Not the ledger: the `durable` row shows the write path at parity with PostgreSQL's, on the same device, at the same `fsync` cost, with `synchronous_commit = on` on one side and `SyncPolicy::Always` on the other.
+* **Analytical** — item 4. An unkeyed `group by` materialises the whole base per query. The engine is doing *more work* than PostgreSQL rather than the same work more slowly, and where that trade pays is what §9.3's phase diagram characterises. Three of PostgreSQL's five analytical statements are also outside the lowered fragment — `count(*)`, `count(distinct …)`, `order by <aggregate>` — so the row compares five statements against three, and each missing construct is named with its reason rather than the fragment being widened during a benchmark.
+
+What this table supports is therefore **an engine with a measured baseline and a characterized gap**, and not a performance claim. §7's contract remains the target; two of its four rows are unmet at this commit, by a factor named against a listed cause.
+
+The `point` row is an engine result rather than a protocol one, and it is a **stronger** result than the one previously reported here. The wire path evaluates the compiled circuit over a source scan through the anchor index and does not consult the partially materialised view at all, so **every point read is an anchored reconstruction: the measured miss rate is 1.00**. Parity with PostgreSQL's indexed aggregate while reconstructing every read is a different claim from parity with a warm cache.
+
+The sentence this replaces said "the measured runs sit at 8–14% misses". They did not. The harness configured a residency budget of 100,000 against 10,000 accounts, so after warm-up nothing was ever evicted and the true rate was zero; the figure was typed into the renderer's prose and no column carried it. The budget now binds at a quarter of the key space, the harness warns when it does not, and `miss_rate` is a column of every CSV row.
 
 Two defects, and neither was in the engine.
 

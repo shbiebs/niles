@@ -84,6 +84,62 @@ against full materialization's C_full = C_apply(λ, |K|) + C_mem(|K|). For every
 
 *Proof.* Upper bounds are exhibited by the algorithms of Appendix D: per-key anchor indices (epoch-skip structures over the key's delta positions) give amortized O(1) locate cost, and each rung's mechanism adds exactly the structure listed; inspection shows no dependence on n, since history enters only through per-key update counts, a workload property. Lower bounds: anchor bookkeeping by a fooling-set argument over traces that violate MONO if fewer than one bit of session watermark is kept; base touches by the adversary argument of Theorem 4.2(iii); freshness from clause (i) of the same theorem. *Restriction, stated honestly:* without anchor-indexed access, locating a key's deltas could require scanning history and would reintroduce n. The assumption is implemented, not idealized — but the theorem is about implementations that make it. ∎
 
+```text
+PROPOSED — MISMATCH-F-07. Not applied to the running text above.
+
+Theorem 4.3′ as stated rests on a premise its own §4.8 and §3.20 refute. The proof says
+"history enters only through per-key update counts, a workload property", and H-S3's own
+status line says the opposite: without checkpointing, cost grew 64× as history grew 64×,
+because under skewed access a hot key retains a roughly constant share of a growing traffic
+total, so its update count is *not* bounded by workload shape. The mechanism that rescues
+the claim — per-key checkpoints at interval C — is a named contribution (SC7) and does not
+appear in the theorem's parameter list.
+
+(1) THE REVISED STATEMENT
+
+    Theorem 4.3′ (History-independence under checkpointing, with matching lower bounds in
+    the restricted model). Assume upquery paths of bounded width w, anchor-indexed access to
+    per-key delta positions, **and that the implementation maintains per-key checkpoints at
+    interval C** (Theorem 3.7). Then (a) every rung's marginal per-operation cost is bounded
+    by a function of (π, read/write mix, λ, m, τ, w, Z, **C**) alone — the price of
+    consistency is workload-shaped and checkpoint-shaped, not history-shaped; and (b) any
+    implementation must pay Ω(1) anchor bookkeeping at ℓ₁ and above,
+    **Ω(miss · min(C, deltas-since-anchor))** base touches at every rung, and Ω(freshness)
+    at ℓ₅.
+
+    The checkpoint hypothesis is a proof obligation on the system, not an ambient fact. It
+    is discharged by `proto_engine::Ledger::checkpoint_interval` and tested by
+    `the_bound_holds_on_the_e10_workload`; an implementation that drops checkpointing does
+    not satisfy the theorem's hypotheses and the claim does not apply to it.
+
+(2) WHERE C ENTERS THE UPPER BOUND
+
+    Reconstruction folds from the most recent checkpoint at or before the anchor rather than
+    from genesis. Per-key work is therefore bounded by the number of deltas between that
+    checkpoint and the anchor, which is at most C by construction — independent of n, and of
+    the key's total update count. The sentence "inspection shows no dependence on n, since
+    history enters only through per-key update counts" becomes "inspection shows no
+    dependence on n, since history enters only through the distance from the nearest
+    checkpoint, which the interval bounds".
+
+(3) THE REVISED LOWER BOUND
+
+    Ω(min(C, deltas-since-anchor)) base touches per miss, in the restricted model. The
+    minimum is essential: a key with fewer than C deltas since its anchor is bounded by that
+    count and not by C, which is why Theorem 3.7's bound is C/2 + 1 in expectation over
+    anchors uniform between checkpoints rather than C.
+
+(4) MATCHING EDITS
+
+    §3.14 (Φ): the per-rung cost function's parameter list gains C, and the reconstruction
+    term becomes miss(π,m) · min(C, d̄) · w · (1 + Θ(Z)) for mean per-key delta density d̄.
+    §3.15 (verification table): Theorem 4.3′'s row gains "hypothesis: per-key checkpoints at
+    interval C" in its assumptions column.
+    §1.6 H-S3: already restated with the checkpoint proviso; its IV list already names C, so
+    only the theorem it points at changes.
+    §4.8: the "promoted to SC7" sentence gains "and is a hypothesis of Theorem 4.3′".
+```
+
 **Consequence.** The institutional question "which rung can we afford for this view" is answered by measuring the workload, not by sizing the history: ten years of ledger cost the same per read as ten days, at every rung. This is the theory behind S3, and it is the claim most directly falsifiable by a single regression.
 
 ## 4.5 Contribution 4 — The Consistency-Effect Calculus and Niles Soundness
@@ -93,6 +149,44 @@ against full materialization's C_full = C_apply(λ, |K|) + C_mem(|K|). For every
 - **(T-Money-Add)** both operands `Money⟨c,s⟩` with the *same* c and s. No rule joins distinct currency indices; currency mismatch is untypeable, in the manner Kennedy's units-of-measure system makes dimensional mismatch untypeable.
 - **(T-Posting)** posting construction consumes linear debit/credit halves; a transaction term `txn{p₁…pₙ}` types only if, per currency, the multiset of halves cancels — the balance obligation is a type-level sum over an indexed monoid, discharged by the currency-row solver.
 - **(T-Overdraw)** a posting whose static balance bound may cross zero requires the ambient capability `Auth⟨overdraw⟩`, which has no introduction rule except an authorization term.
+
+```text
+PROPOSED — MISMATCH-T-11-overdraw. Not applied to the rule above.
+
+T-Overdraw as written asks for a *static balance bound*, and no such analysis exists or can
+be built on the current AST. `niles-lang` has no abstract domain over account balances and
+no representation of a balance at a program point: `Amount` is a linear form over opaque
+symbols, so "is this balance negative after this posting" is not a question the domain can
+express. Implementing it would need an interval or affine-inequality domain over per-account
+state plus a way to relate a posting to the account it lands in — a different analysis, not
+a missing case in this one.
+
+What *is* implemented, and enforced from commit 4ce84c4, is the capability discipline:
+
+  - `Auth<E>` has exactly two introduction forms — an `Auth<E>` parameter and a `grant` —
+    and no expression produces one. `let auth: Auth<authorize<usd>> = 42;` is NL0330.
+  - An `Auth<E>` argument position accepts only an `Auth` of the same effect (NL0331), so
+    the forging cannot move one level out into `f(a, m, granted())`.
+  - The `authorize<c>` effect propagates through calls, so a caller two hops from the
+    `authorize` still needs the capability (NL0312). Before effect rows were transitive, a
+    one-line wrapper laundered an unauthorised overdraft.
+
+THE REPLACEMENT WORDING
+
+  §4.5, the rule:
+    "(T-Overdraw) no overdraw redex is typed without a capability introduced by `authorize`.
+     The capability `Auth⟨overdraw⟩` has no introduction rule except an authorization term,
+     and no elimination except being passed on."
+
+  Theorem 4.4, clause (3), and everywhere the thesis states the soundness result:
+    "cannot overdraw without holding authority" — not "cannot overdraw". The guarantee is
+    that a path which *can* reduce a balance below zero holds a capability; it does not bound
+    the balance. Proposition 3.2 already says the floor is not coordination-free, and the
+    stronger reading should not appear anywhere in the thesis.
+
+  The mutant that holds it: crates/niles-lang/tests/mutants/overdraw_without_authorize.niles,
+  which has two functions and requires both to be refused.
+```
 - **(T-FX)** `fx⟨a,b⟩{legA, legB, rate}` types only if legA balances in a and legB balances in b (Definition 3.7 internalized).
 - **(T-Serve)** a read term is typed at its view's declared rung; a function demanding ℓ₃ composes only with contexts serving ℓ₃ or above — consistency is an effect, so under-consistent composition is a type error.
 - **(T-Idem)** submission is typed as an idempotent effect keyed by an idempotency term, with the declared deduplication window as part of the type (Section 3.20).

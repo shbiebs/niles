@@ -1209,3 +1209,120 @@ that produced it. `--render` re-derives the table *from* the committed CSVs, whi
 that must not drift, and the durable run's own reproduction recipe is in `BENCHMARK.md`.
 
 `cd niles && make reproduce` → **exit 0** on a clean tree.
+
+### [T-17] 2026-09-02T15:10Z MISMATCH-F-07 Theorem 4.3′ rests on a premise its own §4.8 refutes
+
+**The thesis says** (§4.4 proof, verbatim): *"inspection shows no dependence on n, since
+history enters only through per-key update counts, a workload property."* §3.14 says the same.
+
+**The thesis also says** (H-S3 status, §4.8, §3.20): without checkpointing, cost grew **64×**
+as history grew 64×, because under skewed access a hot key retains a roughly constant share of
+a growing traffic total — so its update count is *not* a workload property bounded independent
+of n. The mechanism that rescues the claim is per-key checkpointing at interval C, promoted to
+SC7, and it appears nowhere in Theorem 4.3′'s parameter list.
+
+The full proposal — revised statement with C as a **hypothesis of the theorem** rather than an
+ambient fact, where C enters the upper bound, the revised lower bound
+Ω(min(C, deltas-since-anchor)), and the matching edits to §3.14's Φ, §3.15's table, §1.6's H-S3
+and §4.8 — is written verbatim as a fenced `PROPOSED` block in
+`thesis/04-novel-contributions.md`, immediately after the theorem, and is **not applied** to
+the running text.
+
+### [T-17] 2026-09-02T15:15Z MISMATCH-F-08 C2 is an existence claim, not a predictive one
+
+**The thesis says** (§1.6 H-S2): the crossover falls *"within the band predicted by the
+Eviction–Consistency Frontier Theorem"*, and (§9.12 Finding 1) *"that is the frontier the
+thesis predicts, located empirically for the first time."*
+
+**Theorem 4.2(ii) predicts no band.** Its cost expression carries `(1 + Θ(Z))` and states no
+constant for Θ, so the theorem asserts that a threshold *exists* for every (c_u, w, λ, Z).
+An existence claim cannot be agreed or disagreed with by a located crossover.
+
+C2 drops to an existence claim, refuted by finding no crossover anywhere in a swept price
+range and not by finding one at an unexpected price. `results/E16-band.md` — committed at
+`504c131`, before the durable run — registers the one side that *is* derivable, with Θ(Z)
+set to zero, and names the missing constant.
+
+**§5.5's rule is now satisfied.** It says a crossover without Z is not interpretable, and
+neither phase CSV had a Z column. Both do (T-15), defined identically in the two writers;
+E4 reports Z from 5.3 to 307 across the grid.
+
+Written as a fenced `PROPOSED` block in `thesis/09-evaluation.md` at §9.12 Finding 1.
+
+### [T-17] 2026-09-02T15:20Z MISMATCH-F-09 the restated H-S1 excludes its own counterexample
+
+**The thesis says** (§9.13.2): *"the optimum is strictly interior wherever it is not at the
+swept boundary."* An optimum at an extreme **is** at the swept boundary by definition, so no
+measurement can refute the sentence, and the E12 table shows extremal optima at both price
+ends.
+
+The proposal gives H-S1 an explicit memory-price interval read from E12 —
+**[0.0005, 0.002]** in units of one base-row read per resident entry per epoch — and the
+falsifier that can fire: *a monotone cost-versus-budget curve at a price inside that
+interval*. An extremal optimum outside it refutes nothing, and at a memory price of zero
+full materialization is optimal by construction.
+
+Written as a fenced `PROPOSED` block in `thesis/09-evaluation.md` at §9.13.2.
+
+### [T-17] 2026-09-02T15:25Z RESULT §9.14.1 and §11.3 rewritten from the measured verdicts
+
+§9.14.1's claim that three rows are `NOT RUN` because "nilestreamd exposes no write surface
+over the wire" is gone: all four rows are measured on both targets, and **two say NOT MET**
+(oltp 0.93× against 5–10×, analytical 0.13× against 10–12×). Each is attributed to a named
+item on `BENCHMARK.md`'s limitations list and not to the engine's correctness, and the
+section now states what the table supports — *an engine with a measured baseline and a
+characterized gap*.
+
+The paragraph claiming "the measured runs sit at 8–14% misses" is replaced. They did not: the
+budget was 100,000 against 10,000 accounts, so nothing was ever evicted, the true rate was
+zero, and the figure was typed into the renderer's prose with no column carrying it. The
+measured rate is **1.00** — the wire path does not consult the partial view at all — which
+makes the parity result a claim about reconstruction rather than about a warm cache.
+
+§11.3 gains four refutation rows from this run: the two unmet Part 0 rows; that the served
+answer was not the query the client sent; that the type checker did not implement λ_niles;
+and that the SQL surface did not lower ten of the forms its table called `Lowered`. The
+C2 falsifier row is rewritten as an existence claim per MISMATCH-F-08.
+
+**The absence pattern is at fourteen instances, not three.** §11.5's paragraph naming
+`Err(_) => 0`, `sum` over an empty group and `unwrap_or(LitBool(true))` as "three costumes"
+now records the eleven more that a review looking for the shape found — every one written
+after that paragraph — and states the rule that covers them: a wildcard arm in a soundness
+predicate and an `unwrap_or` at a lowering site are the same defect.
+
+§11.5.7's row claiming the `LitBool(true)` site is pinned is corrected: only the SQL surface
+was; the pipeline surface kept it.
+
+### [T-17] 2026-09-02T15:30Z RESULT F-10 — four status statements that contradicted each other
+
+| where | said | now says |
+|---|---|---|
+| §1.6 | "**No measurements have been taken yet**" | measurements have been taken and some refuted the claim they tested |
+| §3.15 | "Empirical validation: **None yet.**" | partial, with the sections that are measurement and the sections that are protocol named |
+| Front matter | "no comparison against another database system is claimed" | E14 and E16 are claimed and reported, and two E16 rows are unmet |
+| §1.9 | the same sentence | the same correction, with E16's durable rows named |
+
+`bash thesis/build.sh` → exit 0. `Niles-Thesis.docx` rebuilt; **95,081 words** across the
+thesis sources.
+
+### [T-17] 2026-09-02T15:32Z BLOCKED-T-17-remainder the rest of T-17 is not done, and this says what
+
+T-17 has fourteen numbered outputs. Five are done above (the three theory MISMATCHes, the
+measured rewrites of §9.14.1/§11.3/§11.5.7, and F-10's status statements). The following are
+**not done**, and no part of the thesis claims they are:
+
+1. The single-sourced status statement from `thesis/status.toml` (output 1).
+2. Identifier normalisation — `F1…F4`, `S1…S10`, `H0`, `SC1…SC6` to the `H-F`/`H-S`/`C`
+   namespace — and the `no_bare_hypothesis_identifiers` drift test (output 2).
+3. Appendix B's keyword lists generated from `keywords.rs` (output 3).
+4. Appendix E's figures produced by a test (output 4).
+5. `SPEC-LANGUAGE.md`'s per-L-id restructuring and generated Part V (output 5).
+6. `ROADMAP.md`'s reorder rule and phase statuses (output 7).
+7. §11.5.3/§11.5.4's rewording for the extended protocol and MySQL — **now materially
+   wrong**, because T-14 wired the extended protocol and the MySQL row's "codec with no
+   listener" is stated in `mysql_wire.rs` but not in the thesis (output 8, part).
+8. `ARCHITECTURE.md` §7's generated counts and `README.md`'s stale figures (output 9).
+9. F-51's "not measured" status lines with the missing instrument named (output 11).
+
+Item 7 is the one that matters most, because it is a claim that has become *less* true
+during this run rather than merely staying stale.

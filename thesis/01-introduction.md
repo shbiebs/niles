@@ -105,7 +105,7 @@ To construct and validate a formal theory of versioned, partially materialized d
 
 ## 1.6 Hypotheses
 
-Every hypothesis is stated with its independent variable (IV), dependent variable (DV), control variables (CV), and its method — experimental, argumentative or formal. Foundational hypotheses ground the design; system hypotheses are the falsifiable claims about the instrument. **No measurements have been taken yet**: Section 1.9 states the status of every claim, and Chapter 9 gives the protocols and pre-registered predictions rather than results.
+Every hypothesis is stated with its independent variable (IV), dependent variable (DV), control variables (CV), and its method — experimental, argumentative or formal. Foundational hypotheses ground the design; system hypotheses are the falsifiable claims about the instrument. **Measurements have been taken, and some of them refuted the claim they were testing**: Section 1.9 states the status of every claim one by one, Chapter 9 reports what was measured, and where a claim is untested Chapter 9 gives its protocol and pre-registered prediction instead. The sentence this replaces read "no measurements have been taken yet" and stood while §9.1 opened with "measurements that were actually taken".
 
 ### 1.6.1 Foundational Hypotheses
 
@@ -230,6 +230,6 @@ Every hypothesis is stated with its independent variable (IV), dependent variabl
 
 *Measured.* Sections 9.1–9.4 report results from a prototype (Appendix K) implementing the mechanisms: epoch-ordered commit under a per-currency zero-sum rule, hash chaining, anchor indices, checkpoints, partial materialization over the absence lattice, anchored upqueries and eviction policies. Every number there was produced by the run that reports it, on the platform stated in §9.1.2, with five fixed seeds and machine-independent counted-work units. **Three of those measurements contradicted claims made in earlier drafts of this thesis, and are reported as contradictions** (§9.3.4, §9.4.1, §9.4.4).
 
-*Neither.* Everything requiring durability, concurrency, distribution or the compiler is marked *to be measured*, with its protocol and pre-registered prediction. **No number anywhere in this thesis is invented to fill such a cell**, and no comparison against another database system is claimed, because a prototype without durability or concurrency cannot honestly stand in for one.
+*Neither.* Everything requiring durability, concurrency, distribution or the compiler is marked *to be measured*, with its protocol and pre-registered prediction. **No number anywhere in this thesis is invented to fill such a cell.** Two comparisons against another database system are claimed and reported — E14 (§6.10.3) and E16 (§9.14.1) — and E16's durable rows are measured with `synchronous_commit = on` against `SyncPolicy::Always` on the same device, so the prototype is not standing in for a durable system: it is one, on the write path, and the rows that are unmet say so.
 
 *On figures quoted from the literature.* Each carries its original experimental context, and vendor performance claims lacking a disclosed methodology, hardware specification and durability setting are named as such and excluded from use as baselines.

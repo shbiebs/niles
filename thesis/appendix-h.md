@@ -84,6 +84,55 @@ The claim being made is narrow and defensible: not that one storage format serve
 |---|---|
 | Relational completeness | Proved (H.2) |
 | Fixpoint completeness over the epoch-ordered base = PTIME | Proved by reduction to Immerman–Vardi, with the ordering hypothesis supplied by the data model (H.3) |
+
+```text
+PROPOSED — MISMATCH-T-13-fixpoint. Not applied to the table row above.
+
+The row is a claim about the *language*, and the language cannot express a transitive
+closure. The theorem is untouched — the reduction to Immerman–Vardi stands, and it is about
+the fixpoint operator over an ordered base — but the row as it reads invites a reader to
+believe that a PTIME query can be written, and one cannot.
+
+WHAT WORKS
+
+  The fixpoint operator evaluates. `Op::Fixpoint` takes the seed and the step's output, with
+  the step reading the accumulator through the `Delay` that closes the cycle; it runs to a
+  least fixpoint and reports non-convergence as `EvalError::NonTerminating { rounds, tail }`
+  rather than returning what it had reached. Case 31 of the golden corpus reaches closure;
+  `a_non_terminating_fixpoint_is_refused_rather_than_answered` shows a growing step refused
+  with the round count and the accumulator's last sizes. Before this the step was *discarded
+  at lowering* — the node held a termination guard and no body, so the operator was
+  verifiable and not evaluable, and C6(b) had no runnable witness at all.
+
+WHAT DOES NOT
+
+  Two pieces of surface syntax are missing, and a closure needs both:
+
+    1. A join cannot state its key. `.join(u)` takes the two sides' anchor keys, so a step
+       can only join the accumulator's `src` to `edges`' `src`; a closure needs `acc.dst` to
+       `edges.src`.
+    2. A projection cannot name a duplicated column. After a join the schema is
+       [src, dst, src, dst] and `col_index` returns the first match, so the pair a closure
+       step must produce — the outer `src` with the inner `dst` — has no spelling.
+
+  So the step cannot produce the shape it consumes, and NL0514 refuses it: the right refusal
+  for the wrong reason, an arity check doing the work a missing feature should be reported by.
+  Case 36 of the golden corpus records it.
+
+THE REPLACEMENT WORDING
+
+  The table row:
+    "Fixpoint completeness over the epoch-ordered base = PTIME | Proved by reduction to
+     Immerman–Vardi, with the ordering hypothesis supplied by the data model (H.3).
+     **Not exercised: the stage-0 surface cannot express a transitive closure** — a `join`
+     stage takes no explicit key and a projection cannot name a duplicated column — so no
+     PTIME query has been written in Niles. The operator itself evaluates to a least fixpoint
+     and refuses non-convergence (golden cases 31 and 36)."
+
+  §4.7's C6(b), correspondingly: the completeness claim is a claim about the calculus, and
+  the surface's shortfall is named beside it rather than left to a reader to discover by
+  trying.
+```
 | SQL-Core translation, semantics-preserving | Constructed by structural induction, tested by golden-file equivalence (H.4) |
 | Computable-query completeness of the declarative tier | **Not claimed**, deliberately (H.5) |
 | Full SQL-standard compatibility including implementation-defined behaviour | **Not claimed**; out-of-fragment constructs fail loudly (H.4) |

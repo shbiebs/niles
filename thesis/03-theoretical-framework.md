@@ -183,7 +183,7 @@ Stated here in framework vocabulary and proved as Contribution 2: *for any parti
 | Thm 4.5 (optimizer) | Competitive bounds proved for the stated cost model; the delayed-hit regime inherits the literature's caution that classical optimality does not transfer. |
 | Thm 4.6 (generality) | Relational completeness and the SQL-fragment translation are constructive; fixpoint completeness is by reduction to Immerman–Vardi, whose ordering hypothesis the epoch order supplies. |
 | Mechanization | Not done. A Lean or Coq development of P4 and Thm 4.4 is future work (Chapter 12), scoped but not claimed. Note that DBSP's own mathematics has been mechanized in Lean, which lowers the cost of that step. |
-| Empirical validation | **None yet.** Chapter 9 is protocol and prediction. |
+| Empirical validation | **Partial.** §§9.1–9.4 and §9.13–§9.14 report measurements taken; §§9.5–9.12 are protocol and prediction, and each cell says which. The row this replaces read "None yet" and contradicted the chapter it pointed at. |
 
 ## 3.16 Establishment and Formalization of the Foundational Hypotheses
 

@@ -704,3 +704,108 @@ fn no_document_is_reachable_from_nothing() {
          document table, or delete the file."
     );
 }
+
+/// **A phrase that names an unbuilt thing must be near a word that says so.**
+///
+/// The failure this catches is the one that recurs: a chapter written when something was
+/// planned, left in the present tense after the plan changed. Appendix I described an
+/// optimizer as implemented; §7 described a MySQL listener and storage tiers as built; §13
+/// said all four contributions were proved *and measured*. Each was true of an intention.
+///
+/// The check is deliberately crude — a phrase, and a window of 240 characters around it that
+/// must contain one of a small set of hedges — because the alternative is a reviewer
+/// noticing, and a reviewer noticing is what produced this list.
+#[test]
+fn nothing_unbuilt_is_described_in_the_present_tense() {
+    // Each phrase names something that does not exist in this repository at this commit.
+    let unbuilt = [
+        "MySQL listener",
+        "lineage mode",
+        "storage tier",
+        "adaptive optimizer",
+    ];
+    // `Elle` and `model checking` are *not* in that list, deliberately. Both are named
+    // legitimately all over the thesis — as a tool someone else built, as a methodology, as
+    // a thing §12 says should be done — and a check that flagged every mention would be
+    // switched off within a week. What was wrong was one sentence in §3.11 claiming the
+    // programme *adds* an Elle-style checker; that sentence is gone and the assertion below
+    // is what keeps it gone.
+    // A sentence may name one of them if it also says what it is.
+    let hedges = [
+        "absent",
+        "would",
+        "no MySQL listener",
+        "planned",
+        "Planned",
+        "not built",
+        "unbuilt",
+        "withdrawn",
+        "Withdrawn",
+        "future work",
+        "does not exist",
+        "specified and not built",
+        "Specification",
+        "specification",
+        "not run",
+        "has not been done",
+        "no such",
+        "nothing implements",
+        "would be",
+        "not measured",
+        "deleted",
+    ];
+    let mut offenders = Vec::new();
+    for entry in std::fs::read_dir(repo_root().join("thesis")).expect("thesis/") {
+        let path = entry.expect("entry").path();
+        if path.extension().and_then(|s| s.to_str()) != Some("md") {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("?")
+            .to_string();
+        // Appendix J records positions as they were held, marked as withdrawn where they
+        // were; the bibliography carries titles.
+        if name == "references.md" {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("readable");
+        for phrase in unbuilt {
+            let mut from = 0;
+            while let Some(i) = text[from..].find(phrase) {
+                let at = from + i;
+                let lo = at.saturating_sub(240);
+                let hi = (at + phrase.len() + 240).min(text.len());
+                let window = &text[text.floor_char_boundary(lo)..text.floor_char_boundary(hi)];
+                if !hedges.iter().any(|h| window.contains(h)) {
+                    let line = text[..at].matches('\n').count() + 1;
+                    offenders.push(format!(
+                        "{name}:{line}: `{phrase}` with nothing to say it is not built"
+                    ));
+                }
+                from = at + phrase.len();
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "{} present-tense claim(s) about unbuilt components:\n  {}",
+        offenders.len(),
+        offenders.join("\n  ")
+    );
+
+    // The specific sentence, rather than the word.
+    for file in [
+        "03-theoretical-framework.md",
+        "05-research-design.md",
+        "09-evaluation.md",
+    ] {
+        let t = thesis(file);
+        assert!(
+            !t.contains("adds black-box anomaly inference"),
+            "{file} says the correctness programme *adds* an Elle-style checker. It does \
+             not have one."
+        );
+    }
+}

@@ -119,7 +119,7 @@ Full traceability is a requirement, and it is obtained by construction rather th
 
 Three consequences are used later. (i) Z-sets are the (ℤ, +, ·) instance, so the thesis's algebra is already a semiring image and lineage rides along the same circuits rather than requiring a parallel mechanism. (ii) **Upquery paths are provenance witnesses.** For each output key, the set of base slices sufficient to recompute it is exactly the support of its provenance polynomial; deriving upquery plans is therefore a provenance computation, which is the formal version of Noria's key-provenance tracing. (iii) Preservation of lineage under eviction-and-reconstruction is a corollary of factorization rather than a separate theorem: if the reconstructed value is the homomorphic image of the same polynomial, its explanation is the same explanation.
 
-Three lineage modes are offered per view, and the choice is a contract term: `off` (anchors only), `key` (which base keys contributed), and `full` (the how-provenance polynomial, retained). Chapter 9's H-S9 measures the cost of each; ORCHESTRA is the prior art that established provenance-guided incremental maintenance and must be positioned against, not rediscovered [Green et al., VLDB '07].
+Three lineage modes are *specified* per view, and the choice would be a contract term: `off` (anchors only), `key` (which base keys contributed), and `full` (the how-provenance polynomial, retained). **None is built** — the crate that would have held them was a stub and is deleted (`docs/ROADMAP.md`), which is why H-S9 is withdrawn rather than unmeasured (§1.6.2). ORCHESTRA is the prior art that established provenance-guided incremental maintenance and must be positioned against, not rediscovered [Green et al., VLDB '07].
 
 ## 3.11 Transition Semantics and the Reference Oracle
 
@@ -192,14 +192,17 @@ Stated here in framework vocabulary and proved as Contribution 2: *for any parti
 | Mechanization | Not done. A Lean or Coq development of P4 and Thm 4.4 is future work (Chapter 12), scoped but not claimed. Note that DBSP's own mathematics has been mechanized in Lean, which lowers the cost of that step. |
 | Empirical validation | **Partial.** §§9.1–9.4 and §9.13–§9.14 report measurements taken; §§9.5–9.12 are protocol and prediction, and each cell says which. The row this replaces read "None yet" and contradicted the chapter it pointed at. |
 
-The last row of that table is the aggregate, and it is generated from the same file §1.9.1's
-table is, so the two cannot disagree:
+The aggregate over every claim in this thesis is generated from the same file §1.9.1's table
+is, so the two cannot disagree. It is rendered with its own header: the block used to emit a
+bare row into this page, three unlabelled cells under a paragraph introducing them.
 
 <!-- BEGIN:status-row thesis/status.toml#statusrow -->
 
 *Generated from `thesis/status.toml`. Do not edit by hand.*
 
-| **All claims** | 6 proved, 8 measured or partly measured, 1 refuted, 2 not measured | `thesis/status.toml`, rendered into §1.9 |
+| Result | Status |
+|---|---|
+| **All 20 claims** | 6 proved, 8 measured or partly measured, 1 specified, 2 argued, 1 refuted, 2 not measured. Source: `thesis/status.toml`, rendered here and into §1.9 |
 
 <!-- END:status-row -->
 
@@ -247,7 +250,7 @@ Two views follow immediately, and they are the two the regulator distinguishes: 
 
 **Proposition 3.6 (Holds are escrow).** The pending/resolved structure of Definition 3.8 implements the escrow method: the pair (posted, pending) per account maintains exactly the bounds O'Neil's INF/VAL/SUP triple maintains — the worst-case value of the balance given that some in-flight reservations post and others void — so an authorization may be admitted without a global lock precisely when it cannot violate the non-negativity condition regardless of how outstanding reservations resolve [O'Neil, TODS 1986]. *Consequence:* the coordination that Proposition 3.2 proves unavoidable for non-negativity is confined to the reservation step, and is paid per authorization rather than per read. TigerBeetle's `debits_pending`/`credits_pending` fields are this construction in production.
 
-**Hot accounts.** Because account popularity is Pareto-distributed, a few accounts absorb a disproportionate share of authorizations. Three mitigations are available and all are bounded by Proposition 3.2. (i) *Conservation-only fast path:* postings that merely move value and carry no threshold are I-confluent and may be admitted with maximum concurrency. (ii) *Splitting:* per-shard slices of a hot account's reservation capacity, in the demarcation-protocol style — each shard may authorize within its granted range without messages, and boundary changes require bilateral exchange [Barbará & Garcia-Molina, VLDB J. 1994]. (iii) *Rejoin on read:* a read of a split quantity forces reconciliation, exactly as Doppel requires, so the split is invisible to correctness and visible only in latency. Section 9.13 measures which of the three the workload actually needs; the theory's contribution is to say in advance which are sound.
+**Hot accounts.** Because account popularity is Pareto-distributed, a few accounts absorb a disproportionate share of authorizations. Three mitigations are available and all are bounded by Proposition 3.2. (i) *Conservation-only fast path:* postings that merely move value and carry no threshold are I-confluent and may be admitted with maximum concurrency. (ii) *Splitting:* per-shard slices of a hot account's reservation capacity, in the demarcation-protocol style — each shard may authorize within its granted range without messages, and boundary changes require bilateral exchange [Barbará & Garcia-Molina, VLDB J. 1994]. (iii) *Rejoin on read:* a read of a split quantity forces reconciliation, exactly as Doppel requires, so the split is invisible to correctness and visible only in latency. **None of the three is measured.** §9.4.4's hot-account column measures the absence of an experiment: the contention experiment needs concurrency the instruments do not have — the research prototype is single-threaded, the ledger benchmark serialises through one sealer, and the daemon serves every query under one mutex (§9.14.1) — and H-S10 records that as its status. The theory's contribution here is to say in advance which mitigations are sound; which one a workload needs is unmeasured.
 
 ## 3.20 Checkpoints and the Bounded Reconstruction Theorem
 

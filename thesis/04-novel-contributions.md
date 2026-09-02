@@ -398,7 +398,9 @@ and it would make conservation **separately checkable per function** rather than
 a transaction — the same move AARA makes with potential annotations. It is the single
 highest-value extension to this contribution and it is not built.
 
-## 4.6 Contribution 5 (C5) — The Adaptive Materialization Calculus and Optimizer
+## 4.6 Contribution 5 (C5) — The Adaptive Materialization Calculus
+
+**Specified, and not built.** "Optimizer" is gone from this contribution's name. There is no estimator, no hysteresis schedule and no rent-or-buy break-even in the repository; the three eviction rules that exist are an LFU, a cost-and-delay credit rule, and fifty-two lines of unused scaffolding. What follows is a calculus — a mode lattice, an assignment problem, and what is and is not provable about choosing within it — and the two clauses of Theorem 4.5 that are proved are proved about the problem, not about a system. `status.toml` records C5 as `specified`, which is a different thing from an unmeasured implementation, and H-S7 ("the optimizer beats fixed policies and approaches its competitive bound") has nothing to measure and says so.
 
 The engineering requirement is an algorithm that decides what to materialize fully, what to keep on demand, and what to evict. The scientific contribution is to give that decision a formal object, a cost order, and provable guarantees — and to be explicit about which classical guarantees survive the setting and which do not.
 

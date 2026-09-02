@@ -81,6 +81,25 @@ fn main() -> ExitCode {
                 );
             }
         }
+        // **The cheap half of H-S6, which had no measurement of any kind.**
+        //
+        // The hypothesis is that static checkability subsumes runtime policing. Its
+        // residual-violation half is addressed by the mutant corpus; the other half asks
+        // what *fraction* of a real program's conservation obligations the checker
+        // discharges, and nothing counted. One line of machine-readable output, so a corpus
+        // can be summed by a script rather than by reading prose.
+        //
+        // It reports on a file that does not check, too, with `ok=0`: a corpus that silently
+        // dropped its failures would report a flattering fraction over the files that
+        // happened to compile.
+        "report-obligations" => {
+            println!(
+                "file={path} ok={} static={} runtime={}",
+                u8::from(!failed),
+                report.conservation_proved,
+                report.runtime_obligations
+            );
+        }
         "parse" => {
             for item in &prog.items {
                 println!("{}", describe_item(item));
@@ -248,6 +267,10 @@ USAGE:
     nilesc upquery FILE VIEW   the reconstruction path for VIEW
     nilesc verify  FILE        run the IR verifier
     nilesc effects FILE        inferred effect rows
+    nilesc report-obligations FILE
+                               one machine-readable line: how many conservation
+                               obligations were proved statically and how many were
+                               discharged to the runtime seal (H-S6)
     nilesc postings FILE [FN]  the legs a function declares, for conformance
     nilesc run     FILE FN     execute FN; print the canonical encoding of its posting set
                                [--ledger FIXTURE] [--args FIXTURE]

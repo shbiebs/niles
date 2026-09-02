@@ -51,6 +51,7 @@ reproduce:
 	cargo run -q -p niles-lang --bin gen-sql-surface
 	cargo run -q -p niles-lang --bin gen-spec-conformance -- docs/SPEC-LANGUAGE.md
 	cargo run -q -p niles-lang --bin gen-keyword-ref -- docs/keywords.md
+	cargo test -p niles-lang --test corpus_obligations
 	cargo test -p niles-lang --test solver_verdicts -- --ignored
 	cargo test -p nilestream-optimizer --test unnest_corpus -- --ignored
 	cargo test -p nilestream-server --test psql_conformance -- --ignored transcript

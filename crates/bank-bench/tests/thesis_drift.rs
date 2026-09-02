@@ -627,10 +627,32 @@ fn appendix_d_names_only_things_that_exist() {
 /// `unsafe` blocks" was a sentence about a state of the tree at some past moment, which is
 /// the kind of claim one line makes false. It is the only part of that programme this thesis
 /// can currently stand behind, so it is the part that gets a test.
+/// **No `unsafe` anywhere in the repository, with one named exception.**
+///
+/// §9.10 claims the workspace contains no `unsafe` block. This scans the **whole
+/// repository** rather than only `crates/`, which is strictly stronger and is what makes the
+/// one exception reviewable instead of hidden behind a scope: a file outside `crates/` could
+/// previously have used `unsafe` and nothing would have said.
+///
+/// The exception is `tools/memprobe`, the E18 memory instrument. `GlobalAlloc` cannot be
+/// implemented without `unsafe`, and the alternative to this exception was to weaken §9.10's
+/// claim to "no unsafe except…", which trades a guarantee about the system for the
+/// convenience of a tool that measures it. The package is outside the workspace, is built by
+/// nothing that ships, and is allowed here by *name* — so a second file wanting the same
+/// licence has to be added to this list by someone who has thought about it.
 #[test]
-fn the_workspace_contains_no_unsafe_block() {
+fn the_only_unsafe_in_the_repository_is_the_measurement_tool() {
+    /// Files permitted to contain the keyword, with why.
+    const ALLOWED: &[(&str, &str)] = &[(
+        "tools/memprobe/src/alloc.rs",
+        "the counting global allocator: `GlobalAlloc` has no safe implementation, and this \
+         package is outside the workspace and linked into nothing that ships",
+    )];
+
+    let root = repo_root();
     let mut offenders = Vec::new();
-    let mut stack = vec![repo_root().join("crates")];
+    let mut allowed_seen = 0usize;
+    let mut stack = vec![root.clone()];
     while let Some(dir) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
@@ -638,7 +660,8 @@ fn the_workspace_contains_no_unsafe_block() {
         for e in entries.flatten() {
             let p = e.path();
             if p.is_dir() {
-                if p.file_name().and_then(|s| s.to_str()) == Some("target") {
+                let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                if matches!(name, "target" | ".git" | "node_modules") {
                     continue;
                 }
                 stack.push(p);
@@ -652,22 +675,45 @@ fn the_workspace_contains_no_unsafe_block() {
             if p.ends_with("tests/thesis_drift.rs") || p.ends_with("src/keywords.rs") {
                 continue;
             }
+            let rel = p
+                .strip_prefix(&root)
+                .unwrap_or(&p)
+                .to_string_lossy()
+                .replace('\\', "/");
             let text = std::fs::read_to_string(&p).unwrap_or_default();
-            for (n, line) in text.lines().enumerate() {
+            let keyword = "un".to_string() + "safe";
+            let uses = text.lines().enumerate().filter(|(_, line)| {
                 let t = line.trim();
-                // A use site, not a mention: the keyword opening a block or a function.
-                let keyword = "un".to_string() + "safe";
-                if t.starts_with(&format!("{keyword} ")) || t.contains(&format!(" {keyword} {{")) {
-                    offenders.push(format!("{}:{}: {t}", p.display(), n + 1));
+                t.starts_with(&format!("{keyword} ")) || t.contains(&format!(" {keyword} {{"))
+            });
+            match ALLOWED.iter().find(|(f, _)| *f == rel) {
+                Some(_) => {
+                    if uses.count() > 0 {
+                        allowed_seen += 1;
+                    }
+                }
+                None => {
+                    for (n, line) in uses {
+                        offenders.push(format!("{rel}:{}: {}", n + 1, line.trim()));
+                    }
                 }
             }
         }
     }
     assert!(
         offenders.is_empty(),
-        "§9.10 says the workspace has no `unsafe` block and that this is the one layer of \
-         the memory-model programme that is discharged. Found:\n  {}",
+        "§9.10 says the repository has no `unsafe` block outside the measurement tool, and \
+         that this is the one layer of the memory-model programme that is discharged. \
+         Found:\n  {}",
         offenders.join("\n  ")
+    );
+    // An exception that stopped being used should stop being granted: a licence nobody needs
+    // is a licence the next file inherits without argument.
+    assert_eq!(
+        allowed_seen,
+        ALLOWED.len(),
+        "an entry in the allow-list no longer contains the keyword it was granted for; \
+         remove it rather than leaving a standing exception"
     );
 }
 

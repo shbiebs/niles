@@ -6,14 +6,31 @@ check:
 test:
 	cargo test --workspace
 
+# The memory gate (E18). Separate from `test` for two reasons that are both about the
+# instrument rather than about convenience.
+#
+# `--release`: an allocation count is exact *within* a build profile and not across one —
+# the same served query allocates 173,363 times in release and 341,918 in debug. The
+# published table is a release build, so the gate that holds it must be one.
+#
+# `--test-threads=1`: a `#[global_allocator]` is process-wide, so a test allocating on
+# another thread lands in whatever region is being measured. The test checks a known-quiet
+# region first and says so rather than reporting a wrong number.
+memory:
+	cargo test --release --manifest-path tools/memprobe/Cargo.toml \
+	      -- --ignored --test-threads=1
+
 fmt:
 	cargo fmt --all -- --check
+	cargo fmt --all --manifest-path tools/memprobe/Cargo.toml -- --check
 
 lint:
 	cargo clippy --workspace --all-targets -- -D warnings
+	# The measurement tool is outside the workspace and is held to the same lints.
+	cargo clippy --manifest-path tools/memprobe/Cargo.toml --all-targets -- -D warnings
 
 # The gate every task must pass before it is done.
-gate: fmt lint generated test
+gate: fmt lint generated test memory
 
 # Every table, status line and results file that is derived from code. Each target
 # regenerates from the single source and fails if the committed copy differs, so a
@@ -57,6 +74,7 @@ reproduce:
 	cargo test -p nilestream-server --test psql_conformance -- --ignored transcript
 	cargo run --release -p bank-bench --bin bench -- --render
 	cargo run --release -p experiments -- e1 e4 e8
+	cargo run -q --release --manifest-path tools/memprobe/Cargo.toml
 	./target/release/nilestream sweep examples/demo_bank.niles ledger_balance > results/e12_phase_compiled.csv
 	python3 thesis/include-results.py
 	git diff --exit-code -- results/ thesis/ docs/SPEC-LANGUAGE.md docs/keywords.md

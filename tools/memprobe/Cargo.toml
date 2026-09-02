@@ -1,0 +1,39 @@
+# **The memory instrument, deliberately outside the workspace.**
+#
+# `GlobalAlloc` cannot be implemented without `unsafe`, and thesis §9.10 claims — and a drift
+# test asserts — that the workspace contains no `unsafe` block. That claim is about the
+# *system*: the ledger, the compiler, the engine and the products, all of which a user runs.
+# A tool that measures the system is not part of it, so this package sits beside the
+# workspace rather than inside it, is excluded from `cargo build --workspace`, and is linked
+# into nothing that ships.
+#
+# The alternative was to weaken the claim to "no unsafe except…", which trades a guarantee
+# for a convenience. `the_only_unsafe_in_the_repository_is_the_measurement_tool` in
+# `bank-bench/tests/thesis_drift.rs` now scans the **whole repository** rather than only
+# `crates/`, and allows exactly this file, so the exception is visible and reviewed instead
+# of hidden behind a scope.
+[package]
+name = "memprobe"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.95.0"
+license = "MIT OR Apache-2.0"
+authors = ["Sergio"]
+
+[dependencies]
+proto-engine = { path = "../../crates/proto-engine" }
+niles-ir = { path = "../../crates/niles-ir" }
+niles-lang = { path = "../../crates/niles-lang" }
+nilestream-core = { path = "../../crates/nilestream-core" }
+nilestream-server = { path = "../../crates/nilestream-server" }
+
+[[bin]]
+name = "memprobe"
+path = "src/main.rs"
+
+[lib]
+name = "memprobe"
+path = "src/lib.rs"
+
+[profile.release]
+debug = 1

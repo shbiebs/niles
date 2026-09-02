@@ -17,6 +17,12 @@ members = [
     "crates/niles-interp",
 ]
 
+# **The memory instrument is not part of the system.** `GlobalAlloc` cannot be implemented
+# without `unsafe`, and §9.10 claims the workspace has none. `tools/memprobe` measures the
+# workspace from outside it and is linked into nothing that ships. The exception is asserted
+# to be exactly one file by `the_only_unsafe_in_the_repository_is_the_measurement_tool`.
+exclude = ["tools/memprobe"]
+
 [workspace.package]
 version = "0.1.0"
 edition = "2021"

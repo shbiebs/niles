@@ -105,7 +105,7 @@ This is not a convenience feature. PSD2 Article 87 constrains the credit value d
 
 The model aligns with the standardized one where possible: SQL:2011's application-time and system-versioned tables, with the closed-open period model and the rule that historical rows cannot be modified by users [Kulkarni & Michels, 2012]. The difference is that here system time is not a timestamp column but the epoch — a discrete, hash-committed, totally ordered coordinate — so "as of" is exact rather than approximate, and reproducibility is bit-for-bit.
 
-Audit obligations reduce to two mechanically checkable properties: chain verification of the prefix, and *reproducibility* — any published (ρ, e) can be recomputed from the prefix at e and compared byte-for-byte. Retention in Niles is a type-level annotation on *views*, never on the base: derived state may forget; the base may not (F4).
+Audit obligations reduce to two mechanically checkable properties: chain verification of the prefix, and *reproducibility* — any published (ρ, e) can be recomputed from the prefix at e and compared byte-for-byte. Retention in Niles is a type-level annotation on *views*, never on the base: derived state may forget; the base may not (H-F4).
 
 ## 3.10 Lineage: A Provenance Algebra for Derived State
 
@@ -113,7 +113,7 @@ Full traceability is a requirement, and it is obtained by construction rather th
 
 Three consequences are used later. (i) Z-sets are the (ℤ, +, ·) instance, so the thesis's algebra is already a semiring image and lineage rides along the same circuits rather than requiring a parallel mechanism. (ii) **Upquery paths are provenance witnesses.** For each output key, the set of base slices sufficient to recompute it is exactly the support of its provenance polynomial; deriving upquery plans is therefore a provenance computation, which is the formal version of Noria's key-provenance tracing. (iii) Preservation of lineage under eviction-and-reconstruction is a corollary of factorization rather than a separate theorem: if the reconstructed value is the homomorphic image of the same polynomial, its explanation is the same explanation.
 
-Three lineage modes are offered per view, and the choice is a contract term: `off` (anchors only), `key` (which base keys contributed), and `full` (the how-provenance polynomial, retained). Chapter 9's S9 measures the cost of each; ORCHESTRA is the prior art that established provenance-guided incremental maintenance and must be positioned against, not rediscovered [Green et al., VLDB '07].
+Three lineage modes are offered per view, and the choice is a contract term: `off` (anchors only), `key` (which base keys contributed), and `full` (the how-provenance polynomial, retained). Chapter 9's H-S9 measures the cost of each; ORCHESTRA is the prior art that established provenance-guided incremental maintenance and must be positioned against, not rediscovered [Green et al., VLDB '07].
 
 ## 3.11 Transition Semantics and the Reference Oracle
 
@@ -165,7 +165,7 @@ That last sentence is the protocol's most consequential simplification, and Sect
 
 C(ℓ, W, m) = C_base(W, m) + Φ(ℓ) · U(W, m, Z)
 
-where U is the reconstruction/coordination term determined by miss rate under π and m and by Z, and Φ is a rung multiplier: Φ(ℓ₀…ℓ₂) = O(1) (anchor bookkeeping only); Φ(ℓ₃) = O(1) plus snapshot pinning memory; Φ(ℓ₄) = O(contention); Φ(ℓ₅) = Θ(freshness), since every read must observe vis(t). **No term depends on the base length n** — history enters only through per-key update counts, which is a workload property. That is the claim S3 operationalizes.
+where U is the reconstruction/coordination term determined by miss rate under π and m and by Z, and Φ is a rung multiplier: Φ(ℓ₀…ℓ₂) = O(1) (anchor bookkeeping only); Φ(ℓ₃) = O(1) plus snapshot pinning memory; Φ(ℓ₄) = O(contention); Φ(ℓ₅) = Θ(freshness), since every read must observe vis(t). **No term depends on the base length n** — history enters only through per-key update counts, which is a workload property. That is the claim H-S3 operationalizes.
 
 ## 3.15 The Eviction–Consistency Frontier (Statement) and Verification Status
 
@@ -179,25 +179,36 @@ Stated here in framework vocabulary and proved as Contribution 2: *for any parti
 | Thm 4.1 (reconstruction) + conservation corollary | Proved on paper; mirrored as executable property tests against 𝒪. |
 | Thm 4.2 (frontier) | Paper proof of an asymptotic bound; explicit constants only in special cases. The Ω(kZ) competitive lower bound for delayed hits is *attributed* to work cited in Atre et al. and is used as corroboration, not as this thesis's result. |
 | Thm 4.3 (rung pricing) | Upper bounds constructive; lower bounds proved in the restricted cost model stated in §4.4, which assumes anchor-indexed access to per-key deltas. |
-| Thm 4.4 (Niles soundness) | Proved for the calculus λ_niles, which idealizes the implemented language; the gap is a declared threat and is attacked by the S4 campaign. |
+| Thm 4.4 (Niles soundness) | Proved for the calculus λ_niles, which idealizes the implemented language; the gap is a declared threat and is attacked by the H-S4 campaign. |
 | Thm 4.5 (optimizer) | Competitive bounds proved for the stated cost model; the delayed-hit regime inherits the literature's caution that classical optimality does not transfer. |
 | Thm 4.6 (generality) | Relational completeness and the SQL-fragment translation are constructive; fixpoint completeness is by reduction to Immerman–Vardi, whose ordering hypothesis the epoch order supplies. |
 | Mechanization | Not done. A Lean or Coq development of P4 and Thm 4.4 is future work (Chapter 12), scoped but not claimed. Note that DBSP's own mathematics has been mechanized in Lean, which lowers the cost of that step. |
 | Empirical validation | **Partial.** §§9.1–9.4 and §9.13–§9.14 report measurements taken; §§9.5–9.12 are protocol and prediction, and each cell says which. The row this replaces read "None yet" and contradicted the chapter it pointed at. |
 
+The last row of that table is the aggregate, and it is generated from the same file §1.9.1's
+table is, so the two cannot disagree:
+
+<!-- BEGIN:status-row thesis/status.toml#statusrow -->
+
+*Generated from `thesis/status.toml`. Do not edit by hand.*
+
+| **All claims** | 6 proved, 7 measured or partly measured, 1 refuted, 7 not measured | `thesis/status.toml`, rendered into §1.9 |
+
+<!-- END:status-row -->
+
 ## 3.16 Establishment and Formalization of the Foundational Hypotheses
 
-**F1 (unboundedness).** Formally: the source is a stream Δ : ℕ → Z[Row] with no computable bound on Σ|Δᵢ|. The design consequence — no component may be admitted whose correctness or resident-state requirement depends on total input — is imposed on every part of Nilestream and audited. The *mismatch catalog* is the argument's substance: (i) a finite-first engine that destroys the changelog by in-place update must reconstruct it downstream by CDC, paying twice for information it had; (ii) audit that retention gives exactly must be approximated by triggers and shadow tables; (iii) absent anchors, applications implement version fencing by hand, and each hand-rolled fence is an anomaly class; (iv) unbounded state in stream operators must be bounded by windows chosen for engineering rather than semantic reasons, which converts a correctness question into a configuration question. Each entry names the aligned primitive that dissolves it.
+**H-F1 (unboundedness).** Formally: the source is a stream Δ : ℕ → Z[Row] with no computable bound on Σ|Δᵢ|. The design consequence — no component may be admitted whose correctness or resident-state requirement depends on total input — is imposed on every part of Nilestream and audited. The *mismatch catalog* is the argument's substance: (i) a finite-first engine that destroys the changelog by in-place update must reconstruct it downstream by CDC, paying twice for information it had; (ii) audit that retention gives exactly must be approximated by triggers and shadow tables; (iii) absent anchors, applications implement version fencing by hand, and each hand-rolled fence is an anomaly class; (iv) unbounded state in stream operators must be bounded by windows chosen for engineering rather than semantic reasons, which converts a correctness question into a configuration question. Each entry names the aligned primitive that dissolves it.
 
-**F2 (duality).** On epoch-indexed streams, D and I are mutually inverse [Budiu et al., Thm 2.20]. The thesis's contribution is the *asymmetry* that follows:
+**H-F2 (duality).** On epoch-indexed streams, D and I are mutually inverse [Budiu et al., Thm 2.20]. The thesis's contribution is the *asymmetry* that follows:
 
 **Lemma 3.3 (Information asymmetry).** Let 𝔖 be the set of finite histories and let ι : 𝔖 → State send a history to its integral at its final epoch. Then ι is not injective, whereas the map sending a retained history to the family ⟨S(e)⟩_{e≤n} together with the order and per-row provenance is injective. *Proof:* two distinct histories (a single posting of +5, versus +7 followed by −2) share an integral, so ι is not injective; conversely a retained history determines every prefix integral by Definition 3.1 and determines the order by indexing, so the map is injective by construction. ∎
 
 Hence "the table is merely the integral of the stream": the integral is a lossy summary of the stream, and it is the stream that is primitive. CQL is cited for the older architectural correspondence — relations as time-varying mappings, with three operator classes bridging streams and relations — with the explicit caveat that CQL states a reduction rather than a duality theorem; Sax et al. are cited for the systems-level duality [BIRTE '18].
 
-**F3 (alignment).** Established argumentatively via the catalog above, with a comparative audit (Section 9.7) whose counting rules are fixed in advance, and with the generality half discharged by proof: Theorem 4.6 shows the stream-first design retains full relational expressive power, so alignment costs nothing in what can be asked. The strongest opposing position — that SQL needs only time-varying relations, event-time semantics and a few materialization keywords [Begoli et al., SIGMOD '19] — is engaged directly in Section 6.10 rather than ignored.
+**H-F3 (alignment).** Established argumentatively via the catalog above, with a comparative audit (Section 9.7) whose counting rules are fixed in advance, and with the generality half discharged by proof: Theorem 4.6 shows the stream-first design retains full relational expressive power, so alignment costs nothing in what can be asked. The strongest opposing position — that SQL needs only time-varying relations, event-time semantics and a few materialization keywords [Begoli et al., SIGMOD '19] — is engaged directly in Section 6.10 rather than ignored.
 
-**F4 (the aligned shape).** The reconstruction-equivalence theorem (Thm 4.1) shows that with a fully retained base, the pair (immutable base, *partial* derived state) is observationally equivalent to (immutable base, *total* derived state) under all declared contracts. The converse direction is what makes retention *necessary* rather than merely sufficient:
+**H-F4 (the aligned shape).** The reconstruction-equivalence theorem (Thm 4.1) shows that with a fully retained base, the pair (immutable base, *partial* derived state) is observationally equivalent to (immutable base, *total* derived state) under all declared contracts. The converse direction is what makes retention *necessary* rather than merely sufficient:
 
 **Proposition 3.4 (Necessity of retention).** If the base is truncated below epoch e₀, then for any view whose provenance support includes rows before e₀, there exists an eviction schedule after which no procedure can restore the pre-eviction value. *Proof:* by P3 reconstruction is a function of the retained prefix; a truncated prefix is a different function's domain; choose a key whose polynomial support includes a truncated row and evict it. ∎ Compaction and snapshotting are therefore *optimizations that must preserve reconstructibility*, not licence to forget.
 

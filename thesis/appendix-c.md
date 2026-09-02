@@ -12,7 +12,7 @@ Every stage emits a content-addressed artifact, so a build is a Merkle tree of s
 
 ## C.2 Target Triples and the Target Model as Data
 
-Supported v1 targets: `aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`, a WSL profile (Linux with the static-linking profile of Appendix E.16), and `wasm32-wasip1` for UDFs and the self-hosted optimizer.
+**Specified, not built.** Supported v1 targets *are to be*: `aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`, a WSL profile (Linux with the static-linking profile of Appendix E.16), and `wasm32-wasip1` for UDFs and the self-hosted optimizer. What exists at this commit is the host target the workspace builds on; no cross-target build is run, no target record is consumed by a back-end, and §6's target list is a specification. This paragraph used to read as a statement about the artefact.
 
 Each target is a **declarative record** (Appendix E.2): word size, endianness, alignment, calling convention (parameter and return registers, caller/callee-saved sets, stack alignment), relocation kinds, and object-format parameters. All back-ends are generic over the record and encoder tables are generated from it, so adding a target is a data change plus tables rather than a compiler rewrite. The WSL profile is the existence proof: a target record plus linker flags, with no compiler-code change.
 
@@ -46,7 +46,7 @@ UDFs compile to wasm32 against a frozen ABI. Imports: none beyond a capability t
 
 ## C.6 Build and Deployment Model
 
-**Build.** One workspace for the engine and stage-0 compiler, plus the self-hosting stages driven by a bootstrap target; hermetic builds with pinned toolchains (Appendix G.1). Outputs: the server daemon, the CLI (compile, check, REPL), the bare compiler, and the wasm optimizer module.
+**Build, in part.** One workspace for the engine and stage-0 compiler, with the toolchain **pinned** — `rust-toolchain.toml` names an exact version in both repositories and `Cargo.toml` carries a `rust-version` floor, which was not true when this paragraph was written and is now. *Specified, not built:* the self-hosting stages are not driven by a bootstrap target (Appendix E's two stages run inside a Rust test), there is no hermetic build, and of the four named outputs only the server daemon and the CLI exist — there is no bare compiler and no wasm optimizer module.
 
 **Deployment.** A single static binary per target. Configuration is declarative (contract defaults, storage tiers, τ, memory budgets — Appendix D.7). State directories separate by durability class: the base segments (the only truth), derived view state (disposable), and keys (deployment-profile).
 

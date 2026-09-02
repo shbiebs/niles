@@ -529,6 +529,52 @@ fn stage_2_the_niles_front_end_parses_its_own_two_source_files() {
     let niles = render_niles(&src).expect("self-application must succeed");
     assert_same_tree(&niles, &rust, "the front end");
     assert!(niles.len() > 100_000, "got {} bytes", niles.len());
+
+    // The three figures Appendix E quotes, checked against the sources they describe.
+    //
+    // They were typed: E.0 said `parser.niles` was "~1,050 lines" against a file of 1,647,
+    // and E.19 said the self-application covered "1,200 lines" of a front end that is 2,066
+    // and produced "127,165 bytes of tree" from a run nobody had repeated. A figure in an
+    // appendix beside a test that computes it is a figure that drifts, and this is the same
+    // discipline `thesis_drift.rs` applies to Chapter 9's tables.
+    let appendix = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("the repository root")
+            .join("thesis/appendix-e.md"),
+    )
+    .expect("appendix E is readable");
+    for (what, value) in [
+        (
+            "`bootstrap/parser.niles`'s line count",
+            PARSER_SRC.lines().count(),
+        ),
+        (
+            "the self-application corpus's line count",
+            src.lines().count(),
+        ),
+        ("the tree's byte count", niles.len()),
+    ] {
+        let with_commas = commas(value);
+        assert!(
+            appendix.contains(&with_commas) || appendix.contains(&value.to_string()),
+            "Appendix E does not carry {what}, which this run measures as {with_commas}"
+        );
+    }
+}
+
+/// `1647` → `"1,647"`, matching how the appendix writes a figure.
+fn commas(n: usize) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Report the first disagreement in context rather than dumping a hundred kilobytes.

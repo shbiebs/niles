@@ -212,6 +212,12 @@ Every non-excluded row names a case in `crates/niles-lang/tests/golden/`, and
 not.
 <!-- END:sql-surface -->
 
+**Status: Partial.** Read from the generated block above rather than asserted beside it:
+of the stated fragment's 34 forms, 21 are lowered with a golden case fixing what they
+denote and 8 of those are proved equivalent across both surfaces; 4 are refused by code, 2
+are lowered with nothing checking them, 2 are specified, and 5 are excluded with reasons.
+A fragment with four named refusals in it is not a supersession, and this line says so.
+
 ---
 
 ### L-8 / L-9 Algorithm and schedule, separated — with verified schedules
@@ -239,7 +245,12 @@ view balances = postings |> group_by(acct) |> sum(amt)
 *Acceptance test.* A schedule that changes the result MUST be rejected by the verifier, not
 merely produce a different plan. A schedule that is merely slower MUST be accepted. The
 negative control — a schedule that reorders a non-commutative operation — MUST fail.
-**Status: Specified.** This is the single highest-value unbuilt item in this document.
+**Status: Partial** — the catalogue checker is built (`niles-ir::schedule`; `ROADMAP.md`
+Phase 5, BUILT, with its gate measured), and what it decides is the catalogue's declared
+corners rather than an arbitrary schedule. The *general* judgement — a schedule term carrying
+a proof that it preserves denotation for any schedule — remains the highest-value unbuilt item
+in this document. This line read `Specified` for as long as the checker had existed, in a
+section that describes it.
 
 ---
 
@@ -374,12 +385,16 @@ The organising constraint. Each finding becomes a requirement the language MUST 
 | Anchored reconstruction (Thm 4.1) | Enabling | Every view MUST declare an anchor; a non-reconstructible input MUST be a compile error, not a cost | **Built** — `join_order.rs` prunes it as *legality* before costing |
 | Honest absence | Enabling | A miss MUST NOT be expressible as zero. `Reading` has no numeric arm | **Built** — GBS's `gbs-mechanisms::signal` |
 | Static conservation under control flow | Enabling | A `txn` MUST balance per currency on every path, decided before running | **Built** — 11 of 12 defect classes at compile time (E14); **0% undecided on a 40-function corpus** (E18) |
-| Coordination-free cross-shard reads | Enabling | A read of a frozen prefix MUST require no coordination and MUST be cacheable without invalidation | **Built** — `nilestream-core::distributed` |
+| Coordination-free cross-shard reads | Enabling | A read of a frozen prefix MUST require no coordination and MUST be cacheable without invalidation | **Specified** — `nilestream-core::distributed` is a model with ten tests that nothing calls; no read in this repository crosses a shard boundary (thesis §11.5.3) |
 | Per-view rungs with monotonicity | Cumulative | L-12 | **Built** |
-| Bitemporality | Cumulative | Two axes MUST be distinct types; a back-valued correction MUST be an append | **Built** |
+| Bitemporality | Cumulative | Two axes MUST be distinct types; a back-valued correction MUST be an append | **Partial** — the two axes are distinct types and `valid_at` now lowers with its date (it discarded it until T-11, so a bitemporal view returned every row). `recorded_at` and `bitemporal` parse and set a flag nothing reads |
 | Capability-gated effects | Cumulative | A transition MUST name its capability in the effect row | **Built** |
-| Lineage and audit | Cumulative | `explain`, `reproduce e at #4200`, `impact` MUST be language constructs | **Built** |
-| Determinism (Appendix C.4) | Cumulative | No wall-clock read in a view predicate; no float in the money path; stable iteration order | **Built** — `IR013` |
+| Lineage and audit | Cumulative | `explain`, `reproduce e at #4200`, `impact` MUST be language constructs | **Specified** — all three parse and none lowers; the interpreter refuses each by name, `nilestream-lineage` is stubs, and H-S9 has no runner. They are constructs in the grammar and nothing else |
+| Determinism (Appendix C.4) | Cumulative | No wall-clock read in a view predicate; no float in the money path; stable iteration order | **Partial.** The three obligations hold and are tested — no clock in a lowering, no float in the money path, `BTreeMap` throughout — but the citation was wrong: `IR013` is the *reconstruction-path anchoring* rule and says nothing about determinism. A rule cited for a property it does not check is worse than no citation |
+
+**Status: Partial.** Four of the nine obligations are Built, three are Partial and two are
+Specified, by the rows above. This section had no status line at all while Part V counted it,
+so the summary was reading a number nobody had written down.
 
 ---
 
@@ -413,6 +428,74 @@ O(n) for a scan and O(s·n) for an indexed access, verified across three input s
 
 ---
 
+### L-3 Usable for general programming
+
+**The language MUST be usable for ordinary programming, not only for queries.**
+
+The falsifiable form: a non-trivial program that is not a query MUST be writable in Niles and
+runnable. `bootstrap/lexer.niles` (419 lines) and `bootstrap/parser.niles` (1,647 lines) are
+that program — a lexer and a recursive-descent parser, with an enum-of-nodes tree, executed by
+`niles-interp` and verified node for node against the reference implementation over 2,068
+lines of source including their own.
+
+*Acceptance test.* `crates/niles-interp/tests/bootstrap_parser.rs`, stages 1–3, and
+`bootstrap_stages.rs`. The **subset** is the limit and is stated rather than glossed: the
+imperative tier has no relational forms, `hold`, `resolve`, `fx` and `fixpoint` are refused by
+name, and `in_scope` asserts the front end's own source stays inside what it implements.
+**Status: Partial** — general enough for a compiler front end; no I/O, no concurrency, no
+allocator control, and a call-depth ceiling measured against the host stack rather than
+against Niles.
+
+---
+
+### L-4 Powerful for algebra
+
+**Relational algebra MUST be the core, and other algebras MUST be expressible as typed
+libraries rather than as new syntax.**
+
+Relational algebra is the IR (`niles-ir::operator`), and the surface lowers to it. The second
+half is the claim with content: linear algebra and its kin are arrays and functions over them,
+so adding one does not add a keyword. L-11/L-18 carries the array story.
+
+*Acceptance test.* Every operator in the IR has a denotation in the reference evaluator, and
+`crates/niles-lang/tests/sql_golden.rs` checks the two surfaces denote the same Z-set wherever
+both can be written. **Status: Built** for relational algebra; **Specified** for the array
+tier — there is no linear-algebra library in this repository, and calling it "a typed library
+over arrays" describes a design rather than an artefact.
+
+---
+
+### L-7 Query, filter, join, aggregate large datasets
+
+**The language MUST express the four ordinary shapes over data that does not fit in a
+statement.**
+
+*Acceptance test.* The SQL surface corpus: `crates/niles-lang/tests/golden/` carries 41 cases
+with committed expected circuits, and `sql_surface.rs`'s status table names every form as
+Built, Refused with a code, or Untested with a reason — a form nobody has written a case for
+is `Untested`, not assumed. **Status: Built**, with the fragment's edges stated: three
+constructs PostgreSQL accepts in §9.14.1's analytical workload — `count(*)`,
+`count(distinct …)`, `order by <aggregate>` — are outside it, and each is refused with a code
+rather than approximated.
+
+---
+
+### L-14 Compose clean functional code
+
+**Functions MUST compose without a runtime, and composition MUST be checked — including the
+effects that compose with them.**
+
+The content beyond L-2 is *effects*: a caller's effect row is the union of its own and its
+callees', so a signature cannot say "this function moves no money" over a body whose first
+line moves 850 dollars. That transitivity was added by T-11; before it, composition was
+checked for types and not for effects, which is the half that matters in a ledger.
+
+*Acceptance test.* `crates/niles-lang/tests/mutants/` — seventeen ill-typed programs, each
+refused by its own diagnostic code, each with a well-typed neighbour that is accepted. The
+effect-row fixpoint over mutually recursive functions is part of it. **Status: Built.**
+
+---
+
 ## Part IV — What this specification does not claim
 
 Stated because a specification that named no limits would be marketing.
@@ -424,21 +507,33 @@ Stated because a specification that named no limits would be marketing.
 3. **It does not claim WCOJ helps relational workloads.** Zero of 923 joins.
 4. **It does not claim to provide strict serializability.** That is the engine's, and
    §L-12 says so.
-5. **It does not claim the schedule verifier exists.** It is specified, it is the highest-
-   value unbuilt item here, and it is the one genuinely novel contribution in this document.
+5. **It does not claim the schedule verifier is finished — but it exists.** `niles-ir::schedule`
+   is built and `ROADMAP.md` Phase 5 is marked BUILT with its gate measured. This item said the
+   verifier did not exist, in a document whose own L-8/L-9 section describes the catalogue
+   checker that is it. What it does not claim is coverage: the checker decides the catalogue's
+   declared corners, and a schedule outside that shape is refused rather than approximated.
 6. **It does not claim the bootstrap is a compiler.** Two front-end stages — a lexer and a
    parser written in Niles, each verified against the reference implementation, the parser
-   node for node over its own 1,200-line source — are two rungs, not a ladder. The
+   node for node over its own 2,068-line source — are two rungs, not a ladder. The
    type-checker and the lowering pass are still Rust.
 
 ## Part V — Conformance summary
 
-| Part | Requirements | Built | Partial | Specified | Adopt |
-|---|---|---|---|---|---|
-| Execution model | L-1, L-2, L-6, L-16, L-17, L-13, L-22 | 1 | 1 | 4 | 1 |
-| Query semantics | L-5, L-8, L-9, L-10, L-11, L-15, L-18, L-19, L-23 | 4 | 1 | 3 | 1 |
-| Correctness | L-3, L-4, L-7, L-12, L-14, L-20, L-21, L-24 | 6 | 1 | 1 | 0 |
+**Generated. Do not edit.** Produced from the `### L-…` sections above by
+`cargo run -p niles-lang --bin gen-spec-conformance`, and checked by
+`crates/niles-lang/tests/spec_conformance.rs`.
 
-**Ten of twenty-four built with passing tests. Three partial. Nine specified. Two adopt.**
-The gap is the roadmap, and `ROADMAP.md` sequences it by measured value: unnesting first
-(510×), then adaptive tiering, then the schedule verifier.
+<!-- BEGIN:conformance -->
+
+| Part | Requirements | Built | Partial | Specified | Adopt |
+|---|---|---|--:|--:|--:|
+| The execution model | L-1, L-2, L-6, L-13, L-16, L-17, L-22 | 1 | 1 | 3 | 1 |
+| Query semantics | L-5, L-8, L-9, L-10, L-11, L-15, L-18, L-19, L-23 | 3 | 2 | 1 | 0 |
+| Correctness and the thesis findings | L-3, L-4, L-7, L-12, L-14, L-20, L-21, L-24 | 5 | 2 | 1 | 0 |
+
+**20 sections covering 24 requirement identifiers: 9 Built, 5 Partial, 5 Specified, 1 Adopt.** Counted from the sections themselves by `cargo run -p niles-lang --bin gen-spec-conformance`, because the hand-maintained version of this table counted four requirements that had no section and printed a total its own rows did not sum to.
+
+<!-- END:conformance -->
+
+The gap is the roadmap, and `ROADMAP.md` sequences it by measured value per regime —
+expressibility first, then tail reliability, then throughput.

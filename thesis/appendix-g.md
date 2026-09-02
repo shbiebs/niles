@@ -26,7 +26,7 @@ Per view and key range, the optimizer tracks: arrival rate λ_r; reuse-distance 
 
 **Mode selection (rent-or-buy).** Accumulate reconstruction spend for a range; when cumulative spend reaches the cost of maintaining it materialized, switch to `full` — the classical break-even rule, 2-competitive deterministically, with a randomized variant approaching e/(e−1). Downgrade uses the mirrored rule with hysteresis.
 
-**Eviction (cost-and-size aware, delay-weighted).** Rank candidates by expected aggregate delay rather than reuse probability alone: a credit proportional to ĉ_u · (1 + Z) · Φ(ℓ) per unit of residency, decremented as budget pressure rises — a Landlord-style discipline extended by the delayed-hit weighting. Plain LRU is implemented too, as the S7 comparison point.
+**Eviction (cost-and-size aware, delay-weighted).** Rank candidates by expected aggregate delay rather than reuse probability alone: a credit proportional to ĉ_u · (1 + Z) · Φ(ℓ) per unit of residency, decremented as budget pressure rises — a Landlord-style discipline extended by the delayed-hit weighting. Plain LRU is implemented too, as the H-S7 comparison point.
 
 **Spill and tier.** When a range's reconstruction cost is high but its residency cost is dominated by size rather than by update rate, `spilled` or `tiered` dominates both `demand` and `full`; the decision compares I/O cost against reconstruction cost directly.
 

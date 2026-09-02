@@ -1,0 +1,170 @@
+# The status of every claim in this thesis, in one place.
+#
+# WHY THIS FILE EXISTS
+#
+# The status of a claim was written in five places: §1.6's per-hypothesis lines, §1.9's
+# statement, §3.15's verification table, the Abstract's status paragraph, and Appendix K.3.
+# Five copies of a fact is five facts, and they had drifted: the Abstract said "no
+# measurements have been taken yet" while §9.1 opened with "measurements that were actually
+# taken", and §1.9 and K.3 disagreed about which hypotheses had runners.
+#
+# `thesis/include-results.py` renders this file into the generated blocks in those places, and
+# `crates/bank-bench/tests/thesis_drift.rs` fails the build if any of them is out of date. A
+# status changed here changes everywhere or nowhere.
+#
+# FIELDS
+#
+#   id         the identifier used in the text: H-F1..H-F4, H-S1..H-S10, C1..C6, SC7
+#   claim      one line, in the present tense
+#   status     one of: measured | partly measured | proved | not measured | refuted
+#   where      the section that reports it, or the section that states what would
+#   instrument for anything not measured: the thing that does not exist yet. Required.
+#              "A hypothesis with no runner is a hypothesis with no status" — naming the
+#              missing instrument is what keeps "not measured" from being a shrug.
+
+[[claim]]
+id = "H-F1"
+claim = "Streaming data is unbounded, and finite-assuming designs pay for it."
+status = "not measured"
+where = "§1.6.1, §3.16"
+instrument = "no long-horizon experiment exists: there is no live-generating source, no finite-first comparison stack, and no regression of per-answer cost on accumulated input. The mismatch catalogue of §3.16 is the argument; the slope is unmeasured."
+
+[[claim]]
+id = "H-F2"
+claim = "A relation is the integral of its changelog, and a changelog the derivative of a relation."
+status = "proved"
+where = "§3.16, and a property test asserting Z-set equality at every epoch"
+instrument = ""
+
+[[claim]]
+id = "H-F3"
+claim = "A database language and DBMS should be built for H-F1 and H-F2."
+status = "not measured"
+where = "§1.6.1, §4.7"
+instrument = "no comparative audit exists. §9.7 fixes the counting rules; nothing counts. The generality half is discharged by proof (§4.7) and the operational half — components, hand-written consistency code, admitted anomaly classes — has no runner."
+
+[[claim]]
+id = "H-F4"
+claim = "The aligned shape is an immutable, fully retained base plus dynamic derived state."
+status = "measured"
+where = "Theorem 4.1, and E1/E4's wipe-and-reconstruct comparisons"
+instrument = ""
+
+[[claim]]
+id = "H-S1"
+claim = "Partiality pays when memory is dear, at an interior budget."
+status = "refuted"
+where = "§9.3"
+instrument = "the directional half — 'the advantage grows with skew' — is refuted and restated; the memory-price condition is measured. The original wording is retained in Appendix J.9."
+
+[[claim]]
+id = "H-S2"
+claim = "The frontier is real and sits where the theorem says."
+status = "partly measured"
+where = "§9.3, §9.14.1, results/E16-band.md"
+instrument = "a crossover in memory price exists and was located. **The theorem's band was not derived and is not tested**, because Θ(Z) carries no stated constant anywhere in the thesis: a band computed with the constant at 1 and one computed with it at 10 differ by an order of magnitude in exactly the region the experiment measures. `results/E16-band.md` pre-registers the one-sided prediction that is derivable."
+
+[[claim]]
+id = "H-S3"
+claim = "The price of consistency is workload-shaped, not history-shaped, given a bounding mechanism."
+status = "measured"
+where = "§9.4.1, §9.4.3"
+instrument = ""
+
+[[claim]]
+id = "H-S4"
+claim = "Niles soundness holds in the implementation, not only in the calculus."
+status = "partly measured"
+where = "§9.14.2, crates/niles-lang/tests/calculus_mutants.rs"
+instrument = "seventeen mutants are refused, each by its own diagnostic code, and the well-typed neighbour of each is accepted. What does not exist is the *execution* half: no corpus of well-typed programs is run on Nilestream under crash-recovery, eviction and adversarial schedules with an oracle counting violations. The claim quantifies over executions and the evidence is about the checker."
+
+[[claim]]
+id = "H-S5"
+claim = "Generality does not forfeit the floor."
+status = "partly measured"
+where = "§9.13.3, §9.14.1"
+instrument = "the throughput half is measured, and two of §7's four contract rows are NOT MET. The client-compatibility half is not: `psql` drives the PostgreSQL surface in conformance tests, and there is no MySQL listener at all and no pass rate over an unmodified client's query set."
+
+[[claim]]
+id = "H-S6"
+claim = "Static checkability subsumes runtime policing."
+status = "not measured"
+where = "§1.6.2, §6.10.3"
+instrument = "no ported corpus and no trigger-based SQL baseline exist, so neither side of the comparison has been run. The residual-violation half is addressed by the mutant corpus; the **runtime-overhead** half — 'at no measurable runtime cost' — has no measurement of any kind."
+
+[[claim]]
+id = "H-S7"
+claim = "The optimizer beats fixed policies and approaches its competitive bound."
+status = "not measured"
+where = "§4.6, §9.3"
+instrument = "the adaptive optimizer of §4.6 is not built (see §4.6's own note: no estimator, no hysteresis schedule, no rent-or-buy break-even), and `offline.rs` is a planner rather than the dynamic program that would compute an offline optimum. There is nothing to measure a competitive ratio against."
+
+[[claim]]
+id = "H-S8"
+claim = "One engine and one language serve every workload class on a general relational core."
+status = "not measured"
+where = "§6.6, §11.3"
+instrument = "the falsifier is a non-financial conservation domain built with no kernel changes. It does not exist — `grep -ri inventory` over the crates, schemas and examples returns nothing — and §6.6 records what stands in its way: seven banking forms are keywords in the compiler's registry rather than a library over it."
+
+[[claim]]
+id = "H-S9"
+claim = "Lineage is complete and affordable."
+status = "not measured"
+where = "§1.6.2"
+instrument = "`nilestream-lineage` is stubs. There is no lineage mode to switch between, no audit corpus, and therefore no completeness figure and no overhead figure."
+
+[[claim]]
+id = "H-S10"
+claim = "Holds and hot accounts do not break the model."
+status = "not measured"
+where = "§9.4.4"
+instrument = "the contention experiment requires concurrency the instruments do not have: the research prototype is single-threaded, the ledger benchmark serialises through one sealer, and the daemon serves every query under one mutex. §9.4.4's flat hot-account column measures the absence of an experiment."
+
+[[claim]]
+id = "C1"
+claim = "The REV and its versioned partial-state algebra, with the epoch-anchored reconstruction theorem."
+status = "proved"
+where = "§4.1–4.2, and the certification invariant tested in both engines"
+instrument = ""
+
+[[claim]]
+id = "C2"
+claim = "The Eviction–Consistency Frontier Theorem."
+status = "proved"
+where = "§4.3"
+instrument = "the theorem is proved; its *band* is not derivable, for the reason under H-S2, and nothing in this thesis tests one."
+
+[[claim]]
+id = "C3"
+claim = "A complexity theory of consistency under partial materialization."
+status = "proved"
+where = "§4.4, with the checkpoint hypothesis made explicit"
+instrument = ""
+
+[[claim]]
+id = "C4"
+claim = "The consistency-effect calculus and the Niles soundness theorem."
+status = "proved"
+where = "§4.5, Appendix H"
+instrument = ""
+
+[[claim]]
+id = "C5"
+claim = "The adaptive materialization calculus and optimizer."
+status = "partly measured"
+where = "§4.6, Appendix I"
+instrument = "the calculus is stated. The optimizer is specified and not built — see H-S7 — and §4.6's Landlord claim is withdrawn: the three eviction rules in the repository are an LFU, a cost-and-delay credit rule, and fifty-two lines of unused scaffolding."
+
+[[claim]]
+id = "C6"
+claim = "A generality result for the language."
+status = "proved"
+where = "§4.7, Appendix H"
+instrument = ""
+
+[[claim]]
+id = "SC7"
+claim = "Per-key checkpoints, and the bound C/2 + 1 in expectation over anchors uniform between checkpoints."
+status = "measured"
+where = "§9.4.1"
+instrument = "promoted to a named contribution by measurement rather than stated in advance: without checkpoints the cost law of C3 is false, and the mechanism that makes it true was found by the experiment that refuted the claim without it."

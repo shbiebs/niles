@@ -21,6 +21,9 @@ gate: fmt lint generated test
 # review — which is the failure mode a status line has when nothing produces it.
 generated:
 	cargo run -q -p niles-lang --bin gen-sql-surface -- --check
+	cargo run -q -p niles-lang --bin gen-spec-conformance -- docs/SPEC-LANGUAGE.md --check
+	cargo run -q -p niles-lang --bin gen-keyword-ref -- docs/keywords.md
+	python3 thesis/include-results.py --check
 
 bootstrap:
 	@echo "bootstrap: three-stage self-hosting build (Appendix E) — not yet implemented"
@@ -41,6 +44,8 @@ bootstrap:
 # --release -p nilestream`; the E12 sweep is deterministic and its diff is meaningful.
 reproduce:
 	cargo run -q -p niles-lang --bin gen-sql-surface
+	cargo run -q -p niles-lang --bin gen-spec-conformance -- docs/SPEC-LANGUAGE.md
+	cargo run -q -p niles-lang --bin gen-keyword-ref -- docs/keywords.md
 	cargo test -p niles-lang --test solver_verdicts -- --ignored
 	cargo test -p nilestream-optimizer --test unnest_corpus -- --ignored
 	cargo test -p nilestream-server --test psql_conformance -- --ignored transcript
@@ -48,4 +53,4 @@ reproduce:
 	cargo run --release -p experiments -- e1 e4 e8
 	./target/release/nilestream sweep examples/demo_bank.niles ledger_balance > results/e12_phase_compiled.csv
 	python3 thesis/include-results.py
-	git diff --exit-code -- results/ thesis/ docs/SPEC-LANGUAGE.md
+	git diff --exit-code -- results/ thesis/ docs/SPEC-LANGUAGE.md docs/keywords.md

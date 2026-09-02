@@ -1672,3 +1672,160 @@ measured rewrites of §9.14.1/§11.3/§11.5.7, and F-10's status statements). Th
 
 Item 7 is the one that matters most, because it is a claim that has become *less* true
 during this run rather than merely staying stale.
+
+### [T-17] 2026-09-02T17:10Z RESULT the status of a claim was written in five places, and they disagreed
+
+`thesis/status.toml` is now the single source: 21 claims — 14 hypotheses and 7 contributions —
+each with a status, where it is reported, and, for anything not measured, **the instrument that
+does not exist**. `include-results.py` renders it into §1.9.1's table, the Abstract's status
+paragraph, §3.15's aggregate row and Appendix K.3, and `status_statement_is_single_sourced`
+fails the build if any of the four stops being generated or if a hypothesis §1.6 declares has
+no entry.
+
+The parser refuses a claim that is `not measured` and names no missing instrument. That rule is
+the point of the file rather than a nicety: *a hypothesis with no runner is a hypothesis with no
+status*, and "to be measured" without naming what is missing is a promise wearing a result's
+clothes.
+
+**Seven hypotheses have no runner at all** — H-F1, H-F3, H-S6, H-S7, H-S8, H-S9, H-S10 — and
+each row now says what would have to exist. Four more are partly measured with the unmeasured
+half named. That is the honest shape of this thesis's evidence and it is now stated in one
+place rather than reconstructed by a reader from five.
+
+### [T-17] 2026-09-02T17:15Z RESULT identifier normalisation: `H0/H-S1`, `C3/H2`, and an `H1` nobody defined
+
+Every claim identifier is now in one namespace: `H-F1…H-F4`, `H-S1…H-S10`, `C1…C6`, `SC7`.
+Before, the same claim appeared as `H0` and `S1` in one sentence, as `SC3` and `H2` in another,
+and §1.7.1's `C6` was called `H7` in Appendix J.
+
+The worst of them was Appendix J.12's `H1`, which appeared three times **and was defined
+nowhere in the document** — a section turning on what an identifier means, with no way for a
+reader to find out. It is now `H-conv`, defined where it is raised, and explicitly not a
+numbered hypothesis of §1.6: it is a conjecture this appendix leaves open, and the name says
+which kind of object it is.
+
+`no_bare_hypothesis_identifiers` greps every thesis file for the bare forms. Its own negative
+control is `the_bare_identifier_check_has_teeth`, which checks that `H-S3` passes, `S3` fails,
+and `CS1` — a citation to a study of 83 computer-science students — is not read as `S1`.
+
+### [T-17] 2026-09-02T17:20Z RESULT four claims about the wire surface, three of them false
+
+§11.5.4 listed "PostgreSQL wire protocol v3 including the extended query path, MySQL packet
+framing, and the TLS negotiation state machines for both" as things this repository implements.
+One of the three is true. The section now separates them:
+
+* **PostgreSQL v3 — served.** Simple and extended paths, both wired into the connection loop,
+  both driven by `psql`.
+* **MySQL — a codec with no listener.** Frames encode and decode; nothing calls them.
+* **TLS — a state machine with no provider.** `NoProvider` refuses every accept and the daemon
+  runs `TlsConfig::insecure()`.
+
+§11.5.3's list of what Nilestream "demonstrably provides beyond the PostgreSQL construction"
+loses *"cross-shard commit whose coordinator is itself a ledger group"*: `persist_decision`
+sets a boolean over an in-memory participant set, and the ledger group is a design stated in
+the module's own documentation. A list of what a repository demonstrably provides may not carry
+a design.
+
+§11.5.7's five rows are corrected in place — each now says what the module *is* rather than
+that it has tests — and §9.14.1 gains the limitation that explains one of its NOT MET verdicts:
+**the daemon serves every query under one mutex**, so a 5–10× multiple against a 48-core
+baseline is not reachable through a global lock. §9.13.3 gains the note that its group-commit
+scaling is measured on the ledger crate and would not appear through the server.
+
+### [T-17] 2026-09-02T17:25Z RESULT §4.6(d) claimed a policy no crate implements
+
+*"a Landlord-style policy attains the k/(k−h+1) resource-augmented bound, and this is the
+policy Nilestream implements rather than plain LRU."*
+
+Three artefacts carry an eviction rule and none is Landlord. `nilestream-optimizer/eviction.rs`
+is 52 lines of unused scaffolding with no Theorem 4.2 term. `nilestream-core`'s `CostAware`
+approximates reconstruction cost by 1, making it an LFU. `proto-engine`'s `CostAware` weights
+by cost *and* delayed-hit factor — **a different policy from the one sharing its name in the
+runtime**, so the two engines Chapter 9 compares are not evicting alike. The claim is withdrawn
+and §4.6's algorithm paragraph is marked *specified, not built*, with Φ(ℓ) labelled an assumed
+constant.
+
+### [T-17] 2026-09-02T17:30Z RESULT §6.6's "the compiler knows nothing about money" was false
+
+Seven banking forms are keywords in the compiler's own registry — `txn`, `hold`, `resolve`,
+`post`, `fx`, `conserve`, `idem` — each with an `Expr` variant and a case in the parser, the
+lowering and the effect calculus. `Money` is a type constructor the typechecker knows by name.
+A user library could not add any of them. What is general is the machinery underneath; what is
+banking-specific is the surface over it, which is a weaker and different claim.
+
+And §9.11's falsifier — a non-financial conservation domain built with no kernel changes — does
+not exist. `grep -ri inventory` over the crates, the schemas and the examples returns nothing,
+while §1.4 said Chapter 9 builds one. Both sentences are corrected and H-S8's status line says
+the same thing.
+
+### [T-17] 2026-09-02T17:35Z RESULT Appendix E quoted three figures and two were wrong
+
+`parser.niles` was "~1,050 lines" against a file of 1,647; the self-application corpus was
+"1,200 lines" against 2,068. The third — 127,165 bytes of tree — was correct, and I found that
+out by *inventing a replacement for it* and having the new test reject the invention. That is
+the whole argument for computing a figure rather than typing it, demonstrated on the person
+writing the fix.
+
+`stage_2_the_niles_front_end_parses_its_own_two_source_files` now measures all three and asserts
+the appendix carries them.
+
+### [T-17] 2026-09-02T17:40Z RESULT `SPEC-LANGUAGE.md` Part V counted four requirements that had no section
+
+F-35, confirmed on all counts. L-3, L-4, L-7 and L-14 were counted **Built** in Part V and had
+no section anywhere in the document. The prose said "Ten of twenty-four built" while its own
+rows summed to eleven. L-8/L-9 said `Specified` beside a section describing the catalogue
+checker that `ROADMAP.md` Phase 5 marks BUILT. Part IV item 5 said "It does not claim the
+schedule verifier exists" — of a verifier that exists.
+
+The four missing sections are written, each with its acceptance test and an honest status, and
+**Part V is now generated from the sections** by `gen-spec-conformance`, checked by
+`spec_conformance.rs`, and wired into `make generated` and `make reproduce`. A section with no
+`Status:` line is an error rather than a default, with its own negative control — because
+defaulting a missing status is exactly how L-8/L-9 came to read `Specified`.
+
+L-24's table loses three **Built** marks: bitemporality is Partial (`recorded_at` and
+`bitemporal` set a flag nothing reads), lineage is Specified (`explain`, `reproduce` and
+`impact` parse and none lowers), and determinism is Partial with its citation corrected —
+`IR013` is the reconstruction-path anchoring rule and says nothing about determinism. A rule
+cited for a property it does not check is worse than no citation.
+
+### [T-17] 2026-09-02T17:45Z RESULT §5.9 claimed two gates that do not exist
+
+*"the build gate refuses to produce results from a dirty tree"* and *"the figure generator
+refuses to emit a plot for which no template exists"*. Neither exists (F-42). §5.9 now lists
+what **is** enforced — generated blocks, `make reproduce`'s diff, the single-sourced status,
+the keyword and Appendix E figures — and says plainly that pre-registration here is a
+discipline visible in `git log` rather than a gate. `results/E16-band.md` was committed before
+the durable run and that ordering is the evidence; calling it a gate made an auditable claim
+out of an intention.
+
+### [T-17] 2026-09-02T17:50Z RESULT `ROADMAP.md`'s ordering rule was three rules read as one
+
+The rule reads "sequenced by measured value", and flat it contradicts its own table: unnesting
+is worth 510× and sits at phase 2, behind a phase-1 item whose cited result is a *reliability*
+figure. The three findings are in three regimes — expressibility, tail reliability, throughput
+— and are not commensurable.
+
+**Decision: the rule is restated per regime and the phase numbers are left alone.** They are
+cited by number in the thesis, in `SPEC-ENGINE.md` and in this document's own gates, and
+renumbering to satisfy an ordering argument would break every citation to fix a table of
+contents. The order actually taken already follows the corrected rule — phase 2 is built and
+phase 1 is not — which is the clearest evidence that the flat reading was never the one in use.
+
+Phase 1 is marked **NOT RUNNABLE** (its gate names the Join Order Benchmark, and neither JOB
+nor a general scan-and-join surface exists), and phases 3, 4, 6 and 7 are marked **OUT OF
+SCOPE** for this increment with a reason each. A status vocabulary is added so that BUILT, *not
+runnable* and *out of scope* are three different statements rather than three shades of silence.
+
+### [T-17] 2026-09-02T17:55Z TESTS niles 702/0/4 -> 729/0/5; thesis 101,216 words
+
+`python3 thesis/include-results.py --check` → 0.
+`cargo test -p bank-bench --test thesis_drift` → 8 passed, including `no_bare_hypothesis_identifiers`,
+`appendix_b_keywords_match_registry` and `status_statement_is_single_sourced`.
+`cargo test -p niles-lang --test spec_conformance` → 4 passed.
+`grep -nE "\b(F[1-4]|S([1-9]|10)|H[0-9])\b" thesis/*.md | grep -v "H-F\|H-S\|SC7\|C[1-6]\|H-conv"` → no matches.
+`grep -c "MISMATCH-F-07\|MISMATCH-F-08\|MISMATCH-F-09" docs/BUILD-LOG.md` → 3.
+`bash thesis/build.sh` → exit 0, `Niles-Thesis.docx` rebuilt, **101,216 words**.
+`make gate` → exit 0 in both repositories.
+
+### [T-17] 2026-09-02T17:56Z DONE the nine outputs of `BLOCKED-T-17-remainder` are closed

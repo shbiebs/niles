@@ -61,7 +61,7 @@ schema bank {
 
 `table` is ordinary relational data; `ledger` is the authoritative append-only base with a commit rule; `view` is a REV with a contract. Everything else — modules, generics, pattern matching, `let`, `fn` — is Rust-shaped.
 
-**Workload classes on one core.** The generality claim (S8, C6) is discharged by construction, and the constructions are these:
+**Workload classes on one core.** The generality claim (H-S8, C6) is discharged by construction, and the constructions are these:
 
 | Class | Construction |
 |---|---|
@@ -78,7 +78,11 @@ The point is not that one storage format serves everything — it does not — b
 
 Banking is a library over the general core, not a fork of it. A standard module `std::bank` defines accounts, postings, transactions, `Money⟨cur, scale⟩`, holds, authorization capabilities and the double-entry discipline, all expressed with type-system features available to any user library: currency-indexed types, linear halves, effect rows, and commit rules.
 
-The compiler knows nothing about money as such; it knows about indexed monoid rows, linear consumption and declared commit rules, and `std::bank` instantiates them. This is the falsifiable sense of "general core": Section 9.11 builds a non-financial conservation domain — inventory with serial-number conservation — using the same features and no kernel changes, with the change log audited as the falsifier.
+The design intent is that the compiler knows nothing about money as such; that it knows about indexed monoid rows, linear consumption and declared commit rules, and that `std::bank` instantiates them.
+
+**That is not what is implemented, and the sentence that used to stand here said it was.** Seven banking forms are **keywords in the compiler's own registry** — `txn`, `hold`, `resolve`, `post`, `fx`, `conserve`, `idem` — each with a variant in `Expr` and a case in the parser, the lowering and the effect calculus (`niles-lang/src/keywords.rs`, `ast.rs`). `Money` is a type constructor the typechecker knows by name, and the currency-row solver is a pass, not a library. A user library could not add any of them. What is general is the *machinery* underneath — indexed rows, linear types, effect rows, commit rules — and what is banking-specific is the surface syntax over it, which is a weaker and quite different claim.
+
+**And the falsifier has not been run.** Section 9.11's non-financial conservation domain — inventory with serial-number conservation — does not exist: `grep -ri inventory` over the crates, the schemas and the examples returns nothing. Until it does, the generality of the core is a design argument rather than a tested one, and H-S8's status line says so. See §11.3 for the falsifier as it stands.
 
 ## 6.7 Balance as a Function of Time
 
@@ -387,7 +391,7 @@ Achieving it requires closing sources of non-determinism explicitly, and one of 
 
 The trusted kernel is small: admission, validation and sealing; hash chaining; storage; frontier bookkeeping; and the IR executor's core operators. Outside it: UDFs (sandboxed, resource-metered, with no ambient authority — capabilities are passed explicitly, following the capability-based model of the Wasm system interface); surface compilers, whose output is re-checked by the IR verifier, so the kernel trusts the *verifier* rather than the compiler; the materialization optimizer, whose decisions are semantics-preserving by Theorem 4.5(a) and therefore cannot be a correctness dependency; and wire adapters, which translate and never touch state directly.
 
-The soundness theorem's trusted computing base is thus the kernel plus the IR verifier — stated explicitly so that the S4 campaign attacks the right boundary, and so that adding a domain library or an optimizer heuristic provably does not enlarge it.
+The soundness theorem's trusted computing base is thus the kernel plus the IR verifier — stated explicitly so that the H-S4 campaign attacks the right boundary, and so that adding a domain library or an optimizer heuristic provably does not enlarge it.
 
 ## 6.17 Lineage and Traceability
 
@@ -395,19 +399,19 @@ Full traceability of operations, changes and states is a system requirement (Sec
 
 Three modes are declarable per view: `off` (anchors only — every answer still carries the epoch it is correct as of); `key` (which base keys contributed); and `full` (the how-provenance polynomial retained). Provenance rides the same circuits as values, because Z-sets are a semiring instance and the factorization theorem guarantees that computing the most general annotation once permits every other semantics to be recovered by homomorphism [Green et al., PODS '07].
 
-Three operational capabilities follow. **Explain**: for any served answer, return the base rows and the derivation that produced it. **Reproduce**: recompute any published (answer, epoch) from the prefix and compare byte-for-byte — the mechanical form of an audit. **Impact**: given a base row, identify the derived entries whose provenance includes it, which is what makes correction workflows (a reversing entry) analyzable rather than hopeful. Costs are measured under S9, with the published ~30% figure for interactive dataflow lineage as the order-of-magnitude reference point rather than a target.
+Three operational capabilities follow. **Explain**: for any served answer, return the base rows and the derivation that produced it. **Reproduce**: recompute any published (answer, epoch) from the prefix and compare byte-for-byte — the mechanical form of an audit. **Impact**: given a base row, identify the derived entries whose provenance includes it, which is what makes correction workflows (a reversing entry) analyzable rather than hopeful. Costs are measured under H-S9, with the published ~30% figure for interactive dataflow lineage as the order-of-magnitude reference point rather than a target.
 
 ## 6.18 Checkpoints as a Declared View Property
 
 Theorem 3.7 makes the per-key checkpoint interval C the constant in the reconstruction bound, and §9.4.1 measures it: at C = 16 reconstruction cost was flat at ≈ 8.5 base rows across a 64× increase in history, against a predicted C/2 + 1 = 9. C is therefore a *contract term*, declared per view alongside consistency and materialization mode, and not a hidden engine default — because choosing it is choosing a point on the reconstruction-cost/checkpoint-storage trade, and the theory prices that choice.
 
-Checkpoints are derived state: each is recomputable from the base, so they are evictable and rebuildable and stand outside the retention guarantee, exactly as views do. This is the base/derived split of F4 applied one level down, to the reconstruction path itself.
+Checkpoints are derived state: each is recomputable from the base, so they are evictable and rebuildable and stand outside the retention guarantee, exactly as views do. This is the base/derived split of H-F4 applied one level down, to the reconstruction path itself.
 
 ## 6.19 The Materialization Optimizer in the Runtime
 
 Contribution 5's algorithm lives here. Per view and key range, the optimizer maintains estimates of arrival rate, reuse distance, reconstruction cost, reconstruction *latency* and update rate; computes the rent-or-buy break-even for mode selection and a cost-and-size-aware credit for eviction; weights both by the contract multiplier Φ(ℓ) and by the delayed-hit factor; and moves ranges between modes on a hysteresis schedule.
 
-Three properties make this safe to run continuously. It cannot change what an answer *is* (Theorem 4.5(a)). It cannot violate a contract, because contract satisfaction is a constraint of the assignment problem rather than an objective term. And it is *observable*: every mode transition is logged with the estimates that caused it, so a surprising decision is diagnosable rather than mysterious. Appendix I gives the algorithm, the estimators, and the offline dynamic program used to compute the optimum against which S7 measures it.
+Three properties make this safe to run continuously. It cannot change what an answer *is* (Theorem 4.5(a)). It cannot violate a contract, because contract satisfaction is a constraint of the assignment problem rather than an objective term. And it is *observable*: every mode transition is logged with the estimates that caused it, so a surprising decision is diagnosable rather than mysterious. Appendix I gives the algorithm, the estimators, and the offline dynamic program used to compute the optimum against which H-S7 measures it.
 
 ## 6.20 End-to-End Encryption: Threat Model and Requirements
 

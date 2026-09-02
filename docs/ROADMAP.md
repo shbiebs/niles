@@ -16,6 +16,26 @@ The single largest available win in the optimizer literature is not a better est
 is **restricting the plan space**: Leis et al. cut queries running >2× slower from 38% to
 under 4% by disabling risky nested loops. That is phase 1.
 
+### The ordering rule, restated per regime — and what it says about this numbering
+
+The rule above reads "sequenced by measured value", and taken flat it is inconsistent with
+its own table: subquery unnesting is worth 510× and sits at phase 2, behind a phase-1 item
+whose cited result is a *reliability* figure rather than a speed one. **The rule is not one
+rule.** The three findings live in three regimes and are not commensurable:
+
+| Regime | The measurement | What it orders |
+|---|---|---|
+| **Expressibility** | Unnesting is 510× — and, in this engine, a correlated subquery has no delta rule at all, so unnesting is what makes it *servable as a view* | First, always. A rewrite that changes what can be asked outranks one that changes how fast |
+| **Tail reliability** | Leis: >2×-slower queries from 38% to under 4% | Second. It removes catastrophes rather than adding throughput, and a catastrophe is what a user reports |
+| **Throughput** | Join ordering 7%; compiled-vs-vectorized a wash; SIMD 1.4× | Last, and by the margin the numbers show |
+
+**The decision, recorded rather than silently applied:** the rule is restated per regime and
+the phase *numbers* are left alone, because they are cited by number in the thesis, in
+`SPEC-ENGINE.md` and in this document's own gates, and renumbering to satisfy an ordering
+argument would break every citation to fix a table of contents. The order actually taken
+already follows the corrected rule — **phase 2 is built and phase 1 is not** — which is the
+clearest evidence that the flat reading was never the one being used.
+
 ---
 
 ## The eight phases
@@ -23,7 +43,19 @@ under 4% by disabling risky nested loops. That is phase 1.
 Each phase states its gate — the measurement that must hold to proceed — and its kill
 criterion, the result that would end that line of work rather than prompt another attempt.
 
-### Phase 1 — Plan-space restriction · *the cheapest large win*
+**Status vocabulary.** **BUILT** means the phase's build item exists with tests and its gate
+has been measured. *Not runnable* means the build item may exist and the **gate cannot be
+evaluated**, because the instrument it names does not. *Out of scope for this increment*
+means neither is attempted and no claim about it is made anywhere.
+
+### Phase 1 — Plan-space restriction · *the cheapest large win* · **NOT RUNNABLE**
+
+**Not runnable, and the reason is the gate rather than the build.** The gate is stated on the
+Join Order Benchmark, and this repository has neither JOB nor a surface that could run it: the
+lowered fragment has no general scan-and-join query path exposed over the wire, and §9.14.1's
+analytical row already records three PostgreSQL statements — `count(*)`, `count(distinct …)`,
+`order by <aggregate>` — as outside it. A phase whose gate cannot be evaluated is not a phase
+in progress; it is a phase waiting on an instrument, and this line says which one.
 
 **Build.** Refuse any plan containing an unbounded nested loop. Enable runtime hash-table
 resizing. Both go into `join_order.rs`, which already has `DPccp` and the three-term cost
@@ -126,7 +158,9 @@ that a warm view is fast while one at 9% says reconstruction is — and the seco
 
 ---
 
-### Phase 3 — Adaptive tiering · *what makes OLTP possible at all*
+### Phase 3 — Adaptive tiering · *what makes OLTP possible at all* · **OUT OF SCOPE**
+
+*Out of scope for this increment: the adaptive optimizer it depends on is specified and not built (thesis §4.6), and H-S7 has no runner.*
 
 **Build.** Three tiers: bytecode unconditionally, direct machine-code emission on repetition,
 optimising back end only past ~100 ms of measured runtime.
@@ -154,7 +188,9 @@ mistake.
 
 ---
 
-### Phase 4 — Columnar storage: PAX leaves in the B⁺-tree · *the analytical order of magnitude*
+### Phase 4 — Columnar storage: PAX leaves in the B⁺-tree · *the analytical order of magnitude* · **OUT OF SCOPE**
+
+*Out of scope for this increment: no storage engine work is attempted, and §9.14.1's analytical NOT MET is attributed to an unkeyed `group by` materialising the whole base rather than to layout.*
 
 **Build.** Adopt Umbra's layout. Not invent — adopt.
 
@@ -211,7 +247,9 @@ side condition.
 
 ---
 
-### Phase 6 — WCOJ · *parity, not a differentiator*
+### Phase 6 — WCOJ · *parity, not a differentiator* · **OUT OF SCOPE**
+
+*Out of scope for this increment, and the roadmap's own table is the argument: WCOJ was chosen 0 times out of 923 joins on relational workloads.*
 
 **Build.** Adopt Freitag's hybrid optimizer approach.
 
@@ -225,7 +263,9 @@ faster and the evaluation chapter must not imply it does.
 
 ---
 
-### Phase 7 — Distributed execution over a real network
+### Phase 7 — Distributed execution over a real network · **OUT OF SCOPE**
+
+*Out of scope for this increment. `distributed.rs` and `cross_shard.rs` are models — nothing in the server or the experiments calls either, and there is no network anywhere in this repository (thesis §11.5.3).*
 
 **Build.** Nothing new. Deploy what exists.
 

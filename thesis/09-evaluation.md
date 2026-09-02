@@ -61,7 +61,7 @@ Two things about that comparison were wrong in the previous revision and are wor
 *Table 9.1 — Correctness under adversarial interleaving of commit, read, evict, upquery and
 replay. Every check passed on every seed.*
 
-Each column corresponds to a named guarantee. **Divergences = 0** is the executable form of the reconstruction theorem (SC1): across roughly 13,600 reconstructions, no reconstructed value ever differed from the independent fold at the same anchor. **Conservation = OK** is the per-currency system total remaining exactly zero at the end of every run, which is the conservation corollary under continuous eviction and refill. **Rebuild mismatches = 0** is the reconstruction-equivalence property of F4: the entire derived layer was wiped and rebuilt from the retained base alone, and all 40 balances matched their pre-wipe values exactly. **Miss ≠ 0 = OK** is the absence-lattice discipline: after a total wipe, reading a funded account returned its correct non-zero balance *via reconstruction*, not a silent zero from an empty slot. **Idempotent rejects = 103** confirms that every replayed key was refused rather than double-posted.
+Each column corresponds to a named guarantee. **Divergences = 0** is the executable form of the reconstruction theorem (C1): across roughly 13,600 reconstructions, no reconstructed value ever differed from the independent fold at the same anchor. **Conservation = OK** is the per-currency system total remaining exactly zero at the end of every run, which is the conservation corollary under continuous eviction and refill. **Rebuild mismatches = 0** is the reconstruction-equivalence property of H-F4: the entire derived layer was wiped and rebuilt from the retained base alone, and all 40 balances matched their pre-wipe values exactly. **Miss ≠ 0 = OK** is the absence-lattice discipline: after a total wipe, reading a funded account returned its correct non-zero balance *via reconstruction*, not a silent zero from an empty slot. **Idempotent rejects = 103** confirms that every replayed key was refused rather than double-posted.
 
 Separately, mutating a single committed posting broke chain verification, as required: tamper-evidence is detection relative to a retained digest, and the digest detected it.
 
@@ -73,7 +73,7 @@ The methodological consequence, adopted in §9.6, is that the correctness progra
 
 ### 9.2.3 Stream–relation duality (measured)
 
-The duality of F2 was checked executably as well as proved. For each of five seeds, a 200-epoch changelog of signed Z-set deltas over 50 keys was generated; the state sequence was obtained by integration, then differentiated back to a changelog, then re-integrated, and the two state sequences were compared as canonical Z-sets — equal supports, equal weights — at *every* epoch.
+The duality of H-F2 was checked executably as well as proved. For each of five seeds, a 200-epoch changelog of signed Z-set deltas over 50 keys was generated; the state sequence was obtained by integration, then differentiated back to a changelog, then re-integrated, and the two state sequences were compared as canonical Z-sets — equal supports, equal weights — at *every* epoch.
 
 **1,000 epoch-by-epoch comparisons; 0 mismatches.**
 
@@ -203,9 +203,9 @@ WHAT IS NOW SATISFIED
 
 **Finding 2 — The optimal budget is interior, not extremal.** At memory price 0.002 and *s* = 0.5 the ratio runs 0.90 (50% budget) → 0.80 (25%) → **0.79 (10%)** → 0.82 (5%) → 0.87 (2%) → 0.90 (1%). Too large a budget wastes memory; too small a budget thrashes, and reconstruction cost explodes faster than memory savings accrue. The existence of an interior optimum is what makes an adaptive materialization optimizer a necessity rather than an ornament — a fixed policy at either extreme is measurably wrong.
 
-**Finding 3 — the refutation.** Hypothesis H0/S1, as stated in Chapter 1 of the previous draft, held that *"partiality pays on skew"* and that the advantage *grows* with skew. **The measurements contradict this.** Table 9.2 shows why: as *s* rises, full materialization touches fewer distinct keys, so its own footprint shrinks — resident-entry-epochs for full fall from 17.6 M at *s* = 0.5 to 3.9 M at *s* = 1.3, while partial's stay near 1.45 M. The *ratio* therefore gets **worse** for partial as skew increases, from 12:1 down to 2.7:1 (Table 9.2), and the corresponding memory-ratio measurement in §9.3.5 shows the same monotone deterioration. Skew simultaneously reduces partial's reconstruction penalty (36,690 → 4,480 rows read), so the two effects oppose one another and the net result depends on the memory price — which is precisely why the diagram must be swept over price rather than plotted at one.
+**Finding 3 — the refutation.** Hypothesis H-S1, as stated in Chapter 1 of the previous draft, held that *"partiality pays on skew"* and that the advantage *grows* with skew. **The measurements contradict this.** Table 9.2 shows why: as *s* rises, full materialization touches fewer distinct keys, so its own footprint shrinks — resident-entry-epochs for full fall from 17.6 M at *s* = 0.5 to 3.9 M at *s* = 1.3, while partial's stay near 1.45 M. The *ratio* therefore gets **worse** for partial as skew increases, from 12:1 down to 2.7:1 (Table 9.2), and the corresponding memory-ratio measurement in §9.3.5 shows the same monotone deterioration. Skew simultaneously reduces partial's reconstruction penalty (36,690 → 4,480 rows read), so the two effects oppose one another and the net result depends on the memory price — which is precisely why the diagram must be swept over price rather than plotted at one.
 
-The corrected hypothesis, which the data support, is: **partial materialization pays when memory is expensive relative to reconstruction, at an interior budget, and skew determines the *shape* of the trade rather than its direction.** Chapter 1's H0 is restated accordingly, and the earlier phrasing is retained in Appendix J with the reason it was wrong, because a hypothesis quietly edited after the fact is not a hypothesis.
+The corrected hypothesis, which the data support, is: **partial materialization pays when memory is expensive relative to reconstruction, at an interior budget, and skew determines the *shape* of the trade rather than its direction.** Chapter 1's H-S1 is restated accordingly, and the earlier phrasing is retained in Appendix J with the reason it was wrong, because a hypothesis quietly edited after the fact is not a hypothesis.
 
 ### 9.3.5 Resident state across skew
 
@@ -228,7 +228,7 @@ The seed-to-seed range is negligible, so the trend is not noise. The two columns
 
 ### 9.4.1 Is the cost of a read history-shaped or workload-shaped? — a falsification, a refinement, and a fix
 
-This is the thesis's cost-law claim (SC3/H2): *the marginal price is workload-shaped, not history-shaped*. It was tested in three stages, and the first two refuted it.
+This is the thesis's cost-law claim (C3): *the marginal price is workload-shaped, not history-shaped*. It was tested in three stages, and the first two refuted it.
 
 **Stage 1 (E5) — fixed key space.** With 2,000 accounts held fixed and total writes swept, base rows read per reconstruction were:
 
@@ -444,13 +444,13 @@ Constructive tests, unchanged: the banking portfolio implemented in the domain l
 
 | Claim | Status after this chapter |
 |---|---|
-| SC1 reconstruction equivalence | **Corroborated** — 0 divergences against an *independent* oracle at ~3,330 historical anchors per seed, 0 rebuild mismatches, 5 seeds (§9.2.1) |
+| C1 reconstruction equivalence | **Corroborated** — 0 divergences against an *independent* oracle at ~3,330 historical anchors per seed, 0 rebuild mismatches, 5 seeds (§9.2.1) |
 | Conservation under eviction/refill | **Corroborated** — per-currency total exactly 0, 5 seeds (§9.2.1) |
-| F2 stream–relation duality | **Corroborated** — 1,000 epochs, 0 mismatches (§9.2.3) |
+| H-F2 stream–relation duality | **Corroborated** — 1,000 epochs, 0 mismatches (§9.2.3) |
 | Absence discipline (miss ≠ 0) | **Corroborated** (§9.2.1) |
-| SC2 frontier exists | **Corroborated and located** — crossover between memory prices 0.0005 and 0.002 (§9.3.3) |
-| H0/S1 "partiality pays on skew" | **Refuted as stated**; restated as a memory-price condition with an interior optimum (§9.3.4) |
-| SC3 cost is workload- not history-shaped | **Refuted as stated; restored under checkpointing** with constant C/2 + 1 (§9.4.1) |
+| C2 frontier exists | **Corroborated and located** — crossover between memory prices 0.0005 and 0.002 (§9.3.3) |
+| H-S1 "partiality pays on skew" | **Refuted as stated**; restated as a memory-price condition with an interior optimum (§9.3.4) |
+| C3 cost is workload- not history-shaped | **Refuted as stated; restored under checkpointing** with constant C/2 + 1 (§9.4.1) |
 | Consistency rung cost | **Refuted as stated; re-measured.** The reported 66× in deltas applied was the count of deltas a defective batching loop discarded. Corrected: ~66× in maintenance *passes*, 1.67× in deltas, and **2.5× more base rows read** on the lax rung — the tax is not absent from the read path (§9.4.3, Appendix J.16) |
 | Cost-aware eviction beats LRU | **Partly corroborated** — 31% on reconstruction work, 4% on aggregate delay (§9.4.2) |
 | Hot-account contention | **Not measured**; instrument cannot (§9.4.4, §9.9) |
@@ -556,6 +556,8 @@ Third, **full materialization is never uniquely optimal at any price tested**, a
 
 The honest reading is narrow. This says a single sealer with group commit is a batching opportunity rather than a hard ceiling *at this scale, on this machine, with this payload*. It says nothing about a distributed commit, nothing about contention on a hot account (the sealer serialises everything, so there is no contention to observe), and nothing about how either figure compares to a production database. Those cells remain *to be measured*.
 
+**And this table measures the ledger crate, not the server.** The threads here drive `nilestream-ledger` directly. The daemon that serves the wire protocol holds an `Arc<Mutex<RevEngine>>` and takes it once per query, so a client-side version of this experiment would measure the mutex rather than the sealer, and the scaling above would not appear. The two are different artefacts and the distinction is load-bearing: the group-commit result is about the write path's *design*, and the server's concurrency is an implementation limitation recorded in §9.14.1.
+
 ### 9.13.4 What building the compiler found in the thesis
 
 Running the checker over this thesis's own worked program — the one printed in Appendix B.20 — produced four errors. Each is reported here because each is a case of the instrument catching something the argument had missed, which is the only reason to build an instrument.
@@ -624,7 +626,9 @@ Both sides are driven over the PostgreSQL wire protocol *through the same client
 
 **Two rows say NOT MET, and that is the result.** The engine is 0.93× PostgreSQL on durable OLTP against a contract of 5–10×, and 0.13× on the analytical workload against a contract of 10–12×. Both are attributed in `docs/BENCHMARK.md`'s enumerated *Known limitations of the Nilestream path*, and neither is attributed to the engine's correctness:
 
-* **OLTP** — items 3 and 6. The simple query path compiles every statement afresh (parse, resolve, typecheck, lower, verify), and this machine has two cores against a contract written for a 48-core baseline figure. Not the ledger: the `durable` row shows the write path at parity with PostgreSQL's, on the same device, at the same `fsync` cost, with `synchronous_commit = on` on one side and `SyncPolicy::Always` on the other.
+* **OLTP** — items 3 and 6, and a third that belongs on the record. The simple query path compiles every statement afresh (parse, resolve, typecheck, lower, verify), and this machine has two cores against a contract written for a 48-core baseline figure. The third is structural: **the daemon serves every query under one mutex.** `daemon.rs` holds an `Arc<Mutex<RevEngine>>` and takes it per query, on a thread-per-connection model, so the engine is concurrent in its connections and serial in its work — a design that cannot use a second core for reads over an immutable base, which is precisely the coordination-free read §7.5 claims. A 5–10× multiple against a 48-core baseline is not reachable through a global lock, and that is a property of this implementation rather than of the theory. It is listed here rather than in the future work because a limitation that explains a NOT MET belongs beside the NOT MET.
+
+  Not the ledger, in any case: the `durable` row shows the write path at parity with PostgreSQL's, on the same device, at the same `fsync` cost, with `synchronous_commit = on` on one side and `SyncPolicy::Always` on the other.
 * **Analytical** — item 4. An unkeyed `group by` materialises the whole base per query. The engine is doing *more work* than PostgreSQL rather than the same work more slowly, and where that trade pays is what §9.3's phase diagram characterises. Three of PostgreSQL's five analytical statements are also outside the lowered fragment — `count(*)`, `count(distinct …)`, `order by <aggregate>` — so the row compares five statements against three, and each missing construct is named with its reason rather than the fragment being widened during a benchmark.
 
 What this table supports is therefore **an engine with a measured baseline and a characterized gap**, and not a performance claim. §7's contract remains the target; two of its four rows are unmet at this commit, by a factor named against a listed cause.

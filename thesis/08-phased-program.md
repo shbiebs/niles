@@ -26,15 +26,15 @@ Two questions must survive contact with hardware before any language exists.
 
 **Deliverable.** The full spine on one node — ledger, IR, Nilestream-Core, native protocol — running the conservation suite and a reduced benchmark, with the stage-0 compiler covering the declarative and transaction tiers.
 
-**Evaluation.** Differential testing against the oracle; the first round of the S4 fault campaign; the floor re-measured through the real pipeline; and the first empirical check of the §4.2 claim that anchoring removes the need for eviction-notice propagation and anomaly-avoidance protocol.
+**Evaluation.** Differential testing against the oracle; the first round of the H-S4 fault campaign; the floor re-measured through the real pipeline; and the first empirical check of the §4.2 claim that anchoring removes the need for eviction-notice propagation and anomaly-avoidance protocol.
 
 *Kill criterion K2:* any conservation violation not attributable to a fixable implementation defect — that is, a model-level counterexample — halts the program until the theory is revised. This is the criterion the thesis most wants to be tested, because it is the one that would matter most if it fired.
 
 ## 8.4 Phase 3 — Adaptive Materialization, Optimizer, and Language Evaluation
 
-**Deliverables.** The optimizer of Contribution 5 live, with its estimators and the offline dynamic program that grades it; the full consistency ladder served; the S1, S2, S3 and S7 experiment suites; the SQL surface and both wire protocols with the compatibility corpus; the lineage subsystem at all three modes; and the language-scope corpus — the banking products of Section 6.21 plus the non-financial domain library and the ported SQL workloads.
+**Deliverables.** The optimizer of Contribution 5 live, with its estimators and the offline dynamic program that grades it; the full consistency ladder served; the H-S1, H-S2, H-S3 and H-S7 experiment suites; the SQL surface and both wire protocols with the compatibility corpus; the lineage subsystem at all three modes; and the language-scope corpus — the banking products of Section 6.21 plus the non-financial domain library and the ported SQL workloads.
 
-**Evaluation.** The phase diagram (Section 9.6) drawn from real runs, with Z reported at every point; the optimizer measured against every fixed policy and against the offline optimum; S6's enforcement comparison; the compatibility corpus green or its gaps enumerated.
+**Evaluation.** The phase diagram (Section 9.6) drawn from real runs, with Z reported at every point; the optimizer measured against every fixed policy and against the offline optimum; H-S6's enforcement comparison; the compatibility corpus green or its gaps enumerated.
 
 This phase produces the thesis's core empirical chapters, and its templates are frozen before it begins (Section 5.9).
 
@@ -64,7 +64,7 @@ The protocol's novelty budget is deliberately small — it is two-phase commit h
 
 ## 8.7 Fault Model and Its Boundaries
 
-**In scope:** crash-stop failures, media loss up to the replication factor, network partitions, message loss, duplication and reordering, and the injected schedules of the S4 campaign.
+**In scope:** crash-stop failures, media loss up to the replication factor, network partitions, message loss, duplication and reordering, and the injected schedules of the H-S4 campaign.
 
 **Out of scope, declared:** Byzantine replicas — the hash chain provides tamper *evidence* relative to a retained digest, not Byzantine tolerance, and a BFT profile is future work; correlated loss of all replicas, mitigated by cold-storage migration rather than by protocol; and clock attacks beyond what epoch ordering already ignores, since epochs never trust wall clocks for ordering.
 

@@ -65,7 +65,7 @@ A proved expressiveness result is therefore a genuinely novel artifact in this s
 
 ## H.7 Workload-Class Coverage
 
-Generality of the *engine*, as distinct from the language, is discharged constructively (S8). Each class is a REV over the same base with the same contract vocabulary; what differs is the circuit and the resident representation the optimizer chooses.
+Generality of the *engine*, as distinct from the language, is discharged constructively (H-S8). Each class is a REV over the same base with the same contract vocabulary; what differs is the circuit and the resident representation the optimizer chooses.
 
 | Class | Circuit | Resident representation | Precedent adopted |
 |---|---|---|---|

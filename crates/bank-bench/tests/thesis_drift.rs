@@ -97,3 +97,225 @@ fn the_refuted_rung_table_is_retained_in_appendix_j() {
         );
     }
 }
+
+// ── T-17: identifiers, the status statement, and Appendix B's keywords ──────────────
+
+/// Every place that names a hypothesis or a contribution uses the one namespace.
+///
+/// `F1…F4`, `S1…S10`, `H0`, `H1`, `H2`, `H7`, `SC1…SC6` all named claims in earlier drafts,
+/// and several named the *same* claim under two spellings — `H0/S1`, `SC3/H2`, `H7` for what
+/// §1.7.1 calls C6. A reader tracing a claim through the document had to know which era each
+/// section was written in, and Appendix J's `H1` had no definition anywhere at all.
+///
+/// The namespace is now `H-F1…H-F4`, `H-S1…H-S10`, `C1…C6`, `SC7`, plus `H-conv` for the
+/// conjecture Appendix J.12 raises and leaves open. This test greps for the bare forms.
+#[test]
+fn no_bare_hypothesis_identifiers() {
+    let dir = repo_root().join("thesis");
+    // A bare identifier: not preceded by `-` (so `H-F1` and `H-S10` pass) and not part of a
+    // longer word (so `CS1` in a citation passes).
+    let bad = regex_lite(&["F1", "F2", "F3", "F4", "H0", "H1", "H2", "H7"]);
+    let bad_s: Vec<String> = (1..=10).map(|i| format!("S{i}")).collect();
+    let bad_sc: Vec<String> = (1..=6).map(|i| format!("SC{i}")).collect();
+    let mut offenders = Vec::new();
+    for entry in std::fs::read_dir(&dir).expect("the thesis directory is readable") {
+        let path = entry.expect("a directory entry").path();
+        if path.extension().and_then(|s| s.to_str()) != Some("md") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("readable");
+        for (n, line) in text.lines().enumerate() {
+            for id in bad
+                .iter()
+                .map(String::as_str)
+                .chain(bad_s.iter().map(String::as_str))
+                .chain(bad_sc.iter().map(String::as_str))
+            {
+                if let Some(at) = find_bare(line, id) {
+                    offenders.push(format!(
+                        "{}:{}: bare `{id}` at column {at}",
+                        path.file_name().and_then(|s| s.to_str()).unwrap_or("?"),
+                        n + 1
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "these identifiers are outside the `H-F`/`H-S`/`C`/`SC7` namespace:\n  {}",
+        offenders.join("\n  ")
+    );
+}
+
+fn regex_lite(ids: &[&str]) -> Vec<String> {
+    ids.iter().map(|s| s.to_string()).collect()
+}
+
+/// The first bare occurrence of `id` in `line`, or `None`.
+///
+/// "Bare" means the character before is not `-` or alphanumeric or `_`, and the character
+/// after is not alphanumeric or `_`. That admits `H-F1` and `SC7` and rejects `F1` standing
+/// alone; it also admits `CS1` (a citation) because the `S1` inside it is preceded by `C`.
+fn find_bare(line: &str, id: &str) -> Option<usize> {
+    let b = line.as_bytes();
+    let idb = id.as_bytes();
+    let mut i = 0;
+    while i + idb.len() <= b.len() {
+        if &b[i..i + idb.len()] == idb {
+            let before_ok = i == 0
+                || !(b[i - 1] == b'-' || b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_');
+            let after = i + idb.len();
+            let after_ok =
+                after >= b.len() || !(b[after].is_ascii_alphanumeric() || b[after] == b'_');
+            if before_ok && after_ok {
+                return Some(i);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// The bare-identifier check can actually fail.
+#[test]
+fn the_bare_identifier_check_has_teeth() {
+    assert!(find_bare("the H-S3 hypothesis", "S3").is_none());
+    assert!(find_bare("the S3 hypothesis", "S3").is_some());
+    assert!(find_bare("83 CS1 students", "S1").is_none());
+    assert!(find_bare("H-S10 and H-S1", "S1").is_none());
+    assert!(find_bare("SC7 stays", "SC7").is_some());
+}
+
+/// The status of a claim is stated in one file and rendered everywhere else.
+///
+/// Five paragraphs used to state it independently and they had drifted: the Abstract said no
+/// measurements had been taken while §9.1 opened by reporting some. This asserts that each of
+/// the four rendering sites carries a generated block sourced from `thesis/status.toml`, that
+/// the file covers every hypothesis §1.6 declares, and that nothing claiming a status is left
+/// outside the mechanism.
+#[test]
+fn status_statement_is_single_sourced() {
+    let root = repo_root();
+    let toml = std::fs::read_to_string(root.join("thesis/status.toml"))
+        .expect("thesis/status.toml must exist; it is the single source of every status");
+
+    // Every hypothesis §1.6 declares has an entry.
+    let intro = std::fs::read_to_string(root.join("thesis/01-introduction.md")).expect("readable");
+    let mut declared = Vec::new();
+    for line in intro.lines() {
+        if let Some(rest) = line.strip_prefix("**H-") {
+            if let Some(id) = rest.split([' ', '\u{2014}', '*']).next() {
+                declared.push(format!("H-{id}"));
+            }
+        }
+    }
+    declared.sort();
+    declared.dedup();
+    assert!(
+        declared.len() >= 14,
+        "§1.6 should declare fourteen hypotheses; found {declared:?}"
+    );
+    for id in &declared {
+        assert!(
+            toml.contains(&format!("id = \"{id}\"")),
+            "{id} is declared in §1.6 and has no entry in status.toml, so its status is \
+             whatever the prose happens to say"
+        );
+    }
+
+    // Every rendering site carries the block.
+    for (file, marker) in [
+        ("thesis/01-introduction.md", "status-table"),
+        ("thesis/00-front-matter.md", "status-summary"),
+        ("thesis/03-theoretical-framework.md", "status-row"),
+        ("thesis/appendix-k.md", "status-summary-k"),
+    ] {
+        let text = std::fs::read_to_string(root.join(file)).expect("readable");
+        assert!(
+            text.contains(&format!("<!-- BEGIN:{marker} thesis/status.toml#")),
+            "{file} states a status without rendering it from status.toml"
+        );
+    }
+
+    // And the claim the whole mechanism exists to prevent.
+    for file in ["thesis/00-front-matter.md", "thesis/01-introduction.md"] {
+        let text = std::fs::read_to_string(root.join(file)).expect("readable");
+        assert!(
+            !text.contains("No measurements have been taken yet"),
+            "{file} still says no measurements have been taken"
+        );
+    }
+}
+
+/// Appendix B's keyword lists come from the compiler's registry, not from a second copy.
+///
+/// B.3.1–B.3.3 and B.16 were four hand-maintained word lists beside a registry that already
+/// generates `docs/keywords.md`. A word added to the lexer and not to the appendix is a word
+/// the normative grammar does not have, and the appendix is what §6.25 says wins.
+#[test]
+fn appendix_b_keywords_match_registry() {
+    let root = repo_root();
+    let appendix =
+        std::fs::read_to_string(root.join("thesis/appendix-b.md")).expect("appendix B is readable");
+    for marker in ["kw-sql", "kw-rust", "kw-novel", "kw-reserved"] {
+        assert!(
+            appendix.contains(&format!("<!-- BEGIN:{marker} docs/keywords.md#")),
+            "Appendix B carries a keyword list that is not generated: {marker}"
+        );
+    }
+
+    // And the generated content is really the registry's: a word the reference has must be in
+    // the appendix, and a word the appendix has must be in the reference.
+    let reference =
+        std::fs::read_to_string(root.join("docs/keywords.md")).expect("the reference is readable");
+    let mut in_reference = std::collections::BTreeSet::new();
+    let mut inside = false;
+    for line in reference.lines() {
+        if line.starts_with("## ") {
+            // Only the four keyword tables. The "How to read the tables" section is also a
+            // table of backticked cells, and counting `unreserved` as a keyword would make
+            // this test fail for a reason that has nothing to do with the vocabulary.
+            inside = line.contains("keywords (") || line.starts_with("## Reserved for future");
+            continue;
+        }
+        if !inside {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("| `") {
+            if let Some(w) = rest.split('`').next() {
+                in_reference.insert(w.to_string());
+            }
+        }
+    }
+    assert!(
+        in_reference.len() > 150,
+        "only {} keywords parsed out of the reference",
+        in_reference.len()
+    );
+
+    // A word counts as present in the appendix if it appears backticked *or* inside a fenced
+    // block — B.16's reserved list is a fenced block of bare words.
+    let mut in_appendix = std::collections::BTreeSet::new();
+    let mut fenced = false;
+    for line in appendix.lines() {
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+            continue;
+        }
+        if fenced {
+            in_appendix.extend(line.split_whitespace().map(str::to_string));
+        } else {
+            for (i, part) in line.split('`').enumerate() {
+                if i % 2 == 1 {
+                    in_appendix.insert(part.to_string());
+                }
+            }
+        }
+    }
+    let missing: Vec<&String> = in_reference.difference(&in_appendix).collect();
+    assert!(
+        missing.is_empty(),
+        "these keywords exist in the registry and appear nowhere in Appendix B: {missing:?}"
+    );
+}

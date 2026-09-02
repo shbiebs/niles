@@ -38,6 +38,16 @@ It is not Nilestream. It is the smallest artifact that makes Nilestream's mechan
 
 **Baselines that are not the system itself.** Partial materialization is always compared against full materialization on the identical workload and seed; eviction is compared against LRU *and* against the randomized policy that the original partial-state system used. Comparing a system only against itself is a named benchmarking error, and so is presenting a microbenchmark as a system result — the second is answered by scoping (K.2) rather than by the measurement.
 
+**What has and has not been measured, in one sentence.** Rendered from `thesis/status.toml`, the same file §1.9.1's table and the Abstract's status paragraph come from, so this appendix cannot fall out of step with the chapter it documents:
+
+<!-- BEGIN:status-summary-k thesis/status.toml#statussummary -->
+
+*Generated from `thesis/status.toml`. Do not edit by hand.*
+
+Of the 21 claims this thesis makes — 14 hypotheses and 7 contributions — 3 measured, 7 not measured, 4 partly measured, 6 proved, 1 refuted. **7 hypotheses have no runner at all** (H-F1, H-F3, H-S6, H-S7, H-S8, H-S9, H-S10), and for each of them the table in §1.9 names the instrument that does not exist rather than the result that is pending. Measurements have been taken and some of them refuted the claim they were testing; the sentence this replaces read "no measurements have been taken yet" and stood while §9.1 opened with "measurements that were actually taken".
+
+<!-- END:status-summary-k -->
+
 ## K.4 The experiments
 
 | ID | Question | Primary output |

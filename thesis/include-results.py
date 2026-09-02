@@ -56,10 +56,138 @@ def table_after(text: str, heading: str) -> str:
     return first_table(text[idx:])
 
 
+def parse_status(text: str) -> list[dict]:
+    """Read `thesis/status.toml`.
+
+    A five-key subset of TOML, parsed in twenty lines rather than by taking a dependency.
+    The thesis build already refuses to depend on anything it does not need, and a parser
+    for `[[claim]]` blocks of `key = "value"` is smaller than the argument for adding one.
+    """
+    claims, cur = [], None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line == "[[claim]]":
+            cur = {}
+            claims.append(cur)
+            continue
+        if cur is None or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        v = v.strip()
+        if v.startswith('"') and v.endswith('"'):
+            v = v[1:-1]
+        cur[k.strip()] = v
+    for c in claims:
+        for k in ("id", "claim", "status", "where", "instrument"):
+            if k not in c:
+                raise SystemExit(f"status.toml: claim {c.get('id', '?')} has no `{k}`")
+        if c["status"] != "measured" and c["status"] != "proved" and not c["instrument"]:
+            raise SystemExit(
+                f"status.toml: {c['id']} is `{c['status']}` and names no missing instrument. "
+                "A hypothesis with no runner is a hypothesis with no status."
+            )
+    return claims
+
+
+def status_table(text: str) -> str:
+    """One row per claim: what it is, where it stands, and what is missing."""
+    rows = ["| Claim | Status | Reported in | What is missing |", "|---|---|---|---|"]
+    for c in parse_status(text):
+        missing = c["instrument"] or "—"
+        rows.append(
+            f"| **{c['id']}** — {c['claim']} | **{c['status']}** | {c['where']} | {missing} |"
+        )
+    return "\n".join(rows)
+
+
+def status_summary(text: str) -> str:
+    """The one-paragraph statement, counted from the same file the table is."""
+    claims = parse_status(text)
+    n = {}
+    for c in claims:
+        n[c["status"]] = n.get(c["status"], 0) + 1
+    hyp = [c for c in claims if c["id"].startswith("H-")]
+    unrun = [c["id"] for c in hyp if c["status"] == "not measured"]
+    parts = ", ".join(f"{v} {k}" for k, v in sorted(n.items()))
+    return (
+        f"Of the {len(claims)} claims this thesis makes — {len(hyp)} hypotheses and "
+        f"{len(claims) - len(hyp)} contributions — {parts}. "
+        f"**{len(unrun)} hypotheses have no runner at all** "
+        f"({', '.join(unrun)}), and for each of them the table in §1.9 names the instrument "
+        f"that does not exist rather than the result that is pending. "
+        "Measurements have been taken and some of them refuted the claim they were testing; "
+        "the sentence this replaces read \"no measurements have been taken yet\" and stood "
+        "while §9.1 opened with \"measurements that were actually taken\"."
+    )
+
+
+def status_row(text: str) -> str:
+    """The verification table's last row: the aggregate, in the table's own shape."""
+    claims = parse_status(text)
+    proved = sum(1 for c in claims if c["status"] == "proved")
+    measured = sum(1 for c in claims if c["status"] in ("measured", "partly measured"))
+    unrun = sum(1 for c in claims if c["status"] == "not measured")
+    refuted = sum(1 for c in claims if c["status"] == "refuted")
+    return (
+        "| **All claims** | "
+        f"{proved} proved, {measured} measured or partly measured, {refuted} refuted, "
+        f"{unrun} not measured | `thesis/status.toml`, rendered into §1.9 |"
+    )
+
+
+def keyword_column(text: str, heading: str) -> str:
+    """The `Keyword` column of the table under `heading`, as one backticked line.
+
+    Appendix B.3 carries three word lists that were maintained by hand beside a registry that
+    already generates `docs/keywords.md`. Two copies of a vocabulary is two vocabularies, and
+    a word added to the lexer and not to the appendix is a word the normative grammar does not
+    have.
+    """
+    idx = text.find(heading)
+    if idx < 0:
+        raise SystemExit(f"heading {heading!r} not found in the keyword reference")
+    words = []
+    for line in text[idx:].splitlines()[1:]:
+        if line.startswith("## "):
+            break
+        if not line.startswith("| `"):
+            continue
+        w = line.split("|")[1].strip().strip("`")
+        if w:
+            words.append(w)
+    if not words:
+        raise SystemExit(f"no keywords under {heading!r}")
+    return " ".join(f"`{w}`" for w in words)
+
+
+def reserved_list(text: str) -> str:
+    """The normative reserved list, with its count, from the generated reference."""
+    idx = text.find("## The normative reserved list")
+    if idx < 0:
+        raise SystemExit("no reserved list in the keyword reference")
+    body = text[idx:]
+    count = body.splitlines()[2].strip()
+    start = body.find("```")
+    end = body.find("```", start + 3)
+    if start < 0 or end < 0:
+        raise SystemExit("the reserved list is not a fenced block")
+    words = body[start + 3 : end].strip()
+    return f"{count}\n\n```\n{words}\n```"
+
+
 EXTRACTORS = {
     "contract": lambda t: first_table(t),
+    "kwsql": lambda t: keyword_column(t, "## SQL-derived keywords"),
+    "kwrust": lambda t: keyword_column(t, "## Rust-derived keywords"),
+    "kwnovel": lambda t: keyword_column(t, "## Novel Niles keywords"),
+    "kwreserved": reserved_list,
     "curve": lambda t: table_after(t, "### The curve"),
     "table": lambda t: table_after(t, "### The table"),
+    "statustable": status_table,
+    "statussummary": status_summary,
+    "statusrow": status_row,
 }
 
 MARKER = re.compile(

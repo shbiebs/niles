@@ -36,19 +36,37 @@ Normative reference for Niles v0.1. The precedence rule of Section 6.22 governs 
 
 ### B.3.1 SQL-Derived
 
-`select from where group having order limit offset join left right full outer inner on union except intersect distinct as create table view index insert into values update delete begin commit rollback grant revoke primary key foreign references check default null and or not in exists between like case when then else end`
+<!-- BEGIN:kw-sql docs/keywords.md#kwsql -->
+
+*Generated from `docs/keywords.md`. Do not edit by hand.*
+
+`add` `all` `alter` `and` `any` `as` `asc` `begin` `between` `by` `case` `cast` `check` `column` `commit` `create` `cross` `default` `delete` `desc` `distinct` `drop` `else` `end` `except` `exists` `foreign` `from` `full` `grant` `group` `having` `in` `index` `inner` `insert` `intersect` `into` `is` `join` `key` `left` `like` `limit` `natural` `not` `null` `offset` `on` `or` `order` `outer` `primary` `recursive` `references` `revoke` `right` `rollback` `select` `set` `table` `then` `union` `unique` `update` `using` `values` `view` `when` `where` `with`
+
+<!-- END:kw-sql -->
 
 SQL-derived words are legal only in their assigned positions; `update` and `delete` are legal only against `table` data, never against a `ledger`.
 
 ### B.3.2 Rust-Derived
 
-`fn let mut const static struct enum trait impl for while loop if else match return break continue mod use pub crate self Self super type where move ref in as dyn`
+<!-- BEGIN:kw-rust docs/keywords.md#kwrust -->
+
+*Generated from `docs/keywords.md`. Do not edit by hand.*
+
+`Self` `break` `const` `continue` `crate` `dyn` `enum` `false` `fn` `for` `if` `impl` `let` `loop` `match` `mod` `move` `mut` `pub` `ref` `return` `self` `static` `struct` `super` `trait` `true` `type` `use` `while`
+
+<!-- END:kw-rust -->
 
 `unsafe`, `async` and `await` are reserved and rejected in v0.1. `where` serves both Rust's bound clause and the pipeline filter stage; positions are disjoint and the grammar disambiguates.
 
 ### B.3.3 Novel Niles Keywords
 
-`base ledger posting txn hold resolve void expire schema serve consistency bounded monotonic read_your_writes snapshot serializable ledger_consistent materialize absent demand full spilled tiered budget freshness retain evictable pinned forever anchor as_of epoch valid_at value_date recorded_at bitemporal authorize capability idem window conserve currency scale fx leg confidential e2ee committed declassify lineage emit signal backfill upto guard measure explain reproduce impact`
+<!-- BEGIN:kw-novel docs/keywords.md#kwnovel -->
+
+*Generated from `docs/keywords.md`. Do not edit by hand.*
+
+`absent` `anchor` `as_of` `authorize` `auto` `backfill` `base` `bitemporal` `bounded` `budget` `capability` `committed` `confidential` `conserve` `consistency` `currency` `declassify` `demand` `e2ee` `emit` `epoch` `evictable` `expire` `expires` `explain` `forever` `freshness` `fx` `guard` `hold` `idem` `impact` `ledger` `ledger_consistent` `leg` `lineage` `materialize` `measure` `monotonic` `of` `per` `pinned` `post` `posting` `rate` `read_your_writes` `recorded_at` `reproduce` `resolve` `retain` `scale` `schema` `serializable` `serve` `signal` `snapshot` `spilled` `sql` `tiered` `txn` `udf` `upto` `valid_at` `value_date` `void` `window`
+
+<!-- END:kw-novel -->
 
 ## B.4 Type System
 
@@ -277,7 +295,19 @@ The same test file enforces the grammar against the compiler in both directions.
 
 ## B.16 Reserved Keyword List
 
-The union of B.3.1–B.3.3 plus reserved-for-future `async await unsafe yield macro stream actor`. All reserved words require `r#` to be used as identifiers.
+Generated from the compiler's keyword registry, like B.3.1–B.3.3 above. The three lists there and this one used to be maintained by hand beside a registry that already generated `docs/keywords.md`, so a word added to the lexer and not to the appendix was a word the normative grammar did not have.
+
+<!-- BEGIN:kw-reserved docs/keywords.md#kwreserved -->
+
+*Generated from `docs/keywords.md`. Do not edit by hand.*
+
+68 words. All require `r#` to be used as identifiers.
+
+```
+Self actor all and as async await break by case const continue crate cross distinct dyn else enum except false fn for full having if impl in inner intersect is join left let loop macro match mod move mut natural not null on or outer pub ref return right select self static stream struct super then trait true type union unsafe use using when where while with yield
+```
+
+<!-- END:kw-reserved -->
 
 ## B.17 SQL ↔ Niles Mapping
 

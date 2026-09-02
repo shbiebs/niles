@@ -42,7 +42,7 @@ on periodic review(R):
         propose(R, demand)
 ```
 
-**Guarantee (Theorem 4.5(d)).** With `buy_cost` fixed and costs stationary, the deterministic break-even rule is 2-competitive against the offline optimum for the two-mode decision, and a randomized variant achieves a ratio approaching e/(e−1) ≈ 1.58, which is optimal for this class. The randomized variant is implemented behind a flag and compared in S7.
+**Guarantee (Theorem 4.5(d)).** With `buy_cost` fixed and costs stationary, the deterministic break-even rule is 2-competitive against the offline optimum for the two-mode decision, and a randomized variant achieves a ratio approaching e/(e−1) ≈ 1.58, which is optimal for this class. The randomized variant is implemented behind a flag and compared in H-S7.
 
 **Honest scope.** The guarantee is for the two-mode (demand versus full) decision under stationary costs. It does not survive non-stationarity, and it does not extend as stated to the five-mode lattice; I.6 says what does.
 
@@ -102,7 +102,7 @@ Three safety properties hold regardless of estimator quality:
 
 ## I.8 The Offline Optimum (for Grading)
 
-S7 measures the online algorithm against an optimum computed offline over the recorded trace:
+H-S7 measures the online algorithm against an optimum computed offline over the recorded trace:
 
 ```
 # States: (mode assignment for each range at each decision epoch)
@@ -113,7 +113,7 @@ S7 measures the online algorithm against an optimum computed offline over the re
 # multiplier to trace the budget-feasible frontier.
 ```
 
-The relaxation is necessary because the budget couples ranges; the sweep gives a lower bound on achievable cost at each budget level, which is what the ratio in S7 is computed against. Where the relaxation gap is non-zero it is reported, so that a ratio is never presented as tighter than the bound supports.
+The relaxation is necessary because the budget couples ranges; the sweep gives a lower bound on achievable cost at each budget level, which is what the ratio in H-S7 is computed against. Where the relaxation gap is non-zero it is reported, so that a ratio is never presented as tighter than the bound supports.
 
 ## I.9 What Would Falsify Contribution 5
 

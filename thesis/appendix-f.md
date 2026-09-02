@@ -71,7 +71,7 @@ Three properties of this code deserve comment. **Holds are rows, not fields**: a
 
 **Invariant sweeps.** Per-currency conservation at every epoch of every run; the available-balance identity at every anchor; FX-atomicity.
 
-**Algebra laws as properties.** For random evict/reconstruct schedules applied to Nilestream, answers must equal 𝒪's fold at the same anchor — the executable mirror of Theorem 4.1 — and integration/differentiation round-trips must agree as canonical Z-sets at every epoch (F2).
+**Algebra laws as properties.** For random evict/reconstruct schedules applied to Nilestream, answers must equal 𝒪's fold at the same anchor — the executable mirror of Theorem 4.1 — and integration/differentiation round-trips must agree as canonical Z-sets at every epoch (H-F2).
 
 **Fault campaigns.** Crash-recovery, duplicate and reordered delivery, eviction storms, recovery mid-upquery. 𝒪, being a pure fold, is the fixed point against which the chaos is measured. The five partial-state anomalies of §4.2 are written as tests that *must fail to reproduce them*.
 

@@ -26,13 +26,13 @@ What Position B was right about, and is retained: pipelined clause *order*, so a
 
 ## J.2 How many named scientific contributions?
 
-**Position A.** Four: the versioned partial-state algebra with the reconstruction theorem (SC1), the Eviction–Consistency Frontier Theorem (SC2), the complexity theory of consistency under partial materialization (SC3), and the consistency-effect calculus with the soundness theorem (SC4).
+**Position A.** Four: the versioned partial-state algebra with the reconstruction theorem (C1), the Eviction–Consistency Frontier Theorem (C2), the complexity theory of consistency under partial materialization (C3), and the consistency-effect calculus with the soundness theorem (C4).
 
 **Position B.** Six: the four above, plus an adaptive materialization calculus with competitive guarantees, plus a generality result replacing the unprovable "replaces SQL" with provable statements.
 
-**Verdict: B, extended to seven by experiment.** SC1–SC4 stand exactly as stated in Position A. Two are added because they answer questions SC1–SC4 raise but do not close: SC2 says *where* partiality stops paying, but nothing says *what the runtime should therefore do* — that is SC5, the mode calculus over {absent, demand, full, spilled, tiered} with its rent-or-buy and file-caching bounds, and §9.3.4's measured interior optimum is direct evidence that a fixed policy is wrong. And the thesis's own H7 asserts SQL-completeness, which is not a well-formed claim without a definition — that is SC6.
+**Verdict: B, extended to seven by experiment.** C1–C4 stand exactly as stated in Position A. Two are added because they answer questions C1–C4 raise but do not close: C2 says *where* partiality stops paying, but nothing says *what the runtime should therefore do* — that is C5, the mode calculus over {absent, demand, full, spilled, tiered} with its rent-or-buy and file-caching bounds, and §9.3.4's measured interior optimum is direct evidence that a fixed policy is wrong. And the thesis's own C6 asserts SQL-completeness, which is not a well-formed claim without a definition — that is C6.
 
-A seventh was added by measurement rather than by argument. **SC7, the Bounded Reconstruction Theorem**, states that reconstruction cost is bounded by the checkpoint interval rather than by history length. It exists because §9.4.1 falsified SC3's history-independence claim twice, and the third experiment showed what mechanism restores it. It is the clearest case in this thesis of an experiment changing the theory rather than confirming it.
+A seventh was added by measurement rather than by argument. **SC7, the Bounded Reconstruction Theorem**, states that reconstruction cost is bounded by the checkpoint interval rather than by history length. It exists because §9.4.1 falsified C3's history-independence claim twice, and the third experiment showed what mechanism restores it. It is the clearest case in this thesis of an experiment changing the theory rather than confirming it.
 
 ---
 
@@ -144,13 +144,15 @@ This is unusually good support for the thesis's central architectural claim, and
 
 ---
 
-## J.12 Non-convexity of the achievable consistency region (H1)
+## J.12 Non-convexity of the achievable consistency region (H-conv)
+
+*(**H-conv** is defined here and nowhere else. It appeared in earlier drafts under an identifier with no definition anywhere in the document — an identifier a reader could not resolve, in a section that turns on what it means. It is not a numbered hypothesis of §1.6: it is a conjecture this appendix raises and leaves open, and it is named so that the drift test can tell it apart from one.)*
 
 **Position A.** The achievable-consistency region under partial state is non-convex: snapshot reads aligned to epoch boundaries are cheaper to reach than intermediate guarantees that are not.
 
-**Verdict: Open.** §9.4.3 measured cost per rung and found it lands almost entirely on maintenance frequency, scaling as roughly 1/k in the staleness allowance — which is smooth, not obviously non-convex. But that experiment varied staleness, not the *alignment* of a read to an epoch boundary, which is what H1 is actually about. The hypothesis is therefore untested rather than unsupported.
+**Verdict: Open.** §9.4.3 measured cost per rung and found it lands almost entirely on maintenance frequency, scaling as roughly 1/k in the staleness allowance — which is smooth, not obviously non-convex. But that experiment varied staleness, not the *alignment* of a read to an epoch boundary, which is what H-conv is actually about. The hypothesis is therefore untested rather than unsupported.
 
-The experiment that would decide it: hold the rung fixed and vary whether a multi-key read's demanded anchor coincides with a sealed epoch, measuring coordination work in each case. If H1 holds, the cost curve has a discontinuity at the boundary. The variable is stated in Chapter 1 accordingly.
+The experiment that would decide it: hold the rung fixed and vary whether a multi-key read's demanded anchor coincides with a sealed epoch, measuring coordination work in each case. If H-conv holds, the cost curve has a discontinuity at the boundary. The variable is stated in Chapter 1 accordingly.
 
 ---
 

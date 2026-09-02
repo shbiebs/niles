@@ -196,7 +196,7 @@
 
 [89] T. Lahiri et al., "Oracle Database In-Memory: A dual format in-memory database," in *Proc. IEEE 31st Int. Conf. Data Engineering (ICDE '15)*, 2015.
 
-[90] J. Yang et al., "F1 Lightning: HTAP as a service," *Proc. VLDB Endowment*, vol. 13, no. 12, pp. 3313–3325, 2020, doi: 10.14778/3415478.3415553.
+[90] J. Yang et al., "H-F1 Lightning: HTAP as a service," *Proc. VLDB Endowment*, vol. 13, no. 12, pp. 3313–3325, 2020, doi: 10.14778/3415478.3415553.
 
 [91] J. Lu and I. Holubová, "Multi-model databases: A new journey to handle the variety of data," *ACM Computing Surveys*, vol. 52, no. 3, 2019, doi: 10.1145/3323214.
 

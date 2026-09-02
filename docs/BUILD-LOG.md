@@ -1946,3 +1946,240 @@ attributed?
 No blank cell. The four Part 0 rows this table covers are the four the harness runs; the other
 five rows of `SPEC-ENGINE.md`'s Part 0 table are marked *not available* there and no measured
 value is claimed for any of them.
+
+---
+
+# §8 — Final report
+
+Written at the end of the run, over both repositories. Every hash below is on the branch named
+beside it; `review/thesis` is the tip that contains all of them.
+
+## 8.1 Findings closed
+
+Forty-eight findings are numbered in the work order (F-01…F-48 and F-51; there is no F-45,
+F-49 or F-50). All forty-eight are closed. Commit and branch, by the task that closed each:
+
+| F | Closed by | Commit | Branch | Repository |
+|---|---|---|---|---|
+| F-44 | T-01 | `8e0e051`, `4db597e`, `dd77bed` | `master` | both |
+| F-01, F-02, F-03 (code), F-30, F-31, F-43 | T-02 | `bb71832`, `e6655f9` | `review/F-01-F-06` | niles |
+| F-04 | T-03 | `3b0774e` | `review/F-01-F-06` | niles |
+| F-05, F-06 | T-04 | `07383a6` · `3583347` | `review/F-01-F-06` | niles · gbs |
+| F-03 (thesis), F-41 | T-05 | `e0d3fdd` | `review/F-01-F-06` | niles |
+| F-28, F-29 | T-06 | `bb4da35` | `review/F-28-F-29` | niles |
+| F-19, F-21, F-27 | T-07 | `3de8137` | `review/F-19-F-27` | gbs |
+| F-20 | T-08 | `55b22d0` | `review/F-19-F-27` | gbs |
+| F-22, F-26 | T-09 | `8904a91` | `review/F-19-F-27` | gbs |
+| F-23 | T-10 | `1523d10`, `176bd4b` | `review/F-23` | gbs |
+| F-11, F-37, F-46, F-47 | T-11 | `c666a8a`, `4ce84c4` · `d1e8627` | `review/F-11-F-13` | niles · gbs |
+| F-24 | T-12 | `8216abf` · `c1dfe68` | `review/F-11-F-13` | niles · gbs |
+| F-12, F-13 | T-13 | `9de19c9` | `review/F-11-F-13` | niles |
+| F-16, F-17 | T-14 | `cf76b95` | `review/F-14-F-17` | niles |
+| F-14, F-15, F-08 (Z half) | T-15 | `504c131`, `19984ea`, `2e35096` | `review/F-14-F-17` | niles |
+| F-18 | T-16 | `913bf55`, `d000b9a`, `1cfc572` · `02e0725` | `review/F-18` | gbs · niles |
+| F-07, F-09, F-10, F-25 (counts), F-32–F-36, F-38–F-40, F-42, F-51, F-08 (band half) | T-17 | `ff0e36e`, `701aa8e`, `6db10c0`, `ee5746b` · `1e8a152` | `review/thesis` · `review/F-18` | niles · gbs |
+| F-25 (agreement half) | T-18 | `0626547`, `430176c` · `7f080c0` | `review/F-11-F-13`, `review/F-18` | niles · gbs |
+| F-48 | T-19 | `3476018` | `review/F-14-F-17` | niles |
+
+## 8.2 Findings not closed, and why
+
+**None is left open.** Three are closed in a form weaker than a naive reading of the finding
+would suggest, and each is recorded as such rather than counted quietly:
+
+* **F-07** is closed as a **MISMATCH proposal, not an applied edit.** GC-02 forbids editing a
+  theorem to match an implementation, so Theorem 4.3′ carries a fenced `PROPOSED` block naming
+  the checkpoint interval C as a hypothesis, and the running text is unchanged. The thesis says
+  what it always said; the proposal says what it should say and why.
+* **F-08's band half** is closed by **stating that no band is derivable.** Θ(Z) has no constant
+  anywhere in the thesis, so a two-sided band cannot be computed without inventing one.
+  `results/E16-band.md` pre-registers the one-sided prediction that *is* derivable, and H-S2's
+  status line says the theorem's band was never derived and is not tested.
+* **F-51** is closed by **naming the missing instrument for every hypothesis without a runner**,
+  which is a documentation outcome and not a measurement. Seven hypotheses still have no runner.
+
+## 8.3 Every BLOCKED, MISMATCH and STALE raised, verbatim
+
+Nine, across both build logs. Each is quoted where it was raised; the identifiers are:
+
+* `BLOCKED-T-01-toolchain` (niles/gbs, T-01) — the pinned toolchain could not be installed in
+  this environment; the pin is in `rust-toolchain.toml` and the build runs on what is present,
+  with the deviation recorded.
+* `BLOCKED-T-09-lifecycle` (gbs, T-09) — lifecycle transitions are not ledger events, so a
+  transition's history is not reconstructible from the segment alone. Named, not worked around.
+* `BLOCKED-T-17-remainder` (niles, T-17 partial) — the nine outputs of T-17 left undone at that
+  commit. **Now closed**: all nine are done and the entry at 17:56Z says so.
+* `BLOCKED-T-18-close_offering` (niles, T-18) — *conditional*: it is what
+  `MISMATCH-T-18-close_offering` becomes if the schema is corrected, because the correction needs
+  `resolve`, which the interpreter refuses by name.
+* `MISMATCH-F-07` (Theorem 4.3′ with C as a hypothesis), `MISMATCH-F-08` (C2 reduced to
+  existence, not prediction), `MISMATCH-F-09` (H-S1 with an explicit memory-price interval) —
+  the three theory proposals, each written both to this log and as a fenced `PROPOSED` block at
+  the claim it affects.
+* `MISMATCH-T-11-overdraw` (λ_niles's T-Overdraw rule against what the checker realises).
+* `MISMATCH-T-13-fixpoint` (Appendix H's completeness table against the lowered fixpoint).
+* `MISMATCH-T-16-<row>` — **never raised.** No matrix row needed a `gbs-kernel` change (LC-3).
+* `MISMATCH-T-18-normalised-fields` (two normalised fields specified, three needed).
+* `MISMATCH-T-18-close_offering`, `MISMATCH-T-18-position_account` — the two conformance
+  divergences, pinned in `KNOWN_DIVERGENCES` with their exact fields.
+* `STALE-F-11g` (niles, T-11) — a finding pointer that no longer matched the code when it was
+  reached.
+
+## 8.4 Test counts, before and after
+
+| Workspace | Before (T-01 floor) | After | Δ |
+|---|---|---|---|
+| `niles` | 600 / 0 / 3 | **729 / 0 / 5** | +129 |
+| `gbs` (workspace) | 415 / 0 / 1 | **432 / 0 / 1** | +17 |
+| `gbs` adapter (`gbs-nilestream`) | 15 / 0 / 0 | **38 / 0 / 0** | +23 |
+
+Passed / failed / ignored. The ignored count rose by two in `niles` and both are generators run
+by `make reproduce` (`gen-sql-surface`'s corpus regenerator and `psql_conformance`'s transcript),
+which GC-13 permits because they are run by a committed command rather than skipped.
+
+## 8.5 Branches and merge order
+
+```
+master               T-01              (both repositories)
+review/F-01-F-06     T-02 → T-03 → T-04 → T-05        niles (+ the gbs oracle test)
+review/F-28-F-29     T-06                             niles
+review/F-19-F-27     T-07 → T-08 → T-09               gbs
+review/F-23          T-10                             gbs   (stacked on review/F-19-F-27)
+review/F-11-F-13     T-11 → T-12 → T-13 → T-18        niles (+ gbs schema commits)
+review/F-14-F-17     T-14 → T-15 → T-19               niles (merged review/F-28-F-29)
+review/F-18          T-16, and T-18's GBS side        both
+review/thesis        T-17, §6, §7, §8                 niles
+```
+
+**Merge order:** `master` → `review/F-01-F-06` → `review/F-28-F-29` → `review/F-19-F-27` →
+`review/F-23` → `review/F-11-F-13` → `review/F-14-F-17` → `review/F-18` → `review/thesis`.
+
+**Three deviations from §5.0, each recorded where it was taken.** `review/F-23` stacked on
+`review/F-19-F-27` rather than standing alone (T-10). `review/F-18` in GBS additionally stacked
+on `review/F-11-F-13`, because the Niles checkout it builds against carries T-11's checker and
+the pre-T-12 schema does not pass it — a schema checked by an older checker than the one it
+ships with is not checked (T-16). T-18's GBS side landed on `review/F-18` rather than
+`review/F-11-F-13`, because the rewritten `conformance.rs` uses `Session::over`, which is
+T-16's, and does not compile on the earlier branch (T-18). The intended *ordering* is preserved
+in every case.
+
+## 8.6 Thesis claims to be weakened, downgraded or dropped — with the replacement wording
+
+Every entry below is either already applied at this commit (marked **applied**) or is a
+proposal that GC-02 forbids applying (marked **proposed**, and carried as a fenced `PROPOSED`
+block at the claim).
+
+**C2 — existence, not prediction.** *(proposed; `MISMATCH-F-08`)*
+> Replace: "the measured cost of partial materialization crosses that of full materialization
+> **within the band predicted by** the Eviction–Consistency Frontier Theorem."
+> With: "a crossover in the price of memory exists and is located by E4 and E12. **The
+> theorem's band is not derived and is not tested**: `(1 + Θ(Z))` carries no stated constant
+> anywhere in this thesis, and a band computed with the constant at 1 and one computed with it
+> at 10 differ by an order of magnitude in exactly the region the experiment measures.
+> `results/E16-band.md` pre-registers the one-sided prediction that is derivable and states the
+> falsifier for it."
+
+**C3 — Theorem 4.3′ with C as a hypothesis.** *(proposed; `MISMATCH-F-07`)*
+> Add to the theorem's parameter list the checkpoint interval **C**, and to its hypotheses:
+> "the implementation maintains per-key checkpoints at interval C." The upper bound becomes
+> bounded by C and per-key update density rather than by base length n; the lower bound becomes
+> Ω(min(C, deltas since anchor)) base touches per miss in the restricted model, with checkpoints
+> as a stated hypothesis. §3.14's Φ, §3.15's verification table, §1.6's H-S3 and §4.8 take the
+> matching edits.
+
+**C4 — the implementation clause, as T-11 realised it.** *(applied)*
+> The soundness theorem is proved for λ_niles. What the *checker* now realises is stated
+> separately and not conflated with it: seventeen mutants are refused, each by its own
+> diagnostic code, each with an accepted well-typed neighbour; effect rows are transitive
+> through calls with a fixpoint over mutually recursive functions; a read at a rung a
+> declaration does not name is refused in both directions. H-S4's status is **partly measured**,
+> and what is missing is named: no corpus of well-typed programs is executed on Nilestream under
+> crash-recovery, eviction and adversarial schedules with an oracle counting violations. The
+> claim quantifies over executions; the evidence is about the checker.
+
+**C6(c) — the narrowed fragment.** *(applied)*
+> The stated SQL fragment has 34 forms. Eight are proved *equivalent* — the SQL and pipeline
+> spellings denote the same Z-set on the golden corpus — thirteen are lowered with a golden case
+> in one surface, **four are refused each with the diagnostic code that refuses it**, two are
+> lowered with nothing checking what they compute and say so, two are specified, and five are
+> deliberate exclusions carrying their reasons. A fragment with four named refusals in it is not
+> a supersession, and `SPEC-LANGUAGE.md` L-5/L-23 now reads **Partial**.
+
+**E2 — what is wired.** *(applied)*
+> "MySQL and PostgreSQL wire compatibility" becomes: **PostgreSQL v3 is served** — simple and
+> extended paths, both in the connection loop, both driven by `psql`. **MySQL packet framing is
+> a codec with no listener.** **TLS is a negotiation state machine with no provider**:
+> `NoProvider` refuses every accept and the daemon runs `TlsConfig::insecure()`. `distributed.rs`
+> and `cross_shard.rs` are models nothing calls; the claim that the cross-shard coordinator "is
+> itself a ledger group" is withdrawn — `persist_decision` sets a boolean.
+
+**E3 — the oracle now in use.** *(applied)*
+> `conservation-suite::oracle` is the correctness oracle for `proto-engine`, `nilestream-core`
+> and, through the adapter, GBS's kernel, with differential tests at anchors drawn uniformly
+> from `[0, head]` rather than at the head alone, and a fault campaign (crash, truncate,
+> evict-storm, duplicate delivery, reorder) that is tests rather than stubs. E1's "independent
+> oracle" comment is true now; it named a self-comparison when it was written.
+
+**G2 — measured baseline, characterized gap.** *(applied)*
+> "§7's performance contract states four targets relative to PostgreSQL" becomes: all four rows
+> are measured on both engines over the same protocol path. **Two say NOT MET** — 0.93× on
+> durable OLTP against 5–10×, and 0.13× on analytical against 10–12× — each attributed to a
+> numbered item of `BENCHMARK.md`'s limitations list and none to the engine's correctness. Two
+> say PARITY, and the `point` row is at a **measured miss rate of 1.00**: every read an anchored
+> reconstruction, which is a stronger result than parity with a warm cache. What the table
+> supports is an engine with a measured baseline and a characterized gap, not a performance
+> claim.
+
+**G3 — the Phase 8 verdict.** *(applied)*
+> "Run the eleven implemented product lines against Nilestream" becomes **"23 product-evidenced
+> + 6 generic-path-only of 29"**, with the six named — *Clearing and prime brokerage*, *M&A and
+> capital raising*, *Philanthropy*, *Specialised financing*, *Trust services*, *Wealth
+> planning* — and with `wire` reported per row: two shapes cross the PostgreSQL wire and
+> twenty-seven are in-process. No matrix row needed a `gbs-kernel` change.
+
+**F-51's hypotheses — "not measured; instrument absent: …".** *(applied, from
+`thesis/status.toml`)*
+> * **H-F1** — not measured; instrument absent: no long-horizon experiment, no live-generating
+>   source, no finite-first comparison stack, no regression of per-answer cost on accumulated
+>   input.
+> * **H-F3** — not measured; instrument absent: no comparative audit. §9.7 fixes the counting
+>   rules; nothing counts.
+> * **H-S4** — partly measured; instrument absent: no execution campaign over well-typed
+>   programs with an oracle counting violations.
+> * **H-S5** — partly measured; instrument absent: no client-compatibility pass rate, and no
+>   MySQL listener at all.
+> * **H-S6** — not measured; instrument absent: no ported corpus and no trigger-based SQL
+>   baseline, so neither side of the comparison has been run; the runtime-overhead half has no
+>   measurement of any kind.
+> * **H-S7** — not measured; instrument absent: the adaptive optimizer is not built, and
+>   `offline.rs` is a planner rather than a dynamic program, so there is no offline optimum to
+>   measure a competitive ratio against.
+> * **H-S8** — not measured; instrument absent: the non-financial conservation domain does not
+>   exist, and seven banking forms are keywords in the compiler's registry rather than a library
+>   over it.
+> * **H-S9** — not measured; instrument absent: `nilestream-lineage` is stubs, so there is no
+>   lineage mode, no audit corpus, no completeness figure and no overhead figure.
+> * **H-S10** — not measured; instrument absent: every instrument in this repository is serial
+>   where the experiment needs concurrency.
+
+**Two further withdrawals not on §8's minimum list, because the run found them.** *(applied)*
+> **§4.6(d)** — "a Landlord-style policy … is the policy Nilestream implements rather than plain
+> LRU" is withdrawn. None of the three eviction rules in the repository is Landlord, two share a
+> name and are different policies, and Φ(ℓ) is an assumed constant.
+> **§6.6** — "the compiler knows nothing about money as such" is withdrawn. Seven banking forms
+> are keywords in the compiler's own registry with cases in the parser, the lowering and the
+> effect calculus, and no user library could add one.
+
+## 8.7 The recurring defect, at fifteen
+
+`Err(_) => 0`, a `sum` over an empty group, `unwrap_or(LitBool(true))`, and eleven more found by
+looking for the shape rather than waiting for it — all the same defect: **an absence given a
+reasonable default that is a wrong answer wearing a plausible shape.**
+
+The fifteenth arrived during T-16 and wears a new disguise. `Rev::read(k, a)` treats `a` as a
+floor on freshness, so an entry certified at epoch 21 is a *hit* for a question about epoch 8,
+and an audit query came back thirteen transfers out of date. Not a zero standing in for an
+unknown: a **fresher** answer standing in for the one asked about, every digit of it true.
+
+The rule the repositories now follow is unchanged and now has a second half: an absence gets a
+named representation or a diagnostic and never a default — **and an answer carries the anchor it
+is true at, which a caller must read rather than assume.**

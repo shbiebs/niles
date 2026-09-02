@@ -11,11 +11,11 @@ The tool lives outside the workspace. `GlobalAlloc` cannot be implemented withou
 | Scenario | Unit | Ops | Allocations | per op | Bytes | per op | Live | Peak |
 |---|---|--:|--:|--:|--:|--:|--:|--:|
 | `ledger_seeded` | posting | 40000 | 90057 | 2.3 | 16608467 | 415 | 8418859 | 9492956 |
-| `zset_base_at` | row | 40000 | 86665 | 2.2 | 15983856 | 400 | 9583856 | 9584016 |
-| `served_group_by_cur` | query | 3 | 520089 | 173363.0 | 99423687 | 33141229 | 0 | 23887456 |
-| `served_group_by_acct` | query | 3 | 800118 | 266706.0 | 116570298 | 38856766 | 0 | 24937312 |
-| `served_sum_negative` | query | 3 | 470076 | 156692.0 | 100521087 | 33507029 | 0 | 19168888 |
-| `served_point` | query | 200 | 6600 | 33.0 | 1074600 | 5373 | 0 | 3536 |
+| `zset_base_at` | row | 40000 | 46665 | 1.2 | 9583856 | 240 | 9583856 | 9583856 |
+| `served_group_by_cur` | query | 3 | 260091 | 86697.0 | 51471927 | 17157309 | 0 | 14303600 |
+| `served_group_by_acct` | query | 3 | 510120 | 170040.0 | 66698538 | 22232846 | 0 | 15353456 |
+| `served_sum_negative` | query | 3 | 210078 | 70026.0 | 52569423 | 17523141 | 0 | 16735920 |
+| `served_point` | query | 200 | 5400 | 27.0 | 841000 | 4205 | 0 | 3472 |
 | `rev_read_hit` | read | 1000 | 2000 | 2.0 | 32000 | 32 | 0 | 16 |
 | `append_in_memory` | transaction | 500 | 2000 | 4.0 | 145392 | 291 | 67392 | 67548 |
 
@@ -26,11 +26,11 @@ Allocations per operation, asserted exactly — an allocation count is not a tol
 | Scenario | Budget (allocations/op) | Measured | Headroom |
 |---|--:|--:|--:|
 | `ledger_seeded` | 2.6 | 2.3 | 13% |
-| `zset_base_at` | 2.5 | 2.2 | 13% |
-| `served_group_by_cur` | 190000.0 | 173363.0 | 9% |
-| `served_group_by_acct` | 294000.0 | 266706.0 | 9% |
-| `served_sum_negative` | 173000.0 | 156692.0 | 9% |
-| `served_point` | 36.0 | 33.0 | 8% |
+| `zset_base_at` | 1.4 | 1.2 | 17% |
+| `served_group_by_cur` | 95000.0 | 86697.0 | 9% |
+| `served_group_by_acct` | 187000.0 | 170040.0 | 9% |
+| `served_sum_negative` | 77000.0 | 70026.0 | 9% |
+| `served_point` | 30.0 | 27.0 | 10% |
 | `rev_read_hit` | 2.2 | 2.0 | 9% |
 | `append_in_memory` | 4.4 | 4.0 | 9% |
 

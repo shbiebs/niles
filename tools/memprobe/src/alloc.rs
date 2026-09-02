@@ -175,24 +175,23 @@ pub fn budget(scenario: &str) -> Option<f64> {
         // Two `Vec`s per posting — the row, and the tree node holding it — plus the tree's
         // own growth. T-04 takes the Z-set off the served path; this row keeps measuring the
         // reference evaluator's base, which stays and should stay.
-        "zset_base_at" => 2.5,
+        "zset_base_at" => 1.4,
         // A seeded ledger: one epoch record, one idempotency string and one index entry per
         // transaction, amortised over two postings.
         "ledger_seeded" => 2.6,
-        // **The three served analytical statements, and the numbers are not typos.** An
-        // unkeyed `group by` materialises the whole base as a `BTreeMap<Vec<Value>, i128>`
-        // and the evaluator's `Op::Source` arm then clones it, so a query over 20,000
-        // postings allocates eight to thirteen times *per posting*. These are a ratchet at
-        // what that costs today; a streaming fold reaches single digits per query, and
-        // lowering these numbers is what would demonstrate it. Setting them at the target
-        // instead would leave the gate red at every commit until the work landed, which is a
-        // gate nobody reads.
-        "served_group_by_cur" => 190_000.0,
-        "served_group_by_acct" => 294_000.0,
-        "served_sum_negative" => 173_000.0,
+        // **The three served analytical statements, and the numbers are still not typos.**
+        // An unkeyed `group by` materialises the whole base as a `BTreeMap<Vec<Value>,
+        // i128>` and folds it, so a query over 20,000 postings allocates three to eight
+        // times *per posting*. It was eight to thirteen: removing the evaluator's
+        // whole-source copy and `add`'s key clone halved these, and the halves that remain
+        // are the base materialisation itself, which a streaming fold removes rather than
+        // shrinks. These are a ratchet at what it costs today.
+        "served_group_by_cur" => 95_000.0,
+        "served_group_by_acct" => 187_000.0,
+        "served_sum_negative" => 77_000.0,
         // A served point read goes through the anchor index, so its cost is the account's
         // own postings and the reply — not the base.
-        "served_point" => 36.0,
+        "served_point" => 30.0,
         // The REV runtime's hit path: the key is cloned into the recency map, and the answer
         // is a `Copy` struct.
         "rev_read_hit" => 2.2,

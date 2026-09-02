@@ -34,20 +34,36 @@
 use crate::circuit::{Circuit, NodeId};
 use crate::operator::{Agg, ApplyKind, ColIdx, JoinKind, Op, Scalar, ScalarOp};
 use crate::value::{arith, compare, truth, Tri, Value};
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 pub type Row = Vec<Value>;
 pub type ZSet = BTreeMap<Row, i128>;
 
 /// Add `w` to `row`'s weight, removing the row if the weight cancels to zero.
+///
+/// The row is **moved**, not cloned. `z.entry(row.clone()).or_insert(0)` kept the original
+/// alive only so the cancel-to-zero case could `remove(&row)` afterwards, and paid a heap
+/// allocation for every row inserted into every intermediate Z-set to do it — around twenty
+/// thousand of them per analytical query over the benchmark's base, on top of the twenty
+/// thousand the row itself costs.
+///
+/// The cancellation case now pays the extra lookup instead, which is the right way round: a
+/// weight cancelling to zero is rare, and an insert is not.
 pub fn add(z: &mut ZSet, row: Row, w: i128) {
     if w == 0 {
         return;
     }
-    let e = z.entry(row.clone()).or_insert(0);
-    *e += w;
-    if *e == 0 {
-        z.remove(&row);
+    match z.get_mut(&row) {
+        Some(e) => {
+            *e += w;
+            if *e == 0 {
+                z.remove(&row);
+            }
+        }
+        None => {
+            z.insert(row, w);
+        }
     }
 }
 
@@ -235,7 +251,9 @@ pub fn try_run_node(
     let z = e.node(id);
     match e.non_terminating {
         Some(err) => Err(err),
-        None => Ok((z, e.work)),
+        // `into_owned` at the boundary: a caller gets a Z-set it owns, and the copy happens
+        // exactly once — for a circuit that is a bare source and for nothing else.
+        None => Ok((z.into_owned(), e.work)),
     }
 }
 
@@ -253,7 +271,20 @@ pub fn try_run(
 }
 
 impl<'a> Eval<'a> {
-    fn node(&mut self, id: NodeId) -> ZSet {
+    /// Evaluate a node, **borrowing a base relation rather than copying it**.
+    ///
+    /// `Op::Source` used to `.cloned()` the whole source. On the benchmark's base that is a
+    /// twenty-thousand-row `BTreeMap<Vec<Value>, i128>` rebuilt per query — 46,665
+    /// allocations and 9.6MB — before any operator had looked at a row. The operators that
+    /// *read* their input and never own it (`Aggregate`, `Join`, `Apply`) then dropped the
+    /// copy untouched: the analytical shape `Source -> Aggregate` paid for a duplicate of
+    /// the base in order to fold it.
+    ///
+    /// A `Cow` says which arms need ownership. The consuming ones (`Filter`, `Map`,
+    /// `Distinct`, `Union`, `Negate`) call `into_owned`, which copies only when the input is
+    /// borrowed — exactly what they paid before, never more. The reading ones take a
+    /// reference and pay nothing.
+    fn node(&mut self, id: NodeId) -> Cow<'a, ZSet> {
         let n = self
             .circuit
             .nodes
@@ -261,34 +292,41 @@ impl<'a> Eval<'a> {
             .find(|n| n.id == id)
             .expect("node");
         match &n.op {
-            Op::Source { relation, .. } => {
-                let z = self.sources.get(relation).cloned().unwrap_or_default();
-                self.work += z.len() as u64;
-                z
-            }
+            Op::Source { relation, .. } => match self.sources.get(relation) {
+                Some(z) => {
+                    self.work += z.len() as u64;
+                    Cow::Borrowed(z)
+                }
+                None => Cow::Owned(ZSet::new()),
+            },
+            // **Filtered by reference, and a kept row cloned once.** Consuming the input
+            // would copy every row of a borrowed source in order to discard most of them,
+            // which is the wrong way round for the operator whose job is to discard.
             Op::Filter { predicate } => {
                 let inp = self.node(n.inputs[0]);
                 let mut out = ZSet::new();
-                for (r, w) in inp {
+                for (r, w) in inp.iter() {
                     self.work += 1;
-                    if keeps(predicate, &r) {
-                        add(&mut out, r, w);
+                    if keeps(predicate, r) {
+                        add(&mut out, r.clone(), *w);
                     }
                 }
-                out
+                Cow::Owned(out)
             }
+            // A projection builds a new row for every input row, so it never needs to own
+            // the input either.
             Op::Map { exprs } => {
                 let inp = self.node(n.inputs[0]);
                 let mut out = ZSet::new();
-                for (r, w) in inp {
+                for (r, w) in inp.iter() {
                     self.work += 1;
                     add(
                         &mut out,
-                        exprs.iter().map(|e| eval_scalar(e, &r)).collect(),
-                        w,
+                        exprs.iter().map(|e| eval_scalar(e, r)).collect(),
+                        *w,
                     );
                 }
-                out
+                Cow::Owned(out)
             }
             Op::Join {
                 kind,
@@ -298,47 +336,49 @@ impl<'a> Eval<'a> {
             } => {
                 let l = self.node(n.inputs[0]);
                 let r = self.node(n.inputs[1]);
-                self.join(*kind, left_key, right_key, residual.as_ref(), &l, &r)
+                Cow::Owned(self.join(*kind, left_key, right_key, residual.as_ref(), &l, &r))
             }
+            // **The arm the copy was for.** An aggregate reads its input and keeps none of
+            // it, so over a base source this is now a fold with no duplicate at all.
             Op::Aggregate { group_key, aggs } => {
                 let inp = self.node(n.inputs[0]);
-                self.aggregate(group_key, aggs, &inp)
+                Cow::Owned(self.aggregate(group_key, aggs, &inp))
             }
             Op::Distinct => {
                 let inp = self.node(n.inputs[0]);
                 let mut out = ZSet::new();
-                for (r, w) in inp {
+                for (r, w) in inp.iter() {
                     self.work += 1;
-                    if w > 0 {
-                        add(&mut out, r, 1);
+                    if *w > 0 {
+                        add(&mut out, r.clone(), 1);
                     }
                 }
-                out
+                Cow::Owned(out)
             }
             Op::Union => {
                 let mut out = ZSet::new();
                 for k in 0..n.inputs.len() {
                     let z = self.node(n.inputs[k]);
-                    for (r, w) in z {
+                    for (r, w) in z.iter() {
                         self.work += 1;
-                        add(&mut out, r, w);
+                        add(&mut out, r.clone(), *w);
                     }
                 }
-                out
+                Cow::Owned(out)
             }
             Op::Negate => {
                 let inp = self.node(n.inputs[0]);
                 let mut out = ZSet::new();
-                for (r, w) in inp {
+                for (r, w) in inp.iter() {
                     self.work += 1;
-                    add(&mut out, r, -w);
+                    add(&mut out, r.clone(), -*w);
                 }
-                out
+                Cow::Owned(out)
             }
             Op::Apply { kind, correlation } => {
                 let outer = self.node(n.inputs[0]);
                 let inner = self.node(n.inputs[1]);
-                self.apply(kind, correlation, &outer, &inner)
+                Cow::Owned(self.apply(kind, correlation, &outer, &inner))
             }
             // Pass-throughs at this level of abstraction: the reference semantics is about
             // *what* a circuit denotes, and these operators change when or how it is
@@ -360,6 +400,7 @@ impl<'a> Eval<'a> {
             } => {
                 let seed = self.node(n.inputs[0]);
                 let mut acc: ZSet = seed
+                    .as_ref()
                     .iter()
                     .filter(|(_, w)| **w > 0)
                     .map(|(r, _)| (r.clone(), 1))
@@ -368,7 +409,7 @@ impl<'a> Eval<'a> {
                 let mut converged = false;
                 for _ in 0..*max_rounds {
                     self.fix_stack.push(acc.clone());
-                    let produced = self.node(n.inputs[1]);
+                    let produced = self.node(n.inputs[1]).into_owned();
                     self.fix_stack.pop();
                     let before = acc.len();
                     for (r, w) in &produced {
@@ -395,16 +436,19 @@ impl<'a> Eval<'a> {
                         tail,
                     });
                 }
-                acc
+                Cow::Owned(acc)
             }
             // Inside a running fixpoint, the delay *is* the accumulator: it is the back
             // edge, and reading it is how the step sees what the previous round produced.
             // Outside one it is the identity, which is what it means at the top level of a
             // circuit with no cycle.
+            // Owned rather than borrowed: the accumulator lives in `self`, not in the
+            // sources, so a reference to it would borrow the evaluator for the rest of the
+            // round. One copy per fixpoint round, which is what it was before.
             Op::Delay => match self.fix_stack.last() {
                 Some(acc) => {
                     self.work += acc.len() as u64;
-                    acc.clone()
+                    Cow::Owned(acc.clone())
                 }
                 None => self.node(n.inputs[0]),
             },
@@ -428,7 +472,11 @@ impl<'a> Eval<'a> {
             Op::Limit { count, offset } => {
                 let inp = self.node(n.inputs[0]);
                 let keys = self.upstream_order(n.inputs[0]);
-                let mut rows: Vec<(Row, i128)> = inp.into_iter().filter(|(_, w)| *w > 0).collect();
+                let mut rows: Vec<(Row, i128)> = inp
+                    .iter()
+                    .filter(|(_, w)| **w > 0)
+                    .map(|(r, w)| (r.clone(), *w))
+                    .collect();
                 rows.sort_by(|a, b| order_rows(&a.0, &b.0, &keys));
                 let mut out = ZSet::new();
                 let (mut skipped, mut taken) = (0u64, 0u64);
@@ -440,13 +488,13 @@ impl<'a> Eval<'a> {
                             continue;
                         }
                         if taken >= *count {
-                            return out;
+                            return Cow::Owned(out);
                         }
                         add(&mut out, r.clone(), 1);
                         taken += 1;
                     }
                 }
-                out
+                Cow::Owned(out)
             }
             Op::Index { .. }
             | Op::AsOf { .. }

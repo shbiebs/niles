@@ -57,7 +57,13 @@ impl Base for LedgerBase {
     }
 
     fn deltas_at(&mut self, e: Epoch) -> Vec<(Key, Value)> {
-        let Some(rec) = self.ledger.epochs.iter().find(|r| r.id == e) else {
+        // **Indexed, not searched.** An epoch's id *is* its position — `Ledger::submit`
+        // assigns `self.epochs.len()` — so the linear `find` here scanned an average of half
+        // the history on every epoch of every sweep: quadratic in the number of epochs, for
+        // a lookup that is an array index. At the default 20,000 epochs it was 273ms against
+        // 3.2ms, with the counted work identical, so no published number was wrong — only
+        // the time to reproduce one, and that grows with the square.
+        let Some(rec) = self.ledger.epochs.get(e as usize).filter(|r| r.id == e) else {
             return Vec::new();
         };
         rec.rows

@@ -271,7 +271,7 @@ faster and the evaluation chapter must not imply it does.
 
 **Gate.** The consensus, cross-shard commit and distributed read path have all been built and
 tested in a deterministic simulator, and **not one has run over a network.** The gate is
-partial failure, clock skew, and an operator. An Elle-style cycle check MUST find no anomaly
+partial failure, clock skew, and an operator. An Elle-style cycle check SHOULD find no anomaly (planned; no such checker is built)
 — and this matters *even if the conservation suite passes*, because a published analysis
 shows that combination is possible.
 
@@ -373,3 +373,29 @@ Stated so it is falsifiable rather than a plan that survives contact with any ev
 * **If the distributed protocols fail over a real network** in a way the simulator could not
   have caught, the simulator's fault model is wrong and needs rebuilding before the protocols
   do.
+
+## Deleted from the workspace, and why
+
+Three crates were carried in the workspace as `pub mod` lines over one-line files: no
+function, no type, no caller. They appeared in Appendix D's component map, in
+`docs/SPEC-ENGINE.md`'s status lines and in the thesis's chapters as though they were
+components, which is the only thing a reader could have concluded from finding them in
+`crates/`.
+
+A stub is a plan. Kept in the build it is a plan that looks like a component, and every
+count of "how much of this exists" was wrong by three. They are removed and recorded here:
+
+* **`nilestream-storage`** — tiering, cold storage, the migration boundary, checkpoint
+  persistence. Appendix D.5 and SPEC-ENGINE §PAX describe the design; nothing implements it.
+  Checkpointing as a *mechanism* is built and measured, in `proto-engine` and through the
+  compiled sweep (SC7, §9.13.1); what is missing is the durable tier beneath it.
+* **`niles-stdlib`** — `std::bank`, `std::temporal`, money and the builtin catalogue.
+  The builtins that exist live in `niles-interp` and `niles-lang`'s registry; the library
+  *over* the core that §6.6 argues for is the unbuilt part, and H-S8 is the hypothesis it
+  bears on.
+* **`nilestream-lineage`** — provenance annotation, `explain`, `impact`, the semiring
+  machinery. Its absence is why H-S9 is withdrawn rather than merely unmeasured: there is no
+  lineage mode to switch between, so there is no completeness figure and no overhead figure
+  to report (Remark 4.1.2, §12).
+
+Restoring any of them means writing the crate, not un-deleting the file.

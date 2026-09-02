@@ -49,10 +49,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "niles-stdlib"
-version = "0.1.0"
-
-[[package]]
 name = "nilesc"
 version = "0.1.0"
 dependencies = [
@@ -93,10 +89,6 @@ name = "nilestream-ledger"
 version = "0.1.0"
 
 [[package]]
-name = "nilestream-lineage"
-version = "0.1.0"
-
-[[package]]
 name = "nilestream-optimizer"
 version = "0.1.0"
 dependencies = [
@@ -111,15 +103,7 @@ dependencies = [
  "niles-lang",
  "nilestream-core",
  "nilestream-ledger",
- "nilestream-storage",
  "proto-engine",
-]
-
-[[package]]
-name = "nilestream-storage"
-version = "0.1.0"
-dependencies = [
- "nilestream-ledger",
 ]
 
 [[package]]

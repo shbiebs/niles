@@ -8,7 +8,6 @@ authors.workspace = true
 [dependencies]
 nilestream-ledger = { path = "../nilestream-ledger" }
 nilestream-core = { path = "../nilestream-core" }
-nilestream-storage = { path = "../nilestream-storage" }
 niles-ir = { path = "../niles-ir" }
 niles-lang = { path = "../niles-lang" }
 proto-engine = { path = "../proto-engine" }

@@ -2,66 +2,157 @@
 
 ## D.1 Component Map
 
-| Crate | Role |
-|---|---|
-| `nilestream-ledger` | Epoch segments, sequencer, hash chain, durability, admission and commit rules |
-| `nilestream-core` | REV runtime: resident maps, anchor indices, apply loop, upqueries, contracts |
-| `nilestream-optimizer` | Adaptive materialization: estimators, mode selection, eviction, hysteresis |
-| `nilestream-lineage` | Provenance annotation, explain, reproduce, impact |
-| `niles-ir` | Typed IR: circuit types, verifier, interpreter, upquery paths |
-| `niles-lang` | Stage-0 compiler: lexer, parser, type/effect checker, lowering; SQL surface |
-| `niles-stdlib` | `std::bank`, `std::temporal`, money, builtins |
-| `nilestream-storage` | Tiering, migration, checkpoints, cold backend |
-| `nilestream-server` | Daemon: sessions, native protocol, MySQL/PostgreSQL wire, observability, audit |
-| `conservation-suite` | Reference oracle, property tests, fault campaigns |
-| `bank-bench` | NilesBank generator, harness, analysis |
+**This appendix is generated, and it did not use to be.** Every type and method D.2 and D.3
+listed — an `append_batch` on a ledger handle, a `serve` on a read model, a storage tier,
+an `explain` returning a lineage — was absent from `crates/`, in an appendix a reader consults precisely
+to find out what exists. Three of the eleven crates in the map below it were stubs with no
+caller; two of those have since been deleted from the workspace and the third with them
+(`docs/ROADMAP.md` records all three as planned). What follows is read off the crates by
+`thesis/gen-appendix-d.py`, so a component that does not exist cannot appear here and a
+method that does not exist cannot be listed. The *roles* are hand-written, because what a
+component is for is not derivable from its source.
 
-## D.2 Ledger Write-Path API
+<!-- BEGIN:appendix-d-map thesis/appendix-d-map.md#verbatim -->
+
+*Generated from `thesis/appendix-d-map.md`. Do not edit by hand.*
+
+*Generated from the workspace by `thesis/gen-appendix-d.py`. Do not edit by hand.*
+
+| Crate | Role | public items |
+|---|---|--:|
+| `bank-bench` | NilesBank generator, wall-clock harness, thesis drift tests | 25 |
+| `conservation-suite` | Reference oracle and the conservation property tests | 23 |
+| `experiments` | The E-series measurement harness | 0 |
+| `niles-interp` | The imperative-subset interpreter `nilesc run` drives, and the ledger it posts to | 16 |
+| `niles-ir` | Typed IR: circuit types, verifier, reference interpreter, upquery paths | 39 |
+| `niles-lang` | Stage-0 compiler: lexer, parser, type/effect checker, lowering; SQL surface | 133 |
+| `nilesc` | The compiler driver: `check`, `verify`, `run` | 0 |
+| `nilestream` | The engine binary: sweep and serve | 0 |
+| `nilestream-consensus` | A single-process, deterministic simulator for replication and cross-shard commit. No sockets, no clock | 21 |
+| `nilestream-core` | REV runtime: resident maps, anchor indices, apply loop, upqueries, contracts | 19 |
+| `nilestream-ledger` | Epoch segments, sequencer, hash chain, durability, admission and commit rules | 18 |
+| `nilestream-optimizer` | Plan-time mode selection and the eviction policies (the adaptive optimizer of §4.6 is specified and not built) | 37 |
+| `nilestream-server` | Daemon: sessions, PostgreSQL wire surface, conformance | 54 |
+| `proto-engine` | The research prototype the counted-work experiments run on | 20 |
+
+<!-- END:appendix-d-map -->
+
+## D.2 The Public Surface of the Write Path, the Read Model and the IR
+
+Generated from the crates. The prose after it says what the shapes mean; the shapes
+themselves are whatever the source has.
+
+<!-- BEGIN:appendix-d-api thesis/appendix-d-api.md#verbatim -->
+
+*Generated from `thesis/appendix-d-api.md`. Do not edit by hand.*
+
+*Generated from the workspace by `thesis/gen-appendix-d.py`. Do not edit by hand.*
+
+**`nilestream-ledger`**
 
 ```rust
-pub struct Ledger { /* segments, chain head, open epoch, idempotency window */ }
-
-impl Ledger {
-    /// Admission: idempotency check, commit rule, authorization. Idempotent by key
-    /// within the declared window; a fingerprint mismatch is a conflict, not a replay.
-    pub fn submit(&self, txn: ValidatedTxn) -> Result<Pending, AdmitError>;
-
-    /// Seals on the tau boundary or size bound: hash, fsync (and quorum), publish vis.
-    pub fn seal_boundary(&self) -> SealedEpoch;
-
-    /// An immutable, verify-on-read reader over the prefix at `upto`.
-    pub fn prefix(&self, upto: Epoch) -> PrefixReader;
-
-    pub fn frontiers(&self) -> Frontiers;                  // seal / dur / vis
-    pub fn verify_chain(&self, from: Epoch, to: Epoch) -> Result<(), ChainBreak>;
-}
+pub struct Hasher256
+pub fn sha256(bytes: &[u8]) -> [u8
+pub fn chain_hash(parent: &[u8
+pub fn hex(digest: &[u8
+pub struct Frontier
+pub struct Snapshot
+pub type Minor
+pub struct Epoch(pub u64)
+pub enum SyncPolicy
+pub struct Record
+pub enum TruncationCause
+pub struct Recovery
+pub struct Segment
+pub fn recover(path: impl AsRef<Path>) -> std::io::Result<Recovery>
+pub struct Txn
+pub enum Rejected
+pub struct SequencerStats
+pub struct Sequencer
 ```
 
-Validation stages, in order: schema typing; the commit rule (for ledgers, per-currency zero-sum in exact integer minor units); authorization capabilities for flagged effects; idempotency-window check. `SealedEpoch` carries `(id, parent_hash, hash, count, bytes)`, and publication order is fsync → chain append → visibility advance, never reordered. **There is no update or delete API**, by design: corrections are appends and hold resolutions are appends.
-
-## D.3 Read-Model Runtime API
+**`nilestream-core`**
 
 ```rust
-pub enum Slot<V> { Bottom, Hole(Epoch), Pending(Epoch, Waiters), Present(V, Epoch) }
-
-pub struct Rev { /* circuit, resident map, anchor index, contract, mode */ }
-
-impl Rev {
-    pub fn read(&self, key: Key, sess: &mut Session) -> ReadOutcome; // Hit | Wait | Upquery
-    pub fn apply(&mut self, epoch: &SealedEpoch);          // advance anchors monotonically
-    pub fn evict(&mut self, key: Key);                     // Present -> Hole(anchor)
-    pub fn upquery(&self, key: Key, at: Epoch) -> Anchored<Val>;   // pull over frozen prefix
-    pub fn frontier(&self) -> Epoch;                       // applied_V
-    pub fn explain(&self, key: Key) -> Lineage;            // at the view's lineage mode
-    pub fn set_mode(&mut self, range: KeyRange, mode: Mode); // optimizer-driven; see Thm 4.5(a)
-}
+pub type Epoch
+pub enum Slot<V>
+pub type ShardId
+pub struct ShardMap
+pub enum ReadError
+pub struct Shard
+pub struct Cluster
+pub fn maintenance_stride(c: Consistency) -> u64
+pub fn is_highly_available(c: Consistency) -> bool
+pub fn permits_reading(outer: Consistency, inner: Consistency) -> bool
+pub type Key
+pub type Value
+pub struct Anchored
+pub trait Base
+pub enum Policy
+pub struct Stats
+pub struct Rev
+pub enum Unsupported
+pub struct Runtime
 ```
 
-`Slot` is the absence lattice of Section 3.4 verbatim — the type mirrors the lattice deliberately, so that a state the theory does not contemplate cannot be represented.
+**`niles-ir`**
 
-**Anchor indices.** Per key, an epoch-skip structure over that key's delta positions in the segment stream, giving amortized O(1) location of the deltas in an interval. This is the structure that discharges Theorem 4.3′'s access assumption in practice; without it, locating a key's history would scan and would reintroduce a dependence on base length.
+```rust
+pub type NodeId
+pub enum Anchor
+pub struct Checked<T>
+pub struct Node
+pub struct Circuit
+pub struct AccessReport
+pub fn internal_contract() -> ServeContract
+pub enum Consistency
+pub enum Materialize
+pub enum Retention
+pub enum Lineage
+pub struct ServeContract
+pub type ColIdx
+pub enum Agg
+pub enum JoinKind
+pub enum Scalar
+pub enum ScalarOp
+pub enum Op
+pub enum ApplyKind
+pub enum Step
+pub enum ScheduleError
+pub struct Schedule
+pub fn check(circuit: &Circuit, schedule: &Schedule) -> Result<Circuit, ScheduleError>
+pub fn apply(circuit: &Circuit, step: &Step) -> Result<Circuit, ScheduleError>
+pub fn columns_read(s: &Scalar, out: &mut Vec<ColIdx>)
+pub fn step_from_name(name: &str, node: NodeId) -> Result<Step, ScheduleError>
+pub fn catalogue() -> Vec<&'static str>
+pub struct Hop
+pub struct UpqueryPath
+pub enum NoPath
+pub fn derive(circuit: &Circuit, node: NodeId, epoch: u64) -> Result<UpqueryPath, NoPath>
+pub enum Value
+pub enum Tri
+pub fn compare(a: Value, b: Value, f: impl Fn(i128, i128) -> bool) -> Tri
+pub fn arith(a: Value, b: Value, f: impl Fn(i128, i128) -> i128) -> Value
+pub fn truth(v: Value) -> Tri
+pub struct Violation
+pub struct VerifyReport
+pub fn verify(c: &Circuit) -> VerifyReport
+```
 
-## D.4 The Typed Intermediate Representation
+<!-- END:appendix-d-api -->
+
+Validation stages, in order: schema typing; the commit rule (for ledgers, per-currency
+zero-sum in exact integer minor units); authorization capabilities for flagged effects;
+idempotency-window check. Publication order is fsync → chain append → visibility advance,
+never reordered. **There is no update or delete API**, by design: corrections are appends and
+hold resolutions are appends.
+
+`Slot` is the absence lattice of Section 3.4 verbatim — the type mirrors the lattice
+deliberately, so that a state the theory does not contemplate cannot be represented.
+
+## D.3 The Typed Intermediate Representation
+
+**Specification and implementation mixed.** The operator set, the verifier's checks and content-addressed identity are built (`niles-ir`, and the listing in D.2); the provenance metadata is not, since no lineage mode exists.
 
 The IR is a circuit language: nodes are operators, edges carry `Stream<Z<Row>>` types annotated with anchors, effects, contracts and provenance.
 
@@ -73,7 +164,9 @@ The IR is a circuit language: nodes are operators, edges carry `Stream<Z<Row>>` 
 
 **Identity.** IR is serialized content-addressed, so **view identity is the IR hash**. This is what makes "the same view" well-defined across upgrades, what lets the optimizer's statistics survive a redeploy that did not change semantics, and what makes a semantic change to a view a visible, auditable event.
 
-## D.5 Wire Protocols
+## D.4 Wire Protocols
+
+**One of the three is built.** The PostgreSQL surface is implemented and driven by `psql` in conformance tests. The native frame protocol and the MySQL adapter are **specification**: there is no MySQL listener, which is why H-S5's client-compatibility half is unmeasured.
 
 **Native.** Length-prefixed versioned frames carrying typed results *with anchors*; sessions hold the ladder watermarks implementing ℓ₁ and ℓ₂.
 
@@ -83,7 +176,9 @@ The IR is a circuit language: nodes are operators, edges carry `Stream<Z<Row>>` 
 
 **Policy.** Anything outside the documented subset returns a named unsupported-feature error. Silent divergence is a correctness bug, not a compatibility gap — the operational counterpart of Theorem 4.6(c)'s fragment honesty.
 
-## D.6 Storage, Durability, and Memory
+## D.5 Storage, Durability, and Memory
+
+**Durability and the segment format are built** (`nilestream-ledger`, measured at parity with PostgreSQL's `fsync` path in §9.14.1). **Tiering, cold storage and the memory arenas are specification** — the crate that would have held them was a stub and has been deleted; `docs/ROADMAP.md` records it.
 
 **Segment format.** Header (magic, version, algorithm identifiers, epoch id, parent hash), body (canonically serialized rows, compressed), footer (hash, checksum). Algorithm identifiers in the header are what make cryptographic agility possible without breaking historical verification.
 
@@ -95,7 +190,9 @@ The IR is a circuit language: nodes are operators, edges carry `Stream<Z<Row>>` 
 
 **Memory.** Arena-per-open-epoch on the write path; slab allocation for resident maps under the optimizer's budget. The global memory budget is the `m` of every theorem in Chapter 4.
 
-## D.7 Configuration Reference
+## D.6 Configuration Reference
+
+**The per-view knobs are built** — `serve { consistency, materialize, .. }` is checked by the compiler and read by the runtime. The global table is **specification**; the optimizer knobs in it belong to an optimizer that is not built (§4.6).
 
 **Per view:** `consistency` (six rungs), `freshness` (K, T), `checkpoint` (per-key interval C; Theorem 3.7), `materialize` (`absent | demand | full | spilled | tiered | auto`), `budget_share`, `retain` (`evictable | pinned | forever`), `lineage` (`off | key | full`), `backfill`, `upquery_parallelism`, `checkpoint`.
 
@@ -103,7 +200,9 @@ The IR is a circuit language: nodes are operators, edges carry `Stream<Z<Row>>` 
 
 Every knob is pinned and recorded in benchmark configurations (Section 9.2), because an unrecorded knob is an unreproducible result.
 
-## D.8 Observability, Audit, and Operations
+## D.7 Observability, Audit, and Operations
+
+**Specification**, except the counters `nilestream-core` already keeps (reads, hits, misses, upqueries, base rows, evictions) and chain verification, which `nilestream-ledger` implements and the recovery path uses.
 
 **Metrics.** Frontier gauges (seal, dur, vis, applied per view); hit, miss and upquery counters; **reconstruction-latency distributions and the derived Z per key range** (required by Section 5.5, since a phase-diagram point without Z is uninterpretable); eviction pressure; mode transitions *with the estimator values that caused them*; admission rejections by cause; chain-verification status.
 
@@ -111,7 +210,9 @@ Every knob is pinned and recorded in benchmark configurations (Section 9.2), bec
 
 **Operations.** Drain-and-seal; checkpoint; migrate; rotate keys (recorded as a ledger event); deploy and retire views by IR hash. Logs are structured and epoch-stamped.
 
-## D.9 Deployment Topology
+## D.8 Deployment Topology
+
+**Single node is built. Everything below it is specification**, and the replicated and sharded rows are exercised only in the single-process simulator of `nilestream-consensus` — never over a network.
 
 **Single node.** One process, all crates in-process.
 

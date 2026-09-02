@@ -83,8 +83,11 @@ thesis's contribution is elsewhere.
 
 *Acceptance test.* A scan of one column MUST NOT read the other columns' bytes, measured in
 pages faulted. A point lookup MUST touch O(log n) pages. Both MUST hold against the *same*
-physical structure. **Status: Specified** — `nilestream-storage` has checkpointing and
-tiering; PAX leaves are unbuilt.
+physical structure. **Status: Specified.** There is no storage crate. `nilestream-storage`
+was a stub with no caller — a `lib.rs` of three `pub mod` lines over three one-line files —
+and this sentence said it "has checkpointing and tiering". It has been deleted from the
+workspace and recorded in `docs/ROADMAP.md`; checkpointing lives where it is measured, in
+`proto-engine` and the compiled sweep.
 
 ---
 
@@ -348,7 +351,7 @@ non-blocking + one-round reads + conflicting writes is impossible — binding di
 design serving fast reads from derived views while writes land. **Attiya–Welch**:
 linearizability costs ~u/4 on reads and ~u/2 on writes under clock uncertainty *u*.
 
-*Acceptance test.* An Elle-style cycle check MUST find no anomaly. **This matters even if the
+*Acceptance test.* An Elle-style cycle check SHOULD find no anomaly. **Planned: no such checker exists in this repository**, so this row is an acceptance criterion with no instrument, and §9.12 records strict serializability as not tested rather than as passed. **This matters even if the
 conservation suite passes**, because a published analysis shows exactly that combination is
 possible. **Status: Partial** — consensus and cross-shard commit are built and simulated;
 neither has run over a network.

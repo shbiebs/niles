@@ -31,6 +31,14 @@ pub struct Acct(pub u64);
 
 /// A currency's declared scale (ISO 4217 minor-unit exponent): 0 for JPY, 2 for USD,
 /// 3 for KWD. A `Money` type fixed at scale 2 is provably wrong (thesis 3.2).
+///
+/// **Declared and unused, deliberately, and this comment is the record of that.** The oracle
+/// holds amounts in minor units and never renders them, so it needs no scale; the type is
+/// here because Appendix F's design rule 3 says the oracle must not hard-code a scale of
+/// two, and a reader checking that rule against the code should find the concept named
+/// rather than infer its absence. Every amount that reaches this oracle has had its scale
+/// checked by whatever produced it — `CurrencySums` in GBS, the currency row in the
+/// checker — and the oracle's job is to fold, not to re-derive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Scale(pub u8);
 
@@ -152,6 +160,14 @@ impl Oracle {
         Self::default()
     }
 
+    // BEGIN:appendix-f
+    //
+    // Everything between these markers is reproduced verbatim in Appendix F.2 of the thesis
+    // by `thesis/gen-appendix-f.py`, and `tests/appendix_f.rs` fails if the two differ. The
+    // appendix used to carry a hand-written paraphrase that no longer compiled: its fold
+    // signature had drifted from this one and it declared a type nothing used. An appendix
+    // presenting itself as "the one component implemented and passing tests today" has to be
+    // the code that is passing them.
     /// Admission: idempotency, then the commit rule (per (txn, currency) balance), then
     /// seal immediately. The oracle's epoch is one batch; the epoch period is a
     /// performance knob in the real engine and is irrelevant to the semantics here.
@@ -231,6 +247,8 @@ impl Oracle {
             })
             .sum()
     }
+
+    // END:appendix-f
 
     /// The total of holds placed but not yet resolved, as of `anchor`.
     pub fn unresolved_holds(&self, a: Acct, c: Cur, anchor: u64) -> Minor {

@@ -196,7 +196,7 @@
 
 [89] T. Lahiri et al., "Oracle Database In-Memory: A dual format in-memory database," in *Proc. IEEE 31st Int. Conf. Data Engineering (ICDE '15)*, 2015.
 
-[90] J. Yang et al., "H-F1 Lightning: HTAP as a service," *Proc. VLDB Endowment*, vol. 13, no. 12, pp. 3313–3325, 2020, doi: 10.14778/3415478.3415553.
+[90] J. Yang et al., "F1 Lightning: HTAP as a service," *Proc. VLDB Endowment*, vol. 13, no. 12, pp. 3313–3325, 2020, doi: 10.14778/3415478.3415553.
 
 [91] J. Lu and I. Holubová, "Multi-model databases: A new journey to handle the variety of data," *ACM Computing Surveys*, vol. 52, no. 3, 2019, doi: 10.1145/3323214.
 
@@ -426,3 +426,29 @@
 [195] U.S. Department of the Treasury, Bureau of the Fiscal Service, *Treasury Financial Manual, Supplement — U.S. Government Standard General Ledger (USSGL)*, Part 1, Sections II and IV. [Online]. Available: https://tfm.fiscal.treasury.gov/ (accessed Aug. 2026).
 
 [196] jemalloc, "jemalloc(3) manual." [Online]. Available: https://jemalloc.net/jemalloc.3.html (accessed Aug. 2026); Rust Project, "`std::alloc::GlobalAlloc`," *The Rust Standard Library*.
+
+## Static Analysis and Type Systems for Resources and Money
+
+*Added because §4.5.1 argues at length against these five works and cited none of them. A
+reader following that argument had no way to check it. Details for the first four are carried
+over from `docs/research/currency-row-analysis.md`, where the search that produced them is
+recorded; the qualifications there about unverified venue details are reproduced rather than
+dropped.*
+
+[197] M. Karr, "Affine relationships among variables of a program," *Acta Informatica*, vol. 6, no. 2, pp. 133–151, 1976, doi: 10.1007/BF00268497.
+
+[198] M. Müller-Olm and H. Seidl, "A note on Karr's algorithm," in *Proc. 31st Int. Colloquium on Automata, Languages and Programming (ICALP 2004)*, LNCS vol. 3142, pp. 1016–1027, doi: 10.1007/978-3-540-27836-8_85.
+
+[199] S. Blackshear, E. Cheng, D. L. Dill, V. Gao, B. Maurer, T. Nowacki, A. Pott, S. Qadeer, Rain, D. Russi, S. Sezer, T. Zakian, and R. Zhou, "Move: A language with programmable resources," Diem Association, rev. May 26, 2020. [Online]. Available: https://diem-developers-components.netlify.app/papers/diem-move-a-language-with-programmable-resources/2020-05-26.pdf (accessed Sep. 2026).
+
+[200] A. Das, S. Balzer, J. Hoffmann, and F. Pfenning, "Resource-aware session types for digital contracts," in *Proc. IEEE 34th Computer Security Foundations Symp. (CSF)*, 2021. arXiv:1902.06056. *(Venue and a possible fifth author unverified at source.)*
+
+[201] B. Tan, B. Mariano, S. K. Lahiri, I. Dillig, and Y. Feng, "SolType: Refinement types for arithmetic overflow in Solidity," *Proc. ACM Program. Lang.*, vol. 6, no. POPL, 2022. arXiv:2110.00677. *(Author list and venue partially unverified at source.)*
+
+[202] Y. Kotidis and N. Roussopoulos, "DynaMat: A dynamic view management system for data warehouses," in *Proc. 1999 ACM SIGMOD Int. Conf. Management of Data*, 1999, pp. 371–382, doi: 10.1145/304182.304215.
+
+[203] S. Dar, M. J. Franklin, B. T. Jónsson, D. Srivastava, and M. Tan, "Semantic data caching and replacement," in *Proc. 22nd Int. Conf. Very Large Data Bases (VLDB '96)*, 1996, pp. 330–341.
+
+[204] P. A. Bernstein, C. W. Reid, and S. Das, "Hyder — A transactional record manager for shared flash," in *Proc. 5th Biennial Conf. Innovative Data Systems Research (CIDR '11)*, Asilomar, CA, USA, 2011, pp. 9–20.
+
+[205] Amazon Web Services, "Amazon Quantum Ledger Database (QLDB) — end of support announcement." [Online]. Available: https://docs.aws.amazon.com/qldb/ (accessed Sep. 2026).

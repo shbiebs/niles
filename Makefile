@@ -20,9 +20,12 @@ gate: fmt lint generated test
 # document that drifts from the artifact fails a build rather than being noticed in
 # review — which is the failure mode a status line has when nothing produces it.
 generated:
+	python3 thesis/gen-appendix-d.py map | diff -u thesis/appendix-d-map.md - 
+	python3 thesis/gen-appendix-d.py api | diff -u thesis/appendix-d-api.md -
 	cargo run -q -p niles-lang --bin gen-sql-surface -- --check
 	cargo run -q -p niles-lang --bin gen-spec-conformance -- docs/SPEC-LANGUAGE.md --check
 	cargo run -q -p niles-lang --bin gen-keyword-ref -- docs/keywords.md
+	python3 thesis/check-citations.py
 	python3 thesis/include-results.py --check
 
 bootstrap:
@@ -43,6 +46,8 @@ bootstrap:
 # `nilestream sweep` needs the release binary, so `make reproduce` after `cargo build
 # --release -p nilestream`; the E12 sweep is deterministic and its diff is meaningful.
 reproduce:
+	python3 thesis/gen-appendix-d.py map > thesis/appendix-d-map.md
+	python3 thesis/gen-appendix-d.py api > thesis/appendix-d-api.md
 	cargo run -q -p niles-lang --bin gen-sql-surface
 	cargo run -q -p niles-lang --bin gen-spec-conformance -- docs/SPEC-LANGUAGE.md
 	cargo run -q -p niles-lang --bin gen-keyword-ref -- docs/keywords.md

@@ -427,18 +427,51 @@ fn stage_3_the_fixpoint_holds_on_self_application_too() {
 #[test]
 fn the_relational_tier_is_still_refused_and_the_bootstrap_does_not_touch_it() {
     // The bootstrap must not have quietly acquired a second, unchecked path into the
-    // relational tier. If `txn` ever became interpretable, Contribution 4's guarantee
-    // would have a hole shaped exactly like this test.
-    let (prog, _) = parser::parse_program("fn f() -> i64 { txn { 1 } }");
-    let mut it = Interp::new();
-    it.load(&prog);
-    assert!(matches!(
-        it.call("f", vec![]),
-        Err(Error::NotInSubset { form: "txn", .. })
-    ));
+    // relational tier. This used to assert that `txn` was refused by name; T-18 gave `txn` a
+    // dynamic semantics — a posting set has to be sealed somewhere for a function to have run
+    // at all, and a conformance suite that cannot execute is a conformance suite comparing
+    // renderings (F-25).
+    //
+    // The guarantee the old assertion protected is unchanged and is checked where it now
+    // lives: `txn` seals through the commit rule, so a set that does not conserve is refused
+    // by currency with its residual named (`niles-interp`'s own
+    // `a_txn_that_does_not_conserve_is_refused_with_the_currency_and_the_residual`). What
+    // matters *here* is the second half, which is untouched: the bootstrap does not use the
+    // relational tier, and `hold` and `resolve` remain uninterpretable.
+    for (src, form) in [
+        (
+            "fn f() -> i64 { let h = hold(acct(1), 20.00 usd, expires: 7.days)?; 0 }",
+            "hold",
+        ),
+        ("fn f() -> i64 { let x = resolve h void; 0 }", "resolve"),
+    ] {
+        let (prog, _) = parser::parse_program(src);
+        let mut it = Interp::new();
+        it.load(&prog);
+        match it.call("f", vec![]) {
+            Err(Error::NotInSubset { form: got, .. }) => assert_eq!(got, form),
+            other => panic!("`{form}` must still be refused by name, got {other:?}"),
+        }
+    }
     assert!(
         !LEXER_SRC.contains("txn {"),
         "the bootstrap lexer must stay in the imperative subset"
+    );
+    // And the bootstrap does not reach the ledger builtins. Checked by *running* it rather
+    // than by grepping: `post(` occurs in `bootstrap/lexer.niles` inside a string literal —
+    // a sample program the lexer lexes — and a grep would have called that a breach.
+    let (prog, _) = parser::parse_program(LEXER_SRC);
+    let mut it = Interp::new();
+    it.load(&prog);
+    let _ = it
+        .call(
+            "lex_and_render",
+            vec![Value::Str(std::rc::Rc::new("fn f() {}".to_string()))],
+        )
+        .expect("the bootstrap lexer runs");
+    assert!(
+        it.ledger.sealed.is_empty() && it.ledger.open.is_none(),
+        "the bootstrap lexer sealed a posting set, which it has no business doing"
     );
 }
 

@@ -42,6 +42,9 @@
 //! randomness, and no I/O beyond an explicit output buffer the caller owns, so a program
 //! run twice cannot differ. [`determinism_gate`] is the runnable form of that claim.
 
+pub mod ledger;
+
+use ledger::{Ledger, Leg};
 use niles_lang::ast::*;
 use niles_lang::lexer::Span;
 use std::collections::BTreeMap;
@@ -241,6 +244,13 @@ pub enum Error {
         limit: usize,
         at: Span,
     },
+    /// The ledger refused a posting set. Not a bug in the program's *evaluation* — the
+    /// program ran — but a refusal by the one rule this interpreter enforces, and it carries
+    /// the refusal verbatim so a caller does not have to guess which currency was short.
+    Refused {
+        why: ledger::Refusal,
+        at: Span,
+    },
 }
 
 impl Error {
@@ -256,7 +266,8 @@ impl Error {
             | Error::WrongArity { at, .. }
             | Error::NoMatchingArm { at }
             | Error::NotCallable { at, .. }
-            | Error::TooDeep { at, .. } => Some(*at),
+            | Error::TooDeep { at, .. }
+            | Error::Refused { at, .. } => Some(*at),
             Error::OutOfFuel => None,
         }
     }
@@ -284,6 +295,7 @@ impl Error {
             Error::TooDeep { limit, .. } => {
                 format!("call nesting exceeded {limit}; the host stack, not Niles, is the limit")
             }
+            Error::Refused { why, .. } => format!("the ledger refused the set: {why}"),
         }
     }
 }
@@ -378,6 +390,14 @@ pub struct Interp {
     /// caller that has arranged the stack to match (see `run_with_stack`).
     depth: usize,
     max_depth: usize,
+    /// `idem` windows evaluated past. See [`Interp::txn`]; `nilesc run` reports the count.
+    ignored_windows: u32,
+    /// The ledger `txn`, `debit`, `credit` and `post` operate on.
+    ///
+    /// Public because a caller running a function for its *postings* — `nilesc run` — wants
+    /// the sealed set afterwards, and because a caller seeding opening balances wants to say
+    /// so before the run. Empty and inert unless a program uses the ledger forms.
+    pub ledger: Ledger,
 }
 
 impl Default for Interp {
@@ -396,7 +416,14 @@ impl Interp {
             fuel: 50_000_000,
             depth: 0,
             max_depth: DEFAULT_MAX_DEPTH,
+            ignored_windows: 0,
+            ledger: Ledger::new(),
         }
+    }
+
+    /// How many `idem` windows were evaluated past. See [`Interp::txn`].
+    pub fn ignored_windows(&self) -> u32 {
+        self.ignored_windows
     }
 
     pub fn with_fuel(mut self, fuel: u64) -> Self {
@@ -770,6 +797,11 @@ impl Interp {
             Expr::Closure { params, body, .. } => self.make_closure(env, params, body),
 
             Expr::Call { callee, args, span } => self.call_expr(env, callee, args, *span),
+
+            // `txn idem(key, window: …) { … }` — the one relational-tier form the interpreter
+            // evaluates, because a posting set has to be sealed somewhere for a function to
+            // have run at all. Everything else in `refused` below stays refused.
+            Expr::Txn { idem, body, span } => self.txn(env, idem.as_ref(), body, *span),
 
             Expr::Unary { op, operand, span } => self.unary_op(env, *op, operand, *span),
 
@@ -1300,7 +1332,10 @@ impl Interp {
             if let Some(f) = self.fns.get(n).cloned() {
                 return self.call_decl(&f, vs, span);
             }
-            // A free builtin.
+            // A ledger builtin, then a free one.
+            if let Some(v) = self.builtin_ledger(n, &vs, span)? {
+                return Ok(v);
+            }
             if let Some(v) = self.builtin_free(n, &vs, span)? {
                 return Ok(v);
             }
@@ -1350,6 +1385,167 @@ impl Interp {
         };
         self.depth -= 1;
         r
+    }
+
+    /// `txn idem(key, window: …) { … }` — open a transaction, run the body, seal it.
+    ///
+    /// The identity is the `idem` key, evaluated: it is the transaction's name in the encoded
+    /// set, so a schema saying `idem("transfer", window: 30.days)` produces a set whose txn is
+    /// `"transfer"` and whose bytes a Rust product's `PostingSet::new("transfer")` can be
+    /// compared against. A `txn` with no `idem` clause takes the empty identity, which is what
+    /// a set nobody named has and is not a name this interpreter invents.
+    ///
+    /// The window is **evaluated and discarded**, deliberately and not silently: the
+    /// duration literal it holds is outside the subset, so evaluating it would refuse the whole
+    /// function over a clause whose only effect is on an idempotency store this interpreter
+    /// does not have. Ignoring the *value* while honouring the *identity* is the honest split,
+    /// and a run that needed the window would be a run this interpreter should refuse rather
+    /// than approximate — which is why `nilesc run` reports the window it ignored.
+    ///
+    /// If the body fails, the open transaction is abandoned rather than left half-built: a
+    /// refused transaction that leaves legs behind would make the next `txn` seal somebody
+    /// else's money.
+    fn txn(
+        &mut self,
+        env: &mut Env,
+        idem: Option<&IdemSpec>,
+        body: &Block,
+        span: Span,
+    ) -> Eval<Value> {
+        let key = match idem {
+            None => String::new(),
+            Some(spec) => match self.expr(env, &spec.key)? {
+                Value::Str(s) => (*s).clone(),
+                other => {
+                    return Err(Error::TypeMismatch {
+                        want: "a string idempotency key".into(),
+                        got: other.type_name().into(),
+                        at: spec.span,
+                    }
+                    .into())
+                }
+            },
+        };
+        if let Some(spec) = idem {
+            if spec.window.is_some() {
+                self.ignored_windows += 1;
+            }
+        }
+        self.ledger.begin(&key);
+        let out = self.block(env, body);
+        if out.is_err() {
+            self.ledger.abandon();
+            return out;
+        }
+        self.ledger
+            .seal()
+            .map_err(|why| Flow::Err(Error::Refused { why, at: span }))?;
+        out
+    }
+
+    /// The ledger builtins: `acct`, `debit`, `credit`, `post`.
+    ///
+    /// Separate from [`Interp::builtin_free`] so that the free-function table stays the
+    /// "100-line host shim" it is documented to be, and so a reader looking for what the
+    /// interpreter does to money finds it in one place.
+    fn builtin_ledger(&mut self, name: &str, vs: &[Value], span: Span) -> Eval<Option<Value>> {
+        let v = match (name, vs) {
+            // An account identifier. Niles writes `acct(1001)` and the schema's `Id<Account>`
+            // is opaque, so the interpreter's account *name* is the rendering of whatever was
+            // passed — an integer renders as its digits, a string as itself. That makes the
+            // account a caller's choice, which is what lets a fixture pass the concrete names
+            // a Rust product posts to (`loan.fac-1.agent`) where the schema says `lender_a`.
+            ("acct", [v]) => Value::Str(Rc::new(v.render())),
+            ("debit", [a, m]) => self.leg(a, m, -1, span)?,
+            ("credit", [a, m]) => self.leg(a, m, 1, span)?,
+            ("post", legs) => {
+                let mut out = Vec::with_capacity(legs.len());
+                for l in legs {
+                    out.push(as_leg(l, span).map_err(Flow::Err)?);
+                }
+                self.ledger
+                    .push_legs(out)
+                    .map_err(|why| Flow::Err(Error::Refused { why, at: span }))?;
+                // `post` yields the transaction identity, so `txn { … post(…) }` evaluates to
+                // it and a function returning `Result<TxnId, TxnError>` has something to
+                // return. Wrapped in `Ok`, because that is the declared type.
+                let id = self
+                    .ledger
+                    .open
+                    .as_ref()
+                    .map(|o| o.txn.clone())
+                    .unwrap_or_default();
+                Value::Variant {
+                    path: "Ok".into(),
+                    payload: Rc::new(vec![Value::Str(Rc::new(id))]),
+                }
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(v))
+    }
+
+    /// One leg. `sign` is −1 for a debit and +1 for a credit.
+    ///
+    /// The sign convention is the one place the two representations of a posting genuinely
+    /// differ, and it is written here rather than inferred: **Niles writes the verb and the
+    /// amount is positive; the kernel stores a signed amount and derives the verb.** Getting
+    /// this backwards would make every conformance fixture pass while the two implementations
+    /// moved money in opposite directions.
+    fn leg(&mut self, account: &Value, amount: &Value, sign: i128, span: Span) -> Eval<Value> {
+        let account = match account {
+            Value::Str(s) => (**s).clone(),
+            other => other.render(),
+        };
+        let Value::Money {
+            minor,
+            scale,
+            currency,
+        } = amount
+        else {
+            return Err(Error::TypeMismatch {
+                want: "money".into(),
+                got: amount.type_name().into(),
+                at: span,
+            }
+            .into());
+        };
+        let signed = minor.checked_mul(sign).ok_or(Error::Overflow {
+            op: if sign < 0 { "debit" } else { "credit" },
+            at: span,
+        })?;
+        let mut fields = BTreeMap::new();
+        fields.insert("account".into(), Value::Str(Rc::new(account)));
+        fields.insert("minor".into(), Value::Int(signed));
+        fields.insert("scale".into(), Value::Int(*scale as i128));
+        // **Upper case.** The kernel's `Currency::new` documents this as "the only
+        // normalisation the kernel performs", and it performs it because two spellings of one
+        // currency would defeat per-currency conservation: the residuals would balance
+        // separately and both would be zero. A schema writes `300.00 usd` and a product writes
+        // `"USD"`, so the second implementation of a normative rule applies the same rule —
+        // otherwise a conformance comparison fails on a case difference and reports it as a
+        // divergence about money.
+        fields.insert(
+            "currency".into(),
+            Value::Str(Rc::new(currency.to_ascii_uppercase())),
+        );
+        let leg = Value::Record {
+            name: "Leg".into(),
+            fields: Rc::new(fields),
+        };
+        // `debit(...)` is written with a `?` in every schema in this repository, so it must be
+        // a `Result`; `credit(...)` is not, so it must not be. Rather than have two shapes,
+        // both return the bare leg and `?` on a non-`Result` would be an error — which is
+        // wrong. So a debit is wrapped and a credit is not, exactly matching how the schema
+        // writes them, and `as_leg` below unwraps whichever arrives.
+        Ok(if sign < 0 {
+            Value::Variant {
+                path: "Ok".into(),
+                payload: Rc::new(vec![leg]),
+            }
+        } else {
+            leg
+        })
     }
 
     /// Free functions. Deliberately few: this is the "100-line host shim" of Appendix E.3,
@@ -1458,6 +1654,62 @@ fn path_text(p: &Path) -> String {
         .join("::")
 }
 
+/// A `Leg` record back out of a value, accepting `Ok(leg)` as well as a bare `leg`.
+///
+/// Both shapes arrive because the schema writes `debit(..)?` and `credit(..)` — the first is a
+/// `Result` and the second is not. Accepting either here is what lets `post` take them in one
+/// list, which is how every function in `gbs.niles` is written.
+fn as_leg(v: &Value, at: Span) -> Result<Leg, Error> {
+    let v = match v {
+        Value::Variant { path, payload } if path == "Ok" && payload.len() == 1 => &payload[0],
+        other => other,
+    };
+    let Value::Record { name, fields } = v else {
+        return Err(Error::TypeMismatch {
+            want: "a leg from `debit` or `credit`".into(),
+            got: v.type_name().into(),
+            at,
+        });
+    };
+    if name != "Leg" {
+        return Err(Error::TypeMismatch {
+            want: "a leg from `debit` or `credit`".into(),
+            got: name.clone(),
+            at,
+        });
+    }
+    let get = |k: &str| -> Result<&Value, Error> {
+        fields.get(k).ok_or(Error::NoField {
+            name: k.to_string(),
+            at,
+        })
+    };
+    let (Value::Str(account), Value::Int(minor), Value::Int(scale), Value::Str(currency)) = (
+        get("account")?,
+        get("minor")?,
+        get("scale")?,
+        get("currency")?,
+    ) else {
+        return Err(Error::TypeMismatch {
+            want: "a well-formed leg".into(),
+            got: "a leg with the wrong field types".into(),
+            at,
+        });
+    };
+    Ok(Leg {
+        // The two fields Niles has no form for. See `ledger`'s module docs.
+        id: 0,
+        narrative: String::new(),
+        consumes: None,
+        account: (**account).clone(),
+        minor: *minor,
+        scale: u32::try_from(*scale).unwrap_or(0),
+        currency: (**currency).clone(),
+        epoch: 0,
+        value_date: 0,
+    })
+}
+
 /// The relational tier and the un-parsed: named, refused, never approximated.
 ///
 /// One function rather than a dozen match arms, so that `Interp::expr`'s frame does not
@@ -1468,7 +1720,6 @@ fn refused(e: &Expr) -> Error {
         Expr::Float(_, s) => ("floating-point literal", *s),
         Expr::Instant { span, .. } => ("temporal literal", *span),
         Expr::Duration { span, .. } => ("duration literal", *span),
-        Expr::Txn { span, .. } => ("txn", *span),
         Expr::Hold { span, .. } => ("hold", *span),
         Expr::Resolve { span, .. } => ("resolve", *span),
         Expr::Fx { span, .. } => ("fx", *span),
@@ -1981,17 +2232,116 @@ mod tests {
 
     // ── the refusals ────────────────────────────────────────────────────────────────
 
+    /// `txn` used to be refused by name, and the reason it was is now the reason it is not.
+    ///
+    /// The old test read: *"If `txn` evaluated as a block, a Niles-written program could appear
+    /// to conserve money while nothing checked it."* That was the right worry and refusing the
+    /// form was the wrong answer to it, because a form nobody can execute is a form nobody can
+    /// compare against a second implementation — which is exactly how a conformance suite ends
+    /// up comparing renderings instead of documents (F-25).
+    ///
+    /// `txn` now evaluates, and the worry is answered by the seal: a set that does not conserve
+    /// is refused, by currency, with the residual named. The test asserts the property rather
+    /// than the refusal of the syntax.
     #[test]
-    fn the_relational_tier_is_refused_by_name_and_never_approximated() {
-        // The property that keeps stage 0 honest. If `txn` evaluated as a block, a
-        // Niles-written program could appear to conserve money while nothing checked it.
-        let src = "fn main() -> i64 { txn { 1 } }";
+    fn a_txn_that_does_not_conserve_is_refused_with_the_currency_and_the_residual() {
+        let src = "fn main() -> i64 { txn idem(\"t\") { post(debit(acct(1), 10.00 usd)?, \
+                   credit(acct(2), 9.00 usd)) }; 0 }";
         let (prog, _) = parser::parse_program(src);
         let mut it = Interp::new();
         it.load(&prog);
         match it.call("main", vec![]) {
-            Err(Error::NotInSubset { form, .. }) => assert_eq!(form, "txn"),
-            other => panic!("txn must be refused by name, got {other:?}"),
+            Err(Error::Refused {
+                why: ledger::Refusal::Unbalanced { currency, residual },
+                ..
+            }) => {
+                assert_eq!(currency, "USD", "normalised, as the kernel normalises it");
+                assert_eq!(residual, -100, "one dollar short, in minor units");
+            }
+            other => panic!("an unbalanced set must be refused, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_txn_that_conserves_seals_and_the_legs_are_in_the_order_written() {
+        let src = "fn main() -> i64 { txn idem(\"pay\") { post(debit(acct(1), 10.00 usd)?, \
+                   credit(acct(2), 10.00 usd)) }; 0 }";
+        let (prog, _) = parser::parse_program(src);
+        let mut it = Interp::new();
+        it.load(&prog);
+        assert_eq!(it.call("main", vec![]), Ok(Value::Int(0)));
+        assert_eq!(it.ledger.sealed.len(), 1);
+        let set = &it.ledger.sealed[0];
+        assert_eq!(set.txn, "pay");
+        assert_eq!(set.legs.len(), 2);
+        assert_eq!(set.legs[0].account, "1");
+        assert_eq!(set.legs[0].minor, -1000, "a debit is negative");
+        assert_eq!(set.legs[1].minor, 1000, "a credit is positive");
+        assert_eq!(set.legs[0].currency, "USD");
+    }
+
+    /// Two spellings of one currency are one currency, here as in the kernel.
+    ///
+    /// A schema writes `10.00 usd` — the lexer's money suffix is lower case — and a Rust
+    /// product writes `Currency::new("USD")`, which upper-cases. Without the same
+    /// normalisation on both sides, a set posted from a `Money` argument spelled `usd` and a
+    /// literal spelled `USD` would carry two currencies, each summing to zero on its own: a
+    /// transaction that conserves twice and moves money once.
+    #[test]
+    fn two_spellings_of_one_currency_are_one_currency() {
+        let src = "fn main() -> i64 { txn idem(\"mixed\") { post(debit(acct(1), amt)?, \
+                   credit(acct(2), 10.00 usd)) }; 0 }"
+            .replace("amt", "10.00 usd");
+        let (prog, _) = parser::parse_program(&src);
+        let mut it = Interp::new();
+        it.load(&prog);
+        assert_eq!(it.call("main", vec![]), Ok(Value::Int(0)));
+        let set = &it.ledger.sealed[0];
+        assert_eq!(set.legs[0].currency, "USD");
+        assert_eq!(set.legs[1].currency, "USD");
+    }
+
+    /// And the same rule reached through an *argument*, which is the path a conformance
+    /// fixture actually takes: `nilesc run --args` supplies `money 1000 usd 2`, and the leg it
+    /// produces must carry the code the kernel would.
+    #[test]
+    fn a_money_argument_is_normalised_like_a_literal() {
+        let src = "fn f(m: Money<usd>) -> i64 { txn idem(\"a\") { post(debit(acct(1), m)?, \
+                   credit(acct(2), m)) }; 0 }";
+        let (prog, _) = parser::parse_program(src);
+        let mut it = Interp::new();
+        it.load(&prog);
+        let arg = Value::Money {
+            minor: 1_000,
+            scale: 2,
+            currency: "usd".into(),
+        };
+        assert_eq!(it.call("f", vec![arg]), Ok(Value::Int(0)));
+        assert_eq!(it.ledger.sealed[0].legs[0].currency, "USD");
+    }
+
+    /// The rest of the relational tier is still refused by name, and this is where that is
+    /// checked — so evaluating `txn` did not quietly open the others.
+    #[test]
+    fn the_rest_of_the_relational_tier_is_refused_by_name_and_never_approximated() {
+        for (src, want) in [
+            (
+                "fn main() -> i64 { let h = hold(acct(1), 20.00 usd, expires: 7.days)?; 0 }",
+                "hold",
+            ),
+            ("fn main() -> i64 { let x = resolve h void; 0 }", "resolve"),
+            (
+                "fn main() -> i64 { let x = 1.5; 0 }",
+                "floating-point literal",
+            ),
+        ] {
+            let (prog, _) = parser::parse_program(src);
+            let mut it = Interp::new();
+            it.load(&prog);
+            match it.call("main", vec![]) {
+                Err(Error::NotInSubset { form, .. }) => assert_eq!(form, want, "for {src}"),
+                other => panic!("`{want}` must be refused by name, got {other:?}"),
+            }
         }
     }
 

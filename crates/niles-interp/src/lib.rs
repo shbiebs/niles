@@ -392,6 +392,23 @@ pub struct Interp {
     max_depth: usize,
     /// `idem` windows evaluated past. See [`Interp::txn`]; `nilesc run` reports the count.
     ignored_windows: u32,
+    /// The result of each idempotency key already committed in this run.
+    ///
+    /// T-Idem says a transaction is identified by its key and that a replay is the *same*
+    /// transaction, not a second one. The window is still evaluated past — a window is a
+    /// question about wall-clock retention that this interpreter has no clock to answer —
+    /// but the *identity* half is now honoured within a run, which is the half a caller can
+    /// observe: calling a transfer twice under one key posts one set and returns the first
+    /// answer, where before it posted two and the balance moved twice.
+    committed: BTreeMap<String, Value>,
+    /// Whether a `txn` block is already open.
+    ///
+    /// [`Ledger::begin`] replaces the open set rather than extending it, so an inner `txn`
+    /// silently discarded every leg the outer one had accumulated and then sealed only its
+    /// own — a set that balances by itself while the outer half of the transaction is gone.
+    /// The calculus of §4.5 gives `txn` no nesting rule, so this is refused and named rather
+    /// than given a meaning here.
+    in_txn: bool,
     /// The ledger `txn`, `debit`, `credit` and `post` operate on.
     ///
     /// Public because a caller running a function for its *postings* — `nilesc run` — wants
@@ -417,6 +434,8 @@ impl Interp {
             depth: 0,
             max_depth: DEFAULT_MAX_DEPTH,
             ignored_windows: 0,
+            committed: BTreeMap::new(),
+            in_txn: false,
             ledger: Ledger::new(),
         }
     }
@@ -1431,8 +1450,25 @@ impl Interp {
                 self.ignored_windows += 1;
             }
         }
+        // Nesting, refused rather than approximated. See the `in_txn` field.
+        if self.in_txn {
+            return Err(Error::NotInSubset {
+                form: "nested txn",
+                at: span,
+            }
+            .into());
+        }
+        // T-Idem: a replay under a key already committed in this run is the same
+        // transaction. It posts nothing and answers what the first one answered.
+        if !key.is_empty() {
+            if let Some(v) = self.committed.get(&key) {
+                return Ok(v.clone());
+            }
+        }
         self.ledger.begin(&key);
+        self.in_txn = true;
         let out = self.block(env, body);
+        self.in_txn = false;
         if out.is_err() {
             self.ledger.abandon();
             return out;
@@ -1440,6 +1476,11 @@ impl Interp {
         self.ledger
             .seal()
             .map_err(|why| Flow::Err(Error::Refused { why, at: span }))?;
+        if !key.is_empty() {
+            if let Ok(v) = &out {
+                self.committed.insert(key, v.clone());
+            }
+        }
         out
     }
 

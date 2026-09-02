@@ -281,3 +281,155 @@ fn hex_bytes(s: &str) -> Vec<u8> {
         .map(|c| u8::from_str_radix(std::str::from_utf8(c).unwrap(), 16).unwrap())
         .collect()
 }
+
+/// A program whose functions exercise nesting, replay and account identity.
+const IDENTITY: &str = r#"
+schema bank {
+    currency usd { scale: 2 }
+    ledger postings {
+        txn: TxnId, acct: Id<Account>, cur: Currency, amt: Money,
+        idem: IdemKey window 30.days,
+        conserve per (txn, cur);
+        retain forever;
+    }
+}
+
+fn once(from: Id<Account>, to: Id<Account>, amount: Money<usd>)
+    -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("once", window: 30.days) {
+        post(debit(from, amount)?, credit(to, amount))
+    }
+}
+
+// The same key, twice. Under T-Idem this is one transaction.
+fn replay(from: Id<Account>, to: Id<Account>, amount: Money<usd>)
+    -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    once(from, to, amount)?;
+    once(from, to, amount)
+}
+
+// Two different keys. Two transactions, and the control for the test above.
+fn twice(from: Id<Account>, to: Id<Account>, amount: Money<usd>)
+    -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("first", window: 30.days) { post(debit(from, amount)?, credit(to, amount)) };
+    txn idem("second", window: 30.days) { post(debit(from, amount)?, credit(to, amount)) }
+}
+
+fn by_int(amount: Money<usd>) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("ident", window: 30.days) {
+        post(debit(acct(1), amount)?, credit(acct(2), amount))
+    }
+}
+
+fn by_str(amount: Money<usd>) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("ident", window: 30.days) {
+        post(debit(acct("1"), amount)?, credit(acct("2"), amount))
+    }
+}
+
+fn nested(from: Id<Account>, to: Id<Account>, amount: Money<usd>)
+    -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("outer", window: 30.days) {
+        post(debit(from, amount)?, credit(to, amount));
+        txn idem("inner", window: 30.days) {
+            post(debit(from, amount)?, credit(to, amount))
+        }
+    }
+}
+"#;
+
+/// **A replay under one idempotency key posts one set.**
+///
+/// `idem(key)` was parsed, carried, and used as the transaction's *name* — and never
+/// compared against anything. A function calling a transfer twice under one key posted
+/// twice and moved the balance twice, which is the failure an idempotency key exists to
+/// prevent and the one T-Idem says the calculus rules out. The window is still evaluated
+/// past (this interpreter has no clock, and `nilesc run` reports the count), but the
+/// identity half is now honoured for the length of a run.
+#[test]
+fn a_replay_under_one_idempotency_key_posts_one_set() {
+    let src = Temp::new("identity.niles", IDENTITY);
+    let args = args_file("acct a.usd\nacct b.usd\nmoney 25000 usd 2\n");
+    let one = nilesc(&["run", src.path(), "once", "--args", args.path()]);
+    let replayed = nilesc(&["run", src.path(), "replay", "--args", args.path()]);
+    assert_eq!(one.code, 0, "stderr: {}", one.stderr);
+    assert_eq!(
+        replayed.code, 0,
+        "a replay must seal one set, and `run` refuses a function that sealed two: {}",
+        replayed.stderr
+    );
+    assert_eq!(
+        one.stdout, replayed.stdout,
+        "calling the same keyed transaction twice must post what calling it once posts"
+    );
+
+    // **The control, and it is the stronger half.** Two *different* keys are two
+    // transactions — and `run` refuses a function that sealed two sets, by design, because
+    // it compares one. So this exits 2 with the count in the message, which is exactly what
+    // `replay` did before the key was compared against anything. Memoizing every `txn`
+    // unconditionally would turn this green and is what the assertion rules out.
+    let two = nilesc(&["run", src.path(), "twice", "--args", args.path()]);
+    assert_eq!(two.code, 2, "stdout: {}", two.stdout);
+    assert!(
+        two.stderr.contains("sealed 2 posting sets"),
+        "two distinct keys must still be two transactions: {}",
+        two.stderr
+    );
+}
+
+/// **A `txn` inside a `txn` is refused and named.**
+///
+/// `Ledger::begin` replaces the open set rather than extending it, so the inner block
+/// discarded every leg the outer one had accumulated and then sealed only its own: a set
+/// that balances by itself while the outer half of the transaction is silently gone. The
+/// calculus of §4.5 gives `txn` no nesting rule, so this exits 2 as a language gap rather
+/// than being given a meaning here — the same treatment `hold` gets.
+#[test]
+fn a_nested_transaction_is_refused_rather_than_flattened() {
+    let src = Temp::new("identity.niles", IDENTITY);
+    let args = args_file("acct a.usd\nacct b.usd\nmoney 25000 usd 2\n");
+    let out = nilesc(&["run", src.path(), "nested", "--args", args.path()]);
+    assert_eq!(out.code, 2, "stdout: {} stderr: {}", out.stdout, out.stderr);
+    assert!(
+        out.stderr.contains("NotInSubset: nested txn"),
+        "the construct must be named: {}",
+        out.stderr
+    );
+    assert!(out.stdout.trim().is_empty(), "and print no set");
+}
+
+/// **`acct(1)` and `acct("1")` are the same account, deliberately.**
+///
+/// This is not a defect and the test exists to say so. The interpreter's account name is
+/// the *rendering* of whatever was passed, which is what lets a conformance fixture pass
+/// the concrete names a Rust product posts to (`loan.fac-1.agent`) where the schema says
+/// `lender_a`. Making the integer form distinct — or refusing it — would break every
+/// fixture in the GBS conformance suite for no gain in safety: `Id<Account>` is opaque, so
+/// there is no type-level difference for the aliasing to violate.
+///
+/// What the test pins is that the aliasing is *total*: both spellings produce identical
+/// bytes, so no fixture can depend on the difference.
+#[test]
+fn an_account_is_named_by_the_rendering_of_what_was_passed() {
+    let src = Temp::new("identity.niles", IDENTITY);
+    let args = args_file("money 25000 usd 2\n");
+    let a = nilesc(&["run", src.path(), "by_int", "--args", args.path()]);
+    let b = nilesc(&["run", src.path(), "by_str", "--args", args.path()]);
+    assert_eq!((a.code, b.code), (0, 0), "stderr: {} {}", a.stderr, b.stderr);
+    assert_eq!(
+        a.stdout, b.stdout,
+        "an account identifier is its rendering; the two spellings are one account"
+    );
+}

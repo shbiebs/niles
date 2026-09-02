@@ -34,6 +34,9 @@
 
 #[path = "daemon.rs"]
 mod daemon;
+// The extended query protocol's plan cache. Reachable from the session as of this
+// change; before it, the module existed and no listener referred to it.
+mod extended;
 #[path = "pg_wire.rs"]
 mod pg_wire;
 #[path = "rev_engine.rs"]

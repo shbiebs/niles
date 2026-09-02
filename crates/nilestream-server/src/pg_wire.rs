@@ -55,8 +55,14 @@ pub enum Frontend {
     Query(String),
     /// `X` — goodbye.
     Terminate,
-    /// `P`, `B`, `E`, `D`, `S`, `C` — the extended protocol, refused with a reason.
-    Extended(u8),
+    /// `P`, `B`, `E`, `D`, `S`, `C`, `H`, `F` — the extended query protocol.
+    ///
+    /// The body travels with the tag. It used to be discarded at the decoder, which is
+    /// why `extended.rs` — a plan cache with eleven tests and a written answer to the
+    /// epoch-invalidation question — was reachable from nothing: the session could not
+    /// have served a `Parse` even had it wanted to, because the statement text never
+    /// arrived.
+    Extended(u8, Vec<u8>),
     /// `p` — a password message.
     Password(Vec<u8>),
     Unknown(u8),
@@ -130,11 +136,27 @@ pub enum Backend {
     NoticeResponse {
         message: String,
     },
+    // --- the extended protocol's acknowledgements ---
+    //
+    // Empty-bodied, one byte of tag each, and all four were missing: the module that
+    // implements the extended protocol could not have replied without them.
+    /// `1` — the statement parsed and is cached.
+    ParseComplete,
+    /// `2` — the portal is bound.
+    BindComplete,
+    /// `3` — the statement or portal is closed.
+    CloseComplete,
+    /// `n` — the statement returns no rows, the answer to a `Describe` of one that does not.
+    NoData,
 }
 
 pub fn encode(msg: &Backend) -> Vec<u8> {
     let (tag, body) = match msg {
         Backend::AuthenticationOk => (b'R', 0i32.to_be_bytes().to_vec()),
+        Backend::ParseComplete => (b'1', Vec::new()),
+        Backend::BindComplete => (b'2', Vec::new()),
+        Backend::CloseComplete => (b'3', Vec::new()),
+        Backend::NoData => (b'n', Vec::new()),
         Backend::ParameterStatus(k, v) => {
             let mut b = Vec::new();
             put_cstr(&mut b, k);
@@ -226,7 +248,7 @@ fn put_cstr(b: &mut Vec<u8>, s: &str) {
     b.push(0);
 }
 
-fn get_cstr(b: &[u8], at: &mut usize) -> String {
+pub fn get_cstr(b: &[u8], at: &mut usize) -> String {
     let start = *at;
     while *at < b.len() && b[*at] != 0 {
         *at += 1;
@@ -286,7 +308,7 @@ pub fn read_message(r: &mut impl Read) -> std::io::Result<Frontend> {
         }
         b'X' => Frontend::Terminate,
         b'p' => Frontend::Password(body),
-        t @ (b'P' | b'B' | b'E' | b'D' | b'S' | b'C' | b'H' | b'F') => Frontend::Extended(t),
+        t @ (b'P' | b'B' | b'E' | b'D' | b'S' | b'C' | b'H' | b'F') => Frontend::Extended(t, body),
         other => Frontend::Unknown(other),
     })
 }
@@ -330,11 +352,63 @@ pub fn unsupported(feature: &str, why: &str) -> Backend {
 /// rung — have no PostgreSQL equivalent, and mapping them onto `42601 syntax_error` would
 /// tell the user the one thing that is certainly false.
 pub fn diagnostic_error(code: &str, message: &str, detail: Option<&str>) -> Backend {
+    // **`42P01` is `undefined_table`, and it was the answer to everything.** A client's
+    // retry logic reads the SQLSTATE, so answering one code to a syntax error, a type
+    // error and a rung violation alike told every client the same untrue thing. The Niles
+    // code still travels in the message, because it is what a person searches for; the
+    // SQLSTATE is what a driver acts on, so it is now derived from the code's family.
     Backend::ErrorResponse {
         severity: "ERROR".into(),
-        code: "42P01".into(),
+        code: sqlstate_for(code).into(),
         message: format!("[{code}] {message}"),
         detail: detail.map(|d| d.to_string()),
+    }
+}
+
+/// An `ErrorResponse` carrying a SQLSTATE chosen by the caller.
+pub fn sqlstate_error(sqlstate: &str, message: &str, detail: Option<&str>) -> Backend {
+    Backend::ErrorResponse {
+        severity: "ERROR".into(),
+        code: sqlstate.into(),
+        message: message.to_string(),
+        detail: detail.map(|d| d.to_string()),
+    }
+}
+
+/// The SQLSTATE a Niles diagnostic code maps to.
+///
+/// The families are the compiler's own, so this is a translation rather than a judgement:
+/// `NL00xx` is the parser, `NL01xx`/`NL02xx` are declarations, `NL03xx` is the body-level
+/// calculus, `NL04xx` is guarded recursion, `NL05xx` is lowering, and `IR0xx` is the
+/// verifier. Each maps to the closest standard class, and anything unrecognised is
+/// `XX000` — *internal error* — which is the honest code for "this server produced a
+/// diagnostic nobody has classified".
+pub fn sqlstate_for(code: &str) -> &'static str {
+    if code.starts_with("IR") {
+        return "58000"; // system_error: the circuit did not verify
+    }
+    let Some(n) = code.strip_prefix("NL").and_then(|d| d.parse::<u32>().ok()) else {
+        return "XX000";
+    };
+    match n {
+        // The parser.
+        0..=99 => "42601", // syntax_error
+        // Declarations: a relation, a view or a contract that does not hold together.
+        100..=239 => "42P01", // undefined_table / invalid declaration
+        // Money and typing: a scale, a currency, an operator, a call argument.
+        240..=259 => "42804", // datatype_mismatch
+        // Confidentiality.
+        260..=299 => "42501", // insufficient_privilege
+        // Conservation and the effect calculus. A capability failure is a privilege
+        // failure to a client, and a conservation failure is an integrity one — a driver
+        // treats those differently, and before this they were the same code.
+        312 | 330 | 331 => "42501", // insufficient_privilege: no capability
+        300..=399 => "23000",       // integrity_constraint_violation
+        // Guarded recursion.
+        400..=499 => "42P20", // invalid_recursion
+        // Lowering: the form exists in the surface and not in the circuit.
+        500..=599 => "0A000", // feature_not_supported
+        _ => "XX000",
     }
 }
 
@@ -497,24 +571,46 @@ mod tests {
     }
 
     #[test]
-    fn the_extended_protocol_is_refused_by_name_rather_than_ignored() {
-        for tag in [b'P', b'B', b'E'] {
-            let mut bytes = vec![tag];
-            bytes.extend_from_slice(&4i32.to_be_bytes());
+    fn an_extended_message_carries_its_body_to_the_session() {
+        // **Inverted.** This used to assert that `P`, `B` and `E` decoded to a bare tag —
+        // which they did, and that was the defect: the body was discarded, so the statement
+        // text never reached the session and `extended.rs` could not have served a `Parse`
+        // even if it had been called.
+        let mut bytes = vec![b'P'];
+        let mut body = Vec::new();
+        put_cstr(&mut body, "stmt1");
+        put_cstr(&mut body, "select acct from postings");
+        body.extend_from_slice(&0u16.to_be_bytes());
+        bytes.extend_from_slice(&((body.len() + 4) as i32).to_be_bytes());
+        bytes.extend_from_slice(&body);
+        let msg = read_message(&mut Cursor::new(bytes)).unwrap();
+        let Frontend::Extended(tag, got) = msg else {
+            panic!("{msg:?}")
+        };
+        assert_eq!(tag, b'P');
+        let mut at = 0;
+        assert_eq!(get_cstr(&got, &mut at), "stmt1");
+        assert_eq!(get_cstr(&got, &mut at), "select acct from postings");
+    }
+
+    #[test]
+    fn the_four_extended_acknowledgements_encode_to_their_protocol_tags() {
+        // All four were missing from `Backend`, so the module implementing the extended
+        // protocol had nothing to reply with.
+        for (msg, tag) in [
+            (Backend::ParseComplete, b'1'),
+            (Backend::BindComplete, b'2'),
+            (Backend::CloseComplete, b'3'),
+            (Backend::NoData, b'n'),
+        ] {
+            let bytes = encode(&msg);
+            assert_eq!(bytes[0], tag, "{msg:?}");
             assert_eq!(
-                read_message(&mut Cursor::new(bytes)).unwrap(),
-                Frontend::Extended(tag)
+                i32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]),
+                4,
+                "an empty body is a length of four: {msg:?}"
             );
         }
-        let e = unsupported("Bind", "prepared statements need an epoch-keyed plan cache");
-        let Backend::ErrorResponse { code, detail, .. } = &e else {
-            panic!()
-        };
-        assert_eq!(code, "0A000", "feature_not_supported, not a syntax error");
-        assert!(
-            detail.as_ref().unwrap().contains("epoch"),
-            "the refusal must say why"
-        );
     }
 
     #[test]

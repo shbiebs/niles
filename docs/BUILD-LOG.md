@@ -996,3 +996,106 @@ cd gbs && NILES_ROOT=../niles make schema               -> ok, 25 nodes verified
 ```
 
 `make gate` green in both repositories.
+
+### [T-14] 2026-09-02T13:10Z RESULT F-16 confirmed — the compiler was decoration on a hard-coded answer
+
+`session.rs` parsed the client's SQL, resolved it, typechecked it, lowered it, **verified the
+circuit**, and then discarded it. `pick_view` returned the constant `"__wire_result"`;
+`rev_engine`'s `read` ignored the view name, took `key[0]`, and folded `sum(amt)` for
+currency 0; `extract_keys` collected digit runs out of the query *text* after the first
+`" where "`.
+
+So two different questions about one account returned the same number. The shape of the
+`Serving` trait is what made this invisible — `read(&mut self, view: &str, key: &[i64],
+anchor: u64) -> Option<i128>` cannot accept a circuit, so nothing in the type said the answer
+was unrelated to the query. `Serving::query` now takes the circuit, and
+`two_queries_over_one_key_return_different_answers` is the test that would have said so.
+
+The engine materialises the base as a Z-set at the anchor and evaluates the circuit with the
+same `niles_ir::eval` the golden corpus uses. That is a full fold and it is the honest cost of
+an arbitrary query against a partial-state engine; the partial view remains as `read_point`,
+which is the mechanism the phase diagram measures.
+
+### [T-14] 2026-09-02T13:15Z RESULT F-17 — the write path, the extended protocol, and a real client
+
+**The wire surface was read-only.** An `INSERT` was wrapped in a view and rejected, and
+`begin`/`commit` flipped a flag and emitted a notice apologising that a sealed epoch cannot be
+rolled back. Writes are now buffered inside a transaction and sealed as **one epoch** at
+`COMMIT`, so there is no moment in which half of it has happened, and `ROLLBACK` discards the
+buffer — there is nothing to compensate because nothing was sealed. `UPDATE`/`DELETE` against
+a ledger are refused with `0A000` and the compensating-entry note.
+
+**A simple query string may hold several statements.** It was treated as one, so
+`psql -c "begin; insert …; commit"` — the ordinary way anyone scripts a transaction — came
+back as a syntax error on the word `begin`. The transaction machinery existed and no real
+client could reach it.
+
+**`extended.rs` is wired.** It is a complete plan cache with eleven tests and a written
+answer to the epoch-invalidation question (a plan is valid exactly while no schema epoch has
+occurred after the one it was compiled at — a comparison of two integers), and it was
+reachable from nothing: the decoder discarded the extended messages' *bodies*, so the
+statement text never arrived. `Frontend::Extended` now carries the body, `Backend` gained the
+four acknowledgements it had no way to send (`ParseComplete`, `BindComplete`,
+`CloseComplete`, `NoData`), and the session serves `P`/`B`/`D`/`E`/`S`/`C`. Two tests that
+asserted the *refusal* are inverted.
+
+**Every diagnostic reached the client as `42P01` — undefined_table.** A driver's retry logic
+reads the SQLSTATE, so a syntax error, a currency mismatch, a rung violation and a missing
+capability were all reported as "no such table". `pg_wire::sqlstate_for` now maps the Niles
+code's own family to a standard class, and a missing capability (`42501`) is distinguished
+from a conservation failure (`23000`) and a repeated identity (`23505`) — a driver retries
+those differently.
+
+### [T-14] 2026-09-02T13:20Z RESULT the conformance suite uses `psql`, and three tests were inverted
+
+Every wire test until now used the in-repo client, which is a client written against the same
+understanding of the protocol as the server: two halves of one misunderstanding agree
+perfectly. `results/wire-protocol-session.md` was a transcript of that conversation, cited as
+evidence that a PostgreSQL client can connect.
+
+`tests/psql_conformance.rs` drives `psql (PostgreSQL) 16.13` — real libpq — through the SSL
+negotiation, the startup exchange, a point lookup, a scan, an insert, a transaction, an
+unsupported construct, and a catalog query. **9 tests, all passing.** The transcript is
+regenerated from that run.
+
+Three assertions were inverted, and each inversion is the finding:
+
+* `an_unkeyed_query_is_refused_with_an_explanation` → `…_is_answered_by_the_scan_surface`.
+  The server refused `group by` over the base because "scanning defeats the mechanism being
+  measured". That is a benchmark's reason, not a database's, and it is why the analytical row
+  of Part 0 had nothing to run against.
+* `a_missing_key_is_null_and_not_zero` asserted that a query for an account with no postings
+  returns **one row whose value is NULL**, and `e16_nilestream.rs` argued this is "stronger
+  than what PostgreSQL's `group by` does". It is not stronger — it was a *fabricated row*,
+  manufactured from the key the digit scanner found in the query text. A grouped aggregate
+  over an empty group produces no group. The absence distinction is real and is enforced by
+  `read_point`'s `Option`, which is where it belongs.
+* `the_extended_protocol_is_refused_with_the_open_design_question_named` → the protocol is
+  served.
+
+### [T-14] 2026-09-02T13:25Z RESULT durability, and a budget that binds
+
+`DurableSink` wraps the sequencer at `SyncPolicy::Always`, which is the only policy it
+accepts. `a_durable_append_returns_only_after_the_sync` is a **counter-test**, because the
+property is an ordering and an ordering cannot be seen in a successful run: it reads the file
+from a separate handle after each acknowledged epoch, and asserts the bytes are there *now*.
+
+`bench.rs` set the Nilestream budget to 100,000 against 10,000 accounts, so after warm-up
+nothing was ever evicted: the point workload measured the hit path exclusively while being
+presented as a measurement of partial materialisation. The default is now 2,500 — a quarter
+of the key space — and a budget that does not bind prints a warning saying so.
+
+Every CSV row now carries `protocol_path` and `miss_rate`. The protocol is one constant so
+both targets cannot differ: libpq's simple and extended paths differ by a round trip and by
+whether the server re-plans, so a comparison in which each side used one would be measuring
+the protocol.
+
+### [T-14] 2026-09-02T13:28Z TESTS niles 615/0/3 -> 658/0/4
+
+```
+which psql                                              -> /usr/bin/psql (16.13)
+cargo test -p nilestream-server --test psql_conformance  -> 9 passed
+cargo test -p nilestream-server                          -> 152 passed
+grep -rn "fn extract_keys\|fn pick_view" src              -> no match
+grep -rn "extended::" src/session.rs                      -> 3 matches (the module is wired)
+```

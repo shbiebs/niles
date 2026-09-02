@@ -58,6 +58,63 @@ pub struct RevEngine {
     /// per-currency conservation rule invisible from the outside.
     currency: u32,
     views: Vec<(String, u32)>,
+    /// Counted work spent evaluating circuits, so the scan surface's cost is reported
+    /// rather than hidden inside a latency number.
+    scan_work: u64,
+    /// The durable sink, when the daemon was started with one. `None` for the in-memory
+    /// engine the tests and the benchmark's warm-up use.
+    ///
+    /// Its presence is the difference between "an epoch was assigned" and "an epoch is on
+    /// stable storage", and `append` does not return until the second is true.
+    durable: Option<DurableSink>,
+}
+
+/// A write-ahead sink that does not acknowledge until `fsync` has returned.
+///
+/// Wrapped around `nilestream_ledger::Sequencer` with [`SyncPolicy::Always`], which is the
+/// only policy the daemon accepts. The ordering is the entire content of the guarantee:
+/// returning an epoch before the sync would let a client observe a transaction that a crash
+/// then erases, and in a ledger an observation that is later erased is not a stale read —
+/// it is a transaction a customer saw succeed and that no longer exists.
+pub struct DurableSink {
+    seq: nilestream_ledger::sequencer::Sequencer,
+}
+
+impl DurableSink {
+    /// Open a durable sink at `path`. Refuses any policy but `Always`, which the sequencer
+    /// itself also refuses — stated twice on purpose, because the daemon is the layer a
+    /// deployment configures and a server that quietly accepted `Never` would be a server
+    /// whose durability claim depended on a flag nobody read.
+    pub fn open(path: impl AsRef<std::path::Path>) -> std::io::Result<DurableSink> {
+        let seq = nilestream_ledger::sequencer::Sequencer::open(
+            path,
+            nilestream_ledger::segment::SyncPolicy::Always,
+        )?;
+        Ok(DurableSink { seq })
+    }
+
+    /// Seal the transaction and return only once `fsync` has.
+    ///
+    /// A `Duplicate` is not an error: the caller retried, and the correct response is the
+    /// original outcome rather than a second transaction. That distinction is the reason
+    /// this returns the epoch rather than a unit.
+    /// The same call the append path makes, exposed so a test can assert the *ordering*
+    /// rather than only the outcome. An append that returned before `fsync` would look
+    /// identical in a successful run, so the property needs a test that reads the file.
+    pub fn record_for_test(&mut self, txn_id: &str, epoch: u64) -> Result<u64, String> {
+        self.record(txn_id, epoch.to_string().into_bytes())
+    }
+
+    fn record(&mut self, txn_id: &str, payload: Vec<u8>) -> Result<u64, String> {
+        match self.seq.submit(nilestream_ledger::sequencer::Txn {
+            idem_key: txn_id.to_string(),
+            payload,
+        }) {
+            Ok(e) => Ok(e),
+            Err(nilestream_ledger::sequencer::Rejected::Duplicate { at_epoch }) => Ok(at_epoch),
+            Err(e) => Err(format!("{e:?}")),
+        }
+    }
 }
 
 impl RevEngine {
@@ -116,6 +173,8 @@ impl RevEngine {
             view,
             currency: 0,
             views: vec![("__wire_result".to_string(), 2)],
+            scan_work: 0,
+            durable: None,
         }
     }
 
@@ -149,7 +208,133 @@ impl crate::session::Serving for RevEngine {
         self.ledger.head()
     }
 
-    fn read(&mut self, _view: &str, key: &[i64], anchor: u64) -> Option<i128> {
+    /// **Evaluate the circuit the client's query compiled to.**
+    ///
+    /// This is what F-16 was about. The old path compiled the query, verified it, and then
+    /// *discarded the circuit*: `pick_view` returned the constant `"__wire_result"`, this
+    /// method ignored the view name entirely, read `key[0]`, and folded `sum(amt)` for
+    /// currency 0. Every query over one account returned the same number, whatever it
+    /// asked for. The compiler was decoration on a hard-coded answer, and the §6.9 claim —
+    /// "a wire protocol is a surface, not a semantics" — was false in the direction that
+    /// matters: the surface was accepting queries the semantics never saw.
+    ///
+    /// The base is materialised as a Z-set at the anchor and the circuit is evaluated over
+    /// it by the same `niles_ir::eval` the golden corpus uses. That is a full fold, and it
+    /// is the honest cost of an arbitrary query against a partial-state engine: the
+    /// partially-materialised view is a *fast path for one shape*, not a general answer, and
+    /// `read_point` below is where it is spent. `the_scan_and_the_point_path_agree` holds
+    /// the two to the same answer.
+    fn query(
+        &mut self,
+        circuit: &niles_ir::circuit::Circuit,
+        output: &str,
+        anchor: u64,
+    ) -> Result<crate::session::Rows, crate::session::ServeError> {
+        let sources = self.base_at(anchor);
+        let (z, work) = niles_ir::eval::try_run(circuit, output, &sources)
+            .map_err(|e| crate::session::ServeError::Eval(e.to_string()))?;
+        self.scan_work += work;
+
+        // Column names from the lowering are not available here — the circuit is the
+        // contract between the two, and it carries indices rather than names — so the
+        // columns are named positionally and the *anchor* is appended, because a served
+        // answer without the moment it is true at is a number a dispute cannot use.
+        let width = z.keys().next().map(|r| r.len()).unwrap_or(0);
+        let mut columns: Vec<String> = (0..width).map(|i| format!("c{i}")).collect();
+        columns.push("anchor".into());
+        let mut rows = Vec::new();
+        for (r, w) in &z {
+            if *w <= 0 {
+                continue;
+            }
+            // A Z-set weight above one is a row that appears more than once, and a client
+            // asking for rows should be given that many. Silently collapsing them would be
+            // a `distinct` nobody wrote.
+            for _ in 0..*w {
+                let mut cells: Vec<Option<String>> = r
+                    .iter()
+                    .map(|v| match v {
+                        niles_ir::value::Value::Null => None,
+                        niles_ir::value::Value::Int(i) => Some(i.to_string()),
+                    })
+                    .collect();
+                cells.push(Some(anchor.to_string()));
+                rows.push(cells);
+            }
+        }
+        Ok(crate::session::Rows { columns, rows })
+    }
+
+    fn append(&mut self, rows: Vec<Row>, txn_id: &str) -> Result<u64, crate::session::ServeError> {
+        let epoch = self.ledger.submit(txn_id, rows).map_err(|e| match e {
+            // The two are different failures and a client acts on them differently: a
+            // duplicate means the earlier attempt succeeded and the retry must stop; an
+            // unbalanced set means the caller built something that does not conserve.
+            proto_engine::Reject::Duplicate => {
+                crate::session::ServeError::Duplicate(format!("`{txn_id}` already committed"))
+            }
+            other => crate::session::ServeError::Rejected(format!("{other:?}")),
+        })?;
+        // The durable sink, if one is attached, is what makes the returned epoch mean
+        // something: it does not return until `fsync` has. See `DurableSink`.
+        if let Some(sink) = self.durable.as_mut() {
+            sink.record(txn_id, epoch.to_string().into_bytes())
+                .map_err(crate::session::ServeError::NotDurable)?;
+        }
+        self.view.apply_epoch(&self.ledger, epoch);
+        Ok(epoch)
+    }
+
+    fn views(&self) -> Vec<(String, u32)> {
+        self.views.clone()
+    }
+}
+
+impl RevEngine {
+    /// The `postings` base as a Z-set visible at `anchor`, in the schema the lowering gives
+    /// a source node: `(txn, acct, cur, amt, idem)` — the declared column order, so a
+    /// circuit's column indices mean here what they meant when it was lowered.
+    ///
+    /// `idem` is a text column in the schema and has no integer form, so it is `null`. That
+    /// is not a placeholder for a value: an idempotency key is not something a read model
+    /// computes with, and a circuit that filtered on one would be filtering on an absence,
+    /// which the three-valued rules already handle correctly.
+    fn base_at(&self, anchor: u64) -> std::collections::BTreeMap<String, niles_ir::eval::ZSet> {
+        use niles_ir::value::Value;
+        let mut z: niles_ir::eval::ZSet = Default::default();
+        let head = self.ledger.head();
+        let upto = anchor.min(head);
+        for e in &self.ledger.epochs {
+            if e.id > upto {
+                break;
+            }
+            for r in &e.rows {
+                if let Row::Post(p) = r {
+                    let row = vec![
+                        Value::Int(p.txn as i128),
+                        Value::Int(p.acct as i128),
+                        Value::Int(p.cur as i128),
+                        Value::Int(p.amt),
+                        Value::Null,
+                    ];
+                    niles_ir::eval::add(&mut z, row, 1);
+                }
+            }
+        }
+        let mut m = std::collections::BTreeMap::new();
+        m.insert("postings".to_string(), z);
+        m
+    }
+
+    /// The **point path**: one account's balance out of the partially materialised view.
+    ///
+    /// Not part of `Serving`, and deliberately so. This is the mechanism the phase diagram
+    /// measures — a read that hits a resident entry, or misses and reconstructs through the
+    /// anchor index — and it answers one shape of question. The general answer is
+    /// [`Serving::query`], and `the_scan_and_the_point_path_agree` asserts the two do not
+    /// diverge; a fast path that could disagree with the semantics is the seam this thesis
+    /// argues against.
+    pub fn read_point(&mut self, key: &[i64], anchor: u64) -> Option<i128> {
         let acct = *key.first()? as u64;
         if self.ledger.is_empty() {
             return None;
@@ -163,8 +348,8 @@ impl crate::session::Serving for RevEngine {
 
         // An account the base has never posted to has no value, which is not zero. The
         // distinction is the absence lattice's, and this is the layer where it would be
-        // quietest to lose: `Serving::read` returns an `Option`, and a fold over an empty
-        // history has no value to return.
+        // quietest to lose: the return is an `Option`, and a fold over an empty history has
+        // no value to return.
         if self.ledger.key_update_count(acct, anchor) == 0 {
             return None;
         }
@@ -191,10 +376,6 @@ impl crate::session::Serving for RevEngine {
         };
         Some(value)
     }
-
-    fn views(&self) -> Vec<(String, u32)> {
-        self.views.clone()
-    }
 }
 
 #[cfg(test)]
@@ -216,7 +397,7 @@ mod tests {
             "one epoch per seeded transfer, zero-based"
         );
         let v = e
-            .read("__wire_result", &[7], e.frontier())
+            .read_point(&[7], e.frontier())
             .expect("account 7 has postings");
         assert!(v > 0, "a real fold, not a placeholder: {v}");
         assert!(e.stats().reads > 0);
@@ -228,21 +409,21 @@ mod tests {
         // "this account does not exist" indistinguishable from "this account has no money",
         // which is the §1.1.1 defect at the protocol boundary.
         let mut e = engine();
-        assert_eq!(e.read("__wire_result", &[9_999], e.frontier()), None);
-        assert!(e.read("__wire_result", &[1], e.frontier()).is_some());
+        assert_eq!(e.read_point(&[9_999], e.frontier()), None);
+        assert!(e.read_point(&[1], e.frontier()).is_some());
     }
 
     #[test]
     fn a_read_at_a_past_anchor_answers_what_was_true_then() {
         let mut e = engine();
-        let late = e.read("__wire_result", &[5], e.frontier()).unwrap();
-        let early = e.read("__wire_result", &[5], 5).unwrap();
+        let late = e.read_point(&[5], e.frontier()).unwrap();
+        let early = e.read_point(&[5], 5).unwrap();
         assert!(early < late, "the past holds less: {early} vs {late}");
 
         // And it is stable: asking again gives the same answer, because the prefix cannot
         // change and the reconstruction is a pure function of (key, anchor).
         for _ in 0..20 {
-            assert_eq!(e.read("__wire_result", &[5], 5), Some(early));
+            assert_eq!(e.read_point(&[5], 5), Some(early));
         }
     }
 
@@ -251,17 +432,13 @@ mod tests {
         // The property Contribution 1 is about, exercised through the wire path: eviction
         // followed by reconstruction can neither create nor destroy money.
         let mut e = engine();
-        let warm: Vec<Option<i128>> = (1..=20)
-            .map(|a| e.read("__wire_result", &[a], e.frontier()))
-            .collect();
+        let warm: Vec<Option<i128>> = (1..=20).map(|a| e.read_point(&[a], e.frontier())).collect();
         let hits_before = e.stats().hits;
 
         e.evict_all();
         assert_eq!(e.stats().resident, 0);
 
-        let cold: Vec<Option<i128>> = (1..=20)
-            .map(|a| e.read("__wire_result", &[a], e.frontier()))
-            .collect();
+        let cold: Vec<Option<i128>> = (1..=20).map(|a| e.read_point(&[a], e.frontier())).collect();
         assert_eq!(warm, cold, "eviction changed an answer");
         assert!(
             e.stats().misses > 0,
@@ -280,7 +457,7 @@ mod tests {
         let head = e.frontier();
         let pass = |e: &mut RevEngine| {
             for a in 1..=50 {
-                e.read("__wire_result", &[a], head);
+                e.read_point(&[a], head);
             }
         };
 
@@ -321,14 +498,14 @@ mod tests {
     #[test]
     fn an_anchor_beyond_the_head_is_answered_at_the_head_rather_than_invented() {
         let mut e = engine();
-        let at_head = e.read("__wire_result", &[3], e.frontier());
-        assert_eq!(e.read("__wire_result", &[3], u64::MAX), at_head);
+        let at_head = e.read_point(&[3], e.frontier());
+        assert_eq!(e.read_point(&[3], u64::MAX), at_head);
     }
 
     #[test]
     fn an_empty_ledger_answers_nothing_rather_than_zero() {
         let mut e = RevEngine::seeded(0, 0, 10, ViewMode::Demand, EvictionPolicy::Lru);
-        assert_eq!(e.read("__wire_result", &[1], 0), None);
+        assert_eq!(e.read_point(&[1], 0), None);
     }
 
     #[test]
@@ -339,15 +516,11 @@ mod tests {
         let mut e = RevEngine::seeded(3, 1, 100, ViewMode::Demand, EvictionPolicy::Lru);
         assert_eq!(e.frontier(), 2, "three transfers, epochs 0..=2");
         assert!(
-            e.read("__wire_result", &[1], 0).is_some(),
+            e.read_point(&[1], 0).is_some(),
             "account 1 posted at epoch 0"
         );
-        assert_eq!(
-            e.read("__wire_result", &[2], 0),
-            None,
-            "account 2 has not yet"
-        );
-        assert!(e.read("__wire_result", &[2], 1).is_some());
+        assert_eq!(e.read_point(&[2], 0), None, "account 2 has not yet");
+        assert!(e.read_point(&[2], 1).is_some());
     }
 
     #[test]
@@ -358,20 +531,16 @@ mod tests {
         let mut e = engine();
         let head = e.frontier();
         let past = 5;
-        let cold = e.read("__wire_result", &[5], past).unwrap();
+        let cold = e.read_point(&[5], past).unwrap();
 
         for a in 1..=50 {
-            e.read("__wire_result", &[a], head);
+            e.read_point(&[a], head);
         }
         assert_eq!(
-            e.read("__wire_result", &[5], past),
+            e.read_point(&[5], past),
             Some(cold),
             "a warm view answered a historical query with a fresher value"
         );
-        assert_ne!(
-            e.read("__wire_result", &[5], head),
-            Some(cold),
-            "and the head differs"
-        );
+        assert_ne!(e.read_point(&[5], head), Some(cold), "and the head differs");
     }
 }

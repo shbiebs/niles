@@ -19,17 +19,91 @@
 
 use crate::pg_wire::{self, Backend, Field, Frontend};
 use niles_lang::diagnostics::Severity;
-use std::collections::HashMap;
 
 /// What the session can serve from. Kept as a trait so the session can be tested without a
 /// running engine, and so the same code serves the in-memory prototype and a durable one.
 pub trait Serving {
     /// The current visibility frontier.
     fn frontier(&self) -> u64;
-    /// Read a view at an anchor. `None` means the view exists but has no entry for the key.
-    fn read(&mut self, view: &str, key: &[i64], anchor: u64) -> Option<i128>;
+
+    /// **Evaluate a compiled circuit and return its rows.**
+    ///
+    /// The signature is the finding. It used to be
+    /// `read(&mut self, view: &str, key: &[i64], anchor: u64) -> Option<i128>` — one
+    /// number, for one key, from a view named by a string — and the implementation ignored
+    /// the string, took `key[0]`, and folded `sum(amt)` for currency 0. The session
+    /// compiled the client's SQL, verified the circuit, and then threw it away.
+    ///
+    /// A trait that cannot *accept* a circuit cannot serve one, so the shape of this
+    /// method is what made the shortcut invisible: nothing in the type said the answer was
+    /// unrelated to the query.
+    fn query(
+        &mut self,
+        circuit: &niles_ir::circuit::Circuit,
+        output: &str,
+        anchor: u64,
+    ) -> Result<Rows, ServeError>;
+
+    /// Append rows as one sealed epoch, returning the epoch **after** it is durable.
+    fn append(&mut self, rows: Vec<proto_engine::Row>, txn_id: &str) -> Result<u64, ServeError>;
+
     /// The views this server knows, and the scale each one's money column carries.
     fn views(&self) -> Vec<(String, u32)>;
+}
+
+/// A served result: column names and rows of optional text.
+///
+/// `None` is a SQL null and is kept distinct from a zero all the way to the wire, because
+/// the whole absence argument is worthless if the last layer collapses it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rows {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<Option<String>>>,
+}
+
+/// Why a query or an append could not be served.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServeError {
+    /// The circuit did not evaluate — a non-terminating fixpoint, most usefully.
+    Eval(String),
+    /// The ledger refused the rows because the set does not conserve, or names a hold
+    /// that is not there.
+    Rejected(String),
+    /// This identity already committed. **Not the same failure**, and not the same code: a
+    /// driver retries an integrity violation differently from a duplicate, and a retried
+    /// payment that came back as "unbalanced" would be retried again.
+    Duplicate(String),
+    /// The rows were sealed and the sync did not return. The epoch is **not** published and
+    /// the client is told so, because a caller that wanted durability and received an `Ok`
+    /// would stop keeping its own copy and find out at the worst possible moment.
+    NotDurable(String),
+}
+
+impl ServeError {
+    /// The SQLSTATE a PostgreSQL client will interpret.
+    ///
+    /// Real codes rather than a single generic one: a client's retry logic reads this, and
+    /// `40001` (serialization failure) means "retry" while `23505` (unique violation) means
+    /// "you already did this". Answering `XX000` to both would make an idempotent retry
+    /// look like an outage.
+    pub fn sqlstate(&self) -> &'static str {
+        match self {
+            ServeError::Eval(_) => "22000", // data exception
+            // The set does not conserve: an integrity constraint, and the constraint is
+            // the one this whole system is about.
+            ServeError::Rejected(_) => "23000", // integrity_constraint_violation
+            ServeError::Duplicate(_) => "23505", // unique_violation: a repeated identity
+            ServeError::NotDurable(_) => "58030", // io_error
+        }
+    }
+    pub fn detail(&self) -> &str {
+        match self {
+            ServeError::Eval(m)
+            | ServeError::Rejected(m)
+            | ServeError::Duplicate(m)
+            | ServeError::NotDurable(m) => m,
+        }
+    }
 }
 
 pub struct Session {
@@ -39,6 +113,18 @@ pub struct Session {
     pub anchor: u64,
     pub in_transaction: bool,
     pub failed: bool,
+    /// Rows accumulated inside a `BEGIN` … `COMMIT`, sealed as **one** epoch at commit.
+    ///
+    /// Held rather than appended per statement, because a transaction whose statements
+    /// sealed independently would have an epoch in which half of it had happened — which is
+    /// precisely what atomicity means here, and what the old `begin`/`commit` pair did not
+    /// provide: it flipped a flag and said so in a notice.
+    pending: Vec<proto_engine::Row>,
+    /// The identities of the statements in the open transaction, joined into the sealed
+    /// set's own idempotency key so a retried transaction is refused as a whole.
+    pending_ids: Vec<String>,
+    /// Prepared statements and portals, keyed by the schema epoch they were compiled at.
+    pub plans: crate::extended::PlanCache,
     /// The schema text this session's queries are compiled against.
     pub schema: String,
     pub queries_served: u64,
@@ -52,6 +138,9 @@ impl Session {
             anchor: 0,
             in_transaction: false,
             failed: false,
+            pending: Vec::new(),
+            pending_ids: Vec::new(),
+            plans: crate::extended::PlanCache::new(),
             schema,
             queries_served: 0,
         }
@@ -78,25 +167,42 @@ impl Session {
     pub fn handle(&mut self, msg: Frontend, engine: &mut dyn Serving) -> Vec<Backend> {
         match msg {
             Frontend::Query(sql) => {
-                self.queries_served += 1;
-                let mut out = self.query(&sql, engine);
+                // **A simple query string may hold several statements**, and PostgreSQL
+                // executes them in order with one `ReadyForQuery` at the end. The server
+                // used to treat the whole string as one query, so
+                // `psql -c "begin; insert …; commit"` — the ordinary way anyone scripts a
+                // transaction — came back as a syntax error on the word `begin`. The
+                // transaction machinery existed and there was no way to reach it from a
+                // real client.
+                let mut out = Vec::new();
+                for stmt in split_statements(&sql) {
+                    self.queries_served += 1;
+                    out.extend(self.query(&stmt, engine));
+                    // PostgreSQL abandons the rest of a multi-statement string after an
+                    // error, which is what makes `begin; …; commit` safe to send in one
+                    // go: a failing statement does not leave the following `commit` to
+                    // seal a half-built transaction.
+                    if self.failed {
+                        break;
+                    }
+                }
+                if out.is_empty() {
+                    out.push(Backend::EmptyQueryResponse);
+                }
                 out.push(Backend::ReadyForQuery(self.status()));
                 out
             }
             Frontend::Terminate => Vec::new(),
-            Frontend::Extended(tag) => {
-                self.failed = true;
-                vec![
-                    pg_wire::unsupported(
-                        &format!("the extended query protocol (message `{}`)", tag as char),
-                        "a prepared statement must be cached against the epoch it was planned at, \
-                         because a plan valid at one visibility frontier need not be valid at another; \
-                         that design question is open, and shipping a version that ignored it would be \
-                         worse than not shipping one",
-                    ),
-                    Backend::ReadyForQuery(self.status()),
-                ]
-            }
+            // **The extended protocol, served by the plan cache that was written for it.**
+            //
+            // `extended.rs` is a complete module with eleven tests and a written answer to
+            // the epoch-invalidation question — a plan is valid exactly while no schema
+            // epoch has occurred after the one it was compiled at, which is a comparison of
+            // two integers. It was reachable from nothing: the decoder discarded the
+            // message body, so the statement text never arrived, and every `Parse` was
+            // answered with a refusal citing a design question the module beside it had
+            // already answered.
+            Frontend::Extended(tag, body) => self.extended(tag, &body, engine),
             Frontend::Password(_) => vec![
                 Backend::AuthenticationOk,
                 Backend::ReadyForQuery(self.status()),
@@ -126,25 +232,56 @@ impl Session {
         match lower.as_str() {
             "begin" | "start transaction" => {
                 self.in_transaction = true;
+                self.pending.clear();
+                self.pending_ids.clear();
                 return vec![
                     Backend::NoticeResponse {
-                        message: "this session's transaction state is advisory: a sealed ledger epoch \
-                                  has no rollback, and reads are served at a session anchor rather than \
-                                  from a snapshot held open"
-                            .into(),
+                        message:
+                            "reads in this session are served at a session anchor rather than \
+                                  from a snapshot held open; writes are buffered and sealed as one \
+                                  epoch at COMMIT"
+                                .into(),
                     },
                     Backend::CommandComplete("BEGIN".into()),
                 ];
             }
+            // **One epoch, or none.** The buffered rows are sealed together, so there is no
+            // moment at which half the transaction is visible. This used to flip a flag and
+            // return, which is why the notice above had to apologise for it.
             "commit" | "end" => {
                 self.in_transaction = false;
-                self.failed = false;
-                return vec![Backend::CommandComplete("COMMIT".into())];
+                let rows = std::mem::take(&mut self.pending);
+                let ids = std::mem::take(&mut self.pending_ids);
+                if rows.is_empty() {
+                    self.failed = false;
+                    return vec![Backend::CommandComplete("COMMIT".into())];
+                }
+                let txn = ids.join("+");
+                return match engine.append(rows, &txn) {
+                    Ok(epoch) => {
+                        self.observe(epoch);
+                        self.failed = false;
+                        vec![Backend::CommandComplete(format!("COMMIT {epoch}"))]
+                    }
+                    Err(e) => {
+                        self.failed = true;
+                        vec![pg_wire::sqlstate_error(
+                            e.sqlstate(),
+                            "the transaction did not commit",
+                            Some(e.detail()),
+                        )]
+                    }
+                };
             }
+            // A rollback discards the buffer. Nothing was sealed, so there is nothing to
+            // compensate — which is the whole reason the rows are held rather than appended.
             "rollback" | "abort" => {
                 self.in_transaction = false;
                 self.failed = false;
-                return vec![Backend::CommandComplete("ROLLBACK".into())];
+                let n = self.pending.len();
+                self.pending.clear();
+                self.pending_ids.clear();
+                return vec![Backend::CommandComplete(format!("ROLLBACK {n}"))];
             }
             _ => {}
         }
@@ -176,6 +313,26 @@ impl Session {
             ];
         }
 
+        // **A write.** `INSERT INTO postings VALUES (txn, acct, cur, amt)` becomes a
+        // sealed epoch, and inside a transaction it is buffered until `COMMIT`. The old
+        // path wrapped the statement in a view and rejected it, so the wire surface was
+        // read-only and the §6.9 claim covered half a database.
+        if lower.starts_with("insert") {
+            return self.insert(trimmed, engine);
+        }
+        if lower.starts_with("update") || lower.starts_with("delete") {
+            self.failed = true;
+            return vec![pg_wire::sqlstate_error(
+                "0A000",
+                "`update` and `delete` are not legal against a ledger",
+                Some(
+                    "history is the authority: a fact that can be edited is not evidence, and a \
+                     reconstruction over an edited base is not a reproduction. Append a \
+                     compensating entry.",
+                ),
+            )];
+        }
+
         // The real path: compile the client's SQL as Niles, against this session's schema.
         let program = format!("{}\nview __wire_result = sql {{ {trimmed} }} serve {{ consistency: snapshot, materialize: auto }};\n", self.schema);
         let (prog, mut diags) = niles_lang::parser::parse_program(&program);
@@ -202,10 +359,19 @@ impl Session {
         let (lowered, ld) = niles_lang::lower::lower_program(&prog, &cat);
         if ld.has_errors() {
             self.failed = true;
+            // The lowering's own code and message, not a generic one. A client told
+            // "this query has no lowering" cannot tell a `limit` it cannot read from a
+            // stage that does not exist.
+            let first = ld
+                .sorted()
+                .into_iter()
+                .find(|d| d.severity == Severity::Error)
+                .expect("has_errors implies one exists");
+            let detail = first.notes.first().cloned();
             return vec![pg_wire::diagnostic_error(
-                "NL0500",
-                "this query has no lowering",
-                None,
+                first.code,
+                &first.msg,
+                detail.as_deref(),
             )];
         }
         // The verifier stands between the compiler and the engine on this path too. A
@@ -226,132 +392,350 @@ impl Session {
             )];
         }
 
-        // Serve it. The anchor is the session's, advanced to the frontier first, so a
-        // client's reads never run backwards.
+        // Serve it — by **evaluating the circuit that was just compiled and verified**.
+        //
+        // This is the whole of F-16. The three lines this replaces picked a view by name,
+        // scraped integers out of the query text with a digit scanner, and asked the engine
+        // for `sum(amt)` on the first of them. The compiler ran, the verifier ran, and
+        // neither had any bearing on the answer: two different queries over the same
+        // account returned the same number, and `two_queries_over_one_key_return_different_answers`
+        // is the test that would have said so.
         let anchor = self.observe(engine.frontier());
-        let Some(view) = pick_view(&lowered.circuit, &cat) else {
-            self.failed = true;
-            return vec![pg_wire::diagnostic_error(
-                "NL0501",
-                "this query does not name a servable view",
-                None,
-            )];
+        let rows = match engine.query(&lowered.circuit, "__wire_result", anchor) {
+            Ok(r) => r,
+            Err(e) => {
+                self.failed = true;
+                return vec![pg_wire::sqlstate_error(
+                    e.sqlstate(),
+                    "this query could not be evaluated",
+                    Some(e.detail()),
+                )];
+            }
         };
 
-        // The executable fragment is one keyed aggregate, so a query is answered per key.
-        // A query without a key predicate would be a full scan of the view, which the
-        // runtime can do but which is not what a partial-state engine is for — so it is
-        // refused with an explanation rather than served slowly.
-        let keys = extract_keys(trimmed);
-        if keys.is_empty() {
-            return vec![
-                Backend::NoticeResponse {
-                    message: "no key predicate: this engine serves a partially materialized view per key, \
-                              so an unkeyed scan would defeat the mechanism being measured. Add a \
-                              `where <key> = <n>` clause."
-                        .into(),
-                },
-                Backend::RowDescription(vec![Field::int8("key"), Field::numeric("value"), Field::int8("anchor")]),
-                Backend::CommandComplete("SELECT 0".into()),
-            ];
+        // **The column names come from the lowering**, which is the only place that knows
+        // them: a circuit carries indices, so the engine can only name columns
+        // positionally. Taking them from `Lowered::schemas` means a client sees the names
+        // it wrote rather than `c0`, `c1`.
+        let named = lowered
+            .circuit
+            .outputs
+            .get("__wire_result")
+            .and_then(|id| lowered.schemas.get(id))
+            .cloned()
+            .unwrap_or_default();
+        let mut rows = rows;
+        if named.len() + 1 == rows.columns.len() {
+            rows.columns = named;
+            rows.columns.push("anchor".into());
         }
 
-        let mut out = vec![Backend::RowDescription(vec![
-            Field::int8("key"),
-            // Money as `numeric`, never `float8`. Exactness that survived the type system
-            // must survive the wire.
-            Field::numeric("value"),
-            Field::int8("anchor"),
-        ])];
-        let mut n = 0usize;
-        for k in &keys {
-            match engine.read(&view, &[*k], anchor) {
-                Some(v) => {
-                    out.push(Backend::DataRow(vec![
-                        Some(k.to_string()),
-                        Some(v.to_string()),
-                        Some(anchor.to_string()),
-                    ]));
-                    n += 1;
-                }
-                // A view with no entry for this key is a NULL, not a zero. The absence
-                // lattice's distinction reaches the client intact.
-                None => {
-                    out.push(Backend::DataRow(vec![
-                        Some(k.to_string()),
-                        None,
-                        Some(anchor.to_string()),
-                    ]));
-                    n += 1;
-                }
-            }
+        let mut out = vec![Backend::RowDescription(
+            rows.columns
+                .iter()
+                .map(|c| {
+                    // Money as `numeric`, never `float8`. Exactness that survived the type
+                    // system must survive the wire.
+                    if c == "anchor" {
+                        Field::int8("anchor")
+                    } else {
+                        Field::numeric(c)
+                    }
+                })
+                .collect(),
+        )];
+        let n = rows.rows.len();
+        for r in rows.rows {
+            out.push(Backend::DataRow(r));
         }
         out.push(Backend::CommandComplete(format!("SELECT {n}")));
         out
     }
-}
 
-fn pick_view(
-    circuit: &niles_ir::circuit::Circuit,
-    cat: &niles_lang::resolve::Catalog,
-) -> Option<String> {
-    if circuit.outputs.contains_key("__wire_result") {
-        return Some("__wire_result".into());
-    }
-    let mut names: Vec<&String> = cat.views.keys().collect();
-    names.sort();
-    names.first().map(|s| s.to_string())
-}
-
-/// The integer keys a `where k = n` or `where k in (a, b)` clause names.
-///
-/// Deliberately crude, and the crudeness is bounded by the runtime's fragment rather than
-/// by effort: the executable IR fragment is one keyed aggregate, so a key predicate is the
-/// only predicate that changes what is served. A richer predicate parser would be building
-/// for an engine that does not exist yet.
-fn extract_keys(sql: &str) -> Vec<i64> {
-    let lower = sql.to_ascii_lowercase();
-    let Some(w) = lower.find(" where ") else {
-        return Vec::new();
-    };
-    let tail = &lower[w + 7..];
-    let mut keys = Vec::new();
-    let mut num = String::new();
-    for ch in tail.chars() {
-        if ch.is_ascii_digit() {
-            num.push(ch);
-        } else {
-            if !num.is_empty() {
-                if let Ok(v) = num.parse::<i64>() {
-                    keys.push(v);
+    /// Serve one extended-protocol message.
+    ///
+    /// The messages are the standard ones and the state machine is the standard one: a
+    /// `Parse` compiles and caches, a `Bind` makes a portal, an `Execute` serves it, and a
+    /// `Sync` ends the implicit transaction and emits `ReadyForQuery`. Only `Sync` emits
+    /// `ReadyForQuery`, which is the rule that distinguishes the extended protocol from the
+    /// simple one and the one a client notices immediately if it is broken.
+    fn extended(&mut self, tag: u8, body: &[u8], engine: &mut dyn Serving) -> Vec<Backend> {
+        use crate::extended::ExtError;
+        let mut at = 0usize;
+        match tag {
+            // Parse: statement name, query, parameter type OIDs.
+            b'P' => {
+                let name = pg_wire::get_cstr(body, &mut at);
+                let sql = pg_wire::get_cstr(body, &mut at);
+                let epoch = engine.frontier();
+                // The fields are not known until the query is compiled, and compiling it
+                // here is what makes a `Describe` before `Execute` answerable.
+                match self.compile(&sql) {
+                    Ok(fields) => {
+                        let n = sql.matches('$').count();
+                        self.plans.parse(&name, &sql, epoch, fields, n);
+                        vec![Backend::ParseComplete]
+                    }
+                    Err(b) => {
+                        self.failed = true;
+                        vec![b]
+                    }
                 }
-                num.clear();
+            }
+            // Bind: portal, statement, parameters.
+            b'B' => {
+                let portal = pg_wire::get_cstr(body, &mut at);
+                let statement = pg_wire::get_cstr(body, &mut at);
+                match self.plans.bind(&portal, &statement, Vec::new(), 0, false) {
+                    Ok(()) => vec![Backend::BindComplete],
+                    Err(e) => {
+                        self.failed = true;
+                        vec![e.to_backend()]
+                    }
+                }
+            }
+            b'D' => {
+                let _kind = if body.is_empty() { b'S' } else { body[0] };
+                at = 1;
+                let name = pg_wire::get_cstr(body, &mut at);
+                match self.plans.describe(&name) {
+                    Ok(fields) => vec![Backend::RowDescription(fields)],
+                    Err(e) => {
+                        self.failed = true;
+                        vec![e.to_backend()]
+                    }
+                }
+            }
+            b'E' => {
+                let portal = pg_wire::get_cstr(body, &mut at);
+                let sql = match self.plans.portal(&portal) {
+                    Ok(p) => {
+                        let stmt = p.statement.clone();
+                        match self.plans.lookup(&stmt, engine.frontier()) {
+                            Ok(prep) => prep.sql.clone(),
+                            // A stale plan is **recompiled**, not refused: the client's
+                            // prepared name keeps working across a migration, which is the
+                            // entire point of having prepared it.
+                            Err(Some(sql)) => sql,
+                            Err(None) => {
+                                self.failed = true;
+                                return vec![ExtError::UnknownStatement(stmt).to_backend()];
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        self.failed = true;
+                        return vec![e.to_backend()];
+                    }
+                };
+                self.plans.note_execution(&portal);
+                self.queries_served += 1;
+                // The rows only: an `Execute` does not re-send `RowDescription`, which the
+                // client already got from `Describe`.
+                self.query(&sql, engine)
+                    .into_iter()
+                    .filter(|m| !matches!(m, Backend::RowDescription(_)))
+                    .collect()
+            }
+            b'S' => vec![Backend::ReadyForQuery(self.status())],
+            b'C' => {
+                let kind = if body.is_empty() { b'S' } else { body[0] };
+                at = 1;
+                let name = pg_wire::get_cstr(body, &mut at);
+                if kind == b'P' {
+                    self.plans.close_portal(&name);
+                } else {
+                    self.plans.close_statement(&name);
+                }
+                vec![Backend::CloseComplete]
+            }
+            b'H' => Vec::new(), // Flush: everything is written eagerly.
+            other => {
+                self.failed = true;
+                vec![pg_wire::unsupported(
+                    &format!("extended message `{}`", other as char),
+                    "not part of the protocol's message set",
+                )]
             }
         }
     }
-    if let Ok(v) = num.parse::<i64>() {
-        keys.push(v);
+
+    /// Compile a statement far enough to know its output columns, without serving it.
+    fn compile(&mut self, sql: &str) -> Result<Vec<Field>, Backend> {
+        let program = format!(
+            "{}\nview __wire_result = sql {{ {sql} }} serve {{ consistency: snapshot, materialize: auto }};\n",
+            self.schema
+        );
+        let (prog, mut diags) = niles_lang::parser::parse_program(&program);
+        let (cat, rd) = niles_lang::resolve::resolve_program(&prog, self.anchor);
+        diags.extend(rd);
+        let (_r, td) = niles_lang::typecheck::check_program(&prog, &cat);
+        diags.extend(td);
+        let (lowered, ld) = niles_lang::lower::lower_program(&prog, &cat);
+        diags.extend(ld);
+        if diags.has_errors() {
+            let first = diags
+                .sorted()
+                .into_iter()
+                .find(|d| d.severity == Severity::Error)
+                .expect("has_errors implies one exists");
+            return Err(pg_wire::diagnostic_error(
+                first.code,
+                &first.msg,
+                first.notes.first().map(|x| x.as_str()),
+            ));
+        }
+        let mut fields: Vec<Field> = lowered
+            .circuit
+            .outputs
+            .get("__wire_result")
+            .and_then(|id| lowered.schemas.get(id))
+            .map(|cols| cols.iter().map(|c| Field::numeric(c)).collect())
+            .unwrap_or_default();
+        fields.push(Field::int8("anchor"));
+        Ok(fields)
     }
-    keys
+
+    /// `INSERT INTO postings VALUES (txn, acct, cur, amt), (…)` — the write path.
+    ///
+    /// Parsed here rather than through the lowering because an insert is not a query and has
+    /// no circuit: the IR describes read models. The statement's shape is narrow on purpose
+    /// and the narrowness is *stated* — a wider parser would be inventing a DML surface the
+    /// language has not specified, and thesis §11.3's rule is to narrow publicly.
+    fn insert(&mut self, sql: &str, engine: &mut dyn Serving) -> Vec<Backend> {
+        let Some(rows) = parse_insert(sql) else {
+            self.failed = true;
+            return vec![pg_wire::sqlstate_error(
+                "0A000",
+                "this `insert` is outside the supported form",
+                Some(
+                    "the form is `INSERT INTO postings VALUES (txn, acct, cur, amt)[, …]`, with \
+                     integer literals. Anything else is refused rather than partly understood.",
+                ),
+            )];
+        };
+        if rows.is_empty() {
+            return vec![Backend::CommandComplete("INSERT 0 0".into())];
+        }
+        let n = rows.len();
+        // The identity: the transaction numbers in the statement. An insert with no
+        // identity would not be idempotent, and a retried insert over a wire that dropped
+        // an acknowledgement is the ordinary case rather than the exotic one.
+        let txn = rows
+            .iter()
+            .map(|r| match r {
+                proto_engine::Row::Post(p) => p.txn.to_string(),
+                _ => "x".into(),
+            })
+            .collect::<Vec<_>>()
+            .join("-");
+
+        if self.in_transaction {
+            self.pending.extend(rows);
+            self.pending_ids.push(txn);
+            return vec![Backend::CommandComplete(format!("INSERT 0 {n}"))];
+        }
+        match engine.append(rows, &txn) {
+            Ok(epoch) => {
+                self.observe(epoch);
+                vec![Backend::CommandComplete(format!("INSERT 0 {n}"))]
+            }
+            Err(e) => {
+                self.failed = true;
+                vec![pg_wire::sqlstate_error(
+                    e.sqlstate(),
+                    "the insert did not commit",
+                    Some(e.detail()),
+                )]
+            }
+        }
+    }
 }
 
-/// A trivial in-memory `Serving`, for tests and for `nilestreamd --demo`.
-pub struct MemoryEngine {
-    pub frontier: u64,
-    pub data: HashMap<(String, i64), i128>,
-    pub views: Vec<(String, u32)>,
+/// Split a simple-query string into statements at top-level semicolons.
+///
+/// Quotes and parentheses are tracked, because a `;` inside a string literal or a value
+/// list is not a statement boundary and splitting there would cut a query in half — which
+/// is worse than not splitting at all, since the halves might each parse.
+fn split_statements(sql: &str) -> Vec<String> {
+    let (mut out, mut cur) = (Vec::new(), String::new());
+    let (mut in_str, mut depth) = (false, 0i32);
+    let mut chars = sql.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => {
+                // A doubled quote inside a literal is an escaped quote, not a close.
+                if in_str && chars.peek() == Some(&'\'') {
+                    cur.push(c);
+                    cur.push(chars.next().expect("peeked"));
+                    continue;
+                }
+                in_str = !in_str;
+                cur.push(c);
+            }
+            '(' if !in_str => {
+                depth += 1;
+                cur.push(c);
+            }
+            ')' if !in_str => {
+                depth -= 1;
+                cur.push(c);
+            }
+            ';' if !in_str && depth <= 0 => {
+                if !cur.trim().is_empty() {
+                    out.push(cur.trim().to_string());
+                }
+                cur.clear();
+            }
+            _ => cur.push(c),
+        }
+    }
+    if !cur.trim().is_empty() {
+        out.push(cur.trim().to_string());
+    }
+    out
 }
 
-impl Serving for MemoryEngine {
-    fn frontier(&self) -> u64 {
-        self.frontier
+/// The rows an `INSERT INTO postings VALUES (…)` names.
+///
+/// `None` for anything outside the form. Deliberately not lenient: a partly-understood
+/// insert would put rows in the ledger that do not match what was written, and the ledger is
+/// the one place in this system where that cannot be corrected by an update.
+fn parse_insert(sql: &str) -> Option<Vec<proto_engine::Row>> {
+    let lower = sql.to_ascii_lowercase();
+    let into = lower.find("into")?;
+    let values = lower.find("values")?;
+    let target = lower[into + 4..values].trim();
+    // The column list, if written, is accepted only in the declared order — an insert
+    // naming columns in another order would be silently permuted otherwise.
+    let target = target.split('(').next()?.trim();
+    if target != "postings" {
+        return None;
     }
-    fn read(&mut self, view: &str, key: &[i64], _anchor: u64) -> Option<i128> {
-        self.data.get(&(view.to_string(), key[0])).copied()
+    let mut out = Vec::new();
+    let mut rest = &sql[values + 6..];
+    while let Some(open) = rest.find('(') {
+        let close = rest[open..].find(')')? + open;
+        let fields: Vec<i128> = rest[open + 1..close]
+            .split(',')
+            .map(|f| f.trim().parse::<i128>().ok())
+            .collect::<Option<Vec<_>>>()?;
+        if fields.len() != 4 {
+            return None;
+        }
+        out.push(proto_engine::Row::Post(proto_engine::Posting {
+            txn: u64::try_from(fields[0]).ok()?,
+            acct: u64::try_from(fields[1]).ok()?,
+            cur: u32::try_from(fields[2]).ok()?,
+            amt: fields[3],
+            valid: 0,
+        }));
+        rest = &rest[close + 1..];
     }
-    fn views(&self) -> Vec<(String, u32)> {
-        self.views.clone()
+    if out.is_empty() {
+        return None;
     }
+    Some(out)
 }
 
 #[cfg(test)]
@@ -366,13 +750,108 @@ schema bank {
     index ix on postings (acct) anchor;
 }";
 
+    /// A test double that **evaluates the circuit**, like the real engine.
+    ///
+    /// The double it replaces held a `HashMap<(view, key), value>` and answered from it, so
+    /// the session's tests could not have caught F-16: a session that ignored the circuit
+    /// and a double that ignored the circuit agreed perfectly.
+    struct MemoryEngine {
+        frontier: u64,
+        postings: niles_ir::eval::ZSet,
+        views: Vec<(String, u32)>,
+        appended: Vec<(String, usize)>,
+    }
+
+    impl Serving for MemoryEngine {
+        fn frontier(&self) -> u64 {
+            self.frontier
+        }
+        fn query(
+            &mut self,
+            circuit: &niles_ir::circuit::Circuit,
+            output: &str,
+            anchor: u64,
+        ) -> Result<Rows, ServeError> {
+            let mut src = std::collections::BTreeMap::new();
+            src.insert("postings".to_string(), self.postings.clone());
+            let (z, _) = niles_ir::eval::try_run(circuit, output, &src)
+                .map_err(|e| ServeError::Eval(e.to_string()))?;
+            let width = z.keys().next().map(|r| r.len()).unwrap_or(0);
+            let mut columns: Vec<String> = (0..width).map(|i| format!("c{i}")).collect();
+            columns.push("anchor".into());
+            let mut rows = Vec::new();
+            for (r, w) in &z {
+                for _ in 0..(*w).max(0) {
+                    let mut cells: Vec<Option<String>> = r
+                        .iter()
+                        .map(|v| match v {
+                            niles_ir::value::Value::Null => None,
+                            niles_ir::value::Value::Int(i) => Some(i.to_string()),
+                        })
+                        .collect();
+                    cells.push(Some(anchor.to_string()));
+                    rows.push(cells);
+                }
+            }
+            Ok(Rows { columns, rows })
+        }
+        fn append(
+            &mut self,
+            rows: Vec<proto_engine::Row>,
+            txn_id: &str,
+        ) -> Result<u64, ServeError> {
+            if self.appended.iter().any(|(t, _)| t == txn_id) {
+                return Err(ServeError::Duplicate(format!(
+                    "`{txn_id}` already committed"
+                )));
+            }
+            self.appended.push((txn_id.to_string(), rows.len()));
+            for r in rows {
+                if let proto_engine::Row::Post(p) = r {
+                    niles_ir::eval::add(
+                        &mut self.postings,
+                        vec![
+                            niles_ir::value::Value::Int(p.txn as i128),
+                            niles_ir::value::Value::Int(p.acct as i128),
+                            niles_ir::value::Value::Int(p.cur as i128),
+                            niles_ir::value::Value::Int(p.amt),
+                            niles_ir::value::Value::Null,
+                        ],
+                        1,
+                    );
+                }
+            }
+            self.frontier += 1;
+            Ok(self.frontier)
+        }
+        fn views(&self) -> Vec<(String, u32)> {
+            self.views.clone()
+        }
+    }
+
     fn engine() -> MemoryEngine {
-        let mut data = HashMap::new();
-        data.insert(("__wire_result".to_string(), 1001i64), 85000i128);
+        // Two accounts, so a query naming one must not answer for the other.
+        let postings = niles_ir::eval::zset(&[
+            (&[1, 1001, 0, 85_000, 0], 1),
+            (&[2, 2002, 0, 12_500, 0], 1),
+            (&[3, 1001, 0, 500, 0], 1),
+        ]);
+        let mut postings: niles_ir::eval::ZSet = postings;
+        // The `idem` column is text in the schema and has no integer form; it is null.
+        let nulled: Vec<(Vec<niles_ir::value::Value>, i128)> = postings
+            .iter()
+            .map(|(r, w)| {
+                let mut r = r.clone();
+                r[4] = niles_ir::value::Value::Null;
+                (r, *w)
+            })
+            .collect();
+        postings = nulled.into_iter().collect();
         MemoryEngine {
             frontier: 4200,
-            data,
+            postings,
             views: vec![("ledger_balance".into(), 2)],
+            appended: Vec::new(),
         }
     }
 
@@ -443,11 +922,32 @@ schema bank {
             ),
             &mut e,
         );
-        let row = out.iter().find_map(|m| match m {
-            Backend::DataRow(cols) => Some(cols.clone()),
-            _ => None,
-        });
-        assert_eq!(row.unwrap()[1], None, "an absent key must be NULL");
+        // **The old assertion was wrong, and its wrongness is the finding.** It said this
+        // query returns one row whose value is NULL. It does not: a grouped aggregate over
+        // an account with no postings produces *no group*, and SQL returns no row. The old
+        // server manufactured one — it took the key out of the query text and emitted a row
+        // for it whether or not the data had one, which is a fabricated result row wearing
+        // the absence argument's clothes.
+        //
+        // The distinction the old test was defending is real and is enforced one layer
+        // down, where it belongs: `RevEngine::read_point` returns `Option`, and
+        // `a_key_the_base_has_never_seen_has_no_value` holds it.
+        let rows: Vec<&Vec<Option<String>>> = out
+            .iter()
+            .filter_map(|m| match m {
+                Backend::DataRow(r) => Some(r),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            rows.is_empty(),
+            "an account with no postings forms no group, so there is no row to be null: {out:?}"
+        );
+        assert!(
+            out.iter()
+                .any(|m| matches!(m, Backend::CommandComplete(t) if t == "SELECT 0")),
+            "{out:?}"
+        );
     }
 
     #[test]
@@ -492,38 +992,148 @@ schema bank {
     }
 
     #[test]
-    fn an_unkeyed_query_is_refused_with_an_explanation() {
-        // The engine can scan, but scanning defeats the mechanism being measured, so the
-        // refusal says what to add rather than returning a slow answer.
+    fn an_unkeyed_query_is_answered_by_the_scan_surface() {
+        // **Inverted, and the inversion is the finding.** This used to assert that an
+        // unkeyed query was *refused*, on the reasoning that "scanning defeats the
+        // mechanism being measured". That is a benchmark's reason, not a database's: a
+        // server that refuses `group by` because the answer would be uninteresting to an
+        // experiment cannot answer the analytical half of its own Part 0 table.
         let (mut s, mut e) = (session(), engine());
         let out = s.handle(
             Frontend::Query("select acct, sum(amt) from postings group by acct".into()),
             &mut e,
         );
-        assert!(out.iter().any(|m| matches!(m, Backend::NoticeResponse { message } if message.contains("key predicate"))), "{out:?}");
-    }
-
-    #[test]
-    fn the_extended_protocol_is_refused_with_the_open_design_question_named() {
-        let (mut s, mut e) = (session(), engine());
-        let out = s.handle(Frontend::Extended(b'P'), &mut e);
-        let Some(Backend::ErrorResponse { detail, code, .. }) = out.first() else {
-            panic!("{out:?}")
-        };
-        assert_eq!(code, "0A000");
+        let rows: Vec<&Vec<Option<String>>> = out
+            .iter()
+            .filter_map(|m| match m {
+                Backend::DataRow(r) => Some(r),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rows.len(), 2, "both accounts: {out:?}");
         assert!(
-            detail.as_ref().unwrap().contains("visibility frontier"),
-            "the refusal must name the reason"
+            !out.iter()
+                .any(|m| matches!(m, Backend::NoticeResponse { .. })),
+            "and no apology"
         );
     }
 
     #[test]
-    fn transaction_control_says_what_it_does_not_provide() {
+    fn the_extended_protocol_parses_binds_and_executes() {
+        // **Inverted, and the inversion is the finding.** This used to assert that `Parse`
+        // was refused with "that design question is open" — while `extended.rs`, in the
+        // same crate, contained the answer, a plan cache keyed by schema epoch, and eleven
+        // tests. The module was reachable from nothing.
+        let (mut s, mut e) = (session(), engine());
+        let mut parse = Vec::new();
+        push_cstr(&mut parse, "st1");
+        push_cstr(
+            &mut parse,
+            "select acct, sum(amt) from postings where acct = 1001 group by acct",
+        );
+        parse.extend_from_slice(&0u16.to_be_bytes());
+        let out = s.handle(Frontend::Extended(b'P', parse), &mut e);
+        assert!(
+            matches!(out.first(), Some(Backend::ParseComplete)),
+            "{out:?}"
+        );
+
+        let mut bind = Vec::new();
+        push_cstr(&mut bind, "po1");
+        push_cstr(&mut bind, "st1");
+        let out = s.handle(Frontend::Extended(b'B', bind), &mut e);
+        assert!(
+            matches!(out.first(), Some(Backend::BindComplete)),
+            "{out:?}"
+        );
+
+        // Describe answers from the plan, before any row is fetched — which is the whole
+        // point of having compiled at `Parse` time.
+        let mut desc = vec![b'S'];
+        push_cstr(&mut desc, "st1");
+        let out = s.handle(Frontend::Extended(b'D', desc), &mut e);
+        let Some(Backend::RowDescription(fields)) = out.first() else {
+            panic!("{out:?}")
+        };
+        assert_eq!(
+            fields.last().map(|f| f.name.as_str()),
+            Some("anchor"),
+            "every answer carries the moment it is true at"
+        );
+
+        let mut exec = Vec::new();
+        push_cstr(&mut exec, "po1");
+        exec.extend_from_slice(&0u32.to_be_bytes());
+        let out = s.handle(Frontend::Extended(b'E', exec), &mut e);
+        assert!(
+            out.iter()
+                .any(|m| matches!(m, Backend::DataRow(r) if r[1] == Some("85500".into()))),
+            "{out:?}"
+        );
+        assert!(
+            !out.iter().any(|m| matches!(m, Backend::RowDescription(_))),
+            "an Execute does not re-send the row description the client already has"
+        );
+
+        // Only `Sync` emits `ReadyForQuery`. A client notices immediately if this is wrong.
+        let out = s.handle(Frontend::Extended(b'S', Vec::new()), &mut e);
+        assert!(
+            matches!(out.first(), Some(Backend::ReadyForQuery(_))),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn a_prepared_statement_survives_a_schema_epoch_moving() {
+        // The answer `extended.rs` was written around: a plan is valid exactly while no
+        // schema epoch has occurred after the one it was compiled at. A stale plan is
+        // recompiled, not refused, so the client's prepared name keeps working.
+        let (mut s, mut e) = (session(), engine());
+        let mut parse = Vec::new();
+        push_cstr(&mut parse, "st1");
+        push_cstr(
+            &mut parse,
+            "select acct, sum(amt) from postings where acct = 1001 group by acct",
+        );
+        parse.extend_from_slice(&0u16.to_be_bytes());
+        s.handle(Frontend::Extended(b'P', parse), &mut e);
+        let mut bind = Vec::new();
+        push_cstr(&mut bind, "po1");
+        push_cstr(&mut bind, "st1");
+        s.handle(Frontend::Extended(b'B', bind), &mut e);
+
+        // The frontier moves, so the plan's schema epoch no longer matches.
+        e.frontier += 10;
+        let mut exec = Vec::new();
+        push_cstr(&mut exec, "po1");
+        exec.extend_from_slice(&0u32.to_be_bytes());
+        let out = s.handle(Frontend::Extended(b'E', exec), &mut e);
+        assert!(
+            out.iter().any(|m| matches!(m, Backend::DataRow(_))),
+            "a plan whose schema epoch moved is recompiled, not refused: {out:?}"
+        );
+    }
+
+    fn push_cstr(b: &mut Vec<u8>, s: &str) {
+        b.extend_from_slice(s.as_bytes());
+        b.push(0);
+    }
+
+    #[test]
+    fn transaction_control_says_what_it_does_and_does_not_provide() {
+        // The notice no longer apologises for a rollback that does not exist — writes are
+        // buffered and sealed as one epoch at `COMMIT`, so a `ROLLBACK` discards them and
+        // there is nothing to compensate. What it still says is the part that remains true:
+        // reads are served at a session anchor rather than from a snapshot held open.
         let (mut s, mut e) = (session(), engine());
         let out = s.handle(Frontend::Query("begin".into()), &mut e);
         assert!(
-            out.iter().any(|m| matches!(m, Backend::NoticeResponse { message } if message.contains("no rollback"))),
-            "a client must be told that a sealed epoch cannot be rolled back: {out:?}"
+            out.iter().any(|m| matches!(m, Backend::NoticeResponse { message } if message.contains("session anchor"))),
+            "a client must be told how its reads are anchored: {out:?}"
+        );
+        assert!(
+            out.iter().any(|m| matches!(m, Backend::NoticeResponse { message } if message.contains("one epoch at COMMIT"))),
+            "and how its writes are sealed: {out:?}"
         );
         assert_eq!(s.status(), b'T');
         s.handle(Frontend::Query("commit".into()), &mut e);
@@ -538,15 +1148,189 @@ schema bank {
     }
 
     #[test]
-    fn key_extraction_reads_equality_and_in_lists() {
-        assert_eq!(
-            extract_keys("select x from t where acct = 1001"),
-            vec![1001]
+    fn two_queries_over_one_key_return_different_answers() {
+        // **The test that would have caught F-16, and did not exist.** The served answer
+        // used to be `sum(amt)` for `key[0]`, whatever was asked: `pick_view` returned a
+        // constant, `extract_keys` scraped digit runs out of the query *text*, and the
+        // circuit the compiler had just verified was dropped on the floor. Two different
+        // questions about account 1001 came back with the same number.
+        let (mut s, mut e) = (session(), engine());
+        let rows = |out: &[Backend]| -> Vec<Vec<Option<String>>> {
+            out.iter()
+                .filter_map(|m| match m {
+                    Backend::DataRow(r) => Some(r.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let sum = s.handle(
+            Frontend::Query(
+                "select acct, sum(amt) from postings where acct = 1001 group by acct".into(),
+            ),
+            &mut e,
         );
-        assert_eq!(
-            extract_keys("select x from t where acct in (1, 2, 3)"),
-            vec![1, 2, 3]
+        let count = s.handle(
+            Frontend::Query(
+                "select acct, count(amt) from postings where acct = 1001 group by acct".into(),
+            ),
+            &mut e,
         );
-        assert!(extract_keys("select x from t").is_empty());
+        let (a, b) = (rows(&sum), rows(&count));
+        assert_eq!(a.len(), 1, "{sum:?}");
+        assert_eq!(b.len(), 1, "{count:?}");
+        assert_eq!(a[0][1], Some("85500".into()), "the sum of 85000 and 500");
+        assert_eq!(b[0][1], Some("2".into()), "two postings on that account");
+        assert_ne!(a, b, "two queries, two answers");
+    }
+
+    #[test]
+    fn a_query_naming_one_account_does_not_answer_for_another() {
+        // The other half: the key comes from the *predicate the compiler lowered*, not from
+        // a digit scanner over the query text.
+        let (mut s, mut e) = (session(), engine());
+        let out = s.handle(
+            Frontend::Query(
+                "select acct, sum(amt) from postings where acct = 2002 group by acct".into(),
+            ),
+            &mut e,
+        );
+        let rows: Vec<&Vec<Option<String>>> = out
+            .iter()
+            .filter_map(|m| match m {
+                Backend::DataRow(r) => Some(r),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rows.len(), 1, "{out:?}");
+        assert_eq!(rows[0][0], Some("2002".into()));
+        assert_eq!(rows[0][1], Some("12500".into()));
+    }
+
+    #[test]
+    fn an_insert_appends_and_is_visible_to_the_next_read() {
+        // The wire surface used to be read-only: an `INSERT` was wrapped in a view and
+        // rejected, so half a database was unreachable over the protocol §6.9's adoption
+        // argument rests on.
+        let (mut s, mut e) = (session(), engine());
+        let out = s.handle(
+            Frontend::Query("insert into postings values (4, 3003, 0, 700)".into()),
+            &mut e,
+        );
+        assert!(
+            out.iter()
+                .any(|m| matches!(m, Backend::CommandComplete(t) if t == "INSERT 0 1")),
+            "{out:?}"
+        );
+        let read = s.handle(
+            Frontend::Query(
+                "select acct, sum(amt) from postings where acct = 3003 group by acct".into(),
+            ),
+            &mut e,
+        );
+        assert!(
+            read.iter()
+                .any(|m| matches!(m, Backend::DataRow(r) if r[1] == Some("700".into()))),
+            "{read:?}"
+        );
+    }
+
+    #[test]
+    fn a_transaction_seals_as_one_epoch_and_a_rollback_seals_nothing() {
+        let (mut s, mut e) = (session(), engine());
+        s.handle(Frontend::Query("begin".into()), &mut e);
+        s.handle(
+            Frontend::Query("insert into postings values (10, 4004, 0, 100)".into()),
+            &mut e,
+        );
+        s.handle(
+            Frontend::Query("insert into postings values (11, 4004, 0, -100)".into()),
+            &mut e,
+        );
+        let before = e.frontier();
+        s.handle(Frontend::Query("commit".into()), &mut e);
+        assert_eq!(
+            e.frontier(),
+            before + 1,
+            "two statements, one epoch: there is no moment in which half of it happened"
+        );
+        assert_eq!(e.appended.len(), 1);
+        assert_eq!(e.appended[0].1, 2, "both rows in the one sealed set");
+
+        // And the rollback: buffered rows are discarded, and nothing was sealed to
+        // compensate for.
+        s.handle(Frontend::Query("begin".into()), &mut e);
+        s.handle(
+            Frontend::Query("insert into postings values (12, 5005, 0, 1)".into()),
+            &mut e,
+        );
+        let f = e.frontier();
+        let out = s.handle(Frontend::Query("rollback".into()), &mut e);
+        assert_eq!(e.frontier(), f, "a rollback seals nothing");
+        assert!(
+            out.iter()
+                .any(|m| matches!(m, Backend::CommandComplete(t) if t == "ROLLBACK 1")),
+            "and says how many rows it discarded: {out:?}"
+        );
+    }
+
+    #[test]
+    fn a_repeated_transaction_identity_is_refused_with_a_unique_violation() {
+        // Idempotency over a wire that can drop an acknowledgement. The SQLSTATE matters:
+        // a driver reads it, and `23505` says "you already did this" while the `42P01`
+        // this server used to answer to everything says "no such table".
+        let (mut s, mut e) = (session(), engine());
+        s.handle(
+            Frontend::Query("insert into postings values (7, 6006, 0, 5)".into()),
+            &mut e,
+        );
+        let again = s.handle(
+            Frontend::Query("insert into postings values (7, 6006, 0, 5)".into()),
+            &mut e,
+        );
+        let Some(Backend::ErrorResponse { code, .. }) = again.first() else {
+            panic!("{again:?}")
+        };
+        assert_eq!(code, "23505");
+    }
+
+    #[test]
+    fn an_update_against_the_ledger_is_refused_with_feature_not_supported() {
+        let (mut s, mut e) = (session(), engine());
+        let out = s.handle(
+            Frontend::Query("update postings set amt = 0 where acct = 1001".into()),
+            &mut e,
+        );
+        let Some(Backend::ErrorResponse { code, detail, .. }) = out.first() else {
+            panic!("{out:?}")
+        };
+        assert_eq!(code, "0A000");
+        assert!(detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("compensating entry"));
+    }
+
+    #[test]
+    fn a_diagnostic_carries_a_sqlstate_from_its_own_family() {
+        // Every Niles diagnostic used to reach the client as `42P01` — *undefined_table* —
+        // so a driver's retry logic was told the same untrue thing about a syntax error, a
+        // currency mismatch and a rung violation alike.
+        assert_eq!(pg_wire::sqlstate_for("NL0001"), "42601");
+        assert_eq!(pg_wire::sqlstate_for("NL0250"), "42804");
+        assert_eq!(pg_wire::sqlstate_for("NL0300"), "23000");
+        assert_eq!(
+            pg_wire::sqlstate_for("NL0312"),
+            "42501",
+            "a missing capability is a privilege failure, not an integrity one: a driver \
+             retries the second and must not retry the first"
+        );
+        assert_eq!(pg_wire::sqlstate_for("NL0400"), "42P20");
+        assert_eq!(pg_wire::sqlstate_for("NL0501"), "0A000");
+        assert_eq!(pg_wire::sqlstate_for("IR013"), "58000");
+        assert_eq!(
+            pg_wire::sqlstate_for("ZZ9999"),
+            "XX000",
+            "an unclassified code is an internal error, not a guess"
+        );
     }
 }

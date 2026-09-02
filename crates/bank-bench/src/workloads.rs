@@ -69,6 +69,20 @@ pub struct Sample {
     pub durable: bool,
     /// Non-empty when the run did not happen, and why.
     pub not_run: Option<String>,
+    /// Which PostgreSQL query protocol the client used: `simple` or `extended`.
+    ///
+    /// Recorded per row because **both targets must use the same one in a run**, and until
+    /// now nothing said which either used. libpq's `PQexec` is the simple protocol and
+    /// `PQexecParams` is the extended one; they differ by a round trip and by whether the
+    /// server re-plans, so a comparison in which one side used each would be measuring the
+    /// protocol rather than the engine.
+    pub protocol_path: &'static str,
+    /// The miss rate of the partial view over this run, where the target has one.
+    ///
+    /// `None` for PostgreSQL, which has no partial state to miss in. Reported because a run
+    /// whose budget exceeded the key count never evicted anything, so it measured the hit
+    /// path exclusively while being presented as a measurement of the mechanism.
+    pub miss_rate: Option<f64>,
 }
 
 impl Sample {
@@ -82,7 +96,7 @@ impl Sample {
     /// One CSV line. The schema is fixed in `render.rs` and asserted by a test there.
     pub fn to_csv(&self) -> String {
         format!(
-            "{},{},{},{},{:.3},{:.1},{:.1},{:.1},{},{}",
+            "{},{},{},{},{:.3},{:.1},{:.1},{:.1},{},{},{},{}",
             self.workload,
             self.target,
             self.run,
@@ -92,10 +106,22 @@ impl Sample {
             self.p99.as_nanos() as f64 / 1000.0,
             self.ops_per_second(),
             self.durable,
-            self.not_run.as_deref().unwrap_or("")
+            self.not_run.as_deref().unwrap_or(""),
+            self.protocol_path,
+            self.miss_rate
+                .map(|m| format!("{m:.4}"))
+                .unwrap_or_else(|| "n/a".into())
         )
     }
 }
+
+/// **The query protocol both targets use.**
+///
+/// One constant, so the two sides cannot differ. libpq's `PQexec` is the simple protocol and
+/// `PQexecParams` is the extended one; they differ by a round trip and by whether the server
+/// re-plans, so a comparison in which PostgreSQL used one and Nilestream the other would be
+/// measuring the protocol. Nothing recorded which either used, so nothing could have said.
+pub const PROTOCOL_PATH: &str = "simple";
 
 /// A run that did not happen, and the reason.
 ///
@@ -112,6 +138,10 @@ pub fn skipped(workload: &str, target: &str, run: u32, reason: String) -> Sample
         p99: Duration::ZERO,
         durable: false,
         not_run: Some(reason),
+        // A run that did not happen used the protocol nothing used. Recorded rather than
+        // left blank so the column is never ambiguous between "simple" and "unknown".
+        protocol_path: "none",
+        miss_rate: None,
     }
 }
 
@@ -180,6 +210,8 @@ pub fn point(
         p99,
         durable: false,
         not_run: None,
+        protocol_path: PROTOCOL_PATH,
+        miss_rate: None,
     })
 }
 
@@ -234,6 +266,8 @@ pub fn oltp(
         p99,
         durable,
         not_run: None,
+        protocol_path: PROTOCOL_PATH,
+        miss_rate: None,
     })
 }
 
@@ -278,6 +312,8 @@ pub fn analytical(
         p99,
         durable: false,
         not_run: None,
+        protocol_path: PROTOCOL_PATH,
+        miss_rate: None,
     })
 }
 
@@ -324,6 +360,8 @@ pub fn durable(
         p99,
         durable: is_durable,
         not_run: None,
+        protocol_path: PROTOCOL_PATH,
+        miss_rate: None,
     })
 }
 
@@ -426,15 +464,23 @@ mod tests {
 
     #[test]
     fn a_skipped_run_carries_its_reason_into_the_csv() {
+        // The reason this test used to name — "no write surface over the wire" — is no
+        // longer true of this server, so the example is a different one. A skipped run is
+        // still a row rather than an omission: a results table with a missing row invites a
+        // reader to assume the number was unremarkable.
         let s = skipped(
             "oltp",
-            "nilestream",
+            "postgresql",
             3,
-            "no write surface over the wire".into(),
+            "no PostgreSQL server on this host".into(),
         );
         let line = s.to_csv();
-        assert!(line.starts_with("oltp,nilestream,3,0,"), "{line}");
-        assert!(line.ends_with("no write surface over the wire"), "{line}");
+        assert!(line.starts_with("oltp,postgresql,3,0,"), "{line}");
+        assert!(line.contains("no PostgreSQL server on this host"), "{line}");
+        assert!(
+            line.ends_with(",none,n/a"),
+            "a run that did not happen used no protocol and has no miss rate to report: {line}"
+        );
         assert_eq!(
             s.ops_per_second(),
             0.0,
@@ -454,8 +500,15 @@ mod tests {
             p99: Duration::from_micros(900),
             durable: true,
             not_run: None,
+            protocol_path: PROTOCOL_PATH,
+            miss_rate: Some(0.37),
         };
-        assert_eq!(s.to_csv().split(',').count(), 10);
+        assert_eq!(s.to_csv().split(',').count(), 12);
+        assert!(
+            s.to_csv().ends_with(",simple,0.3700"),
+            "the protocol and the miss rate are the last two columns: {}",
+            s.to_csv()
+        );
         assert!(
             (s.ops_per_second() - 4_000.0).abs() < 1.0,
             "{}",

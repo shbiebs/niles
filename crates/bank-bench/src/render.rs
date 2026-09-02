@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 
 /// The CSV header. Asserted against `Sample::to_csv` by a test, so the two cannot drift.
 pub const CSV_HEADER: &str =
-    "workload,target,run,operations,wall_ms,p50_us,p99_us,ops_per_sec,durable,not_run";
+    "workload,target,run,operations,wall_ms,p50_us,p99_us,ops_per_sec,durable,not_run,protocol_path,miss_rate";
 
 /// One row of the performance contract.
 pub struct ContractRow {
@@ -245,6 +245,8 @@ mod tests {
             p99: Duration::from_micros(p99_us),
             durable: true,
             not_run: None,
+            protocol_path: crate::workloads::PROTOCOL_PATH,
+            miss_rate: None,
         }
     }
 

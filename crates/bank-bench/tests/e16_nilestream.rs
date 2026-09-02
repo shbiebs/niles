@@ -104,29 +104,33 @@ fn the_read_path_answers_over_the_wire_from_a_partial_view() {
     let rows = c
         .simple("select acct, sum(amt) from postings where acct = 42 group by acct")
         .expect("query");
-    let value = rows.by_name("value").expect("account 42 has postings");
+    // The column is named `sum`, from the lowering's own schema for a grouped aggregate —
+    // not `value`, which was the name the hard-coded serving path gave every answer it
+    // produced. A client now sees the names its query implies.
+    let value = rows.by_name("sum").expect("account 42 has postings");
     assert!(value != 0, "a real balance: {value}");
 
-    // And an account the base never touched comes back as a **NULL**, not a zero and not a
-    // missing row. That distinction is the absence lattice reaching the wire intact, and it is
-    // stronger than what PostgreSQL's `group by` does with the same query: PostgreSQL returns
-    // no row at all, which tells a client "nothing matched" and leaves it to decide whether
-    // that means the account is empty or absent. Nilestream answers the question that was
-    // asked — this key, at this anchor, has no value — which is the §1.1.1 defect closed at
-    // the protocol boundary where it would otherwise be quietest to lose.
+    // And an account the base never touched forms **no group**, so the answer is no row.
+    //
+    // **This assertion is the opposite of the one it replaces, and the change is a
+    // retraction.** The old test asserted that this query returns one row whose value is
+    // NULL, and argued that this is "stronger than what PostgreSQL's `group by` does with
+    // the same query". It is not stronger. It was a *fabricated row*: the old serving path
+    // scraped the integer out of the query text and emitted a row for it whether or not the
+    // data had one, so the answer was manufactured from the question. A grouped aggregate
+    // over an empty group produces no group, in SQL and in the Z-set semantics alike, and a
+    // client that received a row for a key with no data would be told something untrue.
+    //
+    // The distinction the old test was reaching for is real and is enforced where it
+    // belongs: `RevEngine::read_point` returns `Option`, and an evicted entry and an absent
+    // one are different things in the absence lattice. What is *not* true is that a
+    // grouped query is the place to express it.
     let missing = c
         .simple("select acct, sum(amt) from postings where acct = 999999 group by acct")
         .expect("query");
-    assert_eq!(
-        missing.rows.len(),
-        1,
-        "the key is answered, not silently dropped"
-    );
-    assert_eq!(missing.rows[0][1], None, "and the answer is NULL, not 0");
-    assert_eq!(
-        missing.by_name("value"),
-        None,
-        "which the client reads as no value"
+    assert!(
+        missing.rows.is_empty(),
+        "an account with no postings forms no group: {missing:?}"
     );
 }
 

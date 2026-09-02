@@ -1,7 +1,7 @@
-// The wire surface is incomplete by construction today: there is no write path and the
-// extended query protocol is not wired into the connection loop, so `ReadStats`,
-// `MemoryEngine` and several accessors have no caller yet. They are kept, not deleted,
-// because deleting them would hide the gap that `results/E16-wallclock.md` reports.
+// A few accessors exist for introspection and for the benchmark harness rather than for
+// the server's own path. The blanket allow this replaces was justified by "there is no
+// write path and the extended query protocol is not wired into the connection loop" —
+// both of which are now false, so the justification had to go with them.
 #![allow(dead_code)]
 // `Backend::BackendKeyData` is the PostgreSQL message name; renaming it would make the
 // protocol harder to read against the specification.
@@ -16,8 +16,9 @@
 //! |---|---|
 //! | [`pg_wire`] | **Built** — PostgreSQL wire protocol v3, simple query path |
 //! | [`session`] | **Built** — query → Niles → IR → verifier → REV runtime, one path |
-//! | [`rev_engine`] | **Built** — reads served by a partial view over an immutable ledger |
-//! | `mysql_wire` | Specified in §7.3; not built |
+//! | [`rev_engine`] | **Built** — the compiled circuit is evaluated over the base; the partial view is the point path |
+//! | [`extended`] | **Built** — `Parse`/`Bind`/`Describe`/`Execute`/`Sync`, with plans keyed by schema epoch |
+//! | `mysql_wire` | **A codec, with no listener.** Frames encode and decode and nothing calls them; §7.3 specifies the protocol and this crate does not serve it |
 //! | `native_proto` | Specified; not built |
 //! | `audit`, `observability` | Specified in Appendix D.8; not built |
 //!
@@ -25,6 +26,13 @@
 //! semantics**. There is no compatibility layer with its own execution path, because two
 //! ways to compute an answer is two answers that can disagree — which is the seam this
 //! whole thesis argues against.
+//!
+//! That commitment was, until this revision, false of this crate. The session compiled the
+//! client's SQL, verified the circuit, and then **discarded it**: the answer came from a
+//! hard-coded fold of `sum(amt)` over an account scraped out of the query text with a digit
+//! scanner. Two different questions about one account returned the same number. The
+//! compiler was a decoration on a fixed answer, which is the compatibility-layer failure in
+//! its purest form — one path that parses and another that answers.
 
 pub mod audit;
 pub mod daemon;

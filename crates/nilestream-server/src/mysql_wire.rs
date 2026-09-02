@@ -1,3 +1,11 @@
+//! **The MySQL wire protocol: a codec, and no listener.**
+//!
+//! Stated first because it is the thing a reader most needs to know and the thing the
+//! crate's own documentation used to leave to inference. Every frame below encodes and
+//! decodes and is tested against the protocol's own examples — and *nothing calls any of
+//! it*. There is no MySQL listener, no accept loop, and no session type. §7.3 specifies the
+//! protocol; this crate does not serve it.
+//!
 //! The MySQL client/server protocol.
 //!
 //! Two wire protocols rather than one, for the reason §6.9 gives: a database nobody can

@@ -98,7 +98,13 @@ impl Args {
             runs: 10,
             host_nls: false,
             nls_rounds: 2,
-            nls_budget: 100_000,
+            // **A budget that binds.** It was 100,000 against 10,000 accounts, so after
+            // warm-up the view held every key and nothing was ever evicted: the point
+            // workload measured the hit path exclusively while being presented as a
+            // measurement of partial materialisation. A budget of a quarter of the key
+            // space forces the miss path to run, which is the path the phase diagram is
+            // about. Override with `--nls-budget`.
+            nls_budget: 2_500,
         };
         let mut i = 1;
         while i < argv.len() {
@@ -307,6 +313,15 @@ fn run(args: &Args) -> i32 {
                     "  hosting the daemon on 127.0.0.1:{} — {} accounts x {} rounds, budget {}",
                     args.nls_port, args.accounts, args.nls_rounds, args.nls_budget
                 );
+                if args.nls_budget >= args.accounts as usize {
+                    eprintln!(
+                        "  WARNING: the budget ({}) is at least the key count ({}), so nothing \
+                         will ever be evicted and the point workload will measure the hit \
+                         path only. That is a legitimate configuration and it is not a \
+                         measurement of partial materialisation.",
+                        args.nls_budget, args.accounts
+                    );
+                }
                 let engine = std::sync::Arc::new(std::sync::Mutex::new(
                     nilestream_server::rev_engine::RevEngine::seeded(
                         args.accounts,
@@ -549,8 +564,8 @@ fn render_only(args: &Args) -> i32 {
 }
 
 fn parse_csv_line(line: &str) -> Option<Sample> {
-    let f: Vec<&str> = line.splitn(10, ',').collect();
-    if f.len() < 10 {
+    let f: Vec<&str> = line.splitn(12, ',').collect();
+    if f.len() < 12 {
         return None;
     }
     Some(Sample {
@@ -567,5 +582,13 @@ fn parse_csv_line(line: &str) -> Option<Sample> {
         } else {
             Some(f[9].to_string())
         },
+        // The recorded protocol, not a constant: reading a CSV back must report what that
+        // run used rather than what this build would use.
+        protocol_path: match f[10] {
+            "extended" => "extended",
+            "none" => "none",
+            _ => "simple",
+        },
+        miss_rate: f[11].trim().parse::<f64>().ok(),
     })
 }

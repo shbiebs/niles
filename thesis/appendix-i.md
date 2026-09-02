@@ -82,7 +82,7 @@ Feasibility is a hard filter, not a penalty term: a mode that cannot meet the vi
 
 **Two recoveries.**
 
-1. *Planning time.* With miss rates held fixed per range (estimated from a workload model rather than updated online), benefit is submodular again and greedy recovers the (1 − 1/e) bound. This is used to compute initial mode assignments at deploy time.
+1. *Planning time.* With miss rates held fixed per range (estimated from a workload model rather than updated online) **and range benefits independent** — no two ranges sharing an upquery path, so that no range's benefit depends on which others are resident — the benefit function is additive, hence submodular, and greedy recovers the (1 − 1/e) bound. Both hypotheses are needed; fixing the miss rates alone does not give submodularity. This would be used to compute initial mode assignments at deploy time; nothing computes them, because the optimizer is not built.
 2. *Runtime.* The online per-range analysis of I.3 and I.4 replaces the global guarantee, trading a bound on the *assignment* for bounds on each *decision*.
 
 ## I.7 Hysteresis, Thrash Avoidance, and Safety

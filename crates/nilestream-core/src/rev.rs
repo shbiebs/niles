@@ -375,6 +375,24 @@ pub struct Runtime {
 impl Runtime {
     /// Install a compiled circuit. Rejects anything outside the executable fragment rather
     /// than silently mis-executing it.
+    ///
+    /// # The fragment, and why the theorem stops where this function does
+    ///
+    /// What is accepted is a keyed aggregate over a linear operator — `sum` and `count` —
+    /// which is **Q_lin** of Definition 4.1.1, and Theorem 4.1 (Epoch-Anchored
+    /// Reconstruction) is stated for exactly that fragment. The theorem's proof needs
+    /// linearity in one step and one only: advancing a *resident* key's certified entry by
+    /// an epoch's delta requires that the delta to that key's output be computable from the
+    /// epoch's rows and the key's own current value.
+    ///
+    /// A join or a `max` breaks that step rather than the theorem's other clauses.
+    /// Reconstruction stays pure and total for them — the upquery paths exist for every
+    /// circuit — but the delta to a resident key's output can depend on input rows belonging
+    /// to keys that were evicted, so an incremental advance would have to either re-read the
+    /// base (which makes `apply` an upquery and changes the cost model of C3) or keep state
+    /// for absent keys (which is full materialization under another name). Refusing here is
+    /// what keeps Chapter 9 inside the fragment the theorem covers; Open case 4.1.α states
+    /// the general case as a conjecture rather than pretending it is proved.
     pub fn install(
         circuit: Circuit,
         budget: Option<u64>,

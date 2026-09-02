@@ -358,3 +358,177 @@ fn the_benchmark_recipe_reproduces_the_committed_numbers() {
         );
     }
 }
+
+// ===================== the theorems say what their proofs prove =====================
+
+fn thesis(file: &str) -> String {
+    let p = repo_root().join("thesis").join(file);
+    std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("cannot read {}: {e}", p.display()))
+}
+
+/// Lines that are not prose: a comment, a marker, or a fence.
+fn is_machinery(line: &str) -> bool {
+    let t = line.trim_start();
+    t.starts_with("<!--") || t.starts_with("//") || t.starts_with("```")
+}
+
+/// **Theorem 4.1 is stated for the fragment its proof covers.**
+///
+/// The statement quantified over "every REV with circuit Q over base B" while step (3) of
+/// the proof advanced a resident entry by the epoch's delta — which needs linearity per key
+/// and is false for a join or a `max`. `Runtime::install` refuses those circuits, so the
+/// artifact only ever tested the fragment; the statement is now the fragment too.
+#[test]
+fn theorem_4_1_names_its_fragment() {
+    let s = thesis("04-novel-contributions.md");
+    assert!(
+        !s.contains("**Theorem 4.1 (Epoch-Anchored Reconstruction).** For every REV with circuit Q over base B"),
+        "Theorem 4.1 is stated for every circuit again; the proof covers Q_lin"
+    );
+    assert!(
+        s.matches("Q_lin").count() >= 3,
+        "the fragment must be named in the definition, the statement and the proof"
+    );
+    assert!(
+        s.contains("Open case 4.1.α"),
+        "the non-linear case must be recorded as open rather than absorbed"
+    );
+    let rev = std::fs::read_to_string(repo_root().join("crates/nilestream-core/src/rev.rs"))
+        .expect("rev.rs");
+    assert!(
+        rev.contains("Q_lin"),
+        "`Runtime::install` is what makes the restriction true of the artifact, and its \
+         documentation must say which fragment it is enforcing"
+    );
+}
+
+/// **The frontier claims a boundary, not an impossibility.**
+///
+/// Clause (ii) asserted a threshold for every parameter setting and is false whenever a
+/// reconstruction is cheap relative to the memory and application cost of the whole key
+/// domain; clause (iii) called an arithmetic consequence of the cost model an impossibility
+/// and attributed it to a paging lower bound proved against a different adversary.
+#[test]
+fn the_frontier_does_not_claim_an_impossibility() {
+    let banned = [
+        "no policy escapes",
+        "impossibility region",
+        "competitive guarantee",
+        "information-theoretic",
+    ];
+    for file in [
+        "04-novel-contributions.md",
+        "03-theoretical-framework.md",
+        "01-introduction.md",
+        "13-conclusion.md",
+        "00-front-matter.md",
+        "10-related-work.md",
+        "appendix-i.md",
+        "appendix-j.md",
+    ] {
+        let s = thesis(file);
+        for (n, line) in s.lines().enumerate() {
+            if is_machinery(line) {
+                continue;
+            }
+            // A line may name a withdrawn claim in order to say it is withdrawn. That is
+            // the honest way to retire a claim and is what Appendix J is for.
+            let retracts = line.contains("withdrawn")
+                || line.contains("Withdrawn")
+                || line.contains("not claimed")
+                || line.contains("**not** claimed");
+            for b in banned {
+                assert!(
+                    !line.contains(b) || retracts,
+                    "{file}:{} claims `{b}` without retracting it:\n{line}",
+                    n + 1
+                );
+            }
+        }
+    }
+    let s = thesis("04-novel-contributions.md");
+    assert!(
+        s.contains("Corollary 4.2.1") && s.contains("Corollary 4.2.2"),
+        "the two arithmetic clauses must be corollaries of the cost model, not clauses of \
+         the theorem"
+    );
+    assert!(
+        s.contains("if and only if"),
+        "Corollary 4.2.1 must state the condition under which a threshold exists at all"
+    );
+}
+
+/// **The ladder is a chain.**
+///
+/// ℓ₃ was defined as EXACT ∧ X-CONSIST, dropping the session predicates of ℓ₁ and ℓ₂, so a
+/// "stronger" rung permitted a session whose anchors went backwards. Contribution 3 prices
+/// the rungs; pricing a ladder that is not ordered prices nothing.
+#[test]
+fn the_consistency_ladder_is_nested() {
+    let s = thesis("03-theoretical-framework.md");
+    let line = s
+        .lines()
+        .find(|l| l.starts_with("Then: ℓ₀ ="))
+        .expect("the ladder is defined in one line beginning `Then: ℓ₀ =`");
+    for (rung, prev) in [
+        ("ℓ₁", "ℓ₀"),
+        ("ℓ₂", "ℓ₁"),
+        ("ℓ₃", "ℓ₂"),
+        ("ℓ₄", "ℓ₃"),
+        ("ℓ₅", "ℓ₄"),
+    ] {
+        assert!(
+            line.contains(&format!("{rung} = {prev} ∧")),
+            "{rung} must be {prev} conjoined with one predicate, so the rungs nest:\n{line}"
+        );
+    }
+    assert!(
+        s.contains("ℓ₄ and ℓ₃ therefore coincide on read-only workloads"),
+        "ℓ₄ adds nothing to a read-only trace, and the text must say so where it prices it"
+    );
+}
+
+/// **Theorem 4.4's clauses are labelled, and clause (4) says what it assumes.**
+#[test]
+fn niles_soundness_states_its_hypotheses() {
+    let s = thesis("04-novel-contributions.md");
+    for label in [
+        "[static conservation]",
+        "[currency]",
+        "[authorization]",
+        "[contract]",
+    ] {
+        assert!(s.contains(label), "clause {label} is not labelled in §4.5");
+    }
+    assert!(
+        s.contains("conditional on P6"),
+        "clause (4) rests on P6, which §3.15 marks specified and not proved"
+    );
+    assert!(
+        s.contains("Lemma 4.4.α"),
+        "the transfer from λ_niles reductions to LTS traces is a lemma, and quantifying the \
+         theorem over traces while proving it over reductions is what it replaces"
+    );
+    assert!(
+        !s.contains("every trace of P's execution under the LTS of Section 3.11"),
+        "the theorem quantifies over LTS traces again"
+    );
+}
+
+/// **Theorem 3.7's expectation is an expectation.**
+#[test]
+fn bounded_reconstruction_quantifies_correctly() {
+    let s = thesis("03-theoretical-framework.md");
+    assert!(
+        !s.contains("for every key k and anchor a: (i)"),
+        "C/2 + 1 is an average over anchors, not a bound at every anchor"
+    );
+    assert!(
+        s.contains("drawn uniformly from"),
+        "the anchor's distribution must be stated"
+    );
+    assert!(
+        s.contains("log(n/C)"),
+        "the checkpoint lookup the counted-work unit does not charge must be named"
+    );
+}

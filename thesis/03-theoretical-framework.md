@@ -69,25 +69,31 @@ Six rungs, each declarable per view in the `serve` clause:
 - **ℓ₀ Bounded staleness(K, T):** answers anchored at e ≥ vis(t) − K epochs, and no older than T wall-clock, whichever binds first. The dual parameterization follows shipping practice [Azure Cosmos DB].
 - **ℓ₁ Monotonic reads:** per session, anchors never decrease.
 - **ℓ₂ Read-your-writes:** a session's reads are anchored at or after the epoch of its own last committed write.
-- **ℓ₃ Epoch-consistent (snapshot):** each read, including multi-key and multi-view read sets, is anchored at a *single* epoch e ≤ vis(t).
-- **ℓ₄ Serializable reads:** read sets are anchored at epochs forming a serial order consistent with transaction order.
+- **ℓ₃ Epoch-consistent (snapshot):** everything ℓ₂ gives, and in addition each read — including multi-key and multi-view read sets — is anchored at a *single* epoch e ≤ vis(t).
+- **ℓ₄ Serializable:** everything ℓ₃ gives, and in addition reads *and writes* are placeable in one serial order consistent with commit order. For a read-only transaction this is implied by ℓ₃ (Section 3.8), so ℓ₄ is a rung about read-write transactions.
 - **ℓ₅ Ledger-consistent (strict serializable):** anchored at vis(t) exactly, reflecting every committed write that precedes the read in real time; where the read also reserves (Section 3.19), the reservation is atomic with the observation.
 
 The ladder is deliberately not a free menu. The HAT results place ℓ₀–ℓ₂ in the highly-available or sticky-available classes and ℓ₃–ℓ₅ in the unavailable class [Bailis et al., PVLDB 2013]; a per-view contract is therefore a statement about *what a view gives up*, and the language makes that statement explicit rather than implicit. The worked assignments from Chapter 1's motivation: a dashboard declares ℓ₀; a statement as of a value date declares ℓ₃ anchored at a value-date-derived epoch; a balance-and-hold authorization check declares ℓ₅ with reservation.
 
 ## 3.8 Consistency Levels as Formal Predicates
 
-Following the decomposition style of the consistency-model literature [Viotti & Vukolić, ACM CSUR 2016] and the predicate form of the session guarantees [Terry et al., PDIS 1994], each rung is a conjunction of independently varying predicates over a system trace. Let a read event be r = (session s, keys 𝒦, views 𝒱, result ρ, anchor e_r, wall time t_r).
+Following the decomposition style of the consistency-model literature [Viotti & Vukolić, ACM CSUR 2016] and the predicate form of the session guarantees [Terry et al., PDIS 1994], each rung is a conjunction of independently varying predicates over a system trace.
+
+A read event is r = (session s, keys 𝒦, **write set 𝒲**, views 𝒱, result ρ, anchor e_r, wall time t_r). The write set is what makes ℓ₄ say anything: a predicate over read-only events cannot distinguish serializability from snapshot isolation, because a single-anchor exact read is trivially placeable in a serial order after its own anchor. Read-only events have 𝒲 = ∅ and the ladder collapses at ℓ₄ for them, which is stated below rather than hidden.
 
 - **EXACT(r):** ∀k ∈ 𝒦: ρ[k] = V\*(e_r)[k]. *(Exactness at the anchor.)*
 - **BS(K,T)(r):** e_r ≥ vis(t_r) − K and time(vis(t_r)) − time(e_r) ≤ T.
 - **MONO(r₁,r₂):** r₁ <_s r₂ ⟹ e_{r₁} ≤ e_{r₂}.
 - **RYW(w,r):** w <_s r ⟹ epoch(w) ≤ e_r.
 - **X-CONSIST(r):** a single e_r for the whole read set, across views.
-- **SER:** ∃ a total order O on transactions and reads, consistent with commit order, such that every read returns V\* at its predecessor prefix in O.
+- **SER:** ∃ a total order O on transactions and reads, consistent with commit order, such that every event's read set returns V\* at its predecessor prefix in O *and* every event's writes 𝒲 are ordered after that prefix.
 - **RT:** O is consistent with real time; equivalently ∀r: e_r = vis(t_r).
 
-Then: ℓ₀ = EXACT ∧ BS; ℓ₁ = ℓ₀ ∧ MONO; ℓ₂ = ℓ₁ ∧ RYW; ℓ₃ = EXACT ∧ X-CONSIST; ℓ₄ = ℓ₃ ∧ SER; ℓ₅ = ℓ₄ ∧ RT.
+Then: ℓ₀ = EXACT ∧ BS; ℓ₁ = ℓ₀ ∧ MONO; ℓ₂ = ℓ₁ ∧ RYW; ℓ₃ = ℓ₂ ∧ X-CONSIST; ℓ₄ = ℓ₃ ∧ SER; ℓ₅ = ℓ₄ ∧ RT.
+
+**Each rung is the previous one conjoined with a predicate, so the rungs are nested as sets of traces: ℓ₀ ⊇ ℓ₁ ⊇ ℓ₂ ⊇ ℓ₃ ⊇ ℓ₄ ⊇ ℓ₅.** This is worth stating because it was not true of an earlier draft, which defined ℓ₃ as EXACT ∧ X-CONSIST — dropping BS, MONO and RYW — so that a "stronger" rung permitted a session whose anchors went backwards, and the ladder priced in Contribution 3 was not a ladder.
+
+**Where ℓ₄ bites, and where it does not.** For a read-only event (𝒲 = ∅), SER is implied by EXACT ∧ X-CONSIST: place the event immediately after its own anchor e_r in the commit order and the definition is satisfied, because the event's read set is exactly V\*(e_r) by EXACT and shares one anchor by X-CONSIST. **ℓ₄ and ℓ₃ therefore coincide on read-only workloads**, and Theorem 4.3's O(contended keys) price for ℓ₄ is paid only by events with 𝒲 ≠ ∅. Chapter 9 measures ℓ₀ against ℓ₅ over read-only workloads and so measures nothing about that price; §9.12 records it as not measured rather than implying otherwise.
 
 Two observations do a great deal of work later. First, **EXACT is a conjunct of every rung and is identical at every rung**: it says the value agrees with the ideal view *at whatever anchor was served*. It is discharged once, by the Reconstruction Theorem, independently of eviction — which is why eviction cannot damage correctness at any level. Second, everything that *differs* between rungs is anchor policy. The ladder therefore prices only anchor policy, which is what makes Contribution 3's history-independence result possible.
 
@@ -165,7 +171,7 @@ That last sentence is the protocol's most consequential simplification, and Sect
 
 C(ℓ, W, m) = C_base(W, m) + Φ(ℓ) · U(W, m, Z)
 
-where U is the reconstruction/coordination term determined by miss rate under π and m and by Z, and Φ is a rung multiplier: Φ(ℓ₀…ℓ₂) = O(1) (anchor bookkeeping only); Φ(ℓ₃) = O(1) plus snapshot pinning memory; Φ(ℓ₄) = O(contention); Φ(ℓ₅) = Θ(freshness), since every read must observe vis(t). **No term depends on the base length n** — history enters only through per-key update counts, which is a workload property. That is the claim H-S3 operationalizes.
+where U is the reconstruction/coordination term determined by miss rate under π and m and by Z, and Φ is a rung multiplier: Φ(ℓ₀…ℓ₂) = O(1) (anchor bookkeeping only); Φ(ℓ₃) = O(1) plus snapshot pinning memory; Φ(ℓ₄) = O(contention) *for read-write transactions, and O(1) for read-only ones, where ℓ₄ coincides with ℓ₃*; Φ(ℓ₅) = Θ(freshness), since every read must observe vis(t). **No term depends on the base length n** — history enters only through per-key update counts, which is a workload property. That is the claim H-S3 operationalizes.
 
 ## 3.15 The Eviction–Consistency Frontier (Statement) and Verification Status
 
@@ -176,12 +182,13 @@ Stated here in framework vocabulary and proved as Contribution 2: *for any parti
 | Result | Status |
 |---|---|
 | P1–P3 | Proved from the definitions; hash-chain security reduces to collision resistance of H (assumed), and the guarantee is detection relative to a retained digest. |
-| Thm 4.1 (reconstruction) + conservation corollary | Proved on paper; mirrored as executable property tests against 𝒪. |
-| Thm 4.2 (frontier) | Paper proof of an asymptotic bound; explicit constants only in special cases. The Ω(kZ) competitive lower bound for delayed hits is *attributed* to work cited in Atre et al. and is used as corroboration, not as this thesis's result. |
+| Thm 4.1 (reconstruction) + conservation corollary | Proved on paper **for Q_lin**, the linear keyed fragment the runtime executes (Definition 4.1.1); mirrored as executable property tests against 𝒪. The non-linear case is Open case 4.1.α and is a conjecture, not a theorem. |
+| Thm 4.2 (frontier) | The theorem — strictness forces a miss to wait for the base — is proved from the ℓ₅ predicate. Its two corollaries are arithmetic consequences of the cost model of §3.14, including the condition under which a break-even exists at all; **no lower bound over eviction policies is claimed**, and the "impossibility" wording of an earlier draft is withdrawn. Explicit constants only in special cases. The Ω(kZ) competitive lower bound for delayed hits is *attributed* to work cited in Atre et al. and is used as corroboration, not as this thesis's result. |
 | Thm 4.3 (rung pricing) | Upper bounds constructive; lower bounds proved in the restricted cost model stated in §4.4, which assumes anchor-indexed access to per-key deltas. |
-| Thm 4.4 (Niles soundness) | Proved for the calculus λ_niles, which idealizes the implemented language; the gap is a declared threat and is attacked by the H-S4 campaign. |
-| Thm 4.5 (optimizer) | Competitive bounds proved for the stated cost model; the delayed-hit regime inherits the literature's caution that classical optimality does not transfer. |
+| Thm 4.4 (Niles soundness) | Clauses (1)–(3) proved for λ_niles by progress and preservation. Transfer to the LTS is **Lemma 4.4.α, `[sketch]`** — the crash/recover and eviction transitions are argued, not proved. Clause (4) is **conditional on P6**, which is specified and not proved. λ_niles idealizes the implemented language; the gap is a declared threat and is attacked by the H-S4 campaign. |
+| Thm 4.5 (optimizer) | Safety and hardness proved. The greedy (1 − 1/e) recovery needs *two* hypotheses — fixed per-range miss rates **and** independent range benefits, which together make the objective additive — and is stated with both. The optimizer itself is **specified and not built** (C5, H-S7), so no competitive ratio is measured. |
 | Thm 4.6 (generality) | Relational completeness and the SQL-fragment translation are constructive; fixpoint completeness is by reduction to Immerman–Vardi, whose ordering hypothesis the epoch order supplies. |
+| Thm 3.7 (bounded reconstruction) | (i) proved for every key and anchor; (ii) is an expectation over anchors uniform between checkpoints, **not** a bound at every anchor — the worst case is C. Checkpoint lookup, O(log(n/C)), is outside the counted-work unit and inside the wall-clock figures. |
 | Mechanization | Not done. A Lean or Coq development of P4 and Thm 4.4 is future work (Chapter 12), scoped but not claimed. Note that DBSP's own mathematics has been mechanized in Lean, which lowers the cost of that step. |
 | Empirical validation | **Partial.** §§9.1–9.4 and §9.13–§9.14 report measurements taken; §§9.5–9.12 are protocol and prediction, and each cell says which. The row this replaces read "None yet" and contradicted the chapter it pointed at. |
 
@@ -252,7 +259,9 @@ The mechanism that closes the gap is a per-key checkpoint.
 
 **Definition 3.10 (Checkpointed reconstruction).** ρ\*_{k,a} evaluates k at anchor a by taking the newest checkpoint (e_c, v_c) with e_c ≤ a and folding only the postings on k in (e_c, a].
 
-**Theorem 3.7 (Bounded Reconstruction).** Under Definitions 3.9–3.10, for every key k and anchor a: (i) ρ\*_{k,a} = ρ_{k,a}, so checkpointing changes cost and not value; and (ii) the expected number of base rows read is at most C/2 + 1 in the steady state, independent of the length of the base.
+**Theorem 3.7 (Bounded Reconstruction).** Under Definitions 3.9–3.10: (i) for every key k and every anchor a, ρ\*_{k,a} = ρ_{k,a}, so checkpointing changes cost and not value; and (ii) for a key k and an anchor a drawn uniformly from the C epochs following k's last checkpoint, the *expected* number of base rows read is at most C/2 + 1, and the worst case is C. Neither depends on the length of the base.
+
+The quantifiers in (ii) are not the quantifiers in (i) and the difference matters: C/2 + 1 is an average over anchors, not a bound holding at every anchor, and an anchor immediately before the next checkpoint reads C rows. Two costs the statement does not charge are named here rather than absorbed: locating the checkpoint is O(log(n/C)) index steps, which the counted-work unit of Section 3.14 does not count because it counts base rows, and the wall-clock figures of §9.13.1 include it.
 
 *Proof.* (i) The checkpoint is by definition the value of the ideal view at e_c, and the postings in (e_c, a] are exactly the deltas separating e_c from a; summing them reproduces V\*(a)[k], which by Theorem 4.1 is what unbounded reconstruction returns. (ii) Between consecutive checkpoints a key accumulates exactly C postings, so an anchor falling uniformly in that interval has expectation C/2 postings behind the newest checkpoint, plus one row to read the checkpoint itself. Neither quantity mentions the base length. ∎
 

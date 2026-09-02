@@ -427,7 +427,13 @@ fn an_account_is_named_by_the_rendering_of_what_was_passed() {
     let args = args_file("money 25000 usd 2\n");
     let a = nilesc(&["run", src.path(), "by_int", "--args", args.path()]);
     let b = nilesc(&["run", src.path(), "by_str", "--args", args.path()]);
-    assert_eq!((a.code, b.code), (0, 0), "stderr: {} {}", a.stderr, b.stderr);
+    assert_eq!(
+        (a.code, b.code),
+        (0, 0),
+        "stderr: {} {}",
+        a.stderr,
+        b.stderr
+    );
     assert_eq!(
         a.stdout, b.stdout,
         "an account identifier is its rendering; the two spellings are one account"

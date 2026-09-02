@@ -69,6 +69,16 @@ pub static MAPPING: &[Mapping] = &[
     Mapping { sql: "GROUP BY k HAVING h", niles: ".group_by(|r| r.k).having(|g| h)", status: Status::Lowered },  // 12
     Mapping { sql: "JOIN u ON c", niles: ".join(u)", status: Status::Lowered },                             // 17
     Mapping { sql: "LEFT JOIN u ON c", niles: ".left_join(u)", status: Status::Lowered },                   // 18
+    Mapping { sql: "RIGHT JOIN u ON c", niles: ".right_join(u)", status: Status::Equivalent },              // 50
+    Mapping { sql: "FULL JOIN u ON c", niles: ".full_outer_join(u)", status: Status::Equivalent },          // 51
+    // **Refused, and the reason is worth the row.** Every join operator in the IR joins on
+    // a key and there is no product operator, so `cross join` lowered to the keyed inner
+    // join and answered a different query -- four rows where twelve were asked for.
+    Mapping { sql: "CROSS JOIN u", niles: "(none)", status: Status::Refused("NL0516") },                    // 52
+    Mapping { sql: "JOIN u USING (k)", niles: "(none)", status: Status::Refused("NL0001") },                // 56
+    Mapping { sql: "COUNT(DISTINCT x)", niles: "(none)", status: Status::Refused("NL0002") },               // 57
+    Mapping { sql: "CASE WHEN .. THEN .. ELSE .. END", niles: "(none)", status: Status::Refused("NL0508") },// 53
+    Mapping { sql: "WITH x AS (..) SELECT .. (non-recursive)", niles: "(none)", status: Status::Refused("NL0500") }, // 54, 55
     Mapping { sql: "FROM t, u", niles: "(no pipeline spelling)", status: Status::Lowered },                 // 19
     Mapping { sql: "UNION", niles: ".union(u)", status: Status::Lowered },                                  // 14
     Mapping { sql: "UNION ALL", niles: ".union_all(u)", status: Status::Lowered },                          // 13

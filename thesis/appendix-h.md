@@ -41,15 +41,36 @@ Guardedness restricts recursion to well-founded measures, which is what keeps ev
 
 ## H.4 Claim 3 — The SQL-Core Translation
 
-**Statement.** There is a total, semantics-preserving compilation of SQL-Core into the Niles IR, such that an SQL-Core query and its Niles counterpart lower to α-equivalent circuits.
+**Statement.** There is a total compilation of SQL-Core into the Niles IR that preserves *denotation*: for every SQL-Core query and every finite instance, the Z-set the compiled circuit evaluates to is the Z-set the query denotes — and, where a query has a Niles pipeline spelling, the two spellings evaluate to the same Z-set.
 
-**SQL-Core, stated precisely.** The fragment covers: `SELECT` with projection, expressions and aliases; `FROM` with base tables, subqueries and derived tables; `JOIN` (inner, left, right, full, cross) with `ON` and `USING`; `WHERE`; `GROUP BY` with `HAVING`; aggregate functions (`COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `COUNT DISTINCT`); `ORDER BY`, `LIMIT`, `OFFSET`; set operations (`UNION`, `UNION ALL`, `EXCEPT`, `INTERSECT`); scalar and correlated subqueries in the positions where they are safe; `CASE`; three-valued logic with `NULL`, `IS NULL`, and null-propagating comparisons; **bag semantics** including duplicate preservation and `DISTINCT`; `WITH` and `WITH RECURSIVE` (the latter mapping to guarded fixpoint); DDL (`CREATE TABLE`, `CREATE VIEW`, `CREATE INDEX`, constraints); DML (`INSERT`, `UPDATE`, `DELETE`) restricted to `table` objects; TCL (`BEGIN`, `COMMIT`, `ROLLBACK`); DCL (`GRANT`, `REVOKE`); and the temporal forms of the standard's system-versioned tables (`AS OF`, period predicates), which map onto the epoch and valid-time axes.
+Two words of an earlier statement are gone and their loss is the point. **α-equivalence of circuits** is not claimed: the corpus compares *answers*, not circuit shapes, and two lowerings that denote the same relation may legitimately differ in structure. And *semantics-preserving* is narrowed to denotational agreement on finite instances, which is what a golden corpus can witness.
+
+**SQL-Core, stated precisely — and the fragment is now the parser's.** The definition below was produced by putting each construct through `nilesc` and recording what came back, not by listing what a translation ought to cover. The fragment covers: `SELECT` with projection, expressions and aliases; `FROM` with base tables and comma-separated relations; `JOIN` — **inner, left, right and full** — with `ON`; `WHERE`; `GROUP BY` with `HAVING`; the aggregates `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`; `ORDER BY`, `LIMIT`, `OFFSET` with literal bounds; the set operations `UNION`, `UNION ALL`, `EXCEPT`, `INTERSECT`; correlated `EXISTS` and `NOT IN`; three-valued logic with `NULL`, `IS NULL`, `IS NOT NULL` and null-propagating comparisons; **bag semantics** including duplicate preservation and `DISTINCT`; `AS OF` on the epoch axis; and `WITH RECURSIVE` mapping to the guarded fixpoint.
+
+**Refused, and therefore outside SQL-Core.** Each is refused with a named code and each has a case in the golden corpus, so the boundary is in the build rather than in a reader's assumptions:
+
+| Construct | Code | Why |
+|---|---|---|
+| `CROSS JOIN` | NL0516 | Every join operator in the IR joins on a key and there is no product operator. This one is instructive: until this cycle a cross join *lowered to the keyed inner join and answered a different query* — four rows where twelve were asked for — and no case in the corpus covered it. |
+| `USING (k)` | NL0001 | Not parsed. `ON` is the only join condition in the fragment. |
+| `COUNT(DISTINCT x)` | NL0002, NL0001 | `distinct` is a reserved word and the aggregate-argument position does not accept it. |
+| `CASE WHEN` | NL0508 | The projection list lowers scalars the IR has an operator for; a conditional is not among them. |
+| `WITH` (non-recursive) | NL0500 | Not lowered — while `WITH RECURSIVE` *is*, through the guarded fixpoint. The easier form being the missing one is exactly the kind of gap a fragment stated from the parser exposes and a fragment stated from ambition hides. |
+| `LIMIT ⟨non-literal⟩` | NL0504 | A bound the lowering cannot read became "every row". |
+| a scalar subquery in the projection list | NL0508 | |
+| a set operation between different arities | NL0512 | |
+| `SELECT` with no `FROM` | NL0511 | |
+| DDL, DML, TCL, DCL | — | Surface syntax with no circuit; see below. |
+
+**DDL, DML, TCL and DCL are not part of this claim.** An earlier statement folded them into the translation, which cannot be right: a `CREATE TABLE` denotes no Z-set, so "lowers to an α-equivalent circuit" is not a statement about it. They are accepted as surface syntax where the language has them (`insert`/`update`/`delete` against a `table` only, W4), refused where it does not (`alter`, `drop`), and the theorem quantifies over queries.
 
 **Explicitly outside the fragment**, and refused with a named error rather than approximated: implementation-defined collation and locale behaviour; procedural extensions; cursors with update semantics; triggers (whose effects are expressed as views or transaction-tier code instead); user-defined types outside the declared type system; and any construct whose standard behaviour is implementation-defined in a way that would make the translation's semantics-preservation claim vacuous.
 
 **Proof method.** Structural induction on the fragment's grammar. For each production, a lowering rule into IR is given, and the induction hypothesis is that the rule preserves the bag-semantics denotation with null handling. The interesting cases are: `GROUP BY` with `HAVING` over bags, where the delta form must handle group emptiness; `LEFT JOIN` under incremental maintenance, where null-extension must be retracted correctly when a match later appears; `DISTINCT`, whose delta form is the one DBSP treats explicitly; three-valued logic, which is lowered to explicit option handling rather than left implicit; and `WITH RECURSIVE`, which lowers to the guarded fixpoint and therefore inherits the guardedness requirement — a recursive SQL query without a well-founded measure is rejected, and this is a *deliberate incompatibility* with SQL's permissiveness, stated as such.
 
-**Testing.** Golden-file α-equivalence over a corpus: each SQL-Core query and its hand-written Niles counterpart must lower to circuits equal up to renaming. Failures are specification bugs, not test flakes. The corpus is part of the build gate.
+**Testing.** A golden corpus of 42 cases in `crates/niles-lang/tests/golden`, each carrying the answer it must produce on a fixed four-row dataset written out in `DATA.md`, so an expected file can be read without running anything. Nineteen cases carry both spellings and the test asserts the two denote the same Z-set; the rest are refusals, or SQL forms with no pipeline spelling, and the test now *counts and prints* what it skips so that a case cannot quietly opt out of the comparison. Failures are specification bugs, not test flakes, and the corpus is part of the build gate.
+
+The corpus is also what caught the `CROSS JOIN`, `RIGHT JOIN` and `FULL JOIN` defects: right and full joins parsed, lowered, verified — and evaluated to *nothing at all*, because the reference evaluator emitted matched pairs only for the inner and left kinds. The lesson is not that the constructs were broken; it is that a fragment claimed in an appendix and not written down as cases is a fragment nobody is testing.
 
 ## H.5 The Outer Bound: Computable Queries
 

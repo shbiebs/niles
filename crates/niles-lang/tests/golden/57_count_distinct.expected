@@ -1,0 +1,4 @@
+# 57_count_distinct
+# **Outside SQL-Core**, for the same reason as 47. `distinct` is a reserved word and the
+# aggregate-argument position does not accept it, so the query does not parse.
+REFUSED NL0002 NL0001

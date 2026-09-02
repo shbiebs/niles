@@ -411,6 +411,21 @@ impl<'a> Lx<'a> {
             | StageKind::FullOuterJoin
             | StageKind::CrossJoin => {
                 let rhs = args.first().and_then(|a| self.expr(&a.value, c))?;
+                // **A cross join is not a keyed join and must not be lowered as one.** Every
+                // join operator in the IR joins on a key; `cross_join` was mapped to
+                // `Inner`, which silently answered a *cross join* with the *equi-join* on
+                // whatever key the two sides happened to carry — fewer rows than the query
+                // asked for, with nothing to indicate it. Refused until the IR has a product
+                // operator; §12 records it, and Appendix H lists it outside SQL-Core.
+                if kind == StageKind::CrossJoin {
+                    self.d.push(
+                        Diagnostic::error("NL0516", "`cross join` is outside the executed fragment")
+                            .primary(name.span, "no product operator exists in the IR")
+                            .note("every join this engine executes joins on a key; lowering a cross join to a keyed join answers a different query, which is worse than refusing")
+                            .note("write the product's meaning explicitly, or join on the key the query actually relates the relations by"),
+                    );
+                    return None;
+                }
                 let jk = match kind {
                     StageKind::LeftJoin => IrJoin::LeftOuter,
                     StageKind::RightJoin => IrJoin::RightOuter,
@@ -1375,10 +1390,22 @@ impl<'a> Lx<'a> {
                 right,
                 kind,
                 on,
+                span,
                 ..
             } => {
                 let l = self.table_ref(left, c)?;
                 let r = self.table_ref(right, c)?;
+                // See the pipeline arm: `CROSS JOIN` has no product operator to lower to,
+                // and lowering it to the keyed `Inner` join answers the equi-join instead.
+                if *kind == JoinKind::Cross {
+                    self.d.push(
+                        Diagnostic::error("NL0516", "`cross join` is outside the executed fragment")
+                            .primary(*span, "no product operator exists in the IR")
+                            .note("every join this engine executes joins on a key; lowering a cross join to a keyed join answers a different query, which is worse than refusing")
+                            .note("write the product's meaning explicitly, or join on the key the query actually relates the relations by"),
+                    );
+                    return None;
+                }
                 let jk = match kind {
                     JoinKind::Left => IrJoin::LeftOuter,
                     JoinKind::Right => IrJoin::RightOuter,

@@ -1,0 +1,7 @@
+# 51_full_join
+# The union of 18 and 41: `t`'s (3,30,null) has no partner and `u`'s (4,4) has none.
+1 10 100 1 1 x1
+1 10 null 1 1 x1
+2 20 200 2 2 x1
+3 30 null null null x1
+null null null 4 4 x1

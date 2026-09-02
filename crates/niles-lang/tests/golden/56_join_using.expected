@@ -1,0 +1,9 @@
+# 56_join_using
+# **Outside SQL-Core.** `using` is not in the fragment Theorem 4.6(c) claims a translation
+# for, and Appendix H lists it among the refused forms. Recorded here as a refusal so that
+# the corpus states the fragment's boundary rather than leaving it to be discovered: a
+# construct nobody wrote a case for is indistinguishable from one that works.
+#
+# The refusal is a parse error rather than a named `NotInSubset`, which is a weaker
+# message than this language gives elsewhere; §12 records improving it.
+REFUSED NL0001

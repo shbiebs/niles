@@ -1,0 +1,6 @@
+# 53_case_when
+# **Outside SQL-Core.** `case` parses and is refused at lowering: the projection list
+# accepts scalars the IR has an operator for, and a conditional is not among them. Recorded
+# as a refusal so the fragment's boundary is in the corpus rather than in a reader's
+# assumptions — Appendix H lists it, and §12 records adding it.
+REFUSED NL0508

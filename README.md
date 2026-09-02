@@ -157,6 +157,7 @@ this table.
 | `docs/BENCHMARK.md` | How to run the wall-clock harness, with the recipe a test reproduces. |
 | `docs/BUILD-LOG.md` | What each work cycle changed, in order, including what it got wrong. |
 | `docs/HANDOFF-OPUS.md` | The handoff blueprint an earlier cycle worked from. |
+| `docs/WORK-ORDER-2-REPORT.md` | What the second work order changed, which claims it weakened, and what it could not settle. |
 | `docs/VALIDATION-RUN.md` | That blueprint's validation protocol, run, with the two items it did not meet. A record of a past run, kept rather than deleted. |
 | `docs/adr/` | Architecture decision records. |
 | `docs/research/` | The searches and landscape reviews the design rests on. |

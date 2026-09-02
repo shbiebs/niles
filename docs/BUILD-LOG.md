@@ -2183,3 +2183,47 @@ unknown: a **fresher** answer standing in for the one asked about, every digit o
 The rule the repositories now follow is unchanged and now has a second half: an absence gets a
 named representation or a diagnostic and never a default — **and an answer carries the anchor it
 is true at, which a caller must read rather than assume.**
+
+---
+
+# Cycle: Work Order 2 (the Fable audit)
+
+`review/thesis` @ `8f56b98`, `review/F-18` @ `9f451ba`. niles 757/0/5 (from 730/0/5); gbs
+443/0/1 and adapter 40/0 (from 432/0/1 and 38/0). Both gates green, `make reproduce` clean.
+The full account is `docs/WORK-ORDER-2-REPORT.md`; this entry is the short version and the
+things worth remembering.
+
+**The audit's headline was right and its details were often wrong, in both directions.** Of
+28 findings, 10 were not confirmed on inspection — double consumption *is* caught, `sim.rs`
+*does* honour partitions, `coverage.rs` and `purity.rs` and `layering.rs` are stronger than
+reported, the oracle has two balance definitions and not three. Two were larger than
+reported: the consensus suite survived a weakened quorum rule *for a different reason* than
+the audit gave, and the adapter's scale blindness turned out to mean the instrument rows had
+been running at the wrong scale entirely.
+
+**What the fixes found that nobody had reported.** Writing the SQL corpus's missing cases
+found that RIGHT and FULL joins evaluated to nothing and CROSS JOIN answered the equi-join —
+parsed, lowered, and passed the IR verifier. Running H-S8's falsifier found a three-letter
+restriction on grades in the lexer. Running the citation checker found that a drift test had
+rewritten a paper's title: reference [90] read "H-F1 Lightning: HTAP as a service" because
+`no_bare_hypothesis_identifiers` flagged the bare `F1` and someone obliged.
+
+**The theorems now say what their proofs prove.** Theorem 4.1 for Q_lin with the general case
+open; Theorem 4.2 as one theorem and two corollaries, with the condition under which a
+break-even exists and no claim over policies; Theorem 4.4's clause (1) about the blocks the
+solver decides, clause (4) conditional on P6, and the transfer to LTS traces named as a
+sketched lemma; Theorem 3.7 as an expectation; Theorem 4.6(c) as denotation-preservation over
+the fragment the compiler accepts. C5 is `specified`; H-S9 is withdrawn; H-F1 and H-F3 are
+`argued`; H-S8 and H-S6 moved from unmeasured to partly measured because instruments were
+built for them.
+
+**Two new status values exist because "not measured" was promising instruments that were
+never coming.** `specified` for a design nothing implements; `argued` for a claim no
+instrument will settle.
+
+**The thing to carry forward.** Three separate defects this cycle had the same shape: two
+sides of a comparison sharing a derivation or a constant. E2 compared a telescoping sum with
+its own parts; the novation check compared `n` with `-n`; both arms of G3 folded at a
+hard-coded scale. Each was green, each was documented as catching what it could not catch. A
+systematic pass asking *does one side of this equality derive from the other?* is the highest-
+value instrument this repository does not have.

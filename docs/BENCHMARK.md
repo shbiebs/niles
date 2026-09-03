@@ -218,10 +218,29 @@ on; a gap attributed to "it is a prototype" is not attributed at all.
    3.4x and 2.4x, and two of them are now faster than PostgreSQL. The remaining gap on
    `group_by_acct` and `top_ten_by_sum` is not the fold: those return 10,001 groups, and the
    cost is producing and framing 10,001 rows.
-5. **No incremental maintenance on the served path.** The partially materialised view exists,
-   is maintained, and is *not consulted by the wire path* — every point read is an anchored
-   reconstruction. The `point` row's miss rate is therefore 1.00 by construction, which makes
-   its parity result a claim about reconstruction rather than about a warm cache.
+5. **Incremental maintenance, on the served path.** A single account's balance is answered
+   by the REV runtime — partial materialisation under a budget, the absence lattice, an
+   anchored upquery on a miss — over the circuit the daemon's own schema compiles to. The
+   `point` row's miss rate is therefore **a measurement**: 0.30 at a budget of a quarter of
+   the key space with 90% of reads in the hottest 1%.
+
+   It was 1.00 *by construction*: the wire path evaluated the compiled circuit over a source
+   scan and never consulted the view, and `read_stats` returned `hits = 0, misses = reads`,
+   so the column could not have reported anything else whatever the engine did. The
+   mechanism the phase diagram characterises was measured by nothing the daemon ran.
+
+   The maintenance is not free and the cost is on the record: advancing the view on every
+   append costs about three allocations per transaction and, measured against PostgreSQL
+   within the same run, moved the `oltp` row from 1.16× to 1.00× of the baseline. That is
+   the maintain-versus-reconstruct trade this system exists to characterise, paid on the
+   write path so that a read of a hot key touches no base rows at all.
+
+   Two conditions are checked rather than assumed, because each is a way the view could be a
+   *different* answer from the one asked for: the base must hold exactly one currency (the
+   view is keyed `(account, currency)` and a query naming no currency would otherwise have
+   the server pick one, which is how a per-currency conservation rule becomes invisible), and
+   the answer must be true at the anchor that was requested rather than merely at least as
+   fresh. Either failing falls back to the fold.
 6. **Two cores.** The OLTP contract's "5–10×" was set against a 48-core baseline figure.
    **This is a contributing cause of the `oltp` NOT MET**, together with item 3.
 7. **The budget setting.** The engine is hosted with residency for a quarter of the key

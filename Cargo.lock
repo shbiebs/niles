@@ -111,5 +111,6 @@ name = "proto-engine"
 version = "0.1.0"
 dependencies = [
  "conservation-suite",
+ "nilestream-core",
  "nilestream-ledger",
 ]

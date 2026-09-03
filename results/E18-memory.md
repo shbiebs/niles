@@ -10,14 +10,14 @@ The tool lives outside the workspace. `GlobalAlloc` cannot be implemented withou
 
 | Scenario | Unit | Ops | Allocations | per op | Bytes | per op | Live | Peak |
 |---|---|--:|--:|--:|--:|--:|--:|--:|
-| `ledger_seeded` | posting | 40000 | 90057 | 2.3 | 16608467 | 415 | 8418859 | 9492956 |
+| `ledger_seeded` | posting | 40000 | 150242 | 3.8 | 21132068 | 528 | 8428139 | 9492956 |
 | `zset_base_at` | row | 40000 | 46665 | 1.2 | 9583856 | 240 | 9583856 | 9583856 |
 | `served_group_by_cur` | query | 3 | 75 | 25.0 | 9381 | 3127 | 0 | 1770 |
 | `served_group_by_acct` | query | 3 | 285105 | 95035.0 | 24420792 | 8140264 | 0 | 3619950 |
 | `served_sum_negative` | query | 3 | 69 | 23.0 | 9399 | 3133 | 0 | 1928 |
-| `served_point` | query | 200 | 5800 | 29.0 | 702200 | 3511 | 0 | 1962 |
+| `served_point` | query | 200 | 4000 | 20.0 | 128800 | 644 | 0 | 524 |
 | `rev_read_hit` | read | 1000 | 2000 | 2.0 | 32000 | 32 | 0 | 16 |
-| `append_in_memory` | transaction | 500 | 2000 | 4.0 | 145392 | 291 | 67392 | 67548 |
+| `append_in_memory` | transaction | 500 | 3500 | 7.0 | 257392 | 515 | 67392 | 67624 |
 
 ## The budgets, and what breaches one
 
@@ -25,14 +25,14 @@ Allocations per operation, asserted exactly — an allocation count is not a tol
 
 | Scenario | Budget (allocations/op) | Measured | Headroom |
 |---|--:|--:|--:|
-| `ledger_seeded` | 2.6 | 2.3 | 13% |
+| `ledger_seeded` | 4.2 | 3.8 | 11% |
 | `zset_base_at` | 1.4 | 1.2 | 17% |
 | `served_group_by_cur` | 28.0 | 25.0 | 11% |
 | `served_group_by_acct` | 105000.0 | 95035.0 | 9% |
 | `served_sum_negative` | 26.0 | 23.0 | 12% |
-| `served_point` | 32.0 | 29.0 | 9% |
+| `served_point` | 22.0 | 20.0 | 9% |
 | `rev_read_hit` | 2.2 | 2.0 | 9% |
-| `append_in_memory` | 4.4 | 4.0 | 9% |
+| `append_in_memory` | 7.7 | 7.0 | 9% |
 
 ## What this does not measure
 

@@ -70,6 +70,23 @@ pub struct RevEngine {
     /// `miss_rate` column would otherwise be silently reporting.
     served: u64,
     served_rows: u64,
+    /// **The incremental REV runtime, over the compiled circuit for a balance.**
+    ///
+    /// This is the mechanism the thesis is about — partial materialisation under a budget,
+    /// the absence lattice, an anchored upquery on a miss — and until now the wire path did
+    /// not use it. `read_stats` reported `hits = 0, misses = reads` *by construction*, so
+    /// the `miss_rate` column of every benchmark row was 1.00 whatever the engine did, and
+    /// the phase diagram's mechanism was measured by nothing the daemon ran.
+    ///
+    /// `None` when the view could not be installed, which is a refusal rather than a
+    /// fallback: the fold answers, and the counters say the runtime served nothing.
+    runtime: Option<nilestream_core::rev::Runtime>,
+    /// Currencies the base holds. The installed view is keyed `(account, currency)` and a
+    /// wire query asking for one account's balance names no currency, so the runtime can
+    /// answer only while there is exactly one to name. More than one and the fold answers —
+    /// because picking a currency for the caller is how a per-currency conservation rule
+    /// becomes invisible from outside.
+    currencies: std::collections::BTreeSet<u32>,
     /// The durable sink, when the daemon was started with one. `None` for the in-memory
     /// engine the tests and the benchmark's warm-up use.
     ///
@@ -177,6 +194,20 @@ impl RevEngine {
             view.apply_epoch(&ledger, e);
         }
 
+        // The REV runtime, dragged to the same frontier. `advance` applies each epoch's
+        // deltas to whichever entries are *resident*, which is the whole saving partiality
+        // buys and is why this is cheap over twenty thousand epochs on an empty view.
+        let mut runtime = install_balance_view(budget);
+        if let Some(rt) = runtime.as_mut() {
+            let head = {
+                use nilestream_core::rev::Base;
+                ledger.frontier()
+            };
+            for e in 0..=head {
+                rt.advance(&mut ledger, e);
+            }
+        }
+
         RevEngine {
             ledger,
             view,
@@ -185,6 +216,8 @@ impl RevEngine {
             scan_work: 0,
             served: 0,
             served_rows: 0,
+            runtime,
+            currencies: std::collections::BTreeSet::from([0]),
             durable: None,
         }
     }
@@ -251,7 +284,6 @@ impl crate::session::Serving for RevEngine {
         // there and still applied — and the restriction goes through the anchor index,
         // which is the mechanism §9.4.1 measures at two orders of magnitude.
         // `the_pushdown_and_the_full_scan_agree` holds the two to the same answer.
-        self.served += 1;
         // **The fast path: fold the base, never materialise it.**
         //
         // `scan_fold::plan` recognises the keyed-aggregate fragment and refuses everything
@@ -259,7 +291,21 @@ impl crate::session::Serving for RevEngine {
         // computes is the aggregate node's value; everything above that — `order by`,
         // `limit` — is evaluated by the reference from that value, so those operators keep
         // one semantics and cannot drift from the golden corpus.
-        let (z, work) = match crate::scan_fold::plan(circuit, output) {
+        let planned = crate::scan_fold::plan(circuit, output);
+        // **A single account's balance is a read of the maintained view, not a scan.**
+        //
+        // This is the mechanism the phase diagram is about, and until now nothing on the wire
+        // used it: every read was an anchored reconstruction and the `miss_rate` column read
+        // 1.00 by construction rather than by measurement.
+        if let (Some(p), Some(acct)) = (planned.as_ref(), account_predicate(circuit)) {
+            if let Some(rows) = self.answer_from_view(p, circuit, output, acct, anchor) {
+                return Ok(rows);
+            }
+        }
+        // Counted here rather than on entry: a query the maintained view answered is not a
+        // read of the scan surface, and adding it to both totals double-counted every one.
+        self.served += 1;
+        let (z, work) = match planned {
             Some(p) if p.relation == "postings" => {
                 // **Streamed, not buffered.** Collecting the base into a `Vec` first cost
                 // 10MB of vector growth per query — more than the Z-set this path exists to
@@ -346,6 +392,20 @@ impl crate::session::Serving for RevEngine {
                 .map_err(crate::session::ServeError::NotDurable)?;
         }
         self.view.apply_epoch(&self.ledger, epoch);
+        // The maintained view moves with the ledger, or the next read answers at an anchor
+        // the base has already passed. `advance` touches only *resident* entries, which is
+        // the saving partiality buys and is why this is not a per-epoch scan of the key
+        // space.
+        if let Some(rt) = self.runtime.as_mut() {
+            rt.advance(&mut self.ledger, epoch);
+        }
+        if let Some(e) = self.ledger.epochs.get(epoch as usize) {
+            for r in &e.rows {
+                if let proto_engine::Row::Post(p) = r {
+                    self.currencies.insert(p.cur);
+                }
+            }
+        }
         Ok(epoch)
     }
 
@@ -368,13 +428,33 @@ impl crate::session::Serving for RevEngine {
     /// `PartialView`'s counters here would report a view the wire path does not read — they
     /// would all be zero, and a benchmark would record `n/a` and move on.
     fn read_stats(&self) -> (u64, u64, u64, u64, usize) {
-        (
-            self.served,
-            0,
-            self.served,
-            self.served_rows,
-            self.view.resident(),
-        )
+        // **Hits are counted now, where they used to be zero by construction.**
+        //
+        // This returned `(served, 0, served, rows, resident)` with a paragraph explaining
+        // that the served path never consults a resident entry — true when it was written,
+        // and it made the `miss_rate` column of every benchmark row 1.00 whatever the engine
+        // did. A single-account read is now answered by the REV runtime, so its hits and
+        // misses are the runtime's, and the scan surface's reads are added to both totals so
+        // that a mixed workload's rate is over everything the server answered.
+        match self.runtime.as_ref().and_then(|rt| rt.view(BALANCE_VIEW)) {
+            Some(v) => {
+                let s = &v.stats;
+                (
+                    s.reads + self.served,
+                    s.hits,
+                    s.misses + self.served,
+                    s.base_rows_read + self.served_rows,
+                    v.resident_count() as usize,
+                )
+            }
+            None => (
+                self.served,
+                0,
+                self.served,
+                self.served_rows,
+                self.view.resident(),
+            ),
+        }
     }
 }
 
@@ -384,6 +464,100 @@ impl RevEngine {
     pub fn with_durable(mut self, path: impl AsRef<std::path::Path>) -> std::io::Result<Self> {
         self.durable = Some(DurableSink::open(path)?);
         Ok(self)
+    }
+
+    /// **One account's balance, out of the maintained REV** — or `None`, meaning this query
+    /// is not that question and the general path must answer it.
+    ///
+    /// Every condition below is a way the maintained view could be a *different* answer from
+    /// the one that was asked for, and each is checked rather than assumed:
+    ///
+    /// * the aggregate must be the circuit's output, so nothing sits above it that this
+    ///   would skip;
+    /// * the chain from the base must be filters only — a `Map` changes what is aggregated,
+    ///   and a view maintained over unmapped rows would answer a different query;
+    ///   `account_predicate` has already established that every filter is `acct = k`;
+    /// * the aggregate must be exactly `sum(amt)`, which is what the installed view holds;
+    /// * the base must hold exactly one currency. The view is keyed `(account, currency)`
+    ///   and this query names no currency, so with two the server would have to pick one —
+    ///   and a server that picks a currency for the caller makes the per-currency
+    ///   conservation rule invisible from outside. With two currencies the fold answers,
+    ///   correctly and more slowly, which is the right way round.
+    fn answer_from_view(
+        &mut self,
+        p: &crate::scan_fold::FoldPlan,
+        circuit: &niles_ir::circuit::Circuit,
+        output: &str,
+        acct: u64,
+        anchor: u64,
+    ) -> Option<crate::session::Rows> {
+        use niles_ir::operator::{Agg, Scalar};
+        /// Column positions in `postings`: `txn, acct, cur, amt, idem`.
+        const ACCT: u16 = 1;
+        const CUR: u16 = 2;
+        const AMT: u16 = 3;
+
+        if circuit.outputs.get(output) != Some(&p.node) || !p.filters_only() {
+            return None;
+        }
+        if p.aggs() != [(Agg::Sum, Scalar::Column(AMT))] {
+            return None;
+        }
+        // `group by acct` and `group by acct, cur` are the two spellings of "this account's
+        // balance"; the first is only the same question while there is one currency to mean.
+        let with_currency = match p.group_key() {
+            [ACCT] => false,
+            [ACCT, CUR] => true,
+            _ => return None,
+        };
+        if self.currencies.len() != 1 {
+            return None;
+        }
+        let cur = *self.currencies.iter().next()?;
+        let rt = self.runtime.as_mut()?;
+        let view = rt.view_mut(BALANCE_VIEW)?;
+        let answered = view.read(&mut self.ledger, &vec![acct as i64, cur as i64], anchor);
+
+        // **The answer must be true at the anchor that was asked for, not merely at least as
+        // fresh.** A hit reports the entry's *effective* version, which can be later than the
+        // requested anchor — a value that includes writes the caller's snapshot excludes.
+        // In this server the write path holds the engine's lock, so the frontier cannot move
+        // between `observe` and here and the two are always equal; that is a property of the
+        // current concurrency and not of the read, so it is checked rather than relied on. A
+        // difference falls back to the fold, which reconstructs at the anchor exactly.
+        if answered.anchor != anchor {
+            return None;
+        }
+
+        let mut columns: Vec<String> = (0..p.width()).map(|i| format!("c{i}")).collect();
+        columns.push("anchor".into());
+
+        // **An account the base has never posted to has no balance, and that is not zero.**
+        // The absence lattice's distinction, at the layer where it would be quietest to
+        // lose: a keyed read answers with a number for a key nothing has ever touched, and a
+        // group that does not exist must produce no row at all — which is what the fold and
+        // the reference evaluator both do, and what this must agree with.
+        if self
+            .ledger
+            .key_update_count(acct, anchor.min(self.ledger.head()))
+            == 0
+        {
+            return Some(crate::session::Rows {
+                columns,
+                rows: Vec::new(),
+            });
+        }
+
+        let mut cells = vec![Some(acct.to_string())];
+        if with_currency {
+            cells.push(Some(cur.to_string()));
+        }
+        cells.push(Some(answered.value.to_string()));
+        cells.push(Some(anchor.to_string()));
+        Some(crate::session::Rows {
+            columns,
+            rows: vec![cells],
+        })
     }
 
     /// **The base's posting records, in the schema a lowered circuit indexes into** —
@@ -585,6 +759,48 @@ fn account_predicate(circuit: &niles_ir::circuit::Circuit) -> Option<u64> {
     found
 }
 
+/// **Install the balance view the wire path reads from.**
+///
+/// The circuit is compiled from Niles source against the daemon's own schema rather than
+/// hand-built, because that is the claim: *source → typed IR → running partial-state
+/// engine*, with nothing hand-assembled in between. A hand-built circuit here would make the
+/// pipeline a diagram again.
+///
+/// Keyed `(account, currency)` because a balance is per currency, and folding across
+/// currencies is exactly the thing the commit rule refuses on the write side.
+///
+/// Returns `None` if the view will not install — an aggregate outside the runtime's fragment,
+/// or a compile error — and the caller then serves by folding. A refusal, not a fallback that
+/// answers something else.
+fn install_balance_view(budget: usize) -> Option<nilestream_core::rev::Runtime> {
+    const BALANCE: &str = "select acct, cur, sum(amt) from postings group by acct, cur";
+    let program = format!(
+        "{}\nview {BALANCE_VIEW} = sql {{ {BALANCE} }} serve {{ consistency: snapshot, materialize: auto }};\n",
+        crate::daemon::DEFAULT_SCHEMA
+    );
+    let (prog, d) = niles_lang::parser::parse_program(&program);
+    if d.has_errors() {
+        return None;
+    }
+    let (cat, rd) = niles_lang::resolve::resolve_program(&prog, 0);
+    if rd.has_errors() {
+        return None;
+    }
+    let (lowered, ld) = niles_lang::lower::lower_program(&prog, &cat);
+    if ld.has_errors() || !niles_ir::verify::verify(&lowered.circuit).is_ok() {
+        return None;
+    }
+    nilestream_core::rev::Runtime::install(
+        lowered.circuit,
+        Some(budget as u64),
+        nilestream_core::rev::Policy::Lru,
+    )
+    .ok()
+}
+
+/// The name of that view inside the runtime.
+pub const BALANCE_VIEW: &str = "__balance";
+
 #[cfg(test)]
 mod tests {
 
@@ -745,6 +961,151 @@ mod tests {
             vec![vec![Some("0".into()), None, Some(anchor.to_string())]],
             "the group is there and its sum is absent, not zero"
         );
+    }
+
+    /// **The wire path reads the maintained view, and the miss rate is a measurement.**
+    ///
+    /// `read_stats` used to return `(served, 0, served, …)` — hits zero *by construction* —
+    /// so every benchmark row reported a miss rate of 1.00 whatever the engine did, and the
+    /// phase diagram's mechanism was measured by nothing the daemon ran. This asserts the
+    /// three things that had to become true: a single-account read is answered by the REV
+    /// runtime, its hits are counted, and a budget smaller than the key space produces
+    /// misses that are real reconstructions rather than a number nobody can move.
+    #[test]
+    fn a_single_account_read_is_served_by_the_maintained_view() {
+        use crate::session::Serving;
+        // A budget of a quarter of the key space, as the benchmark configures: small enough
+        // that eviction happens and the miss path is exercised.
+        let mut e = RevEngine::seeded(200, 2, 50, ViewMode::Demand, EvictionPolicy::Lru);
+        let anchor = e.frontier();
+
+        let hot = compile("select acct, sum(amt) from postings where acct = 7 group by acct");
+        // Reading one key repeatedly: the first is a miss, the rest are hits, and the answer
+        // is the same every time.
+        let first = e
+            .query(&hot.circuit, "__wire_result", anchor)
+            .expect("answers");
+        for _ in 0..50 {
+            let again = e
+                .query(&hot.circuit, "__wire_result", anchor)
+                .expect("answers");
+            assert_eq!(again.rows, first.rows, "a hit must answer what a miss did");
+        }
+        let (reads, hits, misses, _rows, resident) = e.read_stats();
+        assert_eq!(reads, 51, "every read reached the view");
+        assert!(hits >= 50, "a warm key must hit: {hits} of {reads}");
+        assert!(misses >= 1, "and the first read of it must not");
+        assert!(resident > 0, "a read materialises the key it answered");
+
+        // And the answer is the one the reference evaluator gives, so serving from the view
+        // is a faster route to the same denotation rather than a second one.
+        let sources = e.base_at(anchor);
+        let (oracle, _) =
+            niles_ir::eval::try_run(&hot.circuit, "__wire_result", &sources).expect("oracle");
+        assert_eq!(first.rows, rendered(&oracle, anchor));
+
+        // Sweeping the whole key space against a budget of 50 forces eviction, so the rate
+        // is a property of the workload rather than of the wiring.
+        for acct in 1..=200i64 {
+            let sql =
+                format!("select acct, sum(amt) from postings where acct = {acct} group by acct");
+            let c = compile(&sql);
+            let got = e
+                .query(&c.circuit, "__wire_result", anchor)
+                .expect("answers");
+            let sources = e.base_at(anchor);
+            let (oracle, _) =
+                niles_ir::eval::try_run(&c.circuit, "__wire_result", &sources).expect("oracle");
+            assert_eq!(got.rows, rendered(&oracle, anchor), "acct {acct}");
+        }
+        let (reads, hits, misses, _, resident) = e.read_stats();
+        assert_eq!(reads, hits + misses);
+        assert!(
+            misses > 51,
+            "a budget below the key space must evict and reconstruct: {misses} misses in \
+             {reads} reads"
+        );
+        assert!(
+            resident <= 50,
+            "the residency budget must bind: {resident} entries held against a budget of 50"
+        );
+        let rate = misses as f64 / reads as f64;
+        assert!(
+            rate > 0.0 && rate < 1.0,
+            "the miss rate must be a measurement rather than a constant: {rate}"
+        );
+    }
+
+    /// An account nothing has posted to produces **no row**, not a balance of zero, on the
+    /// view path as on every other.
+    #[test]
+    fn an_untouched_account_has_no_balance_on_the_view_path_either() {
+        use crate::session::Serving;
+        let mut e = RevEngine::seeded(20, 2, 10, ViewMode::Demand, EvictionPolicy::Lru);
+        let anchor = e.frontier();
+        let c = compile("select acct, sum(amt) from postings where acct = 999999 group by acct");
+        let got = e
+            .query(&c.circuit, "__wire_result", anchor)
+            .expect("answers");
+        assert!(
+            got.rows.is_empty(),
+            "an account with no postings forms no group: {:?}",
+            got.rows
+        );
+        let sources = e.base_at(anchor);
+        let (oracle, _) =
+            niles_ir::eval::try_run(&c.circuit, "__wire_result", &sources).expect("oracle");
+        assert_eq!(got.rows, rendered(&oracle, anchor));
+    }
+
+    /// A write is visible to the next read, which is what `advance` on the append path buys.
+    #[test]
+    fn a_read_after_a_write_sees_it() {
+        use crate::session::Serving;
+        let mut e = RevEngine::seeded(50, 2, 20, ViewMode::Demand, EvictionPolicy::Lru);
+        let c = compile("select acct, sum(amt) from postings where acct = 3 group by acct");
+        let before_anchor = e.frontier();
+        let before = e
+            .query(&c.circuit, "__wire_result", before_anchor)
+            .expect("answers");
+        let was: i128 = before.rows[0][1].as_ref().unwrap().parse().unwrap();
+
+        e.append(
+            vec![
+                Row::Post(Posting {
+                    txn: 77_777,
+                    acct: 3,
+                    cur: 0,
+                    amt: -250,
+                    valid: 0,
+                }),
+                Row::Post(Posting {
+                    txn: 77_777,
+                    acct: 0,
+                    cur: 0,
+                    amt: 250,
+                    valid: 0,
+                }),
+            ],
+            "t-05-write",
+        )
+        .expect("a conserved append");
+
+        let anchor = e.frontier();
+        let after = e
+            .query(&c.circuit, "__wire_result", anchor)
+            .expect("answers");
+        let now: i128 = after.rows[0][1].as_ref().unwrap().parse().unwrap();
+        assert_eq!(
+            now,
+            was - 250,
+            "a maintained view that did not advance would answer the old balance, which is \
+             the failure mode a cached read model has and a reconstruction does not"
+        );
+        let sources = e.base_at(anchor);
+        let (oracle, _) =
+            niles_ir::eval::try_run(&c.circuit, "__wire_result", &sources).expect("oracle");
+        assert_eq!(after.rows, rendered(&oracle, anchor));
     }
 
     #[test]

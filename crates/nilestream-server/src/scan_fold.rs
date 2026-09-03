@@ -76,6 +76,25 @@ impl FoldPlan {
     pub fn width(&self) -> usize {
         self.group_key.len() + self.aggs.len()
     }
+
+    /// The columns the aggregate groups by, in output order.
+    pub fn group_key(&self) -> &[ColIdx] {
+        &self.group_key
+    }
+
+    /// The aggregates, in output order.
+    pub fn aggs(&self) -> &[(Agg, Scalar)] {
+        &self.aggs
+    }
+
+    /// Whether the chain from the base is filters and nothing else.
+    ///
+    /// The question a caller asks before answering from a maintained view instead of the
+    /// base: a `Map` between the source and the aggregate changes what is being aggregated,
+    /// so a view maintained over the unmapped rows is not an answer to this query.
+    pub fn filters_only(&self) -> bool {
+        self.steps.iter().all(|s| matches!(s, Step::Filter(_)))
+    }
 }
 
 /// Find the aggregate this circuit's output rests on, if the path down to the base is inside

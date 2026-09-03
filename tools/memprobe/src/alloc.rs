@@ -177,8 +177,12 @@ pub fn budget(scenario: &str) -> Option<f64> {
         // reference evaluator's base, which stays and should stay.
         "zset_base_at" => 1.4,
         // A seeded ledger: one epoch record, one idempotency string and one index entry per
-        // transaction, amortised over two postings.
-        "ledger_seeded" => 2.6,
+        // transaction, amortised over two postings — **plus the maintained REV**, which is
+        // three more per epoch (the delta vector and its two keys) and took this from 2.3 to
+        // 3.8. That is the maintenance side of the trade the thesis is about, and it is
+        // reported rather than absorbed: the write path pays it so that a single-account
+        // read costs 20 allocations instead of 29 and touches no base rows at all.
+        "ledger_seeded" => 4.2,
         // **The three served analytical statements, after the fold replaced the copy.**
         //
         // `served_group_by_cur` and `served_sum_negative` form one group, so their whole
@@ -193,12 +197,13 @@ pub fn budget(scenario: &str) -> Option<f64> {
         "served_sum_negative" => 26.0,
         // A served point read goes through the anchor index, so its cost is the account's
         // own postings and the reply — not the base.
-        "served_point" => 32.0,
+        "served_point" => 22.0,
         // The REV runtime's hit path: the key is cloned into the recency map, and the answer
         // is a `Copy` struct.
         "rev_read_hit" => 2.2,
-        // An in-memory append: the row vector, the idempotency key, the index push.
-        "append_in_memory" => 4.4,
+        // An in-memory append: the row vector, the idempotency key, the index push, and the
+        // three the maintained view costs. See `ledger_seeded`.
+        "append_in_memory" => 7.7,
         _ => return None,
     })
 }

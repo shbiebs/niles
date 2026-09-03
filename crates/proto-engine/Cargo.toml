@@ -7,6 +7,9 @@ authors.workspace = true
 
 [dependencies]
 nilestream-ledger = { path = "../nilestream-ledger" }
+# For `impl rev::Base for Ledger`: the adapter between this prototype's ledger and the REV
+# runtime, in one place rather than re-written by each binary that needs it.
+nilestream-core = { path = "../nilestream-core" }
 
 [dev-dependencies]
 # The reference oracle, as a *test* dependency: the engine must never be able to

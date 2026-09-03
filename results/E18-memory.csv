@@ -1,9 +1,9 @@
 scenario,unit,operations,allocations,bytes,live_delta,peak_delta,allocations_per_op,bytes_per_op
-ledger_seeded,posting,40000,90057,16608467,8418859,9492956,2.3,415.2
+ledger_seeded,posting,40000,150242,21132068,8428139,9492956,3.8,528.3
 zset_base_at,row,40000,46665,9583856,9583856,9583856,1.2,239.6
 served_group_by_cur,query,3,75,9381,0,1770,25.0,3127.0
 served_group_by_acct,query,3,285105,24420792,0,3619950,95035.0,8140264.0
 served_sum_negative,query,3,69,9399,0,1928,23.0,3133.0
-served_point,query,200,5800,702200,0,1962,29.0,3511.0
+served_point,query,200,4000,128800,0,524,20.0,644.0
 rev_read_hit,read,1000,2000,32000,0,16,2.0,32.0
-append_in_memory,transaction,500,2000,145392,67392,67548,4.0,290.8
+append_in_memory,transaction,500,3500,257392,67392,67624,7.0,514.8

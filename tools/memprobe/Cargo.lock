@@ -51,5 +51,6 @@ dependencies = [
 name = "proto-engine"
 version = "0.1.0"
 dependencies = [
+ "nilestream-core",
  "nilestream-ledger",
 ]

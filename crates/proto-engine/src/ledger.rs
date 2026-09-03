@@ -446,6 +446,51 @@ impl Ledger {
     }
 }
 
+/// **This ledger, presented to the REV runtime.**
+///
+/// One implementation, here beside the ledger, rather than one per binary that wants it.
+/// There were two — `nilestream/src/main.rs` had a `LedgerBase` wrapper and the daemon had
+/// nothing, which is why the daemon's wire path never used the runtime at all — and the copy
+/// in the binary searched `epochs` linearly for an epoch whose id *is* its index, making
+/// every sweep quadratic.
+///
+/// # The key is `(account, currency)`, and that is not a detail
+///
+/// A balance is per currency. A one-component key would have to pick a currency to fold, and
+/// the only available choices are "the first one seen" and "a constant" — both of which make
+/// the per-currency conservation rule invisible from outside, which is the failure this
+/// system exists to make impossible. A key with fewer than two components reconstructs
+/// nothing and reports having read nothing, rather than answering about a currency nobody
+/// named.
+impl nilestream_core::rev::Base for Ledger {
+    fn frontier(&self) -> Epoch {
+        self.head()
+    }
+
+    fn reconstruct(&mut self, key: &nilestream_core::rev::Key, anchor: Epoch) -> (i128, u64) {
+        let (Some(acct), Some(cur)) = (key.first(), key.get(1)) else {
+            return (0, 0);
+        };
+        let before = self.rows_touched;
+        let v = self.reconstruct_balance(*acct as Acct, *cur as Cur, anchor);
+        (v, self.rows_touched - before)
+    }
+
+    fn deltas_at(&mut self, e: Epoch) -> Vec<(nilestream_core::rev::Key, i128)> {
+        // Indexed rather than searched: an epoch's id is its position, assigned by `submit`.
+        let Some(rec) = self.epochs.get(e as usize).filter(|r| r.id == e) else {
+            return Vec::new();
+        };
+        rec.rows
+            .iter()
+            .filter_map(|r| match r {
+                Row::Post(p) => Some((vec![p.acct as i64, p.cur as i64], p.amt)),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod checkpoint_tests {
     //! Theorem 3.7 clause (i): checkpointing changes cost and not value.

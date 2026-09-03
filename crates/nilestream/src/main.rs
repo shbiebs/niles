@@ -25,56 +25,15 @@
 //!   nilestream sweep FILE VIEW           the phase diagram: budget x memory price
 //! ```
 
-use nilestream_core::rev::{Anchored, Base, Key, Policy, Runtime, Stats, Value};
-use nilestream_core::Epoch;
+use nilestream_core::rev::{Anchored, Base, Key, Policy, Runtime, Stats};
 use proto_engine::{Ledger, Posting, Row, Zipf};
 use std::process::ExitCode;
 
-/// The bridge: an immutable, epoch-ordered, hash-chained ledger, presented to the runtime
-/// through the three reads it needs.
-///
-/// Nothing here is a re-implementation. `reconstruct` is the ledger's own checkpointed
-/// per-key fold, and `rows_touched` is its own counter — so the base rows this runtime
-/// reports are the rows the ledger actually read, not an estimate the runtime kept.
-struct LedgerBase {
-    ledger: Ledger,
-    /// The currency every key in this run is denominated in. The executable IR fragment is
-    /// keyed on `(acct, cur)`; a single-currency workload fixes the second component.
-    cur: u32,
-}
-
-impl Base for LedgerBase {
-    fn frontier(&self) -> Epoch {
-        self.ledger.head()
-    }
-
-    fn reconstruct(&mut self, key: &Key, anchor: Epoch) -> (Value, u64) {
-        let before = self.ledger.rows_touched;
-        let acct = key[0] as u64;
-        let cur = key.get(1).copied().unwrap_or(self.cur as i64) as u32;
-        let v = self.ledger.reconstruct_balance(acct, cur, anchor);
-        (v, self.ledger.rows_touched - before)
-    }
-
-    fn deltas_at(&mut self, e: Epoch) -> Vec<(Key, Value)> {
-        // **Indexed, not searched.** An epoch's id *is* its position — `Ledger::submit`
-        // assigns `self.epochs.len()` — so the linear `find` here scanned an average of half
-        // the history on every epoch of every sweep: quadratic in the number of epochs, for
-        // a lookup that is an array index. At the default 20,000 epochs it was 273ms against
-        // 3.2ms, with the counted work identical, so no published number was wrong — only
-        // the time to reproduce one, and that grows with the square.
-        let Some(rec) = self.ledger.epochs.get(e as usize).filter(|r| r.id == e) else {
-            return Vec::new();
-        };
-        rec.rows
-            .iter()
-            .filter_map(|r| match r {
-                Row::Post(p) => Some((vec![p.acct as i64, p.cur as i64], p.amt)),
-                _ => None,
-            })
-            .collect()
-    }
-}
+// The bridge — an immutable, epoch-ordered, hash-chained ledger presented to the runtime
+// through the three reads it needs — now lives in `proto-engine` beside the ledger itself,
+// as `impl rev::Base for Ledger`. It was here, and the daemon had no copy at all, which is
+// how the wire path came to serve every read by materialising the base instead of asking the
+// runtime. One implementation cannot be used by one binary and forgotten by another.
 
 #[derive(Clone, Copy)]
 struct Config {
@@ -240,13 +199,10 @@ fn run(path: &str, view: &str, cfg: Config) -> Result<Stats, String> {
     }
 
     // ---- 4. a ledger, and a workload over it -------------------------------------------
-    let mut base = LedgerBase {
-        ledger: if cfg.checkpoint > 0 {
-            Ledger::with_checkpoints(cfg.checkpoint)
-        } else {
-            Ledger::new()
-        },
-        cur: 0,
+    let mut base = if cfg.checkpoint > 0 {
+        Ledger::with_checkpoints(cfg.checkpoint)
+    } else {
+        Ledger::new()
     };
     let mut writes = Zipf::new(cfg.accounts, cfg.skew, cfg.seed);
     let mut reads = Zipf::new(cfg.accounts, cfg.skew, cfg.seed ^ 0x5eed);
@@ -282,7 +238,7 @@ fn run(path: &str, view: &str, cfg: Config) -> Result<Stats, String> {
         // delta is ever found and the maintenance counters read zero. The first version of
         // this runner had exactly that bug, and it is the reason the loop below asserts
         // that maintenance actually happened.
-        let sealed = match base.ledger.submit(&format!("t{e}"), rows) {
+        let sealed = match base.submit(&format!("t{e}"), rows) {
             Ok(id) => id,
             Err(_) => continue,
         };

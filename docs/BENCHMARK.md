@@ -198,11 +198,24 @@ on; a gap attributed to "it is a prototype" is not attributed at all.
    first thing that would, at any concurrency.
 2. **A thread per connection.** Right at this scale and stated rather than defended; not a
    design for thousands of connections.
-3. **A plan cache keyed by schema epoch, and nothing else.** `extended.rs` caches a compiled
-   plan against the epoch it was planned at. The *simple* query path — which is what this
-   benchmark uses on both targets — compiles every statement afresh: parse, resolve,
-   typecheck, lower, verify, per query. That is a real per-query cost and it is paid on every
-   row of this table.
+3. **A compiled-circuit cache, per session.** The simple query path compiled every statement
+   afresh — parse, resolve, typecheck, lower, verify — on every query. `callgrind` puts that
+   at **177,064 instructions against 7,693 to serve a point read**: 96% of the daemon's own
+   work on that workload was recompiling something it had just compiled. Statements are now
+   compiled once per session and keyed by `(schema, statement text)`, which is sound because
+   a lowering does not depend on the anchor it was compiled at — `Catalog::epoch` is carried
+   into `lower` and never read by it, and a test holds that rather than a comment.
+
+   Worth stating precisely, because both of the things previously said about this cost are
+   true of different budgets. Compilation is *0.5% of a wall-clock budget* dominated by a
+   ~120µs round trip, and *96% of the engine's own instructions*. Measuring first is what
+   distinguished them: the point row moved 9,213 → 12,195 ops/s, +32%.
+
+   `extended.rs`'s `Prepared` still keys on `engine.frontier()` as its schema epoch, which
+   invalidates every prepared statement on every *append* — conservative, and useless as a
+   cache, since a schema does not change when a posting is written. Left alone deliberately:
+   that field is the mechanism a migration story is meant to hang on, and re-purposing it
+   under an efficiency task would spend it.
 4. **A materialising path, for the shapes outside the keyed-aggregate fragment.**
    `Serving::query` recognises `Source → (Filter | Map)* → Aggregate{sum, count}` — the same
    fragment the REV runtime accepts — and answers it by folding the ledger's own posting
@@ -251,7 +264,7 @@ on; a gap attributed to "it is a prototype" is not attributed at all.
 
 | row | verdict | attributed to |
 |---|---|---|
-| `oltp` | NOT MET (≈1× against a 5–10× contract) | items 3 and 6 — per-query compilation on a two-core machine, against a contract written for 48 cores. Not to the ledger: the durable row shows the write path at parity with PostgreSQL's, on the same device and the same `fsync`. |
+| `oltp` | NOT MET (≈1× against a 5–10× contract) | item 6, and the arithmetic below. Not item 3: an `INSERT` does not go through the compiler at all, and not the ledger — the durable row shows the write path at parity with PostgreSQL's, on the same device at the same `fsync` cost. |
 | `analytical` | NOT MET (still, against a 10–12× contract) | no longer item 4 for the keyed shapes: the fold answers `group by cur` at 2.7× PostgreSQL and `sum where` at 1.2×. What remains is the two statements that return 10,001 groups, where the cost is producing and sending the rows, and the protocol floor — a round trip is ~120µs here, so five statements per composite cannot be answered in the 0.25–0.30ms the contract's multiple implies whatever the engine does. See "Is this contract reachable" below. |
 
 Neither is attributed to the engine's correctness, and neither should be read as one. What
@@ -335,6 +348,24 @@ valgrind --tool=massif --massif-out-file=/tmp/massif.out \
       ./target/release/nilestreamd --port 5434 --accounts 10000 --rounds 2 --budget 2500
 ms_print /tmp/massif.out | head -40
 ```
+
+### Is the OLTP contract reachable on this architecture?
+
+The same arithmetic, and the answer is sharper. The contract asks for 5–10× PostgreSQL on a
+**durable** path. A durable commit is an `fsync`, and one `fsync` per transaction caps a
+single writer at `1/fsync` — `results/E13-durability.md` measures 4,450 ops/s at batch 1 on
+this device. PostgreSQL measures ~3,000 here, so 5× is 15,000 and 10× is 30,000: **both are
+above the per-connection fsync ceiling**, and no engine change reaches them.
+
+Group commit does: E13 measures 30,440 ops/s at batch 16, a 6.8× recovery of the fsync tax.
+But a batch of 16 needs 16 *concurrent* writers, and this harness drives **one synchronous
+connection** — so the workload it measures can never form a batch whatever the engine
+implements. The contract is unreachable under the harness's own workload shape.
+
+Reaching it needs three things together: a group-commit sequencer, a concurrent client, and
+more than two cores. PostgreSQL gains from concurrency too, so the ratio afterwards is not
+predictable from these numbers — which is the honest reason this is recorded rather than
+attempted.
 
 ### Is the analytical contract reachable on this architecture?
 

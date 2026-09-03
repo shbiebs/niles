@@ -139,8 +139,36 @@ pub struct Session {
     pub plans: crate::extended::PlanCache,
     /// The schema text this session's queries are compiled against.
     pub schema: String,
+    /// **Compiled circuits, keyed by statement text.**
+    ///
+    /// The simple query path compiled every statement afresh — parse, resolve, typecheck,
+    /// lower, verify — and `callgrind` says what that costs: **177,064 instructions against
+    /// 7,693 to actually serve a point read**, so 96% of the daemon's own work on that
+    /// workload was recompiling a statement it had just compiled. The wall-clock share is
+    /// much smaller (a round trip is ~120µs against ~22µs of compilation) which is why this
+    /// was worth measuring before believing either number: "the compiler is 0.5% of the
+    /// budget" and "the compiler is 96% of the engine" are both true, of different budgets.
+    ///
+    /// Keyed by `(schema, statement text)` and not by an epoch, because **a session compiles
+    /// against one schema for its whole life**: `Session::schema` is set at construction and
+    /// never assigned. A key carrying the schema makes that a property of the cache rather
+    /// than a fact a reader has to go and check, and leaves the door open for a session whose
+    /// schema can move.
+    compiled: std::collections::HashMap<(u64, String), niles_lang::lower::Lowered>,
+    /// Bounded, and cleared rather than evicted when it fills.
+    ///
+    /// A cache keyed by arbitrary client text is unbounded memory with a friendly name. LRU
+    /// would be better and is not obviously worth the machinery here: a session issues a
+    /// handful of statement shapes, and a session that issues more than this many distinct
+    /// ones is not one a plan cache was going to help.
+    compiled_cleared: u64,
+    pub compile_hits: u64,
+    pub compile_misses: u64,
     pub queries_served: u64,
 }
+
+/// How many compiled statements one session holds before the cache is emptied.
+const PLAN_CACHE_LIMIT: usize = 256;
 
 impl Session {
     pub fn new(user: String, database: String, schema: String) -> Session {
@@ -154,8 +182,106 @@ impl Session {
             pending_ids: Vec::new(),
             plans: crate::extended::PlanCache::new(),
             schema,
+            compiled: std::collections::HashMap::new(),
+            compiled_cleared: 0,
+            compile_hits: 0,
+            compile_misses: 0,
             queries_served: 0,
         }
+    }
+
+    /// The identity of the schema a plan was compiled against.
+    ///
+    /// A hash of the text rather than a ledger epoch. The extended path uses
+    /// `engine.frontier()` as its `schema_epoch`, which invalidates every prepared statement
+    /// on every *append* — conservative, and useless as a cache, since the schema does not
+    /// change when a posting is written. That is left alone here and reported rather than
+    /// changed under an efficiency task, because `Prepared::schema_epoch` is the mechanism a
+    /// future migration story is meant to hang on.
+    fn schema_key(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.schema.hash(&mut h);
+        h.finish()
+    }
+
+    /// **Compile a statement, or return the circuit compiled for it earlier.**
+    ///
+    /// One entry point, used by the simple path and by the extended one, so the two cannot
+    /// come to disagree about what a statement means — which is the compatibility-layer
+    /// failure this crate's own module docs argue against, in miniature.
+    fn compile_cached(&mut self, sql: &str) -> Result<&niles_lang::lower::Lowered, Vec<Backend>> {
+        let key = (self.schema_key(), sql.to_string());
+        if self.compiled.contains_key(&key) {
+            self.compile_hits += 1;
+            return Ok(&self.compiled[&key]);
+        }
+        self.compile_misses += 1;
+        let program = format!(
+            "{}\nview __wire_result = sql {{ {sql} }} serve {{ consistency: snapshot, materialize: auto }};\n",
+            self.schema
+        );
+        let (prog, mut diags) = niles_lang::parser::parse_program(&program);
+        let (cat, rd) = niles_lang::resolve::resolve_program(&prog, self.anchor);
+        diags.extend(rd);
+        let (_r, td) = niles_lang::typecheck::check_program(&prog, &cat);
+        diags.extend(td);
+        if diags.has_errors() {
+            let first = diags
+                .sorted()
+                .into_iter()
+                .find(|d| d.severity == Severity::Error)
+                .expect("has_errors implies one exists");
+            let detail = first.notes.first().cloned();
+            self.failed = true;
+            return Err(vec![pg_wire::diagnostic_error(
+                first.code,
+                &first.msg,
+                detail.as_deref(),
+            )]);
+        }
+        let (lowered, ld) = niles_lang::lower::lower_program(&prog, &cat);
+        if ld.has_errors() {
+            // The lowering's own code and message, not a generic one. A client told "this
+            // query has no lowering" cannot tell a `limit` it cannot read from a stage that
+            // does not exist.
+            let first = ld
+                .sorted()
+                .into_iter()
+                .find(|d| d.severity == Severity::Error)
+                .expect("has_errors implies one exists");
+            let detail = first.notes.first().cloned();
+            self.failed = true;
+            return Err(vec![pg_wire::diagnostic_error(
+                first.code,
+                &first.msg,
+                detail.as_deref(),
+            )]);
+        }
+        // **The verifier stands between the compiler and the engine on this path too**, and
+        // it runs before the plan is cached — so a circuit that does not verify is never
+        // stored, and a cache hit is a hit on something that passed the gate. A client cannot
+        // be given a way around it, or the trusted base has a hole in it shaped like a
+        // network socket.
+        let vr = niles_ir::verify::verify(&lowered.circuit);
+        if !vr.is_ok() {
+            let first = vr
+                .violations
+                .first()
+                .map(|v| v.msg.clone())
+                .unwrap_or_default();
+            self.failed = true;
+            return Err(vec![pg_wire::diagnostic_error(
+                "IR000",
+                "the compiled circuit did not verify",
+                Some(&first),
+            )]);
+        }
+        if self.compiled.len() >= PLAN_CACHE_LIMIT {
+            self.compiled.clear();
+            self.compiled_cleared += 1;
+        }
+        Ok(self.compiled.entry(key).or_insert(lowered))
     }
 
     /// The transaction-status byte a `ReadyForQuery` carries.
@@ -382,75 +508,42 @@ impl Session {
             )];
         }
 
-        // The real path: compile the client's SQL as Niles, against this session's schema.
-        let program = format!("{}\nview __wire_result = sql {{ {trimmed} }} serve {{ consistency: snapshot, materialize: auto }};\n", self.schema);
-        let (prog, mut diags) = niles_lang::parser::parse_program(&program);
-        let (cat, rd) = niles_lang::resolve::resolve_program(&prog, self.anchor);
-        diags.extend(rd);
-        let (_r, td) = niles_lang::typecheck::check_program(&prog, &cat);
-        diags.extend(td);
-
-        if diags.has_errors() {
-            self.failed = true;
-            let first = diags
-                .sorted()
-                .into_iter()
-                .find(|d| d.severity == Severity::Error)
-                .expect("has_errors implies one exists");
-            let detail = first.notes.first().cloned();
-            return vec![pg_wire::diagnostic_error(
-                first.code,
-                &first.msg,
-                detail.as_deref(),
-            )];
-        }
-
-        let (lowered, ld) = niles_lang::lower::lower_program(&prog, &cat);
-        if ld.has_errors() {
-            self.failed = true;
-            // The lowering's own code and message, not a generic one. A client told
-            // "this query has no lowering" cannot tell a `limit` it cannot read from a
-            // stage that does not exist.
-            let first = ld
-                .sorted()
-                .into_iter()
-                .find(|d| d.severity == Severity::Error)
-                .expect("has_errors implies one exists");
-            let detail = first.notes.first().cloned();
-            return vec![pg_wire::diagnostic_error(
-                first.code,
-                &first.msg,
-                detail.as_deref(),
-            )];
-        }
-        // The verifier stands between the compiler and the engine on this path too. A
-        // client cannot be given a way around it, or the trusted base has a hole in it
-        // shaped like a network socket.
-        let vr = niles_ir::verify::verify(&lowered.circuit);
-        if !vr.is_ok() {
-            self.failed = true;
-            let first = vr
-                .violations
-                .first()
-                .map(|v| v.msg.clone())
-                .unwrap_or_default();
-            return vec![pg_wire::diagnostic_error(
-                "IR000",
-                "the compiled circuit did not verify",
-                Some(&first),
-            )];
-        }
-
-        // Serve it — by **evaluating the circuit that was just compiled and verified**.
-        //
-        // This is the whole of F-16. The three lines this replaces picked a view by name,
-        // scraped integers out of the query text with a digit scanner, and asked the engine
-        // for `sum(amt)` on the first of them. The compiler ran, the verifier ran, and
-        // neither had any bearing on the answer: two different queries over the same
-        // account returned the same number, and `two_queries_over_one_key_return_different_answers`
-        // is the test that would have said so.
+        // The anchor is observed *before* compiling, and the ordering is not arbitrary: a
+        // cached circuit was compiled at some earlier anchor, so the cache is sound only
+        // because a lowering does not depend on one. `Catalog::epoch` is carried and never
+        // read by `lower`; `as_of` takes a literal epoch. `a_cached_plan_does_not_depend_on
+        // _the_anchor_it_was_compiled_at` holds that, because it is the assumption the whole
+        // cache rests on.
         let anchor = self.observe(engine.frontier());
-        let rows = match engine.query(&lowered.circuit, "__wire_result", anchor) {
+
+        // The real path: compile the client's SQL as Niles, against this session's schema —
+        // or take the circuit compiled for it earlier. `compile_cached` runs the verifier
+        // before it stores anything, so a hit is a hit on a circuit that passed the gate.
+        //
+        // Serving it means **evaluating that circuit**, which is the whole of F-16: the
+        // three lines this replaced picked a view by name, scraped integers out of the query
+        // text with a digit scanner, and asked the engine for `sum(amt)` on the first of
+        // them. The compiler ran, the verifier ran, and neither had any bearing on the
+        // answer.
+        let (served, named) = match self.compile_cached(trimmed) {
+            Ok(lowered) => {
+                let served = engine.query(&lowered.circuit, "__wire_result", anchor);
+                // **The column names come from the lowering**, which is the only place that
+                // knows them: a circuit carries indices, so the engine can only name columns
+                // positionally. Taking them from `Lowered::schemas` means a client sees the
+                // names it wrote rather than `c0`, `c1`.
+                let named: Vec<String> = lowered
+                    .circuit
+                    .outputs
+                    .get("__wire_result")
+                    .and_then(|id| lowered.schemas.get(id))
+                    .cloned()
+                    .unwrap_or_default();
+                (served, named)
+            }
+            Err(e) => return e,
+        };
+        let rows = match served {
             Ok(r) => r,
             Err(e) => {
                 self.failed = true;
@@ -461,18 +554,6 @@ impl Session {
                 )];
             }
         };
-
-        // **The column names come from the lowering**, which is the only place that knows
-        // them: a circuit carries indices, so the engine can only name columns
-        // positionally. Taking them from `Lowered::schemas` means a client sees the names
-        // it wrote rather than `c0`, `c1`.
-        let named = lowered
-            .circuit
-            .outputs
-            .get("__wire_result")
-            .and_then(|id| lowered.schemas.get(id))
-            .cloned()
-            .unwrap_or_default();
         let mut rows = rows;
         if named.len() + 1 == rows.columns.len() {
             rows.columns = named;
@@ -914,6 +995,16 @@ schema bank {
         Session::new("ada".into(), "bank".into(), SCHEMA.into())
     }
 
+    /// The data rows in a reply.
+    fn rows_of(out: &[Backend]) -> Vec<Vec<Option<String>>> {
+        out.iter()
+            .filter_map(|m| match m {
+                Backend::DataRow(r) => Some(r.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn a_query_compiles_through_the_same_front_end_as_any_other() {
         let (mut s, mut e) = (session(), engine());
@@ -1200,6 +1291,109 @@ schema bank {
         let (mut s, mut e) = (session(), engine());
         let out = s.handle(Frontend::Query("   ".into()), &mut e);
         assert!(matches!(out[0], Backend::EmptyQueryResponse), "{out:?}");
+    }
+
+    /// **A statement is compiled once per session, and the second ask is a cache hit.**
+    ///
+    /// `callgrind` on the point path: 177,064 instructions to compile a statement against
+    /// 7,693 to serve it, so 96% of the daemon's own work on that workload was recompiling
+    /// something it had just compiled. Both of the things previously said about this are
+    /// true and neither is the whole story — compilation is 0.5% of a *wall-clock* budget
+    /// dominated by a 120µs round trip, and 96% of the engine's own — which is why the
+    /// decision to build this was gated on measuring it rather than on either intuition.
+    #[test]
+    fn a_repeated_statement_is_compiled_once() {
+        let (mut s, mut e) = (session(), engine());
+        let sql = "select acct, sum(amt) from postings where acct = 1001 group by acct";
+        let first = s.handle(Frontend::Query(sql.into()), &mut e);
+        assert!(
+            !first
+                .iter()
+                .any(|m| matches!(m, Backend::ErrorResponse { .. })),
+            "{first:?}"
+        );
+        assert_eq!((s.compile_hits, s.compile_misses), (0, 1));
+
+        for _ in 0..20 {
+            let again = s.handle(Frontend::Query(sql.into()), &mut e);
+            assert_eq!(
+                rows_of(&again),
+                rows_of(&first),
+                "a cached plan must answer what the compiled one did"
+            );
+        }
+        assert_eq!(
+            (s.compile_hits, s.compile_misses),
+            (20, 1),
+            "twenty-one asks, one compilation"
+        );
+
+        // A *different* statement is a different key, and still compiles.
+        let other = s.handle(
+            Frontend::Query(
+                "select acct, sum(amt) from postings where acct = 9 group by acct".into(),
+            ),
+            &mut e,
+        );
+        assert!(!other
+            .iter()
+            .any(|m| matches!(m, Backend::ErrorResponse { .. })));
+        assert_eq!((s.compile_hits, s.compile_misses), (20, 2));
+    }
+
+    /// **A statement that does not compile is not cached, and says so every time.**
+    ///
+    /// The failure a plan cache invites: storing something the verifier refused, or
+    /// answering the second ask from a cache entry that should not exist. A refusal is not a
+    /// plan.
+    #[test]
+    fn a_refused_statement_is_refused_again_and_never_cached() {
+        let (mut s, mut e) = (session(), engine());
+        for _ in 0..3 {
+            let mut fresh = session();
+            let out = fresh.handle(
+                Frontend::Query("select nope from nonexistent_table".into()),
+                &mut e,
+            );
+            assert!(
+                out.iter()
+                    .any(|m| matches!(m, Backend::ErrorResponse { .. })),
+                "a statement that does not compile must be refused: {out:?}"
+            );
+            assert_eq!(fresh.compile_hits, 0, "a refusal is not a plan");
+        }
+        let _ = &mut s;
+    }
+
+    /// **The assumption the cache rests on**: a lowering does not depend on the anchor it
+    /// was compiled at.
+    ///
+    /// The cache is keyed by `(schema, statement text)` and not by the session anchor, which
+    /// would be a different key on every write and no cache at all. That is sound only
+    /// because `Catalog::epoch` is carried into the lowering and never read by it — `as_of`
+    /// takes a *literal* epoch. If that ever stops being true, this fails here rather than
+    /// by serving a stale plan.
+    #[test]
+    fn a_cached_plan_does_not_depend_on_the_anchor_it_was_compiled_at() {
+        let sql = "select acct, sum(amt) from postings where acct = 1001 group by acct";
+        let circuit_at = |anchor: u64| {
+            let program = format!(
+                "{SCHEMA}\nview __wire_result = sql {{ {sql} }} serve {{ consistency: snapshot, materialize: auto }};\n"
+            );
+            let (prog, d) = niles_lang::parser::parse_program(&program);
+            assert!(!d.has_errors());
+            let (cat, _) = niles_lang::resolve::resolve_program(&prog, anchor);
+            let (lowered, ld) = niles_lang::lower::lower_program(&prog, &cat);
+            assert!(!ld.has_errors());
+            format!("{:?}", lowered.circuit)
+        };
+        assert_eq!(
+            circuit_at(0),
+            circuit_at(4_200),
+            "the same statement lowered to different circuits at two anchors, so a plan \
+             cached at one is not valid at another and this cache is unsound"
+        );
+        assert_eq!(circuit_at(4_200), circuit_at(u64::MAX / 2));
     }
 
     #[test]

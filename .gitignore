@@ -1,3 +1,13 @@
 target/
 **/*.rs.bk
 _to_delete/
+
+# The benchmark's durable sink and its private copy of the rendered document.
+#
+# The segment is a *working file*: `bench --run` opens it under `SyncPolicy::Always`, writes
+# every durable append of every run into it, and the bytes differ on every run by
+# construction. Tracking it meant a benchmark could not be run without dirtying the tree,
+# which is the same defect as writing the committed results document without `--publish`,
+# one file over. The CSVs — the raw results the table is rendered from — stay tracked.
+results/E16-wallclock/nilestream-bench.seg
+results/E16-wallclock/E16-wallclock.md

@@ -6,10 +6,41 @@
 
 | Workload | Contract (SPEC-ENGINE Part 0) | PostgreSQL | Nilestream | Ratio | Verdict |
 |---|---|---|---|---|---|
-| oltp | 5–10× PostgreSQL | 4518 ops/s | 4189 ops/s | 0.93× | **NOT MET** |
-| analytical | 10–12× PostgreSQL | 330.0 ops/s | 44.4 ops/s | 0.13× | **NOT MET** |
-| point | parity with PostgreSQL | 122.1 µs p99 | 131.1 µs p99 | 0.93× | **PARITY** |
-| durable | parity with PostgreSQL | 4654 ops/s | 3820 ops/s | 0.82× | **PARITY** |
+| oltp | 5–10× PostgreSQL | 2676 ops/s | 2800 ops/s | 1.05× | **NOT MET** |
+| analytical | 10–12× PostgreSQL | 155.0 ops/s | 88.4 ops/s | 0.57× | **NOT MET** |
+| point | parity with PostgreSQL | 203.4 µs p99 | 167.4 µs p99 | 1.22× | **PARITY** |
+| durable | parity with PostgreSQL | 2804 ops/s | 3007 ops/s | 1.07× | **PARITY** |
+
+### Runs and spread
+
+| Workload | Target | Runs | Median | MAD | MAD as % of median |
+|---|---|---|---|---|---|
+| oltp | postgres | 5 | 2675.6 ops/s | 118.8 | 4.4% |
+| oltp | nilestream | 5 | 2800.0 ops/s | 205.3 | 7.3% |
+| analytical | postgres | 5 | 155.0 ops/s | 2.3 | 1.5% |
+| analytical | nilestream | 5 | 88.4 ops/s | 0.9 | 1.0% |
+| point | postgres | 5 | 7908.4 ops/s | 191.2 | 2.4% |
+| point | nilestream | 5 | 13001.3 ops/s | 934.2 | 7.2% |
+| durable | postgres | 5 | 2803.7 ops/s | 182.3 | 6.5% |
+| durable | nilestream | 5 | 3007.2 ops/s | 167.0 | 5.6% |
+
+### The analytical workload, statement by statement
+
+Median of the per-run medians, with the median absolute deviation beside it. The **composite** row above is computed from the statements marked `common` and from nothing else.
+
+| Statement | In the ratio | PostgreSQL | Nilestream | Nilestream speed ÷ PostgreSQL |
+|---|---|---|---|---|
+| `count_star` | no | 1.31 ± 0.02 ms | — | — |
+| `group_by_cur` | common | 3.99 ± 0.02 ms | 1.45 ± 0.06 ms | 2.75× |
+| `group_by_acct` | common | 10.73 ± 0.11 ms | 22.98 ± 0.19 ms | 0.47× |
+| `top_ten_by_sum` | common | 8.90 ± 0.37 ms | 16.54 ± 0.13 ms | 0.54× |
+| `count_distinct_acct` | no | 4.45 ± 0.11 ms | — | — |
+| `sum_negative` | common | 2.05 ± 0.05 ms | 1.73 ± 0.11 ms | 1.18× |
+
+**Coverage.** 2 of 6 statements are outside Nilestream's lowered fragment. They are measured on PostgreSQL — so their cost is on the record — and excluded from the ratio, because a composite that averaged a statement one side cannot express is not a comparison:
+
+* `count_star` — `*` is not a column, and the aggregate lowering resolves its argument as one (NL0502). A `count(*)` needs a form that counts rows rather than values.
+* `count_distinct_acct` — `distinct` inside an aggregate is a second aggregation over a de-duplicated multiset; the fragment has `distinct` as a stage and not as an aggregate modifier.
 
 ## How it was run
 
@@ -63,4 +94,4 @@ None could have been found by counting operations. In each case the engine did t
 
 The OLTP and durable rows for PostgreSQL are a *baseline*, not a competition: they establish what the comparison is against. A row that cannot be run is reported with the reason rather than omitted, and filling one by measuring something else under the same name is the specific failure this file exists to avoid.
 
-Three of PostgreSQL's five analytical statements are outside Nilestream's lowered fragment — `count(*)`, `count(distinct …)` and `order by <aggregate>` — so the analytical row compares five statements against three. Each missing construct is named with its reason in `target::ANALYTICAL_BLOCKED`. Widening the fragment during a benchmark would be tuning the artifact to the measurement.
+**The analytical row is a common-set ratio.** It used to compare five PostgreSQL statements against three Nilestream ones, round-robined into one composite: PostgreSQL's set contained its cheapest statement (`count(*)`) and Nilestream's did not, and one pair — `group by acct order by sum(amt) desc limit 10` against a plain `group by acct` — was two different operations averaged as though it were one. The statement set is now paired by operation in `workloads::ANALYTICAL_STATEMENTS`; the ratio is computed from the statements both targets run, the rest are still measured on PostgreSQL so their cost is on the record, and the per-statement table above says which operator the distance is in. Widening the fragment during a benchmark would be tuning the artifact to the measurement; averaging over a statement one side cannot express is worse, because it looks like a comparison.

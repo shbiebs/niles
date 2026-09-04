@@ -2,7 +2,7 @@
 
 | Crate | Role | public items |
 |---|---|--:|
-| `bank-bench` | NilesBank generator, wall-clock harness, thesis drift tests | 47 |
+| `bank-bench` | NilesBank generator, wall-clock harness, thesis drift tests | 49 |
 | `conservation-suite` | Reference oracle and the conservation property tests | 23 |
 | `experiments` | The E-series measurement harness | 0 |
 | `niles-interp` | The imperative-subset interpreter `nilesc run` drives, and the ledger it posts to | 16 |

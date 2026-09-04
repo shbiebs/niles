@@ -73,6 +73,10 @@ bootstrap:
 #
 # `nilestream sweep` needs the release binary, so `make reproduce` after `cargo build
 # --release -p nilestream`; the E12 sweep is deterministic and its diff is meaningful.
+#
+# E21 (`--example wire_cost`) is excluded for the same reason: it is wall-clock, it times two
+# write paths against each other over a socket, and its ratios move a few percent between
+# runs on the same machine. Re-run it when the reply path changes.
 reproduce:
 	python3 thesis/gen-appendix-d.py map > thesis/appendix-d-map.md
 	python3 thesis/gen-appendix-d.py api > thesis/appendix-d-api.md

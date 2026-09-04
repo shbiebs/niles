@@ -8,4 +8,5 @@ authors.workspace = true
 [dependencies]
 conservation-suite = { path = "../conservation-suite" }
 nilestream-server = { path = "../nilestream-server" }
+niles-ir = { path = "../niles-ir" }
 proto-engine = { path = "../proto-engine" }

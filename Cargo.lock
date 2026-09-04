@@ -7,6 +7,7 @@ name = "bank-bench"
 version = "0.1.0"
 dependencies = [
  "conservation-suite",
+ "niles-ir",
  "nilestream-server",
  "proto-engine",
 ]

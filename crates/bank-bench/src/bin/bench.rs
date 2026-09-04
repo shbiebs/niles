@@ -450,6 +450,30 @@ fn run(args: &Args) -> i32 {
     };
     let _ = bound;
 
+    // **The device's ceiling, and how much it moved.** The `durable` row is an `fsync` rate
+    // by construction, so it is a measurement of the storage as much as of the engine. This
+    // container's device has ranged 7,794 to 12,761 commits per second across probes taken
+    // seconds apart, which is more movement than any engine change this cycle produced — so
+    // the ceiling is measured here and published beside the row, and each target's rate is
+    // reported as a fraction of it. That fraction is the part that is about the engine.
+    let ceiling = std::env::var("BENCH_FSYNC_DIR")
+        .ok()
+        .or_else(|| pg.data_directory())
+        .and_then(|d| bank_bench::storage::ceiling(&d, 7, 200).ok());
+    if let Some(c) = &ceiling {
+        eprintln!(
+            "  device: {:.0} durable commits/s median over {} probes, spread {:.2}x{}",
+            c.median,
+            c.probes,
+            c.spread(),
+            if c.steady() {
+                ""
+            } else {
+                " — NOT STEADY, absolute durable rates are the device's and not the engine's"
+            }
+        );
+    }
+
     let mut described = false;
     // The two targets' base sizes, compared once both have been prepared. A ratio between a
     // 20,000-row table and a 40,000-posting ledger is not a ratio, and nothing said so.
@@ -585,7 +609,7 @@ fn run(args: &Args) -> i32 {
 
     let _ = pg.teardown();
     if !args.scaling_only {
-        if let Err(e) = write_all(args, &samples, &config) {
+        if let Err(e) = write_all(args, &samples, &config, ceiling) {
             eprintln!("bench: writing results failed: {e}");
             return 6;
         }
@@ -1009,6 +1033,7 @@ fn write_all(
     args: &Args,
     samples: &[Sample],
     config: &[(String, Vec<(String, String)>)],
+    ceiling: Option<bank_bench::storage::Ceiling>,
 ) -> std::io::Result<()> {
     std::fs::create_dir_all(&args.out)?;
     // One file per contract workload, and one for the per-statement rows: a workload column
@@ -1029,7 +1054,7 @@ fn write_all(
         }
     }
 
-    let doc = document(samples, config, args);
+    let doc = document(samples, config, args, ceiling);
     let where_to = bank_bench::publish::destinations(std::path::Path::new(&args.out), args.publish);
     for path in &where_to {
         std::fs::write(path, &doc)?;
@@ -1051,7 +1076,12 @@ fn write_all(
     Ok(())
 }
 
-fn document(samples: &[Sample], config: &[(String, Vec<(String, String)>)], args: &Args) -> String {
+fn document(
+    samples: &[Sample],
+    config: &[(String, Vec<(String, String)>)],
+    args: &Args,
+    ceiling: Option<bank_bench::storage::Ceiling>,
+) -> String {
     let gaps: BTreeMap<String, String> = ["oltp", "analytical", "point", "durable"]
         .iter()
         .filter_map(|w| nilestream_gap(w).map(|r| (w.to_string(), r)))
@@ -1073,6 +1103,55 @@ fn document(samples: &[Sample], config: &[(String, Vec<(String, String)>)], args
     s.push_str(&render::spread_table(samples));
     s.push('\n');
     s.push_str(&render::statement_table(samples));
+    // **The durable row is an fsync rate, so the device belongs beside it.**
+    if let Some(c) = ceiling {
+        s.push_str("\n### The `durable` row is an `fsync` rate, so here is the device\n\n");
+        s.push_str(&format!(
+            "The device was probed {} times across this run: **{:.0}** durable commits per \
+             second per connection at the median, MAD {:.0}, lowest {:.0}, highest {:.0} — a \
+             spread of **{:.2}x**.{}\n\n",
+            c.probes,
+            c.median,
+            c.mad,
+            c.lowest,
+            c.highest,
+            c.spread(),
+            if c.steady() {
+                " The device held still, so the absolute rates below mean what they say."
+            } else {
+                " **The device did not hold still.** An absolute durable rate measured \
+                 against storage that moves this much is a number about the storage, and a \
+                 movement in it between sessions is not evidence about the engine. The \
+                 fraction of the ceiling is the part that is."
+            }
+        ));
+        s.push_str(
+            "| Target | Durable commits/s | Fraction of the device ceiling |\n|---|--:|--:|\n",
+        );
+        for target in ["postgres", "nilestream"] {
+            let rows: Vec<&Sample> = samples
+                .iter()
+                .filter(|x| x.workload == "durable" && x.target == target && x.not_run.is_none())
+                .collect();
+            if rows.is_empty() {
+                continue;
+            }
+            let mut v: Vec<f64> = rows.iter().map(|x| x.ops_per_second()).collect();
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let med = v[v.len() / 2];
+            s.push_str(&format!(
+                "| {target} | {med:.0} | {:.0}% |\n",
+                c.efficiency(med) * 100.0
+            ));
+        }
+        s.push_str(
+            "\nA fraction is machine-independent in a way a rate is not: \"this engine gets \
+             *n*% of the `fsync`s its storage can deliver\" survives being run somewhere \
+             else, and is the claim a durability comparison is actually making. Both targets \
+             are measured against the **same** ceiling in the **same** session, and the runs \
+             are interleaved, so whatever the device is doing it is doing to both.\n",
+        );
+    }
     s.push_str("\n## How it was run\n\n");
     s.push_str(&format!(
         "* Accounts: {}\n* Operations per run: {}\n* Runs per workload: {} (medians reported)\n\

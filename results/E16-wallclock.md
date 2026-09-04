@@ -6,23 +6,23 @@
 
 | Workload | Contract (SPEC-ENGINE Part 0) | PostgreSQL | Nilestream | Ratio | Verdict |
 |---|---|---|---|---|---|
-| oltp | 5–10× PostgreSQL | 4429 ops/s | 4297 ops/s | 0.97× | **NOT MET** |
-| analytical | 10–12× PostgreSQL | 235.3 ops/s | 441.3 ops/s | 1.88× | **NOT MET** |
-| point | parity with PostgreSQL | 114.5 µs p99 | 104.4 µs p99 | 1.10× | **PARITY** |
-| durable | parity with PostgreSQL | 5398 ops/s | 4228 ops/s | 0.78× | **NOT MET** |
+| oltp | 5–10× PostgreSQL | 4478 ops/s | 4628 ops/s | 1.03× | **NOT MET** |
+| analytical | 10–12× PostgreSQL | 236.0 ops/s | 429.0 ops/s | 1.82× | **NOT MET** |
+| point | parity with PostgreSQL | 128.4 µs p99 | 105.7 µs p99 | 1.22× | **PARITY** |
+| durable | parity with PostgreSQL | 4668 ops/s | 4595 ops/s | 0.98× | **PARITY** |
 
 ### Runs and spread
 
 | Workload | Target | Runs | Median | MAD | MAD as % of median |
 |---|---|---|---|---|---|
-| oltp | postgres | 5 | 4428.6 ops/s | 41.6 | 0.9% |
-| oltp | nilestream | 5 | 4296.6 ops/s | 53.7 | 1.2% |
-| analytical | postgres | 5 | 235.3 ops/s | 2.8 | 1.2% |
-| analytical | nilestream | 5 | 441.3 ops/s | 8.1 | 1.8% |
-| point | postgres | 5 | 13802.8 ops/s | 163.3 | 1.2% |
-| point | nilestream | 5 | 19939.2 ops/s | 493.9 | 2.5% |
-| durable | postgres | 5 | 5397.5 ops/s | 157.0 | 2.9% |
-| durable | nilestream | 5 | 4228.5 ops/s | 319.5 | 7.6% |
+| oltp | postgres | 5 | 4478.0 ops/s | 392.4 | 8.8% |
+| oltp | nilestream | 5 | 4627.6 ops/s | 330.2 | 7.1% |
+| analytical | postgres | 5 | 236.0 ops/s | 1.9 | 0.8% |
+| analytical | nilestream | 5 | 429.0 ops/s | 2.3 | 0.5% |
+| point | postgres | 5 | 13268.2 ops/s | 404.8 | 3.1% |
+| point | nilestream | 5 | 19887.3 ops/s | 539.5 | 2.7% |
+| durable | postgres | 5 | 4668.0 ops/s | 347.5 | 7.4% |
+| durable | nilestream | 5 | 4595.5 ops/s | 349.0 | 7.6% |
 
 ### The analytical workload, statement by statement
 
@@ -30,17 +30,28 @@ Median of the per-run medians, with the median absolute deviation beside it. The
 
 | Statement | In the ratio | PostgreSQL | Nilestream | Nilestream speed ÷ PostgreSQL |
 |---|---|---|---|---|
-| `count_star` | no | 0.96 ± 0.02 ms | — | — |
-| `group_by_cur` | common | 2.95 ± 0.06 ms | 0.65 ± 0.02 ms | 4.52× |
-| `group_by_acct` | common | 6.45 ± 0.37 ms | 4.07 ± 0.03 ms | 1.58× |
-| `top_ten_by_sum` | common | 5.69 ± 0.17 ms | 3.22 ± 0.05 ms | 1.77× |
-| `count_distinct_acct` | no | 3.09 ± 0.09 ms | — | — |
-| `sum_negative` | common | 1.66 ± 0.03 ms | 0.73 ± 0.07 ms | 2.28× |
+| `count_star` | no | 0.93 ± 0.02 ms | — | — |
+| `group_by_cur` | common | 2.97 ± 0.01 ms | 0.66 ± 0.06 ms | 4.53× |
+| `group_by_acct` | common | 6.31 ± 0.03 ms | 4.14 ± 0.03 ms | 1.52× |
+| `top_ten_by_sum` | common | 5.56 ± 0.08 ms | 3.26 ± 0.04 ms | 1.70× |
+| `count_distinct_acct` | no | 2.94 ± 0.04 ms | — | — |
+| `sum_negative` | common | 1.57 ± 0.02 ms | 0.66 ± 0.04 ms | 2.39× |
 
 **Coverage.** 2 of 6 statements are outside Nilestream's lowered fragment. They are measured on PostgreSQL — so their cost is on the record — and excluded from the ratio, because a composite that averaged a statement one side cannot express is not a comparison:
 
 * `count_star` — `*` is not a column, and the aggregate lowering resolves its argument as one (NL0502). A `count(*)` needs a form that counts rows rather than values.
 * `count_distinct_acct` — `distinct` inside an aggregate is a second aggregation over a de-duplicated multiset; the fragment has `distinct` as a stage and not as an aggregate modifier.
+
+### The `durable` row is an `fsync` rate, so here is the device
+
+The device was probed 7 times across this run: **9806** durable commits per second per connection at the median, MAD 996, lowest 8089, highest 12813 — a spread of **1.58x**. **The device did not hold still.** An absolute durable rate measured against storage that moves this much is a number about the storage, and a movement in it between sessions is not evidence about the engine. The fraction of the ceiling is the part that is.
+
+| Target | Durable commits/s | Fraction of the device ceiling |
+|---|--:|--:|
+| postgres | 4668 | 48% |
+| nilestream | 4595 | 47% |
+
+A fraction is machine-independent in a way a rate is not: "this engine gets *n*% of the `fsync`s its storage can deliver" survives being run somewhere else, and is the claim a durability comparison is actually making. Both targets are measured against the **same** ceiling in the **same** session, and the runs are interleaved, so whatever the device is doing it is doing to both.
 
 ## How it was run
 

@@ -114,6 +114,84 @@ pub fn fsync_cost(dir: &str, calls: u32) -> std::io::Result<FsyncCost> {
     })
 }
 
+/// **The device's ceiling, probed repeatedly, with its own spread.**
+///
+/// One probe is not a ceiling on shared or virtualised storage. Measured here, repeated
+/// probes seconds apart on this container's device ranged 7,794 to 12,761 durable commits
+/// per second — a factor of 1.6 — while nothing about the database changed. A `durable` row
+/// published as an absolute number against a device that moves like that is a number about
+/// the device, and reading a 10% movement in it as an engine regression is reading noise.
+///
+/// So the harness probes several times and reports the median, the spread, and — the figure
+/// that actually means something — each target's rate as a **fraction of what the device
+/// could do**. That last one is machine-independent: "we get 55% of the fsyncs this storage
+/// can deliver" is a statement about the engine, and it survives being run somewhere else.
+#[derive(Debug, Clone, Copy)]
+pub struct Ceiling {
+    /// Median durable commits per second the device can sustain, per connection.
+    pub median: f64,
+    /// Median absolute deviation of the probes, in the same unit.
+    pub mad: f64,
+    pub lowest: f64,
+    pub highest: f64,
+    pub probes: u32,
+}
+
+impl Ceiling {
+    /// The spread as a multiple: highest over lowest.
+    ///
+    /// The number that says whether an absolute durable figure means anything. Near 1.0 the
+    /// device is steady and a rate can be quoted; at 1.6 it cannot, and only the fraction of
+    /// the ceiling can.
+    pub fn spread(&self) -> f64 {
+        if self.lowest <= 0.0 {
+            return f64::INFINITY;
+        }
+        self.highest / self.lowest
+    }
+
+    /// Whether the device held still enough for an absolute rate to be worth quoting.
+    ///
+    /// A tenth of a spread is generous; the point is to catch the case where it is not
+    /// close, and to say so in the results rather than leave a reader to wonder.
+    pub fn steady(&self) -> bool {
+        self.spread() <= 1.1
+    }
+
+    /// What fraction of the device's ceiling a measured rate achieved.
+    pub fn efficiency(&self, measured_tps: f64) -> f64 {
+        if self.median <= 0.0 {
+            return 0.0;
+        }
+        measured_tps / self.median
+    }
+}
+
+/// Probe the device `probes` times, pausing between, and report the distribution.
+///
+/// Spaced rather than back to back: a burst measures one moment of the device's mood, and the
+/// question is whether its mood changes over the minutes a benchmark takes.
+pub fn ceiling(dir: &str, probes: u32, calls: u32) -> std::io::Result<Ceiling> {
+    let mut v = Vec::with_capacity(probes as usize);
+    for i in 0..probes.max(1) {
+        v.push(fsync_cost(dir, calls)?.ceiling_per_second());
+        if i + 1 < probes {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let median = v[v.len() / 2];
+    let mut d: Vec<f64> = v.iter().map(|x| (x - median).abs()).collect();
+    d.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    Ok(Ceiling {
+        median,
+        mad: d[d.len() / 2],
+        lowest: v[0],
+        highest: v[v.len() - 1],
+        probes: v.len() as u32,
+    })
+}
+
 /// Whether a measured durable-commit rate is consistent with the device it ran on.
 ///
 /// Returns `Ok(())` when the rate sits in the plausible band, and an explanation when it does
@@ -252,5 +330,86 @@ mod tests {
         }
         .device_class()
         .contains("slow"));
+    }
+
+    #[test]
+    fn a_ceiling_reports_the_devices_spread_and_refuses_to_call_a_moving_device_steady() {
+        let steady = Ceiling {
+            median: 10_000.0,
+            mad: 100.0,
+            lowest: 9_800.0,
+            highest: 10_200.0,
+            probes: 7,
+        };
+        assert!((steady.spread() - 1.0408).abs() < 0.001);
+        assert!(steady.steady(), "a 4% spread is a device holding still");
+
+        let moving = Ceiling {
+            median: 10_243.0,
+            mad: 804.0,
+            lowest: 7_794.0,
+            highest: 12_761.0,
+            probes: 7,
+        };
+        assert!((moving.spread() - 1.637).abs() < 0.01);
+        assert!(
+            !moving.steady(),
+            "the container's own storage moved 1.6x between probes seconds apart; a harness \
+             that called that steady would be publishing the device's mood as an engine result"
+        );
+    }
+
+    #[test]
+    fn the_fraction_of_the_ceiling_is_what_survives_a_change_of_machine() {
+        // The same engine, the same efficiency, on two devices a factor of two apart. The
+        // absolute rate says the engine changed; the fraction says it did not. That is the
+        // whole reason the `durable` row is published as a fraction.
+        let fast = Ceiling {
+            median: 20_000.0,
+            mad: 0.0,
+            lowest: 20_000.0,
+            highest: 20_000.0,
+            probes: 3,
+        };
+        let slow = Ceiling {
+            median: 10_000.0,
+            mad: 0.0,
+            lowest: 10_000.0,
+            highest: 10_000.0,
+            probes: 3,
+        };
+        assert!((fast.efficiency(9_400.0) - slow.efficiency(4_700.0)).abs() < 1e-9);
+        assert_eq!(
+            slow.efficiency(0.0),
+            0.0,
+            "and a target that committed nothing has no share of the device"
+        );
+    }
+
+    #[test]
+    fn probing_the_real_device_returns_a_distribution_rather_than_a_point() {
+        // Its own directory: the probe file has a fixed name, and the test above asserts the
+        // shared temp dir holds none of them before it starts.
+        let dir = std::env::temp_dir().join("bench-ceiling-probe-test");
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let path = dir
+            .to_str()
+            .expect("a temp dir with a printable path")
+            .to_string();
+        let c = ceiling(&path, 3, 20).expect("the device is probeable");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(c.probes, 3);
+        assert!(c.median > 0.0, "some rate was measured");
+        assert!(
+            c.lowest <= c.median && c.median <= c.highest,
+            "median {} outside [{}, {}]",
+            c.median,
+            c.lowest,
+            c.highest
+        );
+        assert!(
+            c.spread() >= 1.0,
+            "the spread is a multiple, never below one"
+        );
     }
 }

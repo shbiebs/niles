@@ -874,3 +874,72 @@ fn nothing_unbuilt_is_described_in_the_present_tense() {
         );
     }
 }
+
+/// **The README's test count is the source's test count.**
+///
+/// It was neither. The status line said 201 and the reproduce block said 430, in the same
+/// file, while the workspace held 736 — two figures that disagreed with each other and with
+/// the artifact, in a repository whose stated discipline is that a document which drifts from
+/// the code fails a build rather than being noticed in review.
+///
+/// Counted as `#[test]` functions in the source rather than as lines from `cargo test`,
+/// deliberately. The runner prints 821 because `nilestream-server` is compiled as both a
+/// library and a binary and its module tests are executed under each, so the runner's figure
+/// counts several dozen tests twice. A reader who wants to know how much is tested wants the
+/// number of distinct tests, and a test cannot shell out to the test runner anyway.
+#[test]
+fn the_readme_test_count_is_the_number_of_tests_that_exist() {
+    let root = repo_root();
+    let mut found = 0usize;
+    let mut stack = vec![root.join("crates")];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                if p.file_name().is_some_and(|n| n == "target") {
+                    continue;
+                }
+                stack.push(p);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                let text = std::fs::read_to_string(&p).unwrap_or_default();
+                // Whole lines only. Counting substrings would count this test's own doc
+                // comment and the pattern it searches for, which it did: the first run
+                // reported three tests that do not exist.
+                found += text
+                    .lines()
+                    .filter(|l| l.trim() == concat!("#[", "test]"))
+                    .count();
+            }
+        }
+    }
+
+    let readme = std::fs::read_to_string(root.join("README.md")).expect("README.md");
+    let parts: Vec<&str> = readme.split("test function").collect();
+    let claimed: Vec<usize> = parts[..parts.len().saturating_sub(1)]
+        .iter()
+        .filter_map(|before| {
+            let digits: String = before
+                .chars()
+                .rev()
+                .skip_while(|c| !c.is_ascii_digit())
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            digits.chars().rev().collect::<String>().parse().ok()
+        })
+        .collect();
+
+    assert!(
+        !claimed.is_empty(),
+        "the README no longer states a test count; it stated two, and both were wrong"
+    );
+    for c in &claimed {
+        assert_eq!(
+            *c, found,
+            "the README claims {c} test functions and the workspace has {found}. Update the \
+             README — both places it says so — rather than the assertion."
+        );
+    }
+}

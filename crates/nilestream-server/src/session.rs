@@ -63,14 +63,99 @@ pub trait Serving {
     fn read_stats(&self) -> (u64, u64, u64, u64, usize);
 }
 
-/// A served result: column names and rows of optional text.
+/// A served result: column names and the rows, in whatever form the answer already had them.
 ///
 /// `None` is a SQL null and is kept distinct from a zero all the way to the wire, because
 /// the whole absence argument is worthless if the last layer collapses it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rows {
     pub columns: Vec<String>,
-    pub rows: Vec<Vec<Option<String>>>,
+    pub rows: RowSource,
+}
+
+/// **Where a served answer's rows are, rather than a copy of them.**
+///
+/// This used to be `Vec<Vec<Option<String>>>` and nothing else, so answering a `group by
+/// acct` meant taking a Z-set the fold had just built and rebuilding it: a `Vec` per row and
+/// a `String` per cell, ten thousand times, to hold integers that were already sitting in
+/// memory as integers. With the framing costs above it, that was six allocations per row of
+/// a reply whose content is a handful of numbers.
+///
+/// The evaluated path therefore hands over **the Z-set itself**, and the framer reads it
+/// where it lies. The text form stays for the diagnostic statements — `nilestream_stats`,
+/// the catalog queries — whose cells are genuinely strings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RowSource {
+    /// Rows that are text: the diagnostic and catalog statements.
+    Text(Vec<Vec<Option<String>>>),
+    /// An evaluated answer, with the anchor each row is stamped with.
+    ///
+    /// The anchor is a column of the reply and not of the Z-set, because it is not part of
+    /// what the query denotes: it is the moment the answer is true at, which a dispute needs
+    /// and a `select` did not ask for.
+    Evaluated {
+        z: niles_ir::eval::ZSet,
+        anchor: u64,
+    },
+}
+
+impl Rows {
+    /// How many rows a client will receive — the number `CommandComplete` reports.
+    ///
+    /// A Z-set weight above one is a row that appears that many times, so this is a sum of
+    /// weights and not a count of entries. Collapsing them would be a `distinct` nobody
+    /// wrote.
+    pub fn len(&self) -> usize {
+        match &self.rows {
+            RowSource::Text(r) => r.len(),
+            RowSource::Evaluated { z, .. } => {
+                z.values().filter(|w| **w > 0).map(|w| *w as usize).sum()
+            }
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The rows as text, the way a client decodes them.
+    ///
+    /// For tests and for the in-process callers that want to compare answers rather than
+    /// bytes. Deliberately not what the wire path uses: rendering here would put back exactly
+    /// the per-cell allocations this type exists to avoid.
+    pub fn text(&self) -> Vec<Vec<Option<String>>> {
+        match &self.rows {
+            RowSource::Text(r) => r.clone(),
+            RowSource::Evaluated { z, anchor } => {
+                let mut out = Vec::new();
+                for (r, w) in z {
+                    if *w <= 0 {
+                        continue;
+                    }
+                    for _ in 0..*w {
+                        let mut cells: Vec<Option<String>> = r
+                            .iter()
+                            .map(|v| match v {
+                                niles_ir::value::Value::Null => None,
+                                niles_ir::value::Value::Int(i) => Some(i.to_string()),
+                            })
+                            .collect();
+                        cells.push(Some(anchor.to_string()));
+                        out.push(cells);
+                    }
+                }
+                out
+            }
+        }
+    }
+
+    /// A text answer, for the diagnostic statements and the test doubles.
+    pub fn text_rows(columns: Vec<String>, rows: Vec<Vec<Option<String>>>) -> Rows {
+        Rows {
+            columns,
+            rows: RowSource::Text(rows),
+        }
+    }
 }
 
 /// Why a query or an append could not be served.
@@ -560,7 +645,7 @@ impl Session {
             rows.columns.push("anchor".into());
         }
 
-        let mut out = vec![Backend::RowDescription(
+        let description = Backend::RowDescription(
             rows.columns
                 .iter()
                 .map(|c| {
@@ -573,13 +658,61 @@ impl Session {
                     }
                 })
                 .collect(),
-        )];
-        let n = rows.rows.len();
-        for r in rows.rows {
-            out.push(Backend::DataRow(r));
-        }
-        out.push(Backend::CommandComplete(format!("SELECT {n}")));
-        out
+        );
+        let n = rows.len();
+
+        // **The rows are framed once, into one buffer.**
+        //
+        // The description and the completion stay ordinary messages either side of it: an
+        // `Execute` filters the description out because the client already has it from
+        // `Describe`, and a reply that fused the three would break that and be harder to read
+        // in a capture. What is removed is the per-row cost — a `Vec` for the row, a `String`
+        // per cell, and `encode`'s two vectors per message — for a reply whose content is
+        // integers that were already integers.
+        let framed = match &rows.rows {
+            RowSource::Evaluated { z, anchor } => {
+                use niles_ir::value::Value;
+                // Two integers of body per cell is a generous estimate that is wrong in the
+                // cheap direction: the buffer grows a few times at most instead of once per
+                // row.
+                let width = rows.columns.len();
+                let mut buf = Vec::with_capacity(z.len() * (7 + width * 12) + 32);
+                let anchor = *anchor as i128;
+                for (r, w) in z {
+                    if *w <= 0 {
+                        continue;
+                    }
+                    // A Z-set weight above one is a row that appears more than once, and a
+                    // client asking for rows should be given that many. Silently collapsing
+                    // them would be a `distinct` nobody wrote.
+                    for _ in 0..*w {
+                        pg_wire::put_data_row(
+                            &mut buf,
+                            r.iter()
+                                .map(|v| match v {
+                                    Value::Null => None,
+                                    Value::Int(i) => Some(*i),
+                                })
+                                .chain(std::iter::once(Some(anchor))),
+                        );
+                    }
+                }
+                Backend::Raw(buf)
+            }
+            // The diagnostic statements: a handful of rows whose cells are text.
+            RowSource::Text(text) => {
+                let mut buf = Vec::new();
+                for r in text {
+                    pg_wire::encode_into(&mut buf, &Backend::DataRow(r.clone()));
+                }
+                Backend::Raw(buf)
+            }
+        };
+        vec![
+            description,
+            framed,
+            Backend::CommandComplete(format!("SELECT {n}")),
+        ]
     }
 
     /// Serve one extended-protocol message.
@@ -923,7 +1056,7 @@ schema bank {
                     rows.push(cells);
                 }
             }
-            Ok(Rows { columns, rows })
+            Ok(Rows::text_rows(columns, rows))
         }
         fn append(
             &mut self,
@@ -996,13 +1129,15 @@ schema bank {
     }
 
     /// The data rows in a reply.
+    /// The rows a client would decode from a reply.
+    ///
+    /// Through `pg_wire::decoded_rows` rather than by matching on `Backend::DataRow`,
+    /// because a served answer's rows are framed once into a `Backend::Raw` buffer and a
+    /// diagnostic statement's are not. A test that matched on the representation would be
+    /// asserting which code path ran; this asserts what reaches the client, which is what
+    /// the test is about.
     fn rows_of(out: &[Backend]) -> Vec<Vec<Option<String>>> {
-        out.iter()
-            .filter_map(|m| match m {
-                Backend::DataRow(r) => Some(r.clone()),
-                _ => None,
-            })
-            .collect()
+        pg_wire::decoded_rows(out)
     }
 
     #[test]
@@ -1015,7 +1150,7 @@ schema bank {
             &mut e,
         );
         assert!(matches!(out[0], Backend::RowDescription(_)), "{out:?}");
-        assert!(out.iter().any(|m| matches!(m, Backend::DataRow(_))));
+        assert!(!pg_wire::decoded_rows(&out).is_empty());
         assert!(matches!(out.last(), Some(Backend::ReadyForQuery(b'I'))));
     }
 
@@ -1078,13 +1213,7 @@ schema bank {
         // The distinction the old test was defending is real and is enforced one layer
         // down, where it belongs: `RevEngine::read_point` returns `Option`, and
         // `a_key_the_base_has_never_seen_has_no_value` holds it.
-        let rows: Vec<&Vec<Option<String>>> = out
-            .iter()
-            .filter_map(|m| match m {
-                Backend::DataRow(r) => Some(r),
-                _ => None,
-            })
-            .collect();
+        let rows = pg_wire::decoded_rows(&out);
         assert!(
             rows.is_empty(),
             "an account with no postings forms no group, so there is no row to be null: {out:?}"
@@ -1112,10 +1241,7 @@ schema bank {
             fields[2].name, "anchor",
             "the anchor is a column, not a footnote"
         );
-        let row = out.iter().find_map(|m| match m {
-            Backend::DataRow(c) => Some(c.clone()),
-            _ => None,
-        });
+        let row = pg_wire::decoded_rows(&out).into_iter().next();
         assert_eq!(row.unwrap()[2], Some("4200".into()));
     }
 
@@ -1149,13 +1275,7 @@ schema bank {
             Frontend::Query("select acct, sum(amt) from postings group by acct".into()),
             &mut e,
         );
-        let rows: Vec<&Vec<Option<String>>> = out
-            .iter()
-            .filter_map(|m| match m {
-                Backend::DataRow(r) => Some(r),
-                _ => None,
-            })
-            .collect();
+        let rows = pg_wire::decoded_rows(&out);
         assert_eq!(rows.len(), 2, "both accounts: {out:?}");
         assert!(
             !out.iter()
@@ -1212,8 +1332,9 @@ schema bank {
         exec.extend_from_slice(&0u32.to_be_bytes());
         let out = s.handle(Frontend::Extended(b'E', exec), &mut e);
         assert!(
-            out.iter()
-                .any(|m| matches!(m, Backend::DataRow(r) if r[1] == Some("85500".into()))),
+            pg_wire::decoded_rows(&out)
+                .iter()
+                .any(|r| r[1] == Some("85500".into())),
             "{out:?}"
         );
         assert!(
@@ -1255,7 +1376,7 @@ schema bank {
         exec.extend_from_slice(&0u32.to_be_bytes());
         let out = s.handle(Frontend::Extended(b'E', exec), &mut e);
         assert!(
-            out.iter().any(|m| matches!(m, Backend::DataRow(_))),
+            !pg_wire::decoded_rows(&out).is_empty(),
             "a plan whose schema epoch moved is recompiled, not refused: {out:?}"
         );
     }
@@ -1400,7 +1521,7 @@ schema bank {
                 "`{sql}` must be refused on the wire with {code}, got {out:?}"
             );
             assert!(
-                !out.iter().any(|m| matches!(m, Backend::DataRow(_))),
+                pg_wire::decoded_rows(&out).is_empty(),
                 "`{sql}` must serve no row at all"
             );
         }
@@ -1445,14 +1566,7 @@ schema bank {
         // circuit the compiler had just verified was dropped on the floor. Two different
         // questions about account 1001 came back with the same number.
         let (mut s, mut e) = (session(), engine());
-        let rows = |out: &[Backend]| -> Vec<Vec<Option<String>>> {
-            out.iter()
-                .filter_map(|m| match m {
-                    Backend::DataRow(r) => Some(r.clone()),
-                    _ => None,
-                })
-                .collect()
-        };
+        let rows = |out: &[Backend]| -> Vec<Vec<Option<String>>> { pg_wire::decoded_rows(out) };
         let sum = s.handle(
             Frontend::Query(
                 "select acct, sum(amt) from postings where acct = 1001 group by acct".into(),
@@ -1484,13 +1598,7 @@ schema bank {
             ),
             &mut e,
         );
-        let rows: Vec<&Vec<Option<String>>> = out
-            .iter()
-            .filter_map(|m| match m {
-                Backend::DataRow(r) => Some(r),
-                _ => None,
-            })
-            .collect();
+        let rows = pg_wire::decoded_rows(&out);
         assert_eq!(rows.len(), 1, "{out:?}");
         assert_eq!(rows[0][0], Some("2002".into()));
         assert_eq!(rows[0][1], Some("12500".into()));
@@ -1518,8 +1626,9 @@ schema bank {
             &mut e,
         );
         assert!(
-            read.iter()
-                .any(|m| matches!(m, Backend::DataRow(r) if r[1] == Some("700".into()))),
+            pg_wire::decoded_rows(&read)
+                .iter()
+                .any(|r| r[1] == Some("700".into())),
             "{read:?}"
         );
     }

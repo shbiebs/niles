@@ -201,12 +201,24 @@ pub fn budget(scenario: &str) -> Option<f64> {
         // 75,046 allocations per query, all of it O(groups) and none of it O(base). The
         // 10,001 that remain per group are the output rows themselves, which are what the
         // `ZSet` type is; taking those off the served path is T-05's job, not this one's.
-        "served_group_by_cur" => 28.0,
-        "served_group_by_acct" => 80_000.0,
-        "served_sum_negative" => 26.0,
+        //
+        // **T-05 took the reply off the heap.** An answer was rendered into
+        // `Vec<Vec<Option<String>>>` and then framed message by message: a `Vec` for the row,
+        // a `String` per cell, and two more vectors inside `encode` — six allocations per row
+        // to send integers that were already integers. The Z-set is now handed to the framer
+        // where it lies and written into one buffer with an integer formatter, and the
+        // aggregate that *is* the output is no longer deep-cloned through the reference
+        // evaluator's `Cow` boundary. 95,035 → 12,602.
+        //
+        // What is left is the Z-set itself — one row vector per group, which is what the
+        // type is — plus the tree that holds it. Below that needs a different `ZSet`.
+        "served_group_by_cur" => 15.0,
+        "served_group_by_acct" => 14_000.0,
+        "served_sum_negative" => 14.0,
         // A served point read goes through the anchor index, so its cost is the account's
-        // own postings and the reply — not the base.
-        "served_point" => 22.0,
+        // own postings and the reply — not the base. The plan is borrowed from the circuit
+        // rather than cloned out of it, which was four of these on its own.
+        "served_point" => 13.0,
         // The REV runtime's hit path: the key is cloned into the recency map, and the answer
         // is a `Copy` struct.
         "rev_read_hit" => 2.2,

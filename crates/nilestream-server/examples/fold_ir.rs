@@ -56,21 +56,32 @@ fn main() {
         EvictionPolicy::Lru,
     );
     let anchor = e.frontier();
-    // Once to warm whatever the allocator and the page tables need, then the timed one. The
-    // wall figure is an advisory — the gate asserts allocations, which are deterministic —
-    // but an in-process time is what says whether an instruction count moved anything a
-    // client would feel.
-    let _ = e.query(&lowered.circuit, "__wire_result", anchor);
-    let at = std::time::Instant::now();
-    let rows = e
-        .query(&lowered.circuit, "__wire_result", anchor)
-        .expect("serves");
-    let took = at.elapsed();
+    // **Exactly `repeat` queries, and `repeat` is 1 by default.** An instruction count is
+    // only comparable to another instruction count if both cover the same number of queries,
+    // and a warm-up run inside a profiled process doubles the profile silently — which is
+    // the kind of arithmetic error that turns a documented figure into a wrong one. Pass a
+    // third argument to repeat, for a wall-clock reading that is not the first query of a
+    // process; the reported time is always the last one.
+    let repeat: u32 = std::env::args()
+        .nth(3)
+        .and_then(|r| r.parse().ok())
+        .unwrap_or(1);
+    let mut rows = None;
+    let mut took = std::time::Duration::ZERO;
+    for _ in 0..repeat.max(1) {
+        let at = std::time::Instant::now();
+        rows = Some(
+            e.query(&lowered.circuit, "__wire_result", anchor)
+                .expect("serves"),
+        );
+        took = at.elapsed();
+    }
+    let rows = rows.expect("at least one query");
     // Printed so the optimiser cannot delete the query, and so a reader can see the profile
     // covered the shape they think it did.
     println!(
         "{} rows, {} columns, {} accounts x {rounds} rounds, {:.2} ms in process",
-        rows.rows.len(),
+        rows.len(),
         rows.columns.len(),
         ACCOUNTS,
         took.as_secs_f64() * 1000.0

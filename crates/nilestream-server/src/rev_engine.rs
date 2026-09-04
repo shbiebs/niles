@@ -319,16 +319,32 @@ impl crate::session::Serving for RevEngine {
                 });
                 self.served_rows += scanned;
                 let (folded, w) = folder.finish();
-                let mut given = std::collections::BTreeMap::new();
-                given.insert(p.node, folded);
-                let (z, w2) = niles_ir::eval::try_run_with(
-                    circuit,
-                    output,
-                    &std::collections::BTreeMap::new(),
-                    &given,
-                )
-                .map_err(|e| crate::session::ServeError::Eval(e.to_string()))?;
-                (z, w + w2)
+                // **When the aggregate *is* the output, the fold has already answered.**
+                //
+                // Handing it to the reference evaluator as a precomputed node and asking for
+                // the output cost a full deep clone of the Z-set — ten thousand row vectors
+                // and a tree rebuilt — because `try_run_node_with` returns a `Cow` and
+                // `into_owned` at its boundary copies a borrowed one. That is the right
+                // shape for the general case and pure waste for the common one, which is a
+                // plain `group by` with nothing above it.
+                //
+                // Where something *is* above it — an `order by`, a `limit` — the reference
+                // still evaluates it from the folded value, so those operators keep exactly
+                // one semantics.
+                if circuit.outputs.get(output) == Some(&p.node) {
+                    (folded, w)
+                } else {
+                    let mut given = std::collections::BTreeMap::new();
+                    given.insert(p.node, folded);
+                    let (z, w2) = niles_ir::eval::try_run_with(
+                        circuit,
+                        output,
+                        &std::collections::BTreeMap::new(),
+                        &given,
+                    )
+                    .map_err(|e| crate::session::ServeError::Eval(e.to_string()))?;
+                    (z, w + w2)
+                }
             }
             // The materialising path, still here and still correct: it is what answers every
             // shape outside the fragment, and it is the oracle the fast path is tested
@@ -364,27 +380,15 @@ impl crate::session::Serving for RevEngine {
             .unwrap_or_else(|| z.keys().next().map(|r| r.len()).unwrap_or(0));
         let mut columns: Vec<String> = (0..width).map(|i| format!("c{i}")).collect();
         columns.push("anchor".into());
-        let mut rows = Vec::new();
-        for (r, w) in &z {
-            if *w <= 0 {
-                continue;
-            }
-            // A Z-set weight above one is a row that appears more than once, and a client
-            // asking for rows should be given that many. Silently collapsing them would be
-            // a `distinct` nobody wrote.
-            for _ in 0..*w {
-                let mut cells: Vec<Option<String>> = r
-                    .iter()
-                    .map(|v| match v {
-                        niles_ir::value::Value::Null => None,
-                        niles_ir::value::Value::Int(i) => Some(i.to_string()),
-                    })
-                    .collect();
-                cells.push(Some(anchor.to_string()));
-                rows.push(cells);
-            }
-        }
-        Ok(crate::session::Rows { columns, rows })
+        // **The Z-set is handed over, not copied out.** Rendering it here meant a `Vec` per
+        // row and a `String` per cell — ten thousand rows rebuilt out of integers that were
+        // already integers, immediately before the wire layer parsed them back. The framer
+        // reads them where they lie; `Rows::text` is still there for a caller that wants the
+        // text form, and the tests use it.
+        Ok(crate::session::Rows {
+            columns,
+            rows: crate::session::RowSource::Evaluated { z, anchor },
+        })
     }
 
     fn append(&mut self, rows: Vec<Row>, txn_id: &str) -> Result<u64, crate::session::ServeError> {
@@ -556,19 +560,27 @@ impl RevEngine {
         {
             return Some(crate::session::Rows {
                 columns,
-                rows: Vec::new(),
+                rows: crate::session::RowSource::Evaluated {
+                    z: niles_ir::eval::ZSet::new(),
+                    anchor,
+                },
             });
         }
 
-        let mut cells = vec![Some(acct.to_string())];
+        // The same shape the fold would have produced, so the two paths are
+        // indistinguishable to everything above them — including the framer, which appends
+        // the anchor itself rather than being handed it as a cell.
+        use niles_ir::value::Value;
+        let mut row = vec![Value::Int(acct as i128)];
         if with_currency {
-            cells.push(Some(cur.to_string()));
+            row.push(Value::Int(cur as i128));
         }
-        cells.push(Some(answered.value.to_string()));
-        cells.push(Some(anchor.to_string()));
+        row.push(Value::Int(answered.value));
+        let mut z = niles_ir::eval::ZSet::new();
+        z.insert(row, 1);
         Some(crate::session::Rows {
             columns,
-            rows: vec![cells],
+            rows: crate::session::RowSource::Evaluated { z, anchor },
         })
     }
 
@@ -904,7 +916,7 @@ mod tests {
             let (oracle, _) = niles_ir::eval::try_run(&lowered.circuit, "__wire_result", &sources)
                 .expect("the reference answers");
             assert_eq!(
-                by_fold.rows,
+                by_fold.text(),
                 rendered(&oracle, anchor),
                 "`{sql}`: the fold and the reference evaluator denote different things"
             );
@@ -930,7 +942,7 @@ mod tests {
             let sources = e.base_at(anchor);
             let (oracle, _) = niles_ir::eval::try_run(&lowered.circuit, "__wire_result", &sources)
                 .expect("the reference answers");
-            assert_eq!(served.rows, rendered(&oracle, anchor), "`{sql}`");
+            assert_eq!(served.text(), rendered(&oracle, anchor), "`{sql}`");
         }
     }
 
@@ -987,7 +999,7 @@ mod tests {
             let (oracle, _) = niles_ir::eval::try_run(&lowered.circuit, "__wire_result", &sources)
                 .expect("the reference answers");
             assert_eq!(
-                by_fold.rows,
+                by_fold.text(),
                 rendered(&oracle, anchor),
                 "`{sql}`: the scalar-key fold and the reference denote different things"
             );
@@ -1034,7 +1046,7 @@ mod tests {
             .query(&lowered.circuit, "__wire_result", anchor)
             .expect("answers");
         assert!(
-            out.rows.is_empty(),
+            out.is_empty(),
             "no row passes the filter, so there is no group and no row: {:?}",
             out.rows
         );
@@ -1050,9 +1062,9 @@ mod tests {
         let sources = e.base_at(anchor);
         let (oracle, _) =
             niles_ir::eval::try_run(&lowered.circuit, "__wire_result", &sources).expect("oracle");
-        assert_eq!(by_fold.rows, rendered(&oracle, anchor));
+        assert_eq!(by_fold.text(), rendered(&oracle, anchor));
         assert_eq!(
-            by_fold.rows,
+            by_fold.text(),
             vec![vec![Some("0".into()), None, Some(anchor.to_string())]],
             "the group is there and its sum is absent, not zero"
         );
@@ -1097,7 +1109,7 @@ mod tests {
         let sources = e.base_at(anchor);
         let (oracle, _) =
             niles_ir::eval::try_run(&hot.circuit, "__wire_result", &sources).expect("oracle");
-        assert_eq!(first.rows, rendered(&oracle, anchor));
+        assert_eq!(first.text(), rendered(&oracle, anchor));
 
         // Sweeping the whole key space against a budget of 50 forces eviction, so the rate
         // is a property of the workload rather than of the wiring.
@@ -1111,7 +1123,7 @@ mod tests {
             let sources = e.base_at(anchor);
             let (oracle, _) =
                 niles_ir::eval::try_run(&c.circuit, "__wire_result", &sources).expect("oracle");
-            assert_eq!(got.rows, rendered(&oracle, anchor), "acct {acct}");
+            assert_eq!(got.text(), rendered(&oracle, anchor), "acct {acct}");
         }
         let (reads, hits, misses, _, resident) = e.read_stats();
         assert_eq!(reads, hits + misses);
@@ -1143,14 +1155,14 @@ mod tests {
             .query(&c.circuit, "__wire_result", anchor)
             .expect("answers");
         assert!(
-            got.rows.is_empty(),
+            got.is_empty(),
             "an account with no postings forms no group: {:?}",
             got.rows
         );
         let sources = e.base_at(anchor);
         let (oracle, _) =
             niles_ir::eval::try_run(&c.circuit, "__wire_result", &sources).expect("oracle");
-        assert_eq!(got.rows, rendered(&oracle, anchor));
+        assert_eq!(got.text(), rendered(&oracle, anchor));
     }
 
     /// A write is visible to the next read, which is what `advance` on the append path buys.
@@ -1163,7 +1175,7 @@ mod tests {
         let before = e
             .query(&c.circuit, "__wire_result", before_anchor)
             .expect("answers");
-        let was: i128 = before.rows[0][1].as_ref().unwrap().parse().unwrap();
+        let was: i128 = before.text()[0][1].as_ref().unwrap().parse().unwrap();
 
         e.append(
             vec![
@@ -1190,7 +1202,7 @@ mod tests {
         let after = e
             .query(&c.circuit, "__wire_result", anchor)
             .expect("answers");
-        let now: i128 = after.rows[0][1].as_ref().unwrap().parse().unwrap();
+        let now: i128 = after.text()[0][1].as_ref().unwrap().parse().unwrap();
         assert_eq!(
             now,
             was - 250,
@@ -1200,7 +1212,7 @@ mod tests {
         let sources = e.base_at(anchor);
         let (oracle, _) =
             niles_ir::eval::try_run(&c.circuit, "__wire_result", &sources).expect("oracle");
-        assert_eq!(after.rows, rendered(&oracle, anchor));
+        assert_eq!(after.text(), rendered(&oracle, anchor));
     }
 
     #[test]
@@ -1261,7 +1273,8 @@ mod tests {
                 })
                 .collect();
             assert_eq!(
-                pushed.rows, from_full,
+                pushed.text(),
+                from_full,
                 "the restricted scan and the full scan must denote the same thing for acct {acct}"
             );
         }
@@ -1497,8 +1510,8 @@ mod tests {
         let without = e
             .query(&empty.circuit, "__wire_result", anchor)
             .expect("serves");
-        assert!(!with_rows.rows.is_empty(), "the control has rows");
-        assert!(without.rows.is_empty(), "and the case has none");
+        assert!(!with_rows.is_empty(), "the control has rows");
+        assert!(without.is_empty(), "and the case has none");
         assert_eq!(
             with_rows.columns.len(),
             without.columns.len(),

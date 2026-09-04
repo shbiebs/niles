@@ -12,10 +12,10 @@ The tool lives outside the workspace. `GlobalAlloc` cannot be implemented withou
 |---|---|--:|--:|--:|--:|--:|--:|--:|
 | `ledger_seeded` | posting | 40000 | 150251 | 3.8 | 21132989 | 528 | 8428139 | 9492956 |
 | `zset_base_at` | row | 40000 | 46665 | 1.2 | 9583856 | 240 | 9583856 | 9583856 |
-| `served_group_by_cur` | query | 3 | 75 | 25.0 | 9141 | 3047 | 0 | 1722 |
-| `served_group_by_acct` | query | 3 | 220608 | 73536.0 | 23768472 | 7922824 | 0 | 3253710 |
-| `served_sum_negative` | query | 3 | 72 | 24.0 | 9159 | 3053 | 0 | 1848 |
-| `served_point` | query | 200 | 4000 | 20.0 | 128800 | 644 | 0 | 524 |
+| `served_group_by_cur` | query | 3 | 39 | 13.0 | 5454 | 1818 | 0 | 1664 |
+| `served_group_by_acct` | query | 3 | 37806 | 12602.0 | 11387166 | 3795722 | 0 | 2841312 |
+| `served_sum_negative` | query | 3 | 36 | 12.0 | 5376 | 1792 | 0 | 1664 |
+| `served_point` | query | 200 | 2400 | 12.0 | 178000 | 890 | 0 | 762 |
 | `rev_read_hit` | read | 1000 | 2000 | 2.0 | 32000 | 32 | 0 | 16 |
 | `append_in_memory` | transaction | 500 | 3500 | 7.0 | 257392 | 515 | 67392 | 67624 |
 
@@ -27,10 +27,10 @@ Allocations per operation, asserted exactly — an allocation count is not a tol
 |---|--:|--:|--:|
 | `ledger_seeded` | 4.2 | 3.8 | 11% |
 | `zset_base_at` | 1.4 | 1.2 | 17% |
-| `served_group_by_cur` | 28.0 | 25.0 | 11% |
-| `served_group_by_acct` | 80000.0 | 73536.0 | 8% |
-| `served_sum_negative` | 26.0 | 24.0 | 8% |
-| `served_point` | 22.0 | 20.0 | 9% |
+| `served_group_by_cur` | 15.0 | 13.0 | 13% |
+| `served_group_by_acct` | 14000.0 | 12602.0 | 10% |
+| `served_sum_negative` | 14.0 | 12.0 | 14% |
+| `served_point` | 13.0 | 12.0 | 8% |
 | `rev_read_hit` | 2.2 | 2.0 | 9% |
 | `append_in_memory` | 7.7 | 7.0 | 9% |
 

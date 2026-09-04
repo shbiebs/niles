@@ -52,26 +52,32 @@ use niles_ir::operator::{Agg, ColIdx, Op, Scalar};
 use niles_ir::value::Value;
 
 /// One stage of the row pipeline, in the order the circuit applies it.
-#[derive(Debug, Clone)]
-enum Step {
-    Filter(Scalar),
-    Map(Vec<Scalar>),
+///
+/// **Borrowed from the circuit rather than cloned out of it.** A plan is built per query and
+/// thrown away at the end of it, and cloning a `Scalar::Binary` clones its two boxed operands:
+/// planning a single-account read cost six allocations, four of them for structures the
+/// circuit was still holding unchanged a stack frame below. The plan cannot outlive the
+/// circuit it describes, and the borrow says so.
+#[derive(Debug, Clone, Copy)]
+enum Step<'c> {
+    Filter(&'c Scalar),
+    Map(&'c [Scalar]),
 }
 
 /// A keyed aggregate that can be answered by one pass over the base.
 #[derive(Debug, Clone)]
-pub struct FoldPlan {
+pub struct FoldPlan<'c> {
     /// The base relation the source names.
-    pub relation: String,
+    pub relation: &'c str,
     /// The aggregate node, whose value this plan computes. The caller hands it to
     /// `eval::try_run_with` so the rest of the circuit is evaluated by the reference.
     pub node: NodeId,
-    steps: Vec<Step>,
-    group_key: Vec<ColIdx>,
-    aggs: Vec<(Agg, Scalar)>,
+    steps: Vec<Step<'c>>,
+    group_key: &'c [ColIdx],
+    aggs: &'c [(Agg, Scalar)],
 }
 
-impl FoldPlan {
+impl FoldPlan<'_> {
     /// Columns in the output: the group key, then one per aggregate.
     pub fn width(&self) -> usize {
         self.group_key.len() + self.aggs.len()
@@ -79,12 +85,12 @@ impl FoldPlan {
 
     /// The columns the aggregate groups by, in output order.
     pub fn group_key(&self) -> &[ColIdx] {
-        &self.group_key
+        self.group_key
     }
 
     /// The aggregates, in output order.
     pub fn aggs(&self) -> &[(Agg, Scalar)] {
-        &self.aggs
+        self.aggs
     }
 
     /// Whether the chain from the base is filters and nothing else.
@@ -103,7 +109,7 @@ impl FoldPlan {
 /// Conservative by construction. Anything unrecognised — a join, a fixpoint, a second
 /// source, an aggregate this cannot fold — returns `None`, and the caller materialises. A
 /// planner that guessed would be trading a wrong answer for a fast one.
-pub fn plan(c: &Circuit, output: &str) -> Option<FoldPlan> {
+pub fn plan<'c>(c: &'c Circuit, output: &str) -> Option<FoldPlan<'c>> {
     let out = *c.outputs.get(output)?;
     // Walk down from the output through the stages that sit *above* an aggregate, looking
     // for one. `order by` and `limit` are evaluated by the reference from the folded value,
@@ -122,8 +128,8 @@ pub fn plan(c: &Circuit, output: &str) -> Option<FoldPlan> {
                     relation: steps.0,
                     node: n.id,
                     steps: steps.1,
-                    group_key: group_key.clone(),
-                    aggs: aggs.clone(),
+                    group_key,
+                    aggs,
                 });
             }
             Op::OrderBy { .. } | Op::Limit { .. } | Op::Distinct => id = *n.inputs.first()?,
@@ -133,7 +139,7 @@ pub fn plan(c: &Circuit, output: &str) -> Option<FoldPlan> {
 }
 
 /// The `Source → (Filter | Map)*` chain feeding an aggregate, in application order.
-fn chain(c: &Circuit, from: NodeId) -> Option<(String, Vec<Step>)> {
+fn chain<'c>(c: &'c Circuit, from: NodeId) -> Option<(&'c str, Vec<Step<'c>>)> {
     let mut steps = Vec::new();
     let mut id = from;
     loop {
@@ -148,14 +154,14 @@ fn chain(c: &Circuit, from: NodeId) -> Option<(String, Vec<Step>)> {
                     return None;
                 }
                 steps.reverse();
-                return Some((relation.clone(), steps));
+                return Some((relation.as_str(), steps));
             }
             Op::Filter { predicate } => {
-                steps.push(Step::Filter(predicate.clone()));
+                steps.push(Step::Filter(predicate));
                 id = *n.inputs.first()?;
             }
             Op::Map { exprs } => {
-                steps.push(Step::Map(exprs.clone()));
+                steps.push(Step::Map(exprs.as_slice()));
                 id = *n.inputs.first()?;
             }
             _ => return None,
@@ -182,7 +188,7 @@ struct Acc {
 /// exists to avoid building. Pushed, the scan streams and the fold allocates once per
 /// *group*.
 pub struct Folder<'p> {
-    plan: &'p FoldPlan,
+    plan: &'p FoldPlan<'p>,
     /// Two row buffers for the whole query rather than two allocations per row. A `Map`
     /// writes into the spare and the two swap, so a chain of maps costs nothing.
     cur: Vec<Value>,
@@ -227,7 +233,7 @@ enum Groups {
 }
 
 impl<'p> Folder<'p> {
-    pub fn new(plan: &'p FoldPlan) -> Self {
+    pub fn new(plan: &'p FoldPlan<'p>) -> Self {
         Folder {
             plan,
             cur: Vec::with_capacity(8),
@@ -272,7 +278,7 @@ impl<'p> Folder<'p> {
                 }
                 Step::Map(exprs) => {
                     self.spare.clear();
-                    for e in exprs {
+                    for e in exprs.iter() {
                         self.spare.push(eval::eval_scalar(e, &self.cur));
                     }
                     std::mem::swap(&mut self.cur, &mut self.spare);
@@ -301,7 +307,7 @@ impl<'p> Folder<'p> {
             }
             Groups::Wide(g) => {
                 self.key.clear();
-                for c in &plan.group_key {
+                for c in plan.group_key.iter() {
                     self.key
                         .push(self.cur.get(*c as usize).copied().unwrap_or(Value::Null));
                 }
@@ -407,7 +413,7 @@ impl<'p> Folder<'p> {
 }
 
 /// Fold an iterator of base records. The pulling form, for callers that have one.
-pub fn fold<'r, I>(plan: &FoldPlan, rows: I) -> (ZSet, u64)
+pub fn fold<'r, I>(plan: &FoldPlan<'_>, rows: I) -> (ZSet, u64)
 where
     I: IntoIterator<Item = &'r [Value]>,
 {

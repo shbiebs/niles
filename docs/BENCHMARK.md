@@ -243,7 +243,14 @@ on; a gap attributed to "it is a prototype" is not attributed at all.
    The fold itself is no longer a plausible suspect, which is worth stating because it was
    the obvious one. At 20,000 postings and 10,001 groups it costs 26.5 M instructions and
    4.3 ms in process, down from 97.9 M and 7.3 ms — see the callgrind section above for what
-   moved and why. The rows and the reply are what is left.
+   moved and why.
+
+   Nor is the reply, any longer. T-05 took the whole served path from 51.0 M instructions to
+   27.8 M and from 95,035 allocations to 12,602, and the effect is visible in the contract
+   table: the `analytical` composite went from 0.66× PostgreSQL to **1.05×**, and
+   `top_ten_by_sum` from 0.59× to 1.18×. `group_by_acct` remains the one common statement
+   behind, at 0.67×, and what it is behind on is producing and sending 10,001 rows — the
+   Z-set's own row vectors and the socket, not the aggregation.
 5. **Incremental maintenance, on the served path.** A single account's balance is answered
    by the REV runtime — partial materialisation under a budget, the absence lattice, an
    anchored upquery on a miss — over the circuit the daemon's own schema compiles to. The
@@ -278,7 +285,7 @@ on; a gap attributed to "it is a prototype" is not attributed at all.
 | row | verdict | attributed to |
 |---|---|---|
 | `oltp` | NOT MET (≈1× against a 5–10× contract) | item 6, and the arithmetic below. Not item 3: an `INSERT` does not go through the compiler at all, and not the ledger — the durable row shows the write path at parity with PostgreSQL's, on the same device at the same `fsync` cost. |
-| `analytical` | NOT MET (still, against a 10–12× contract) | no longer item 4 for the keyed shapes: the fold answers `group by cur` at 2.7× PostgreSQL and `sum where` at 1.2×. What remains is the two statements that return 10,001 groups, where the cost is producing and sending the rows, and the protocol floor — a round trip is ~120µs here, so five statements per composite cannot be answered in the 0.25–0.30ms the contract's multiple implies whatever the engine does. See "Is this contract reachable" below. |
+| `analytical` | NOT MET (still, against a 10–12× contract) — though the composite is now **above** 1.0× | no longer item 4 at all. After T-04 and T-05 the composite is faster than PostgreSQL rather than two thirds of it, and `top_ten_by_sum` crossed with it: three of the four common statements are now ahead. What remains is `group_by_acct`, which returns 10,001 rows and is dominated by sending them, and the protocol floor — a round trip is ~120µs here, so five statements per composite cannot be answered in the 0.25–0.30ms the contract's multiple implies whatever the engine does. See "Is this contract reachable" below. |
 
 Neither is attributed to the engine's correctness, and neither should be read as one. What
 they are is a **measured baseline and a characterised gap**, which is the claim §9.14.1 can
@@ -385,6 +392,66 @@ those off the served path is T-05's job.
 
 The 26.5 M is below the 30.9 M a hand-written reference fold needed for the same Z-set from
 the same postings, which is the number this task was aimed at rather than a round figure.
+
+### The reply (T-05)
+
+With the fold down to 26.5 M, the rest of `query` was 24.5 M — and none of it was computing
+anything. The same recipe, at the same 20,000 postings and 10,001 groups, one query per
+process:
+
+| | `RevEngine::query`, inclusive | of which the fold | everything else | in-process |
+|---|--:|--:|--:|--:|
+| after T-04 | 51.0 M Ir | 26.5 M | 24.5 M | 4.3 ms |
+| after T-05 | **27.8 M Ir** | 27.0 M | **0.8 M** | **2.5 ms** |
+
+The 24.5 M was two copies of an answer that already existed.
+
+* The engine rendered the Z-set into `Vec<Vec<Option<String>>>` — a vector per row and a
+  `String` per cell — and the wire layer then parsed those strings back into bytes. Both
+  paths now read the Z-set where it lies: `Rows` carries a `RowSource`, the served answer
+  hands over the Z-set and the anchor, and the framer writes each cell's integer straight into
+  one reply buffer. The text form remains for the diagnostic statements, whose cells are
+  genuinely strings, and as `Rows::text()` for in-process callers and tests.
+* The folded aggregate was handed to the reference evaluator as a precomputed node and asked
+  for the output. `try_run_node_with` returns a `Cow` and `into_owned` at its boundary
+  **deep-clones a borrowed one**, so a plain `group by` with nothing above it copied ten
+  thousand row vectors and rebuilt the tree to arrive at the value it started from. When the
+  aggregate *is* the output, the fold has already answered. Where an `order by` or a `limit`
+  sits above it, the reference still evaluates from the folded value, so those operators keep
+  exactly one semantics.
+
+Framing is the third saving and does not appear in the table above, because the example does
+not go over a socket: a served row was a `DataRow(Vec<Option<String>>)` and `encode` allocated
+a body vector and an output vector for each one. Rows are now framed into a single buffer
+carried as one `Backend::Raw`, with `RowDescription` and `CommandComplete` still ordinary
+messages either side of it — which is what keeps `Execute`'s "do not re-send the description"
+filter working, and keeps a reply legible in a packet capture.
+
+**The bytes did not change**, and that is asserted rather than argued:
+`a_framed_row_is_the_bytes_the_message_encoded` compares the framed form against the encoded
+message for nulls, zero, negatives and `i128::MIN` — the value a formatter that negates before
+converting overflows on — and the `psql` conformance transcript is byte-identical. The
+server's tests decode rows with `pg_wire::decoded_rows` rather than matching on
+`Backend::DataRow`, so they assert what reaches a client rather than which representation
+carried it.
+
+E18 after both tasks:
+
+| Scenario | before T-04 | after T-05 | budget |
+|---|--:|--:|--:|
+| `served_group_by_acct` | 95,035 | **12,602** | 14,000 |
+| `served_point` | 20 | **12** | 13 |
+| `served_group_by_cur` | 25 | **13** | 15 |
+| `served_sum_negative` | 23 | **12** | 14 |
+
+`served_point` is not a reply-size story — it returns one row. Four of its eight came from
+`scan_fold::plan`, which cloned the predicate out of the circuit to describe it; a plan is
+built per query and thrown away at the end of one, so it now borrows, and cloning a
+`Scalar::Binary` no longer clones its two boxed operands.
+
+What is left in `served_group_by_acct` is the Z-set itself: one row vector per group, which is
+what the type is, plus the tree holding it. Going below that needs a different `ZSet`, which is
+not an efficiency task but a change to the reference semantics' representation.
 
 ## Concurrency (E19), and why it is a separate document
 

@@ -148,10 +148,146 @@ pub enum Backend {
     CloseComplete,
     /// `n` — the statement returns no rows, the answer to a `Describe` of one that does not.
     NoData,
+    /// **A run of already-encoded backend messages.**
+    ///
+    /// The served rows of a query arrive here, framed once into one buffer, rather than as
+    /// ten thousand `DataRow(Vec<Option<String>>)` values. The reason is the cost: every one
+    /// of those was a `Vec` for the row, a `String` per cell, a body `Vec` inside `encode`
+    /// and an output `Vec` around it — six allocations per row, for a reply whose content is
+    /// a handful of integers.
+    ///
+    /// Nothing about the bytes changes. `RowDescription` and `CommandComplete` stay ordinary
+    /// messages either side of it, which is what keeps `Execute`'s "do not re-send the
+    /// description" filter working and keeps a reply readable in a packet capture.
+    /// [`decoded_rows`] parses rows back out of one, so a test can assert on what a client
+    /// would see rather than on which representation produced it.
+    Raw(Vec<u8>),
+}
+
+/// Format an `i128` into `out` without allocating a `String` for it.
+///
+/// `i128::to_string` allocates, and a served reply of ten thousand rows with three integer
+/// cells each allocated thirty thousand short strings whose only purpose was to be copied
+/// into a buffer and dropped. The digits are produced into a stack array and copied once.
+fn put_i128(out: &mut Vec<u8>, mut v: i128) {
+    if v == 0 {
+        out.push(b'0');
+        return;
+    }
+    // 39 digits is the widest `i128`, plus a sign.
+    let mut buf = [0u8; 40];
+    let mut i = buf.len();
+    let neg = v < 0;
+    // Accumulate negatively so `i128::MIN` does not overflow on negation.
+    if !neg {
+        v = -v;
+    }
+    while v != 0 {
+        i -= 1;
+        buf[i] = b'0' + (-(v % 10)) as u8;
+        v /= 10;
+    }
+    if neg {
+        i -= 1;
+        buf[i] = b'-';
+    }
+    out.extend_from_slice(&buf[i..]);
+}
+
+/// **Frame one `DataRow` straight into a reply buffer.**
+///
+/// `cells` is the row; `null` cells are written as the -1 length that means SQL NULL, which
+/// is not an empty string and not an evicted hole. The message's length prefix is patched in
+/// after the body is written, so nothing is measured twice and nothing is allocated per row.
+pub fn put_data_row(out: &mut Vec<u8>, cells: impl IntoIterator<Item = Option<i128>>) {
+    out.push(b'D');
+    let len_at = out.len();
+    out.extend_from_slice(&0i32.to_be_bytes());
+    let count_at = out.len();
+    out.extend_from_slice(&0i16.to_be_bytes());
+    let mut n: i16 = 0;
+    for c in cells {
+        n += 1;
+        match c {
+            None => out.extend_from_slice(&(-1i32).to_be_bytes()),
+            Some(v) => {
+                let cell_len_at = out.len();
+                out.extend_from_slice(&0i32.to_be_bytes());
+                let from = out.len();
+                put_i128(out, v);
+                let w = (out.len() - from) as i32;
+                out[cell_len_at..cell_len_at + 4].copy_from_slice(&w.to_be_bytes());
+            }
+        }
+    }
+    out[count_at..count_at + 2].copy_from_slice(&n.to_be_bytes());
+    let body = (out.len() - len_at) as i32;
+    out[len_at..len_at + 4].copy_from_slice(&body.to_be_bytes());
+}
+
+/// The rows a client would decode from a message list, whichever representation carried them.
+///
+/// For tests. A `DataRow` contributes itself; a [`Backend::Raw`] is parsed for the `D` frames
+/// inside it. The point is that a test asserts on what reaches the client, so moving rows
+/// from one representation to the other cannot quietly change what is asserted.
+pub fn decoded_rows(msgs: &[Backend]) -> Vec<Vec<Option<String>>> {
+    let mut out = Vec::new();
+    for m in msgs {
+        match m {
+            Backend::DataRow(r) => out.push(r.clone()),
+            Backend::Raw(b) => {
+                let mut at = 0usize;
+                while at + 5 <= b.len() {
+                    let tag = b[at];
+                    let len =
+                        i32::from_be_bytes([b[at + 1], b[at + 2], b[at + 3], b[at + 4]]) as usize;
+                    let body = &b[at + 5..at + 1 + len];
+                    at += 1 + len;
+                    if tag != b'D' {
+                        continue;
+                    }
+                    let n = i16::from_be_bytes([body[0], body[1]]) as usize;
+                    let mut p = 2usize;
+                    let mut row = Vec::with_capacity(n);
+                    for _ in 0..n {
+                        let w =
+                            i32::from_be_bytes([body[p], body[p + 1], body[p + 2], body[p + 3]]);
+                        p += 4;
+                        if w < 0 {
+                            row.push(None);
+                        } else {
+                            let w = w as usize;
+                            row.push(Some(String::from_utf8_lossy(&body[p..p + w]).into_owned()));
+                            p += w;
+                        }
+                    }
+                    out.push(row);
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Encode one message **into** a caller's buffer.
+///
+/// The buffered form is what a reply of many messages uses: `encode` allocates a body vector
+/// and an output vector per message, which is two allocations for four bytes of
+/// `CommandComplete` and twenty thousand for a ten-thousand-row answer.
+pub fn encode_into(out: &mut Vec<u8>, msg: &Backend) {
+    if let Backend::Raw(b) = msg {
+        out.extend_from_slice(b);
+        return;
+    }
+    out.extend_from_slice(&encode(msg));
 }
 
 pub fn encode(msg: &Backend) -> Vec<u8> {
     let (tag, body) = match msg {
+        // Already framed, length prefixes and all: it is a run of messages rather than one,
+        // so there is no tag to add and no length to compute.
+        Backend::Raw(b) => return b.clone(),
         Backend::AuthenticationOk => (b'R', 0i32.to_be_bytes().to_vec()),
         Backend::ParseComplete => (b'1', Vec::new()),
         Backend::BindComplete => (b'2', Vec::new()),
@@ -651,5 +787,59 @@ mod tests {
         let mut s = Vec::new();
         s.extend_from_slice(&3i32.to_be_bytes());
         assert!(read_startup(&mut Cursor::new(s)).is_err());
+    }
+
+    /// **The framed row is byte-identical to the message it replaced.**
+    ///
+    /// T-05 stopped building a `Backend::DataRow(Vec<Option<String>>)` per served row and
+    /// started writing the frame straight into the reply buffer. That is only a performance
+    /// change if the bytes are the same, and "the same" has to mean every case that differs
+    /// on the wire: a null is a -1 length and not an empty string, a negative number carries
+    /// its sign, zero is one digit, and `i128::MIN` is the value a naive formatter overflows
+    /// on while negating.
+    #[test]
+    fn a_framed_row_is_the_bytes_the_message_encoded() {
+        let cases: Vec<Vec<Option<i128>>> = vec![
+            vec![],
+            vec![None],
+            vec![Some(0)],
+            vec![Some(-1)],
+            vec![Some(1), None, Some(-85_500)],
+            vec![Some(i128::MAX), Some(i128::MIN)],
+            vec![Some(9_999), Some(-9_999), None, Some(0)],
+        ];
+        for cells in cases {
+            let mut framed = Vec::new();
+            put_data_row(&mut framed, cells.iter().copied());
+            let as_message = encode(&Backend::DataRow(
+                cells.iter().map(|c| c.map(|v| v.to_string())).collect(),
+            ));
+            assert_eq!(
+                framed, as_message,
+                "the framed form and the message form disagree for {cells:?}"
+            );
+            // And it decodes back to what went in, so a test asserting on rows is asserting
+            // on the same thing whichever representation carried them.
+            let back = decoded_rows(&[Backend::Raw(framed)]);
+            assert_eq!(
+                back,
+                vec![cells
+                    .iter()
+                    .map(|c| c.map(|v| v.to_string()))
+                    .collect::<Vec<_>>()]
+            );
+        }
+    }
+
+    /// A `Raw` run carrying several rows decodes to all of them, in order.
+    #[test]
+    fn a_reply_buffer_carries_every_row_it_was_given() {
+        let mut buf = Vec::new();
+        for i in 0..5i128 {
+            put_data_row(&mut buf, [Some(i), None, Some(-i)]);
+        }
+        let rows = decoded_rows(&[Backend::Raw(buf)]);
+        assert_eq!(rows.len(), 5);
+        assert_eq!(rows[3], vec![Some("3".into()), None, Some("-3".into())]);
     }
 }

@@ -1,0 +1,7 @@
+# 63_non_key_projection_refused
+# **Refused, where the column used to be dropped.** `n` is neither grouped nor aggregated, so
+# it has one value per row and the result has one row per group: there is no value to report.
+# PostgreSQL says `column "t.n" must appear in the GROUP BY clause or be used in an aggregate
+# function`; this used to emit the two columns the aggregate operator happened to produce and
+# say nothing, so a view's schema was not the schema its author wrote.
+REFUSED NL0517

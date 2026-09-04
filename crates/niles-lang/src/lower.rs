@@ -147,6 +147,55 @@ impl<'a> Lx<'a> {
         self.schemas.get(&id).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
+    /// Resolve a clause's column list against a node's schema, or refuse.
+    ///
+    /// **The one helper `group by`, `order by` and the pipeline's `key_of` all go through.**
+    /// Each of the three used to resolve its own way, and each drifted separately: `order by`
+    /// zipped a name list against its keys and truncated at the first name that did not
+    /// resolve; `group by` `filter_map`ped unresolvable names away and grouped by what was
+    /// left; the pipeline's `key_of` did the same. A clause that quietly groups or orders by
+    /// *fewer columns than it names* answers a different question from the one asked, and does
+    /// it without a diagnostic. One helper, one behaviour: every name resolves or the query is
+    /// refused with the name that failed.
+    fn resolve_columns(
+        &mut self,
+        input: NodeId,
+        exprs: &[Expr],
+        clause: &str,
+    ) -> Option<Vec<ColIdx>> {
+        let mut out = Vec::new();
+        for e in exprs {
+            let mut names = Vec::new();
+            collect_field_names(e, &mut names);
+            if names.is_empty() {
+                self.d.push(
+                    Diagnostic::error("NL0509", format!("this `{clause}` key is not a column"))
+                        .primary(e.span(), "no column can be resolved from this expression")
+                        .note(format!(
+                            "`{clause}` names columns of its input; an arbitrary expression would \
+                         have to be projected first"
+                        )),
+                );
+                return None;
+            }
+            for n in names {
+                let Some(i) = self.col_index(input, &n) else {
+                    self.d.push(
+                        Diagnostic::error("NL0509", format!("`{clause} {n}` names no column"))
+                            .primary(e.span(), "not a column of this stage's input")
+                            .note(format!(
+                                "the columns available here are: {}",
+                                self.schema_of(input).join(", ")
+                            )),
+                    );
+                    return None;
+                };
+                out.push(i);
+            }
+        }
+        Some(out)
+    }
+
     fn col_index(&self, id: NodeId, name: &str) -> Option<ColIdx> {
         self.schema_of(id)
             .iter()
@@ -335,7 +384,7 @@ impl<'a> Lx<'a> {
                 // A `group_by` alone is not an aggregate; it establishes the key, and the
                 // aggregate that follows consumes it. Lowering it to an `Index` keeps the
                 // two-stage surface honest without inventing an aggregate nobody wrote.
-                let key = self.key_of(input, args);
+                let key = self.key_of(input, args, "group_by")?;
                 (Op::Index { key }, in_schema.clone())
             }
             StageKind::Sum
@@ -731,16 +780,23 @@ impl<'a> Lx<'a> {
         }
     }
 
-    /// The column indices a `|r| (r.a, r.b)` closure names.
-    fn key_of(&self, input: NodeId, args: &[Arg]) -> Vec<ColIdx> {
-        let mut names = Vec::new();
-        if let Some(a) = args.first() {
-            collect_field_names(&a.value, &mut names);
-        }
-        names
-            .iter()
-            .filter_map(|n| self.col_index(input, n))
-            .collect()
+    /// The column indices a `|r| (r.a, r.b)` closure names, or a refusal.
+    ///
+    /// The pipeline's half of the same defect: this `filter_map`ped away a name that did not
+    /// resolve, so `t.group_by(|p| (p.acct, p.nope)).sum(…)` grouped by `acct` alone and
+    /// `t.group_by(|p| p.nope)` grouped by *nothing at all* — a global aggregate answering one
+    /// row where the query asked for one per key. Routed through `resolve_columns` so the two
+    /// surfaces refuse identically, which is what "one IR, two surfaces" has to mean about
+    /// failure as well as success.
+    fn key_of(&mut self, input: NodeId, args: &[Arg], clause: &str) -> Option<Vec<ColIdx>> {
+        let Some(a) = args.first() else {
+            self.d.push(
+                Diagnostic::error("NL0509", format!("`{clause}` names no key"))
+                    .primary(Span::default(), "no key expression"),
+            );
+            return None;
+        };
+        self.resolve_columns(input, std::slice::from_ref(&a.value), clause)
     }
 
     /// One scalar. Returns `None` for shapes the IR has no form for; the caller supplies a
@@ -1041,65 +1097,177 @@ impl<'a> Lx<'a> {
         if !s.group_by.is_empty() || has_aggregate {
             agg_input = cur;
             let in_schema = self.schema_of(cur).to_vec();
-            let mut names = Vec::new();
-            for g in &s.group_by {
-                collect_field_names(g, &mut names);
-            }
-            let group_key: Vec<ColIdx> = names
-                .iter()
-                .filter_map(|n| self.col_index(cur, n))
-                .collect();
-            // The aggregate in the projection list.
+
+            // **The `group by` list resolves or the query is refused.**
+            //
+            // This was `names.iter().filter_map(|n| self.col_index(cur, n)).collect()`: a name
+            // that resolved to nothing simply left the list, so `group by nope` produced
+            // `Aggregate { group_key: [] }` — a *global* aggregate — and the server answered
+            // one row where the query asked for one per account, with no diagnostic. It is the
+            // same defect `order by` carried until last cycle, in the sibling clause, sharing
+            // the same helper. Both now go through `resolve_columns`, so the two cannot drift
+            // apart again.
+            let declared_key = self.resolve_columns(cur, &s.group_by, "group by")?;
+
+            // **Every projection item is a `group by` column, a bare aggregate, or refused.**
+            //
+            // The loop below used to look only for aggregate calls and ignore everything else,
+            // so `select acct, cur, sum(amt) … group by acct` dropped `cur` and served two
+            // columns where three were written, and `select acct, sum(amt) * 2 … group by acct`
+            // produced an `Aggregate` node with *no aggregates* and served the key alone. A
+            // projection that silently loses a column is a view whose schema is not the one the
+            // author wrote, which is the §1.1.1 defect one layer out from the data.
+            let mut group_key: Vec<ColIdx> = Vec::new();
+            let mut key_names: Vec<String> = Vec::new();
             let mut aggs = Vec::new();
-            // The name each aggregate column carries in the output schema, in the same order
-            // as `aggs`. An alias when the projection wrote one, so `sum(amt) as total`
-            // produces a column called `total` — which is both what a client should be sent
-            // and what an `order by total` has to be able to resolve against.
             let mut agg_names: Vec<String> = Vec::new();
             for (e, alias) in &s.projections {
-                if let Expr::Call { args, .. } = e {
-                    {
-                        let agg = aggregate_of(e);
-                        if let Some(a) = agg {
-                            agg_names.push(match alias {
-                                Some(n) => n.text.clone(),
-                                None => a.as_str().to_string(),
-                            });
-                            // The SQL surface's copy of the same defect the pipeline
-                            // surface had: `unwrap_or(Scalar::Column(0))` aggregated the
-                            // first column of the input and labelled the result `sum`.
-                            // The two surfaces must lower identically or the generality
-                            // claim is marketing, and that includes how they fail.
-                            let Some(x) = args.first() else {
-                                self.d.push(
-                                    Diagnostic::error(
-                                        "NL0502",
-                                        format!("`{}` takes an argument", a.as_str()),
-                                    )
-                                    .primary(e.span(), "no expression to aggregate"),
-                                );
-                                return None;
-                            };
-                            let Some(v) = self.scalar(cur, &x.value) else {
-                                self.d.push(
-                                    Diagnostic::error(
-                                        "NL0502",
-                                        format!("the expression `{}` aggregates has no lowering", a.as_str()),
-                                    )
-                                    .primary(x.value.span(), "cannot be expressed in the circuit")
-                                    .note("there is no safe default: aggregating the first column instead would report some other quantity under this aggregate's name"),
-                                );
-                                return None;
-                            };
-                            aggs.push((a, v));
-                        }
+                if let Expr::Path(pp) = e {
+                    if pp.last().text == "*" {
+                        self.d.push(
+                            Diagnostic::error(
+                                "NL0517",
+                                "`select *` is not a projection an aggregating query can have",
+                            )
+                            .primary(e.span(), "`*` names every column, and an aggregate produces its own schema")
+                            .note("name the `group by` columns and the aggregates the result should carry"),
+                        );
+                        return None;
                     }
                 }
+                if let Some(a) = aggregate_of(e) {
+                    agg_names.push(match alias {
+                        Some(n) => n.text.clone(),
+                        None => a.as_str().to_string(),
+                    });
+                    // The SQL surface's copy of the same defect the pipeline surface had:
+                    // `unwrap_or(Scalar::Column(0))` aggregated the first column of the input
+                    // and labelled the result `sum`. The two surfaces must lower identically or
+                    // the generality claim is marketing, and that includes how they fail.
+                    let Expr::Call { args, .. } = e else {
+                        unreachable!("aggregate_of matched a call")
+                    };
+                    let Some(x) = args.first() else {
+                        self.d.push(
+                            Diagnostic::error(
+                                "NL0502",
+                                format!("`{}` takes an argument", a.as_str()),
+                            )
+                            .primary(e.span(), "no expression to aggregate"),
+                        );
+                        return None;
+                    };
+                    let Some(v) = self.scalar(cur, &x.value) else {
+                        self.d.push(
+                            Diagnostic::error(
+                                "NL0502",
+                                format!("the expression `{}` aggregates has no lowering", a.as_str()),
+                            )
+                            .primary(x.value.span(), "cannot be expressed in the circuit")
+                            .note("there is no safe default: aggregating the first column instead would report some other quantity under this aggregate's name"),
+                        );
+                        return None;
+                    };
+                    aggs.push((a, v));
+                    continue;
+                }
+                // Not an aggregate, so it must name a column — and the aggregate operator emits
+                // the key columns before the aggregate columns, so a key named *after* an
+                // aggregate cannot be placed where it was written. Refused rather than
+                // reordered: a result whose columns are not in the order the query names them
+                // is a wrong answer that looks right.
+                if !aggs.is_empty() {
+                    self.d.push(
+                        Diagnostic::error(
+                            "NL0517",
+                            "a `group by` column may not be projected after an aggregate",
+                        )
+                        .primary(e.span(), "this column follows an aggregate in the projection")
+                        .note("the aggregate operator emits the grouping columns first, so the projection must name them first: write the `group by` columns, then the aggregates"),
+                    );
+                    return None;
+                }
+                let mut names = Vec::new();
+                collect_field_names(e, &mut names);
+                let one = match names.as_slice() {
+                    [n] if is_column_reference(e) => n.clone(),
+                    _ => {
+                        let (msg, note) = if contains_aggregate(e) {
+                            (
+                                "an expression over an aggregate is not a projection this query can have",
+                                "the fragment projects grouping columns and bare aggregates; `sum(x) * 2` would have to be computed by the reader, and evaluating it as `sum(x)` — which is what this did — reports a different quantity under the same name",
+                            )
+                        } else {
+                            (
+                                "this projection item is neither a `group by` column nor an aggregate",
+                                "an aggregating query's result has one column per grouping column and one per aggregate; anything else has no place in it",
+                            )
+                        };
+                        self.d.push(
+                            Diagnostic::error("NL0517", msg)
+                                .primary(e.span(), "not a grouping column or an aggregate")
+                                .note(note),
+                        );
+                        return None;
+                    }
+                };
+                let Some(i) = self.col_index(cur, &one) else {
+                    self.d.push(
+                        Diagnostic::error("NL0517", format!("`{one}` names no column"))
+                            .primary(e.span(), "not a column of this query's input")
+                            .note(format!(
+                                "the columns available here are: {}",
+                                in_schema.join(", ")
+                            )),
+                    );
+                    return None;
+                };
+                if !declared_key.contains(&i) {
+                    self.d.push(
+                        Diagnostic::error(
+                            "NL0517",
+                            format!("`{one}` is projected but is not in the `group by`"),
+                        )
+                        .primary(e.span(), "this column is not grouped")
+                        .note("a column outside the grouping has one value per row and the result has one row per group, so there is no value to report; add it to the `group by` or aggregate it"),
+                    );
+                    return None;
+                }
+                if group_key.contains(&i) {
+                    self.d.push(
+                        Diagnostic::error("NL0517", format!("`{one}` is projected twice"))
+                            .primary(e.span(), "already projected")
+                            .note("each grouping column appears once in the result"),
+                    );
+                    return None;
+                }
+                group_key.push(i);
+                key_names.push(match alias {
+                    Some(n) => n.text.clone(),
+                    None => one,
+                });
             }
-            let mut out: Vec<String> = group_key
-                .iter()
-                .filter_map(|i| in_schema.get(*i as usize).cloned())
-                .collect();
+            // A grouping column the projection does not name would still be emitted by the
+            // operator — the result would carry a column the query never asked for. Refused,
+            // because a schema nobody wrote is a schema nobody checked.
+            for i in &declared_key {
+                if !group_key.contains(i) {
+                    let name = in_schema
+                        .get(*i as usize)
+                        .cloned()
+                        .unwrap_or_else(|| format!("c{i}"));
+                    self.d.push(
+                        Diagnostic::error(
+                            "NL0517",
+                            format!("`{name}` is grouped but is not projected"),
+                        )
+                        .primary(s.span, "this `group by` column has no place in the result")
+                        .note("the result carries one column per grouping column; select it, or drop it from the `group by`"),
+                    );
+                    return None;
+                }
+            }
+            let mut out: Vec<String> = key_names;
             let key_width = out.len();
             out.extend(agg_names.iter().cloned());
             // Remembered for `order by`, which has to be able to say *which* aggregate a key
@@ -1714,6 +1882,42 @@ fn leaf_name(e: &Expr) -> Option<String> {
         Expr::Field { name, .. } => Some(name.text.clone()),
         Expr::Path(p) => Some(p.last().text.clone()),
         _ => None,
+    }
+}
+
+/// Whether an expression is *only* a column reference — a bare name or a field access.
+///
+/// `collect_field_names` yields names from anywhere inside an expression, which is what an
+/// `order by` key needs and what a projection item must not have: `a + b` and `f(a)` both
+/// yield `a`, and treating either as "the column `a`" is how a projection silently becomes a
+/// different projection.
+fn is_column_reference(e: &Expr) -> bool {
+    matches!(e, Expr::Path(_) | Expr::Field { .. })
+}
+
+/// Whether an aggregate call appears anywhere inside an expression.
+///
+/// Only used to choose between two diagnostics — `sum(x) * 2` deserves to be told that the
+/// fragment has no form for it rather than that it is "not a column" — so the walk covers the
+/// shapes a projection can take and answers `false` for anything else, which costs a less
+/// precise message and never a wrong decision.
+fn contains_aggregate(e: &Expr) -> bool {
+    if aggregate_of(e).is_some() {
+        return true;
+    }
+    match e {
+        Expr::Unary { operand, .. } => contains_aggregate(operand),
+        Expr::Cast { expr, .. } => contains_aggregate(expr),
+        Expr::Binary { lhs, rhs, .. } => contains_aggregate(lhs) || contains_aggregate(rhs),
+        Expr::Index { base, index, .. } => contains_aggregate(base) || contains_aggregate(index),
+        Expr::Field { base, .. } => contains_aggregate(base),
+        Expr::Tuple { elems, .. } | Expr::Array { elems, .. } => {
+            elems.iter().any(contains_aggregate)
+        }
+        Expr::Call { callee, args, .. } => {
+            contains_aggregate(callee) || args.iter().any(|a| contains_aggregate(&a.value))
+        }
+        _ => false,
     }
 }
 

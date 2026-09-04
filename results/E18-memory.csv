@@ -1,5 +1,5 @@
 scenario,unit,operations,allocations,bytes,live_delta,peak_delta,allocations_per_op,bytes_per_op
-ledger_seeded,posting,40000,150242,21132068,8428139,9492956,3.8,528.3
+ledger_seeded,posting,40000,150248,21132371,8428139,9492956,3.8,528.3
 zset_base_at,row,40000,46665,9583856,9583856,9583856,1.2,239.6
 served_group_by_cur,query,3,75,9381,0,1770,25.0,3127.0
 served_group_by_acct,query,3,285105,24420792,0,3619950,95035.0,8140264.0

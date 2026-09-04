@@ -4,7 +4,7 @@
 //! whose intermediate results cannot be inspected is a compiler nobody can review:
 //!
 //! ```text
-//! nilesc check   FILE     lex -> parse -> resolve -> typecheck; report diagnostics
+//! nilesc check   FILE     lex -> parse -> resolve -> typecheck -> lower; report diagnostics
 //! nilesc parse   FILE     the item structure, for debugging the parser
 //! nilesc explain FILE     the lowered circuit, with keys, anchors, rungs and contracts
 //! nilesc upquery FILE V   the reconstruction path for view V, and whether it is anchored
@@ -67,8 +67,21 @@ fn main() -> ExitCode {
 
     match cmd {
         "check" => {
+            // **`check` lowers.** It used to stop after typechecking, so a view whose
+            // `group by` named nothing, whose projection dropped a column, or whose `order by`
+            // key did not resolve was reported `ok` by the command a `make` target and a CI
+            // job run — while `explain` on the same file printed three errors. A checker that
+            // is green on a program the compiler refuses is worse than no checker: it is a
+            // green light nobody can act on. Lowering is 2.6 µs on a view; the cost of not
+            // running it was a whole class of refusal nothing surfaced.
+            let (_lowered, ldiags) = lower::lower_program(&prog, &cat);
+            let lowering_errors = ldiags.error_count();
+            if !ldiags.items.is_empty() {
+                eprint!("{}", ldiags.render(&src, path));
+            }
+            failed |= ldiags.has_errors();
             if failed {
-                eprintln!("nilesc: {} error(s)", diags.error_count());
+                eprintln!("nilesc: {} error(s)", diags.error_count() + lowering_errors);
             } else {
                 println!(
                     "ok: {} relation(s), {} view(s), {} function(s); \

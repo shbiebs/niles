@@ -1,0 +1,1 @@
+t.group_by(|r| r.nope).sum(|r| r.v)

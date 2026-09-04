@@ -59,6 +59,10 @@ Two words of an earlier statement are gone and their loss is the point. **α-equ
 | `LIMIT ⟨non-literal⟩` | NL0504 | A bound the lowering cannot read became "every row". |
 | a scalar subquery in the projection list | NL0508 | |
 | a set operation between different arities | NL0512 | |
+| an expression over an aggregate in the projection list (`sum(v) * 2`) | NL0517 | The projection loop matched only *bare* aggregate calls and ignored the rest, so this lowered to an aggregate node with no aggregates and served the grouping column alone. Refusing costs an expressiveness the fragment never had; the alternative was reporting `sum(v)` under the name `sum(v) * 2`. |
+| a projected column outside the `group by` | NL0517 | PostgreSQL's `must appear in the GROUP BY clause`; here the column was silently dropped from the result. |
+| a `group by` column the projection does not name | NL0517 | The aggregate operator emits every grouping column, so the result would carry a column the query never asked for. |
+| a grouping column projected after an aggregate | NL0517 | The operator emits keys before aggregates, so the column cannot be placed where it was written; reordering it silently would be a wrong answer that looks right. |
 | `SELECT` with no `FROM` | NL0511 | |
 | DDL, DML, TCL, DCL | — | Surface syntax with no circuit; see below. |
 

@@ -3,8 +3,15 @@ schema bank {
     currency eur { scale: 2 }
     currency jpy { scale: 0 }
     table accounts { id: Id<A> primary key, owner: Text @confidential(e2ee) }
+    // `value_date` is declared because the view groups by it and the SQL side's `postings`
+    // has it (`sql/schema.sql:32`). It was missing, so this case's `group_by` named a column
+    // that does not exist: the pipeline surface dropped the unresolvable key, grouped by
+    // *nothing*, and the file's only diagnostic was the anchor warning it is named for —
+    // which arrived for the right reason by accident. The pair claims the same defect written
+    // twice; on this row it was two different defects until now.
     ledger postings { txn: TxnId, acct: Id<A>, cur: Currency, amt: Money,
-        idem: IdemKey window 1.days, conserve per (txn, cur); retain forever; }
+        value_date: Instant, idem: IdemKey window 1.days,
+        conserve per (txn, cur); retain forever; }
     index ix on postings (acct, cur) anchor;
     view v = postings.group_by(|p| p.value_date).sum(|p| p.amt)
         serve { consistency: snapshot, materialize: demand };

@@ -1,0 +1,8 @@
+# 64_group_by_two_keys_ordered
+# The correct multi-key shape, kept beside the three refusals so that tightening the
+# projection rule cannot be mistaken for narrowing the fragment: two grouping columns, both
+# projected, one aggregate after them, ordered by that aggregate and limited. This is the
+# shape `select acct, cur, sum(amt) … group by acct, cur` takes in `gbs.niles` and in the
+# benchmark, and it must keep serving.
+2 200 20 x1
+3 null 30 x1

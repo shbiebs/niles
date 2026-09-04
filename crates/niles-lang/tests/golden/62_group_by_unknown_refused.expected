@@ -1,0 +1,10 @@
+# 62_group_by_unknown_refused
+# **Refused on both surfaces, where both used to group by nothing.** The group key was built
+# with `filter_map(|n| self.col_index(..))`, so a name that resolved to no column simply left
+# the list: `group by nope` produced `Aggregate { group_key: [] }`, a *global* aggregate
+# answering one row where the query asked for one per key. The pipeline surface's `key_of`
+# had the identical `filter_map` and the identical result.
+#
+# Both now go through one `resolve_columns` helper, so the two cannot drift apart again —
+# which is the point of writing this case with both spellings.
+REFUSED NL0509

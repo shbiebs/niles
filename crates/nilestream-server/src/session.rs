@@ -1365,6 +1365,47 @@ schema bank {
         let _ = &mut s;
     }
 
+    /// **The lowering's refusals reach the wire with their codes.**
+    ///
+    /// The three shapes T-03 repaired all *compiled* before it, and the daemon served their
+    /// wrong answers: an aggregating projection with no aggregate in it, a `group by` over a
+    /// name that resolves to nothing, and a projection column outside the grouping. A
+    /// refusal that only `nilesc` produces is a refusal a client never sees, and the client
+    /// is what a bank runs.
+    #[test]
+    fn the_aggregating_refusals_reach_the_wire_with_their_codes() {
+        for (sql, code) in [
+            (
+                "select acct, sum(amt) * 2 from postings group by acct",
+                "NL0517",
+            ),
+            (
+                "select acct, sum(amt) from postings group by nope",
+                "NL0509",
+            ),
+            (
+                "select acct, cur, sum(amt) from postings group by acct",
+                "NL0517",
+            ),
+        ] {
+            let (mut s, mut e) = (session(), engine());
+            let out = s.handle(Frontend::Query(sql.into()), &mut e);
+            let found = out.iter().any(|m| {
+                matches!(m, Backend::ErrorResponse { message, detail, .. }
+                    if message.contains(code)
+                        || detail.as_deref().is_some_and(|d| d.contains(code)))
+            });
+            assert!(
+                found,
+                "`{sql}` must be refused on the wire with {code}, got {out:?}"
+            );
+            assert!(
+                !out.iter().any(|m| matches!(m, Backend::DataRow(_))),
+                "`{sql}` must serve no row at all"
+            );
+        }
+    }
+
     /// **The assumption the cache rests on**: a lowering does not depend on the anchor it
     /// was compiled at.
     ///

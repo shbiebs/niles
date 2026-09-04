@@ -1,0 +1,11 @@
+# 61_projection_over_aggregate_refused
+# **Refused, where it used to serve the key alone.** The projection loop looked only for
+# projection items that were *directly* an aggregate call and ignored everything else, so
+# `sum(v) * 2` matched nothing, no aggregate reached the operator, and the query lowered to
+# `aggregate(by=[0], )` — an aggregate node with no aggregates. The server answered `(k,
+# anchor)`: one column short, with no diagnostic, and `nilesc check` said `ok`.
+#
+# There is no safe fallback. Computing `sum(v)` and labelling it `sum(v) * 2` reports a
+# different quantity under the name the author wrote, which is the failure this project
+# refuses by policy rather than by preference.
+REFUSED NL0517

@@ -61,6 +61,25 @@ pub trait Serving {
     /// `(reads, hits, misses, rows_touched, resident)` for the read model, or zeroes where
     /// the target has no partial state.
     fn read_stats(&self) -> (u64, u64, u64, u64, usize);
+
+    /// **What this server would do with this circuit, right now**, as one short class name.
+    ///
+    /// On the trait rather than as a free function over the circuit, because one of the
+    /// classes is not a property of the circuit at all: whether a report is answered from a
+    /// maintained view depends on the view's contract and on how far the write path has
+    /// advanced it. `explain` reported `fold` for statements the engine answered without
+    /// reading a single base row.
+    ///
+    /// The default is the circuit's own answer, which is right for a server with no
+    /// maintained state to consult.
+    fn serve_path_now(
+        &self,
+        circuit: &niles_ir::circuit::Circuit,
+        output: &str,
+        _anchor: u64,
+    ) -> &'static str {
+        crate::rev_engine::serve_path(circuit, output).as_str()
+    }
 }
 
 /// A served result: column names and the rows, in whatever form the answer already had them.
@@ -629,10 +648,17 @@ impl Session {
                 Ok(l) => l,
                 Err(e) => return e,
             };
-            let path = crate::rev_engine::serve_path(&lowered.circuit, "__wire_result");
+            // The engine's answer, not the circuit's. A report served from a fully
+            // maintained view is decided by the view's contract and by how far it has been
+            // advanced, and `serve_path` — which reads the circuit alone — reported `fold`
+            // for statements the engine answered without reading a base row.
+            let path = engine.serve_path_now(&lowered.circuit, "__wire_result", engine.frontier());
             let rows = vec![
-                vec![Some("serve path".to_string()), Some(path.as_str().into())],
-                vec![Some("what it costs".into()), Some(path.describe().into())],
+                vec![Some("serve path".to_string()), Some(path.to_string())],
+                vec![
+                    Some("what it costs".into()),
+                    Some(crate::rev_engine::ServePath::describe_class(path).into()),
+                ],
                 vec![
                     Some("circuit nodes".into()),
                     Some(lowered.circuit.nodes.len().to_string()),

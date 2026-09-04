@@ -245,6 +245,15 @@ impl RevEngine {
 }
 
 impl crate::session::Serving for RevEngine {
+    fn serve_path_now(
+        &self,
+        circuit: &niles_ir::circuit::Circuit,
+        output: &str,
+        anchor: u64,
+    ) -> &'static str {
+        self.serve_path_at(circuit, output, anchor).as_str()
+    }
+
     fn frontier(&self) -> u64 {
         self.ledger.head()
     }
@@ -506,6 +515,69 @@ impl RevEngine {
         Ok(self)
     }
 
+    /// Whether this query is a report the maintained view can answer, and in which spelling.
+    ///
+    /// `Some(true)` for `group by acct, cur`, `Some(false)` for `group by acct`, `None` when
+    /// the fold must answer. Split out of [`report_from_view`] so `explain` can say which
+    /// path a statement will take **without running it and without a second opinion**: the
+    /// benchmark's report row claims to be served by a maintained view, and a reader who
+    /// wants to check that should be able to ask the server rather than infer it from a
+    /// latency.
+    fn report_shape(
+        &self,
+        p: &crate::scan_fold::FoldPlan,
+        circuit: &niles_ir::circuit::Circuit,
+        output: &str,
+        anchor: u64,
+    ) -> Option<bool> {
+        use niles_ir::operator::{Agg, Scalar};
+        const ACCT: u16 = 1;
+        const CUR: u16 = 2;
+        const AMT: u16 = 3;
+
+        if circuit.outputs.get(output) != Some(&p.node) || !p.steps_are_empty() {
+            return None;
+        }
+        if p.aggs() != [(Agg::Sum, Scalar::Column(AMT))] {
+            return None;
+        }
+        let with_currency = match p.group_key() {
+            [ACCT] => false,
+            [ACCT, CUR] => true,
+            _ => return None,
+        };
+        if !with_currency && self.currencies.len() != 1 {
+            return None;
+        }
+        let view = self.runtime.as_ref()?.view(BALANCE_VIEW)?;
+        if !view.is_full() || view.applied_through() != anchor {
+            return None;
+        }
+        Some(with_currency)
+    }
+
+    /// **The serve path this engine would take, as opposed to the one the circuit implies.**
+    ///
+    /// [`serve_path`] reads the circuit alone, which is right for every class it names and
+    /// wrong for one: whether a report is answered from a maintained view depends on the
+    /// view's contract and on how far it has been advanced, neither of which is in the
+    /// circuit. `explain` reported `fold` for a statement the engine was about to answer
+    /// without touching a base row.
+    pub fn serve_path_at(
+        &self,
+        circuit: &niles_ir::circuit::Circuit,
+        output: &str,
+        anchor: u64,
+    ) -> ServePath {
+        let planned = crate::scan_fold::plan(circuit, output);
+        if let Some(p) = planned.as_ref() {
+            if self.report_shape(p, circuit, output, anchor).is_some() {
+                return ServePath::Report;
+            }
+        }
+        serve_path_of(planned.as_ref(), circuit, output)
+    }
+
     /// **A whole report, out of a fully maintained view.**
     ///
     /// The other end of the trade `answer_from_view` is one end of. That answers one key from
@@ -537,31 +609,11 @@ impl RevEngine {
         output: &str,
         anchor: u64,
     ) -> Option<crate::session::Rows> {
-        use niles_ir::operator::{Agg, Scalar};
         use niles_ir::value::Value;
-        const ACCT: u16 = 1;
-        const CUR: u16 = 2;
-        const AMT: u16 = 3;
 
-        if circuit.outputs.get(output) != Some(&p.node) || !p.steps_are_empty() {
-            return None;
-        }
-        if p.aggs() != [(Agg::Sum, Scalar::Column(AMT))] {
-            return None;
-        }
-        let with_currency = match p.group_key() {
-            [ACCT] => false,
-            [ACCT, CUR] => true,
-            _ => return None,
-        };
-        if !with_currency && self.currencies.len() != 1 {
-            return None;
-        }
+        let with_currency = self.report_shape(p, circuit, output, anchor)?;
         let rt = self.runtime.as_ref()?;
         let view = rt.view(BALANCE_VIEW)?;
-        if !view.is_full() || view.applied_through() != anchor {
-            return None;
-        }
 
         let mut columns: Vec<String> = (0..p.width()).map(|i| format!("c{i}")).collect();
         columns.push("anchor".into());
@@ -825,6 +877,13 @@ pub const ACCT_COL: u16 = 1;
 /// branches on *this*, so the two cannot drift into describing different engines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServePath {
+    /// **Every key of a fully maintained view, read without touching the base.**
+    ///
+    /// The other end of the trade `View` is one end of, and the one the `report` row of E16
+    /// measures. Reachable only while the view's contract is `materialize: full` and it has
+    /// been advanced to the anchor being asked about — so it is a property of the engine at
+    /// this moment, not of the circuit, and only `serve_path_now` can report it.
+    Report,
     /// A maintained REV entry: one key, read from partial state, reconstructed on a miss.
     /// This is the mechanism the phase diagram characterises.
     View,
@@ -840,6 +899,7 @@ pub enum ServePath {
 impl ServePath {
     pub fn as_str(self) -> &'static str {
         match self {
+            ServePath::Report => "report-from-view",
             ServePath::View => "view",
             ServePath::IndexFold => "index-fold",
             ServePath::Fold => "fold",
@@ -847,9 +907,31 @@ impl ServePath {
         }
     }
 
+    /// The same line, from the class name a `Serving` implementation reported.
+    ///
+    /// The trait returns a `&'static str` rather than a `ServePath` so a server with no
+    /// partial state need not depend on this enum; this turns it back.
+    pub fn describe_class(name: &str) -> &'static str {
+        for p in [
+            ServePath::Report,
+            ServePath::View,
+            ServePath::IndexFold,
+            ServePath::Fold,
+            ServePath::Materialise,
+        ] {
+            if p.as_str() == name {
+                return p.describe();
+            }
+        }
+        "an unnamed serve class — this server reported a path this build does not know"
+    }
+
     /// One line saying what the class means and what it costs, for `explain`.
     pub fn describe(self) -> &'static str {
         match self {
+            ServePath::Report => {
+                "every key of a fully maintained view, in key order, at the anchor the view is true at; touches no base rows at all"
+            }
             ServePath::View => {
                 "a maintained REV entry, read at the requested anchor and reconstructed on a miss; touches no base rows on a hit"
             }
@@ -1397,6 +1479,65 @@ mod tests {
             "the maintained view and the base disagree about every account's balance"
         );
         assert!(served.len() > 100, "and it is a report, not a row");
+    }
+
+    /// **`explain` names the path the engine will actually take, not the circuit's.**
+    ///
+    /// The report row of E16 claims to be answered out of a maintained view; a reader who
+    /// wants to check that should be able to ask the server. Before this, `explain` read the
+    /// circuit alone and answered `fold` for a statement the engine was about to answer
+    /// without touching a base row — which is the one case where a static class is wrong,
+    /// because the view's contract and how far it has been advanced are not in the circuit.
+    #[test]
+    fn explain_names_the_report_path_only_when_the_engine_would_take_it() {
+        use crate::session::Serving;
+        let report = compile("select acct, sum(amt) from postings group by acct");
+
+        let full = RevEngine::seeded(200, 2, usize::MAX, ViewMode::Demand, EvictionPolicy::Lru);
+        let at = full.frontier();
+        assert_eq!(
+            Serving::serve_path_now(&full, &report.circuit, "__wire_result", at),
+            "report-from-view",
+            "a full view at the anchor being asked about answers a report without the base"
+        );
+
+        let partial = RevEngine::seeded(200, 2, 20, ViewMode::Demand, EvictionPolicy::Lru);
+        let at = partial.frontier();
+        assert_eq!(
+            Serving::serve_path_now(&partial, &report.circuit, "__wire_result", at),
+            "fold",
+            "and a partial view does not, however many entries happen to be resident"
+        );
+
+        // The static answer is what it always was for the shapes that do not depend on the
+        // engine, so this did not become a second opinion about the other four classes.
+        let point = compile("select acct, sum(amt) from postings where acct = 7 group by acct");
+        assert_eq!(
+            Serving::serve_path_now(&full, &point.circuit, "__wire_result", at),
+            serve_path(&point.circuit, "__wire_result").as_str()
+        );
+    }
+
+    /// **An anchor the view has not been advanced to is not answered from the view.**
+    ///
+    /// A report is a set of rows true at one moment. Serving the view's own moment for a
+    /// different one asked about would be answering as of a time nobody asked about, which
+    /// is the quietest way a bitemporal system can lie.
+    #[test]
+    fn a_report_at_an_anchor_the_view_has_not_reached_is_not_served_from_it() {
+        use crate::session::Serving;
+        let e = RevEngine::seeded(200, 2, usize::MAX, ViewMode::Demand, EvictionPolicy::Lru);
+        let report = compile("select acct, sum(amt) from postings group by acct");
+        let now = e.frontier();
+        assert_eq!(
+            Serving::serve_path_now(&e, &report.circuit, "__wire_result", now),
+            "report-from-view"
+        );
+        assert_eq!(
+            Serving::serve_path_now(&e, &report.circuit, "__wire_result", now.saturating_sub(1)),
+            "fold",
+            "an earlier anchor is a different question and the fold answers it"
+        );
     }
 
     /// **A partial view never serves a report.**

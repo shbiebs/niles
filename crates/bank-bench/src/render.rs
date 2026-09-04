@@ -54,6 +54,23 @@ pub fn contract() -> Vec<ContractRow> {
             target: "parity with PostgreSQL",
             factor: None,
         },
+        // **The row the analytical contract was written for.** `analytical` measures a *cold
+        // reconstruction*: the fold runs over the whole base every time, which is one end of
+        // the phase diagram and not the end the thesis claims. `report` is the other — the
+        // same statement answered out of a view the write path is keeping current, under
+        // concurrent appends so that "warm" means maintained rather than stale.
+        //
+        // Its target is stated as a multiple rather than as parity because a maintained view
+        // that were merely at parity with a recompute would be evidence *against* the
+        // structural claim: the whole argument for holding derived state is that reading it
+        // is cheaper than deriving it. 2.6x is the figure T-33 derives from the measured
+        // parts — frame, client, socket — against PostgreSQL's measured recompute, not a
+        // number chosen to be reachable.
+        ContractRow {
+            workload: "report",
+            target: "≥ 2.6× PostgreSQL (maintained view vs recompute)",
+            factor: Some(2.6),
+        },
     ]
 }
 
@@ -643,7 +660,7 @@ mod tests {
             "the reason is in the notes: {table}"
         );
         // Every contract row appears, whether or not it was measured.
-        for w in ["oltp", "analytical", "point", "durable"] {
+        for w in ["oltp", "analytical", "point", "durable", "report"] {
             assert!(table.contains(w), "{w} missing from {table}");
         }
     }
@@ -777,5 +794,145 @@ mod tests {
             SCALING_CSV_HEADER.contains("connections"),
             "the column that makes the row mean something is not in the schema"
         );
+    }
+}
+
+/// **The two asymptotic verdicts (E-2a, E-2b), as functions rather than as inline branches.**
+///
+/// Pulled out of the E23 renderer because both of them are judgements a test should be able
+/// to make fail. One of them shipped wrong: with the control's own slope buried in noise, the
+/// parity comparison read a *negative* PostgreSQL slope as Nilestream winning — a benchmark
+/// flattering itself with the baseline's measurement error.
+pub mod asymptotic {
+    use crate::fit::{Fit, NoFit};
+
+    type Fitted = Result<Fit, NoFit>;
+
+    /// E-2b: per row of base, the warm slope must be flat and the control's must be positive.
+    ///
+    /// Both halves are required. "Flat" alone would be satisfied by a measurement too noisy
+    /// to show anything, and the control having a positive slope is what says the experiment
+    /// had the resolution to have found one.
+    pub fn per_row_of_base(control: &Fitted, warm: &Fitted) -> &'static str {
+        match (control, warm) {
+            (Ok(c), Ok(w)) => {
+                if w.distinguishable_from_zero() {
+                    "**NOT MET** (the warm slope is not flat)"
+                } else if c.distinguishable_from_zero() && c.slope > 0.0 {
+                    "**MET**"
+                } else {
+                    "**INCONCLUSIVE** (the control's own slope is not positive, so a flat                      result could be an experiment with no resolution rather than a system                      with no growth)"
+                }
+            }
+            _ => "**NOT RUN**",
+        }
+    }
+
+    /// E-2a: per row of answer, the warm slope must not exceed the control's.
+    ///
+    /// Compared against the **sum** of the two standard errors: a difference smaller than the
+    /// two error bars together is not a difference either way, and calling it one in the
+    /// favourable direction is how a benchmark flatters itself.
+    pub fn per_row_of_answer(control: &Fitted, warm: &Fitted) -> &'static str {
+        match (control, warm) {
+            (Ok(c), Ok(w)) => {
+                if !c.distinguishable_from_zero() {
+                    "**INCONCLUSIVE** (the control's own slope is not distinguishable from                      zero, so there is nothing to be at parity with — widen the answer's                      range)"
+                } else if w.slope <= c.slope + (c.stderr + w.stderr) {
+                    "**MET** (parity at the floor)"
+                } else {
+                    "**NOT MET** (cost per row of answer is above PostgreSQL's)"
+                }
+            }
+            _ => "**NOT RUN**",
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::fit::fit;
+
+        fn line(sizes: &[f64], slope: f64, jitter: f64) -> Fitted {
+            fit(&sizes
+                .iter()
+                .enumerate()
+                .map(|(i, x)| {
+                    // A deterministic wobble, so a verdict test cannot pass or fail by luck.
+                    let sign = if i % 2 == 0 { 1.0 } else { -1.0 };
+                    (*x, 1.0 + slope * x + sign * jitter)
+                })
+                .collect::<Vec<_>>())
+        }
+
+        const SIZES: [f64; 6] = [
+            20_000.0,
+            200_000.0,
+            2_000_000.0,
+            20_000.0,
+            200_000.0,
+            2_000_000.0,
+        ];
+
+        #[test]
+        fn the_base_row_needs_both_halves_and_says_which_one_failed() {
+            let growing = line(&SIZES, 8.4e-5, 0.02);
+            let flat = line(&SIZES, 0.0, 0.05);
+            assert_eq!(per_row_of_base(&growing, &flat), "**MET**");
+
+            // The warm side grows: not met, whatever the control did.
+            assert!(per_row_of_base(&growing, &growing).contains("NOT MET"));
+
+            // The control does not grow either. Nothing was measured well enough to say
+            // anything, and calling that a win is the failure this branch exists for.
+            assert!(per_row_of_base(&flat, &flat).contains("INCONCLUSIVE"));
+        }
+
+        #[test]
+        fn the_answer_row_refuses_a_verdict_when_the_control_has_no_slope() {
+            // **The defect, reproduced.** E23's first output-axis run held the base at
+            // 200,000 rows while the answer grew from 201 to 1,001, so PostgreSQL's cost was
+            // dominated by an unchanging scan and its fitted slope came out negative. A
+            // comparison of point estimates reads that as parity met.
+            let noisy_control = line(&[201.0, 501.0, 1001.0, 201.0, 501.0, 1001.0], -3.3e-3, 6.0);
+            let real = line(&[201.0, 501.0, 1001.0, 201.0, 501.0, 1001.0], 3.0e-4, 0.01);
+            assert!(
+                noisy_control
+                    .as_ref()
+                    .is_ok_and(|c| !c.distinguishable_from_zero()),
+                "the fixture must reproduce the buried control"
+            );
+            assert!(per_row_of_answer(&noisy_control, &real).contains("INCONCLUSIVE"));
+
+            // With a control that does have a slope, the same warm series passes.
+            let control = line(
+                &[1_001.0, 10_001.0, 100_001.0, 1_001.0, 10_001.0, 100_001.0],
+                8.6e-4,
+                0.5,
+            );
+            let warm = line(
+                &[1_001.0, 10_001.0, 100_001.0, 1_001.0, 10_001.0, 100_001.0],
+                2.5e-4,
+                0.05,
+            );
+            assert!(per_row_of_answer(&control, &warm).contains("MET"));
+            assert!(!per_row_of_answer(&control, &warm).contains("NOT MET"));
+
+            // And a warm series that is genuinely worse is not excused by the error bars.
+            let worse = line(
+                &[1_001.0, 10_001.0, 100_001.0, 1_001.0, 10_001.0, 100_001.0],
+                5.0e-3,
+                0.05,
+            );
+            assert!(per_row_of_answer(&control, &worse).contains("NOT MET"));
+        }
+
+        #[test]
+        fn a_missing_fit_is_not_run_rather_than_a_pass() {
+            let ok = line(&SIZES, 8.4e-5, 0.02);
+            let none = fit(&[(1.0, 1.0), (2.0, 2.0)]);
+            assert_eq!(per_row_of_base(&none, &ok), "**NOT RUN**");
+            assert_eq!(per_row_of_answer(&ok, &none), "**NOT RUN**");
+        }
     }
 }

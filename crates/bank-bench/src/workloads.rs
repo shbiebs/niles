@@ -449,6 +449,192 @@ pub fn analytical(
     Ok(out)
 }
 
+/// **The report workload: the same statement, served from a view that is being maintained.**
+///
+/// The analytical row measures a *cold reconstruction* — the fold runs over the whole base
+/// for every query. That is one end of the phase diagram and the thesis is about the other:
+/// a derived view kept current by the write path, so a report is a read of state that is
+/// already correct rather than a recomputation of it. Nothing on the wire had ever measured
+/// that end.
+///
+/// **"Warm" here means maintained, not cached.** A number taken from a view over a base that
+/// stopped moving is a number about a cache, and a cache is not what the thesis claims. So
+/// this workload holds a second connection open that appends at the OLTP rate for the whole
+/// measurement, and the report is timed on the primary connection against a base that is
+/// growing underneath it. Both targets get the same treatment: PostgreSQL's recompute over
+/// its own growing table is the control, and it is a fair one, because that is what a
+/// database without maintained state has to do.
+///
+/// The appends are counted and returned, because "the base was moving" is a claim this
+/// workload makes and a reader should be able to check it. A run whose appender managed no
+/// appends measured a quiesced base, and the sample says so rather than looking identical to
+/// one that did not.
+pub struct Report {
+    pub sample: Sample,
+    /// Appends the second connection completed during the measurement.
+    pub appends: u64,
+    /// Appends per second the appender was **asked** for, and what it achieved.
+    ///
+    /// Both, because the first run of this workload let the appender go as fast as it could
+    /// and PostgreSQL's side got 108 appends against Nilestream's 21 — five times the write
+    /// pressure on one arm of a two-arm comparison, on a two-core host where that pressure
+    /// is taken out of the thing being timed. A rate the harness *asked* for is the same on
+    /// both sides; a rate it achieved is a fact about the run, and a run that could not hold
+    /// the rate is a run whose report was measured under lighter load than it claims.
+    pub append_rate_target: f64,
+    pub append_rate_achieved: f64,
+    /// What the server said it would do with the report statement, when it can be asked.
+    ///
+    /// `explain` on the Nilestream side; `None` for a target with no such surface. The
+    /// report row asserts a *mechanism* — an answer read out of maintained state — and a
+    /// latency alone cannot distinguish that from a fold that happened to be quick.
+    pub serve_path: Option<String>,
+    /// Base rows before and after, when the target can be asked. The pair a reader checks
+    /// the appender against.
+    pub base_before: Option<u64>,
+    pub base_after: Option<u64>,
+}
+
+/// The statement a report is: every account's total, which is what the maintained view holds.
+pub const REPORT_STATEMENT: AnalyticalStatement = AnalyticalStatement {
+    id: "report_totals",
+    pg: "select acct, sum(amt) from postings group by acct",
+    nls: Some("select acct, sum(amt) from postings group by acct"),
+};
+
+/// Measure the report while a second connection appends to the base.
+///
+/// `open` yields a fresh connection to the *same* target — the appender must not share the
+/// measured connection, or the appends would be serialised into the latency being timed and
+/// the workload would be measuring a mixture rather than a report under load.
+pub fn report(
+    t: &mut dyn Target,
+    operations: u64,
+    run: u32,
+    append_rate: f64,
+    open: &(dyn Fn() -> Result<crate::wire::Client, WireError> + Sync),
+    append: &(dyn Fn(u32, u64) -> String + Sync),
+) -> Result<Report, WireError> {
+    if let Some(reason) = t.unsupported("report") {
+        return Ok(Report {
+            sample: skipped("report", t.name(), run, reason),
+            appends: 0,
+            append_rate_target: append_rate,
+            append_rate_achieved: 0.0,
+            serve_path: None,
+            base_before: None,
+            base_after: None,
+        });
+    }
+    let is_pg = t.name() == "postgres";
+    let sql = if is_pg {
+        REPORT_STATEMENT.pg
+    } else {
+        REPORT_STATEMENT
+            .nls
+            .expect("the report statement is expressible on both targets")
+    };
+
+    // **Warm the view before the clock starts.** On the Nilestream side the first report
+    // installs the maintained view's keys; charging that to the measurement would report the
+    // cost of becoming warm as the cost of being warm. PostgreSQL gets the same two
+    // untimed executions, which warm its buffer cache — the same courtesy, for the same
+    // reason.
+    t.run(sql)?;
+    t.run(sql)?;
+
+    // Ask the server what it will do, before doing it. A `report` row that claims a
+    // maintained view and cannot say so is a latency with a story attached.
+    let serve_path = t.serve_path(sql);
+
+    let base_before = t.base_rows();
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let done = std::sync::atomic::AtomicU64::new(0);
+    let gap = if append_rate > 0.0 {
+        Duration::from_secs_f64(1.0 / append_rate)
+    } else {
+        Duration::ZERO
+    };
+
+    let (latencies, wall) = std::thread::scope(|scope| {
+        let stop = &stop;
+        let done = &done;
+        scope.spawn(move || {
+            // A failure to open is not a failure of the run: it is recorded as zero appends,
+            // and the caller's `appends` column says the base did not move. Silently
+            // measuring a quiesced base is the failure this counter exists to prevent.
+            let Ok(mut client) = open() else { return };
+            let mut i = 0u64;
+            let from = Instant::now();
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                if client.simple(&append(run, i)).is_err() {
+                    return;
+                }
+                i += 1;
+                done.store(i, std::sync::atomic::Ordering::Relaxed);
+                // **Paced against the wall clock rather than by sleeping a fixed gap.** A
+                // fixed sleep between statements gives a rate of `1/(gap + service time)`,
+                // which is a different rate on a target whose service time is different —
+                // which is exactly the two targets here. Sleeping until the wall clock
+                // reaches `i * gap` gives the same rate on both, or falls behind visibly.
+                let due = gap * i as u32;
+                if let Some(left) = due.checked_sub(from.elapsed()) {
+                    std::thread::sleep(left);
+                }
+            }
+        });
+
+        let mut lat = Vec::with_capacity(operations as usize);
+        let started = Instant::now();
+        for _ in 0..operations {
+            let at = Instant::now();
+            match t.run(sql) {
+                Ok(_) => lat.push(at.elapsed()),
+                Err(e) => {
+                    // Release the appender before returning, or its thread outlives the
+                    // scope's join and the failure becomes a hang.
+                    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                    return (Err(e), Duration::ZERO);
+                }
+            }
+        }
+        let wall = started.elapsed();
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        (Ok(lat), wall)
+    });
+
+    let latencies = latencies?;
+    let appends = done.load(std::sync::atomic::Ordering::Relaxed);
+    let achieved = if wall.as_secs_f64() > 0.0 {
+        appends as f64 / wall.as_secs_f64()
+    } else {
+        0.0
+    };
+    let base_after = t.base_rows();
+    let (p50, p99) = percentiles(latencies.clone());
+    Ok(Report {
+        sample: Sample {
+            workload: "report".into(),
+            target: t.name().into(),
+            run,
+            operations: latencies.len() as u64,
+            wall,
+            p50,
+            p99,
+            durable: false,
+            not_run: None,
+            protocol_path: PROTOCOL_PATH,
+            miss_rate: None,
+        },
+        appends,
+        append_rate_target: append_rate,
+        append_rate_achieved: achieved,
+        serve_path,
+        base_before,
+        base_after,
+    })
+}
+
 /// **Durable commit.** The `fsync` cost, measured rather than assumed.
 ///
 /// One tiny transaction at a time, so the number is dominated by the commit rather than by

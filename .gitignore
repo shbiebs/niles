@@ -10,4 +10,6 @@ _to_delete/
 # which is the same defect as writing the committed results document without `--publish`,
 # one file over. The CSVs — the raw results the table is rendered from — stay tracked.
 results/E16-wallclock/nilestream-bench.seg
+results/E16-wallclock/nilestream-report.seg
 results/E16-wallclock/E16-wallclock.md
+results/E23-scaling/E23-scaling.md

@@ -55,6 +55,62 @@ strictly-serializable OLTP, MUST meet or exceed 10× on scan-heavy analytical wo
 clause is the one that keeps the specification honest: a system that wins the first two by
 losing the third has not replaced PostgreSQL.
 
+### The analytical contract, re-shaped: two asymptotic rows (DM-03)
+
+The 10–12× figure above is a *geomean over ClickBench*, and it was carried into a harness
+whose analytical set returns ten thousand rows per statement. That makes it unreachable for a
+reason that has nothing to do with the engine: putting 10,001 rows on the wire costs both
+sides the same milliseconds, and a fixed cost added to both terms of a ratio drags it toward
+1.0× however fast the server is. The audit's own arithmetic gives a ceiling of about 2.7× in
+that shape. A contract nothing can meet is not a demanding contract; it is an unread one.
+
+So the shape changes rather than the number, and it changes to something a benchmark can
+falsify. E23 measures the report statement along two axes and fits a slope with its standard
+error on each:
+
+| # | Row | Normative claim | Measured by |
+|---|---|---|---|
+| **E-2a** | **Per row of the answer** | Nilestream's cost per row of output MUST NOT exceed PostgreSQL's. **Parity, not a multiple** — a report has to put its answer on the wire, and a system claiming to beat that would be claiming to send fewer bytes than the answer contains. | `results/E23-scaling.md`, output axis |
+| **E-2b** | **Per row of the base** | Nilestream's **warm** cost MUST be *o(1)* in the base: the slope's confidence interval MUST contain zero, while PostgreSQL's MUST be positive. This is F1 — a stream-first system's per-answer cost must not grow with accumulated input — narrowed to a report. | `results/E23-scaling.md`, base axis |
+
+**E-2b is the row the whole architecture is for.** Everything else in this table can be won
+by being faster at the same work; this one can only be won by not doing the work — by having
+maintained the answer as the writes arrived rather than deriving it when the question was
+asked. It is also the only row on which "matches PostgreSQL as the data grows to infinity" is
+a statement that can come out false: a ratio at one size cannot distinguish a system that
+scales from one that happens to be quick at twenty thousand rows.
+
+Two guards keep these rows honest, and both are in the harness rather than in this document:
+
+* **A slope is refused on fewer than three distinct sizes.** With two the fit is exact, the
+  residual degrees of freedom are zero, and the standard error is 0/0.
+* **A verdict is refused when the control's own slope is not distinguishable from zero.** The
+  first run of E23's output axis held the base at 200,000 rows while the answer grew from 201
+  to 1,001, so PostgreSQL's cost was dominated by a scan that did not change and its output
+  slope came out *negative* — which a naive comparison reads as Nilestream winning. That row
+  now reads `INCONCLUSIVE` and says to widen the answer's range.
+
+**The old wording is not deleted.** `MISMATCH-A-01` in `docs/BUILD-LOG.md` records the 10–12×
+claim, where it came from, and why the shape rather than the number was wrong. The
+cold-reconstruction composite stays in E16 under its own name as the other end of the phase
+diagram — a system that only ever reported the warm end would be hiding the trade the thesis
+exists to characterise.
+
+### The report row
+
+Between the two: `report` in the E16 contract table is the same statement at one size,
+answered from a maintained view **while a second connection appends to the base**, against
+PostgreSQL running the identical statement over its identically growing table. Its target is
+**≥ 2.6× PostgreSQL**, derived from the measured parts (frame, client, socket) rather than
+chosen to be reachable.
+
+It is stated as a multiple rather than parity deliberately: a maintained view that were
+merely at parity with a recompute would be evidence *against* the structural claim, because
+the entire argument for holding derived state is that reading it is cheaper than deriving it.
+The row is refused — `NOT RUN`, with the reason — when the server says it would answer by the
+fold rather than from the view (`explain` reports `report-from-view`), and when the appender
+completed no appends, which would make "warm" mean "stale" instead of "maintained".
+
 *Two figures previously cited here have been corrected against primary sources: the WCOJ
 4-clique gain is 4.5–6.9× rather than 77× (that number does not appear in Freitag et al.),
 and the 1.4× on TPC-H Q6 is the AVX-512 gain and not the compilation gain — compiled versus

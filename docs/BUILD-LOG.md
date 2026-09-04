@@ -2227,3 +2227,126 @@ its own parts; the novation check compared `n` with `-n`; both arms of G3 folded
 hard-coded scale. Each was green, each was documented as catching what it could not catch. A
 systematic pass asking *does one side of this equality derive from the other?* is the highest-
 value instrument this repository does not have.
+
+### [T-33] 2026-09-04T16:20Z MISMATCH-A-01 the analytical contract's 10–12× is a geomean over a different workload
+
+**The specification said** (SPEC-ENGINE Part 0) that scan-heavy analytical work must reach
+**10–12× PostgreSQL, geomean**, sourced from ClickBench.
+
+**The harness says** that is unreachable in the shape it was written into, for a reason that
+is not about the engine. Two of the four common statements return 10,001 rows. Putting an
+answer that size on the wire costs both targets the same milliseconds — E21 measures the
+client's own share of such a statement at roughly a quarter of it — and a fixed cost added to
+both terms of a ratio drags it toward 1.0× however fast the server is. WORK-ORDER-4's own
+arithmetic puts the ceiling at about 2.7× in this shape. The measured composite has ranged
+0.56× to 1.88× across this cycle, and every one of those was reported `NOT MET` against a
+number nothing could have met.
+
+**Neither half of the mismatch is the engine's.** ClickBench's geomean is over queries whose
+answers are aggregates — a handful of rows — where the server's work is nearly the whole
+wall clock. Carrying a geomean from that workload into a row-returning one is comparing two
+different problems and calling the difference a shortfall.
+
+**What was changed:** the *shape*, not the number, per DM-03 and the author's answer (c). The
+analytical row keeps its old wording and its `NOT MET`, re-labelled as **cold reconstruction**
+— it is one end of the phase diagram and deleting it would hide the trade. Beside it, two
+asymptotic rows (E-2a, E-2b) state the claim in a form that can come out false:
+
+* per row of **answer**, cost ≤ PostgreSQL's — parity at the floor, because nobody sends
+  fewer bytes than the answer contains;
+* per row of **base**, the warm cost is *o(1)* while PostgreSQL's is positive — which is F1
+  applied to reports, and the only row on which "matches PostgreSQL as the data grows" is a
+  statement with a truth value.
+
+**What it cost:** a specification edit, `crates/bank-bench/src/fit.rs` (ordinary least squares
+with the slope's standard error, and a refusal below three distinct sizes), and the E23 sweep.
+No change to the engine to make a number appear.
+
+**The trap this leaves open**, recorded because it caught this task once already: a slope near
+zero always *looks* like the answer H-F1 wants. The guard is the standard error, and a second
+guard is that the control must have a measurable slope of its own — E23's first output-axis
+run held the base at 200,000 rows while the answer grew from 201 to 1,001, so PostgreSQL's
+cost was dominated by an unchanging scan, its output slope came out **negative**, and the
+verdict logic read that as parity being met. It now reads `INCONCLUSIVE` and says to widen the
+range.
+
+### [T-33] 2026-09-04T16:25Z RESULT `explain` was describing a different engine than the one that answered
+
+`serve_path` classifies a statement from the compiled circuit, and `explain` reported its
+answer. That is right for four of the five classes and wrong for the fifth: whether a report
+is served out of a fully maintained view depends on the view's **contract** and on **how far
+the write path has advanced it**, and neither is in the circuit. So `explain` answered `fold`
+for statements the engine was about to answer without reading a single base row.
+
+It mattered because the benchmark's new `report` row asserts a *mechanism* rather than a
+speed, and a latency cannot distinguish a maintained view from a fold that happened to be
+quick. `Serving::serve_path_now` puts the question to the engine, `ServePath::Report` is the
+new class, and the harness refuses to publish a `report` point the server did not claim:
+`nilestream:warm` requires `report-from-view` and `nilestream:cold` requires `fold`, and a
+point that comes back the other way is `NOT RUN` with the mismatch in the reason.
+
+Two tests hold it, and the second is the one worth keeping: a report asked at an anchor the
+view has **not** been advanced to falls back to the fold. Serving the view's own moment for a
+different moment asked about is the quietest way a bitemporal system can lie.
+
+### [T-33] 2026-09-04T16:30Z RESULT an unpaced appender gave one arm of the comparison five times the write pressure
+
+"Warm" in the report row means *maintained*, not cached, so a second connection appends
+throughout the measurement. The first version let it run as fast as it could. PostgreSQL's
+side took 108 appends and Nilestream's took 21 — five times the write pressure on one arm of
+a two-arm comparison, on a two-core host where that pressure comes out of the thing being
+timed.
+
+The appender is now paced against the **wall clock** rather than by sleeping a fixed gap
+between statements: a fixed gap gives a rate of `1/(gap + service time)`, which is a
+different rate on a target whose service time is different — which is exactly these two.
+Sleeping until the clock reaches `i × gap` gives the same rate on both, or falls visibly
+behind. Both the rate asked for and the rate achieved are recorded, because a run that could
+not hold the rate measured its report under lighter load than it claims.
+
+### [T-33] 2026-09-04T17:05Z RESULT the H-F1 verdict came out both ways, and the fix was not to re-run
+
+E23's warm slope along the base — the row this whole architecture is for — was measured twice
+by the same binary on the same host, hours apart:
+
+| Sweep | Warm slope (ms per row of base) | Verdict |
+|---|--:|---|
+| first | 1.176e-7 ± 3.2e-8 | **positive — NOT MET** |
+| second | 5.376e-8 ± 2.3e-7 | **flat — MET** |
+
+Both are honest readings of their own nine points. They disagree because the quantity being
+asked about is near the resolution floor: on three sizes and three runs, the smallest slope
+distinguishable from zero is about **4.5e-7 ms per row of base**, which is larger than the
+effect. The control's slope is 8.7e-5 — sixteen hundred times larger — and *that* ratio is
+stable across every sweep.
+
+**The tempting move here is to keep sweeping.** It is also the move that makes a benchmark
+worthless, and it is not distinguishable from honest work by looking at the commit: a third
+sweep would have produced a number, that number would have had a verdict, and the verdict
+would have gone into the thesis. What was done instead: the results file prints its **own
+resolution floor** beside the verdict, states that the row has come out both ways, and tells
+the reader to take the ratio as the result and the verdict as the strict form of a question
+this experiment is close to being unable to answer.
+
+**And the residual was located rather than excused.** Along the base axis the answer has the
+same *number* of rows at every size — the account count does not change — but not the same
+number of *bytes*: at a hundred times the base, each balance has summed a hundred times as
+many postings and needs about two more decimal digits. The harness now records the answer's
+measured size at every point, and the same nine measurements plotted against kilobytes of
+answer instead of rows of base give a **flat** warm series (9.1e-3 ± 1.2e-2 ms/KB, R² = 0.07)
+against positive ones for both recomputing series. Measured answer sizes: 108,907 → 128,909 →
+148,911 bytes across the three base sizes, a 37% growth for a 100× growth in history.
+
+So the residual is the cost of putting a bigger answer on the wire, which no design makes
+smaller — and *not* the cost of touching more state. That is published as evidence about a
+cause, in its own section, and the contract row above it is still judged on the criterion as
+written. A diagnostic that quietly became the verdict would be the same failure as re-running
+until the number appeared, one layer further in.
+
+**H-F1's own wording is where this lands.** "A stream-first system's per-answer cost must not
+grow with accumulated input" is not quite what the experiment can test, because the *answer*
+grows with accumulated input too — a balance over more postings is a larger number. The
+refined claim the measurements support is: **per-answer cost is invariant in the number of
+accumulated records, and grows only in the size of the answer they sum to.** That is a
+narrower claim than the thesis states and a defensible one; the broader wording is recorded
+here as the thing the instrument could not establish.

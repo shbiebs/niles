@@ -81,6 +81,16 @@ pub trait Target {
     /// a fabrication.
     fn unsupported(&self, workload: &str) -> Option<String>;
 
+    /// **What this server says it will do with a statement, before it does it.**
+    ///
+    /// `None` where the target has no such surface — PostgreSQL's `EXPLAIN` produces a plan
+    /// tree, not the one-word class this is for, and translating one into the other would be
+    /// the harness inventing a claim on the server's behalf. The `report` row asserts a
+    /// mechanism rather than a speed, and a mechanism a reader cannot ask about is a story.
+    fn serve_path(&mut self, _sql: &str) -> Option<String> {
+        None
+    }
+
     /// **How much base this target is about to be measured over.**
     ///
     /// Compared across runs, and the comparison is the point: PostgreSQL was re-prepared
@@ -349,6 +359,16 @@ impl Target for NilestreamTarget {
 
     fn unsupported(&self, workload: &str) -> Option<String> {
         nilestream_gap(workload)
+    }
+
+    fn serve_path(&mut self, sql: &str) -> Option<String> {
+        // The engine's own answer, from the same function `query` branches on, so this
+        // cannot become a second opinion about the engine.
+        let r = self.client.simple(&format!("explain {sql}")).ok()?;
+        r.rows
+            .iter()
+            .find(|row| row.first().and_then(|c| c.as_deref()) == Some("serve path"))
+            .and_then(|row| row.get(1)?.clone())
     }
 
     fn base_marker(&mut self) -> Option<u64> {

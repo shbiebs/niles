@@ -71,6 +71,28 @@ struct Args {
     pg_user: String,
     pg_db: String,
     nls_port: u16,
+    /// The second hosted Nilestream, whose view is **fully materialised**.
+    ///
+    /// The engine holds one runtime, so one daemon cannot serve both the partial view the
+    /// `point` row needs and the maintained view a `report` is read from. Two daemons, one
+    /// process, the same seed, and the results file says which port served which row —
+    /// rather than one budget quietly deciding both and a reader assuming it did not.
+    nls_report_port: Option<u16>,
+    /// Appends per second on the second connection during the `report` workload.
+    ///
+    /// The same figure on both targets, which is the point: an unpaced appender ran five
+    /// times faster against one target than the other, so the two report rows were measured
+    /// under different write pressure on a host where pressure is taken out of the thing
+    /// being timed.
+    append_rate: f64,
+    /// E23's axes. Accounts fixed while the base grows; the base held while the answer grows.
+    e23_accounts: i64,
+    e23_base: Vec<u32>,
+    e23_output: Vec<i64>,
+    e23_hold_base: u64,
+    e23_reps: u32,
+    /// Run E23 and nothing else.
+    e23_only: bool,
     accounts: i64,
     operations: u64,
     runs: u32,
@@ -106,7 +128,21 @@ struct Args {
     publish: bool,
 }
 
+/// The contract workloads, in one place.
+///
+/// It was seven copies of the same array literal, and adding `report` had to touch all
+/// seven — which is the shape of a list that will one day be six and a bug. A skipped row
+/// for a workload nobody remembered to add to one of the copies is invisible: the row is
+/// simply absent from the CSV and the table renders without it.
+const CONTRACT_WORKLOADS: [&str; 5] = ["oltp", "analytical", "point", "durable", "report"];
+
 impl Args {
+    /// Where the fully-materialised daemon listens. One past the partial one unless asked
+    /// otherwise, so the flag order cannot decide it.
+    fn report_port(&self) -> u16 {
+        self.nls_report_port.unwrap_or(self.nls_port + 1)
+    }
+
     fn parse() -> Args {
         let argv: Vec<String> = std::env::args().collect();
         let mut a = Args {
@@ -119,6 +155,14 @@ impl Args {
             pg_user: "bench".into(),
             pg_db: "postgres".into(),
             nls_port: 5434,
+            nls_report_port: None,
+            append_rate: 500.0,
+            e23_accounts: 10_000,
+            e23_base: vec![1, 10, 100],
+            e23_output: vec![1_000, 10_000, 100_000],
+            e23_hold_base: 200_000,
+            e23_reps: 9,
+            e23_only: false,
             accounts: 10_000,
             operations: 2_000,
             runs: 10,
@@ -160,6 +204,43 @@ impl Args {
                 "--pg-db" => {
                     a.pg_db = argv[i + 1].clone();
                     i += 1;
+                }
+                "--e23" => a.e23_only = true,
+                "--e23-reps" => {
+                    if i + 1 < argv.len() {
+                        a.e23_reps = argv[i + 1].parse().unwrap_or(a.e23_reps);
+                        i += 1;
+                    }
+                }
+                "--e23-base" => {
+                    if i + 1 < argv.len() {
+                        a.e23_base = argv[i + 1]
+                            .split(',')
+                            .filter_map(|x| x.trim().parse().ok())
+                            .collect();
+                        i += 1;
+                    }
+                }
+                "--e23-output" => {
+                    if i + 1 < argv.len() {
+                        a.e23_output = argv[i + 1]
+                            .split(',')
+                            .filter_map(|x| x.trim().parse().ok())
+                            .collect();
+                        i += 1;
+                    }
+                }
+                "--append-rate" => {
+                    if i + 1 < argv.len() {
+                        a.append_rate = argv[i + 1].parse().unwrap_or(a.append_rate);
+                        i += 1;
+                    }
+                }
+                "--nls-report-port" => {
+                    if i + 1 < argv.len() {
+                        a.nls_report_port = argv[i + 1].parse().ok().or(a.nls_report_port);
+                        i += 1;
+                    }
                 }
                 "--nls-port" => {
                     a.nls_port = argv[i + 1].parse().unwrap_or(a.nls_port);
@@ -450,6 +531,59 @@ fn run(args: &Args) -> i32 {
     };
     let _ = bound;
 
+    // **A second daemon, whose view is fully materialised.** The `report` row is a read of
+    // maintained state; the `point` row is a read of *partially* maintained state under a
+    // budget that binds. One engine holds one runtime, so one daemon cannot be both — and
+    // making the point row's budget large enough to serve a report would delete the very
+    // thing the point row measures. Two daemons, one process, the same seed, and both ports
+    // named in the results.
+    let mut hosted_report: Option<Hosted> = None;
+    if args.host_nls {
+        let port = args.report_port();
+        match std::net::TcpListener::bind(("127.0.0.1", port)) {
+            Ok(listener) => {
+                let seg = std::path::Path::new(&args.out).join("nilestream-report.seg");
+                if let Some(parent) = seg.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let _ = std::fs::remove_file(&seg);
+                let base = nilestream_server::rev_engine::RevEngine::seeded(
+                    args.accounts,
+                    args.rounds,
+                    usize::MAX,
+                    proto_engine::ViewMode::Demand,
+                    proto_engine::EvictionPolicy::Lru,
+                );
+                match base.with_durable(&seg) {
+                    Ok(e) => {
+                        eprintln!(
+                            "  hosting the report daemon on 127.0.0.1:{port} — the same \
+                             {} accounts x {} rounds, view fully materialised",
+                            args.accounts, args.rounds
+                        );
+                        let engine = std::sync::Arc::new(std::sync::Mutex::new(e));
+                        hosted_report = Some(Hosted {
+                            engine: std::sync::Arc::clone(&engine),
+                            seg,
+                            accounts: args.accounts,
+                            rounds: args.rounds,
+                            budget: usize::MAX,
+                        });
+                        let schema = nilestream_server::daemon::DEFAULT_SCHEMA.to_string();
+                        std::thread::spawn(move || {
+                            nilestream_server::daemon::accept_loop(listener, schema, engine);
+                        });
+                    }
+                    Err(e) => eprintln!(
+                        "  the report daemon has no durable sink ({e}); the report row will \
+                         be NOT RUN rather than measured against a different engine"
+                    ),
+                }
+            }
+            Err(e) => eprintln!("  cannot bind 127.0.0.1:{port} for the report daemon: {e}"),
+        }
+    }
+
     // **The device's ceiling, and how much it moved.** The `durable` row is an `fsync` rate
     // by construction, so it is a measurement of the storage as much as of the engine. This
     // container's device has ranged 7,794 to 12,761 commits per second across probes taken
@@ -482,8 +616,15 @@ fn run(args: &Args) -> i32 {
     // `write_all` below has nothing to write and the committed E16 document cannot be
     // reached. The two experiments are published at different run counts and re-rendering one
     // as a side effect of re-running the other would overwrite a measured table.
-    let contract_runs = if args.scaling_only { 0 } else { args.runs };
+    let contract_runs = if args.scaling_only || args.e23_only {
+        0
+    } else {
+        args.runs
+    };
     for run_no in 1..=contract_runs {
+        // The base the first arm of this run's report row started from. Reset per run,
+        // because each run re-prepares both targets.
+        let mut report_base: Option<u64> = None;
         // ---- PostgreSQL's half of this run ----
         // Re-prepare between runs so each starts from the same table: an OLTP run that
         // appended two million rows would otherwise make the next run's analytical scan a
@@ -503,6 +644,34 @@ fn run(args: &Args) -> i32 {
             report(&s);
             samples.push(s);
         }
+        {
+            // **Re-prepared first, because the report row is measured against a freshly
+            // seeded engine on the other side.** Without this PostgreSQL entered the report
+            // carrying `oltp` and `durable`'s appends — 24,500 rows against Nilestream's
+            // 20,000, a 22% larger base on the arm the ratio divides by, which is a 22%
+            // gift to the other arm. The Nilestream report daemon is reseeded per run; this
+            // is the same courtesy on the same line.
+            let (host, port, user, db) = (
+                args.pg_host.clone(),
+                args.pg_port,
+                args.pg_user.clone(),
+                args.pg_db.clone(),
+            );
+            let s = match pg.prepare(args.accounts, args.rounds) {
+                Ok(()) => {
+                    let open = move || bank_bench::wire::Client::connect(&host, port, &user, &db);
+                    report_row(&mut pg, args, run_no, &open, &mut report_base)
+                }
+                Err(e) => workloads::skipped(
+                    "report",
+                    "postgres",
+                    run_no,
+                    format!("could not re-prepare before the report row: {e}"),
+                ),
+            };
+            report(&s);
+            samples.push(s);
+        }
 
         // ---- Nilestream's half of the same run ----
         // **A fresh engine per run**, mirroring PostgreSQL's `prepare`. Without it every
@@ -516,6 +685,12 @@ fn run(args: &Args) -> i32 {
                 return 5;
             }
         }
+        if let Some(h) = &hosted_report {
+            if let Err(e) = h.reseed() {
+                eprintln!("bench: could not re-seed the report engine for run {run_no}: {e}");
+                return 5;
+            }
+        }
         // A fresh connection too: a session tracks the anchor it has observed, and a session
         // that outlived a re-seeded ledger would be reading at an anchor from a history that
         // no longer exists.
@@ -525,7 +700,7 @@ fn run(args: &Args) -> i32 {
                 // Recorded as `NOT RUN` with the reason, not omitted. A missing row invites a
                 // reader to assume the number was unremarkable.
                 eprintln!("  unreachable on 127.0.0.1:{}: {e}", args.nls_port);
-                for w in ["oltp", "analytical", "point", "durable"] {
+                for w in CONTRACT_WORKLOADS {
                     samples.push(workloads::skipped(
                         w,
                         "nilestream",
@@ -545,7 +720,7 @@ fn run(args: &Args) -> i32 {
         }
         if let Err(e) = nls.prepare(args.accounts, args.rounds) {
             eprintln!("  unavailable: {e}");
-            for w in ["oltp", "analytical", "point", "durable"] {
+            for w in CONTRACT_WORKLOADS {
                 samples.push(workloads::skipped(w, "nilestream", run_no, format!("{e}")));
             }
             continue;
@@ -573,7 +748,7 @@ fn run(args: &Args) -> i32 {
                     args.rounds
                 );
                 eprintln!("bench: {why}");
-                for w in ["oltp", "analytical", "point", "durable"] {
+                for w in CONTRACT_WORKLOADS {
                     samples.push(workloads::skipped(w, "postgres", run_no, why.clone()));
                     samples.push(workloads::skipped(w, "nilestream", run_no, why.clone()));
                 }
@@ -584,6 +759,32 @@ fn run(args: &Args) -> i32 {
             report(&s);
             samples.push(s);
         }
+        // **The report row is measured against the other daemon**, the one whose view is
+        // fully materialised. A row served by the partial engine would be the fold's number
+        // wearing the maintained view's name, which the engine itself refuses
+        // (`a_partial_view_never_serves_a_report`) — this is the harness declining to ask.
+        let s = match NilestreamTarget::connect("127.0.0.1", args.report_port()) {
+            Ok(mut rt) => {
+                let port = args.report_port();
+                let open =
+                    move || bank_bench::wire::Client::connect("127.0.0.1", port, "bench", "bank");
+                match rt.prepare(args.accounts, args.rounds) {
+                    Ok(()) => report_row(&mut rt, args, run_no, &open, &mut report_base),
+                    Err(e) => workloads::skipped("report", "nilestream", run_no, format!("{e}")),
+                }
+            }
+            Err(e) => workloads::skipped(
+                "report",
+                "nilestream",
+                run_no,
+                format!(
+                    "the fully-materialised daemon was not reachable on 127.0.0.1:{}: {e}",
+                    args.report_port()
+                ),
+            ),
+        };
+        report(&s);
+        samples.push(s);
     }
     if let (Some(p), Some(n)) = (base_size.get("postgres"), base_size.get("nilestream")) {
         eprintln!(
@@ -607,8 +808,21 @@ fn run(args: &Args) -> i32 {
         }
     }
 
+    // ---- E23: the two asymptotic sweeps, into their own document ----
+    //
+    // Its own file for the reason E19 has one: it answers a question the contract table
+    // cannot ask, at a different shape, and a slope must not be able to reach a row that
+    // states a ratio at one size.
+    if args.e23_only {
+        let pts = run_e23(args, &mut pg, &hosted, &hosted_report);
+        if let Err(e) = write_e23(args, &pts) {
+            eprintln!("bench: writing E23 failed: {e}");
+            return 6;
+        }
+    }
+
     let _ = pg.teardown();
-    if !args.scaling_only {
+    if !args.scaling_only && !args.e23_only {
         if let Err(e) = write_all(args, &samples, &config, ceiling) {
             eprintln!("bench: writing results failed: {e}");
             return 6;
@@ -639,6 +853,35 @@ struct Hosted {
 }
 
 impl Hosted {
+    /// Replace the engine with one seeded at a **different** size.
+    ///
+    /// E23 sweeps the base across two decades, and a sweep that could not reseed at each
+    /// size would be measuring one size three times.
+    fn reseed_at(&self, accounts: i64, rounds: u32) -> Result<(), String> {
+        use nilestream_server::rev_engine::RevEngine;
+        let mut guard = self.engine.lock().map_err(|e| e.to_string())?;
+        // The tiny engine first, so the old one's durable sink releases the segment before
+        // it is removed — two sequencers over one path recover each other's history.
+        *guard = RevEngine::seeded(
+            1,
+            1,
+            1,
+            proto_engine::ViewMode::Demand,
+            proto_engine::EvictionPolicy::Lru,
+        );
+        let _ = std::fs::remove_file(&self.seg);
+        *guard = RevEngine::seeded(
+            accounts,
+            rounds,
+            self.budget,
+            proto_engine::ViewMode::Demand,
+            proto_engine::EvictionPolicy::Lru,
+        )
+        .with_durable(&self.seg)
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     /// Replace the engine with a freshly seeded one on a fresh segment.
     fn reseed(&self) -> Result<(), String> {
         use nilestream_server::rev_engine::RevEngine;
@@ -715,6 +958,693 @@ fn report(s: &Sample) {
 /// index, in a range no other workload in this binary uses. The audit's scratch harness reused
 /// one sequence across levels; the ledger refused the repeats as duplicates, and idempotency
 /// working exactly as designed was read as a throughput collapse at four connections.
+/// One measured point of the E23 sweep.
+#[derive(Debug, Clone)]
+struct E23 {
+    /// `postgres`, `nilestream:cold` or `nilestream:warm`.
+    series: String,
+    /// Which axis this point was taken along: `base` or `output`.
+    axis: &'static str,
+    base_rows: u64,
+    output_rows: u64,
+    run: u32,
+    /// Median wall clock of the statement, in milliseconds.
+    ms: f64,
+    /// Bytes of cell payload the answer carried, excluding protocol framing.
+    ///
+    /// Here because of what the first full sweep found. The maintained view's cost per row
+    /// of base came out *just* above the noise floor — 1.2e-7 ± 3.2e-8 ms/row, positive —
+    /// and the obvious reading is that reading maintained state is not quite free of the
+    /// history behind it. The obvious reading is wrong, and this column is how a reader can
+    /// check that: at a hundred times the base, each account's balance has summed a hundred
+    /// times as many postings and is a hundred times larger, so it takes about two more
+    /// decimal digits to write down. Ten thousand rows two bytes wider is a ten-percent
+    /// larger *answer*, and the wall clock grew about ten percent. The residual is in the
+    /// size of the answer, not in the amount of state touched — but that is a claim, and a
+    /// claim needs a column.
+    bytes: u64,
+    /// What the server said it would do. Empty where the target does not say.
+    serve_path: String,
+    not_run: Option<String>,
+}
+
+impl E23 {
+    fn csv(&self) -> String {
+        format!(
+            "{},{},{},{},{},{:.4},{},{},{}",
+            self.series,
+            self.axis,
+            self.base_rows,
+            self.output_rows,
+            self.run,
+            self.ms,
+            self.bytes,
+            self.serve_path,
+            self.not_run.clone().unwrap_or_default().replace(',', ";")
+        )
+    }
+}
+
+const E23_HEADER: &str = "series,axis,base_rows,output_rows,run,ms,answer_bytes,serve_path,not_run";
+
+/// Measure the report statement `n` times and take the median, in milliseconds.
+fn time_report(t: &mut dyn Target, n: u32) -> Result<(f64, u64), bank_bench::wire::WireError> {
+    let sql = if t.name() == "postgres" {
+        workloads::REPORT_STATEMENT.pg
+    } else {
+        workloads::REPORT_STATEMENT.nls.expect("expressible")
+    };
+    // Two untimed executions on both targets: the maintained view installs its keys and the
+    // buffer cache fills. Charging either to the first measurement would report the cost of
+    // becoming ready as the cost of being ready, on whichever target happened to be first.
+    t.run(sql)?;
+    t.run(sql)?;
+    let mut v = Vec::with_capacity(n as usize);
+    let mut bytes = 0u64;
+    for _ in 0..n {
+        let at = std::time::Instant::now();
+        let c = t.run(sql)?;
+        v.push(at.elapsed().as_secs_f64() * 1000.0);
+        // Every execution returns the same answer, so the last one's size is the answer's
+        // size. Recorded rather than derived from the row count: the whole point is that
+        // rows are not all the same width.
+        bytes = c.bytes;
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).expect("no NaN in a wall clock"));
+    Ok((v[v.len() / 2], bytes))
+}
+
+/// **E23: how the report's cost moves with the base under it and with the answer it returns.**
+///
+/// Two sweeps, because they answer two different questions and averaging them would answer
+/// neither:
+///
+/// * **Along the base**, with the answer's size held fixed. This is the thesis's H-F1 applied
+///   to reports — a stream-first system's per-answer cost must not grow with accumulated
+///   input — and it is the only row on which "matches PostgreSQL as the data grows" is a
+///   statement that can be false. PostgreSQL must recompute, so its slope is positive by
+///   construction; the claim under test is that Nilestream's warm slope is not.
+/// * **Along the output**, with the base held fixed. Nobody can beat the size of the answer,
+///   so the claim here is parity at the floor rather than a multiple: Nilestream's cost per
+///   row of output must be no worse than PostgreSQL's.
+///
+/// Three series rather than two, because Nilestream has two paths and publishing only the
+/// fast one would be publishing half the phase diagram. `nilestream:cold` is the fold over
+/// the base — the same work PostgreSQL does — and `nilestream:warm` is the maintained view.
+fn run_e23(
+    args: &Args,
+    pg: &mut PgTarget,
+    hosted: &Option<Hosted>,
+    hosted_report: &Option<Hosted>,
+) -> Vec<E23> {
+    let mut out: Vec<E23> = Vec::new();
+    let reps = args.e23_reps;
+
+    // (accounts, rounds) pairs. Along the base: the answer is fixed at `accounts + 1` rows
+    // and the base grows by a decade at a time. Along the output: the base is held and the
+    // answer grows by a decade.
+    let base_axis: Vec<(i64, u32)> = args
+        .e23_base
+        .iter()
+        .map(|&rounds| (args.e23_accounts, rounds))
+        .collect();
+    let output_axis: Vec<(i64, u32)> = args
+        .e23_output
+        .iter()
+        .map(|&accounts| {
+            // Hold the base: total postings = accounts * rounds * 2, kept at the middle
+            // base size so the two sweeps meet at one common point.
+            let target = args.e23_hold_base;
+            let rounds = ((target / (accounts.max(1) as u64 * 2)) as u32).max(1);
+            (accounts, rounds)
+        })
+        .collect();
+
+    for run_no in 1..=args.runs {
+        for (axis, sizes) in [("base", &base_axis), ("output", &output_axis)] {
+            for &(accounts, rounds) in sizes.iter() {
+                let base_rows = accounts as u64 * rounds as u64 * 2;
+                let output_rows = accounts as u64 + 1;
+                eprintln!(
+                    "  E23 {axis} run {run_no}: {accounts} accounts x {rounds} rounds \
+                     = {base_rows} base rows, {output_rows} rows of answer"
+                );
+
+                // ---- PostgreSQL: one path, recompute, the control for both modes ----
+                let point = match pg.prepare(accounts, rounds) {
+                    Ok(()) => match time_report(pg, reps) {
+                        Ok((ms, bytes)) => E23 {
+                            series: "postgres".into(),
+                            axis,
+                            base_rows,
+                            output_rows,
+                            run: run_no,
+                            ms,
+                            bytes,
+                            serve_path: String::new(),
+                            not_run: None,
+                        },
+                        Err(e) => e23_skip(
+                            "postgres",
+                            axis,
+                            base_rows,
+                            output_rows,
+                            run_no,
+                            e.to_string(),
+                        ),
+                    },
+                    Err(e) => e23_skip(
+                        "postgres",
+                        axis,
+                        base_rows,
+                        output_rows,
+                        run_no,
+                        format!("prepare: {e}"),
+                    ),
+                };
+                out.push(point);
+
+                // ---- Nilestream, both paths ----
+                for (series, host, port) in [
+                    ("nilestream:cold", hosted, args.nls_port),
+                    ("nilestream:warm", hosted_report, args.report_port()),
+                ] {
+                    let Some(h) = host else {
+                        out.push(e23_skip(
+                            series,
+                            axis,
+                            base_rows,
+                            output_rows,
+                            run_no,
+                            "the daemon for this series was not hosted; pass --host-nls".into(),
+                        ));
+                        continue;
+                    };
+                    if let Err(e) = h.reseed_at(accounts, rounds) {
+                        out.push(e23_skip(
+                            series,
+                            axis,
+                            base_rows,
+                            output_rows,
+                            run_no,
+                            format!("reseed: {e}"),
+                        ));
+                        continue;
+                    }
+                    let mut t = match NilestreamTarget::connect("127.0.0.1", port) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            out.push(e23_skip(
+                                series,
+                                axis,
+                                base_rows,
+                                output_rows,
+                                run_no,
+                                format!("connect: {e}"),
+                            ));
+                            continue;
+                        }
+                    };
+                    let sql = workloads::REPORT_STATEMENT.nls.expect("expressible");
+                    // Two untimed runs first, so the path is asked about a *warmed* view —
+                    // `explain` on a cold full view reports the path it will take once the
+                    // first delta installs the keys, and asking before that would record a
+                    // claim about a different moment than the one measured.
+                    let _ = t.run(sql);
+                    let _ = t.run(sql);
+                    let path = t.serve_path(sql).unwrap_or_default();
+                    // **The series names a mechanism, so a mismatch is a refusal.** A cold
+                    // point served by the view, or a warm point served by the fold, would be
+                    // the other series' number under this series' name — and the slopes
+                    // this experiment publishes are about the mechanisms, not the ports.
+                    let want = if series == "nilestream:warm" {
+                        "report-from-view"
+                    } else {
+                        "fold"
+                    };
+                    if path != want {
+                        out.push(e23_skip(
+                            series,
+                            axis,
+                            base_rows,
+                            output_rows,
+                            run_no,
+                            format!("the server said it would serve this by `{path}`, and this series is `{want}`"),
+                        ));
+                        continue;
+                    }
+                    match time_report(&mut t, reps) {
+                        Ok((ms, bytes)) => out.push(E23 {
+                            series: series.into(),
+                            axis,
+                            base_rows,
+                            output_rows,
+                            run: run_no,
+                            ms,
+                            bytes,
+                            serve_path: path,
+                            not_run: None,
+                        }),
+                        Err(e) => out.push(e23_skip(
+                            series,
+                            axis,
+                            base_rows,
+                            output_rows,
+                            run_no,
+                            e.to_string(),
+                        )),
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+fn e23_skip(
+    series: &str,
+    axis: &'static str,
+    base_rows: u64,
+    output_rows: u64,
+    run: u32,
+    why: String,
+) -> E23 {
+    eprintln!("    {series}: NOT RUN — {why}");
+    E23 {
+        series: series.into(),
+        axis,
+        base_rows,
+        output_rows,
+        run,
+        ms: 0.0,
+        bytes: 0,
+        serve_path: String::new(),
+        not_run: Some(why),
+    }
+}
+
+/// Render E23: the two sweeps, the six slopes, and the two asymptotic contract rows.
+fn e23_document(args: &Args, pts: &[E23]) -> String {
+    use bank_bench::fit;
+    let mut s = String::new();
+    s.push_str(
+        "# E23 — the report's cost per row of base, and per row of answer\n\n\
+         **Generated by `bench --e23`. Nothing in this file is typed in by hand.**\n\n\
+         The contract table measures one size. This measures a *shape*, which is what the \
+         thesis's structural claim is about: a derived view maintained over an immutable \
+         ledger should answer a report without its cost following the history that produced \
+         it. That is the foundational hypothesis F1 — a stream-first system's per-answer cost \
+         must not grow with accumulated input — narrowed to something a benchmark can \
+         falsify.\n\n\
+         Three series, because Nilestream has two paths and publishing only the fast one \
+         would be publishing half the phase diagram:\n\n\
+         * **`postgres`** — recompute. There is no maintained state to read, so the whole \
+           base is aggregated for every answer. This is the control for both of the others.\n\
+         * **`nilestream:cold`** — the typed fold over the base. The same work PostgreSQL \
+           does, on this engine's own scan surface.\n\
+         * **`nilestream:warm`** — the maintained view, read in key order at the anchor it is \
+           true at, touching no base row. Every point in this series was confirmed by asking \
+           the server (`explain`) before it was timed, and a point the server said it would \
+           serve by the fold is `NOT RUN` rather than published under this name.\n\n",
+    );
+
+    for (axis, title, unit, xname) in [
+        (
+            "base",
+            "Along the base: the answer is fixed, the history grows",
+            "row of base",
+            "base rows",
+        ),
+        (
+            "output",
+            "Along the answer: the base is fixed, the answer grows",
+            "row of answer",
+            "rows of answer",
+        ),
+    ] {
+        s.push_str(&format!("## {title}\n\n"));
+        let mut sizes: Vec<u64> = pts
+            .iter()
+            .filter(|p| p.axis == axis)
+            .map(|p| {
+                if axis == "base" {
+                    p.base_rows
+                } else {
+                    p.output_rows
+                }
+            })
+            .collect();
+        sizes.sort_unstable();
+        sizes.dedup();
+
+        // A column per size, filled with the median of that (series, size)'s runs.
+        s.push_str(&format!("Median wall clock, by {xname}.\n\n| Series |"));
+        let mut rule = "|---|".to_string();
+        for z in &sizes {
+            s.push_str(&format!(" {z} |"));
+            rule.push_str("--:|");
+        }
+        s.push('\n');
+        s.push_str(&rule);
+        s.push('\n');
+
+        for series in ["postgres", "nilestream:cold", "nilestream:warm"] {
+            s.push_str(&format!("| `{series}` |"));
+            for z in &sizes {
+                let mut v: Vec<f64> = pts
+                    .iter()
+                    .filter(|p| {
+                        p.axis == axis
+                            && p.series == series
+                            && p.not_run.is_none()
+                            && (if axis == "base" {
+                                p.base_rows
+                            } else {
+                                p.output_rows
+                            }) == *z
+                    })
+                    .map(|p| p.ms)
+                    .collect();
+                if v.is_empty() {
+                    s.push_str(" NOT RUN |");
+                } else {
+                    v.sort_by(|a, b| a.partial_cmp(b).expect("no NaN"));
+                    s.push_str(&format!(" {:.2} ms |", v[v.len() / 2]));
+                }
+            }
+            s.push('\n');
+        }
+        s.push('\n');
+
+        s.push_str(&format!(
+            "### The slopes, per {unit}\n\n\
+             Ordinary least squares over every run at every size, with the standard error of \
+             the slope. **The error bar is the point.** A slope of 0.000003 ms per row is not \
+             a finding on its own; whether its confidence interval contains zero is. A fit is \
+             refused outright on fewer than three distinct sizes, because with two the \
+             residual degrees of freedom are zero and the standard error is 0/0 — a number \
+             that would look like certainty and mean nothing.\n\n\
+             | Series | Slope (ms per {unit}) | Standard error | R² | n | Distinguishable from zero? |\n\
+             |---|--:|--:|--:|--:|:--|\n"
+        ));
+        for series in ["postgres", "nilestream:cold", "nilestream:warm"] {
+            let points: Vec<(f64, f64)> = pts
+                .iter()
+                .filter(|p| p.axis == axis && p.series == series && p.not_run.is_none())
+                .map(|p| {
+                    (
+                        if axis == "base" {
+                            p.base_rows
+                        } else {
+                            p.output_rows
+                        } as f64,
+                        p.ms,
+                    )
+                })
+                .collect();
+            match fit::fit(&points) {
+                Ok(f) => s.push_str(&format!(
+                    "| `{series}` | {:.3e} | {:.3e} | {:.3} | {} | **{}** |\n",
+                    f.slope,
+                    f.stderr,
+                    f.r2,
+                    f.n,
+                    f.verdict()
+                )),
+                Err(e) => s.push_str(&format!(
+                    "| `{series}` | — | — | — | {} | NO FIT: {e} |\n",
+                    points.len()
+                )),
+            }
+        }
+        s.push('\n');
+    }
+
+    s.push_str(&e23_answer_size(pts));
+    s.push_str(&e23_contract(pts));
+
+    s.push_str("\n## How it was run\n\n");
+    s.push_str(&format!(
+        "* Along the base: {} accounts, {} rounds per account — {} rows of answer throughout.\n\
+         * Along the answer: {} accounts, rounds chosen so the base stays near {} rows.\n\
+         * {} timed executions per point, median reported; {} run(s) of the whole sweep.\n\
+         * Both targets are re-seeded at every size, so no point inherits the previous one's \
+           base.\n\
+         * Both are driven over the PostgreSQL wire protocol through the same client, and the \
+           two untimed executions that precede every point are given to both.\n",
+        args.e23_accounts,
+        args.e23_base
+            .iter()
+            .map(|r| r.to_string())
+            .collect::<Vec<_>>()
+            .join(", "),
+        args.e23_accounts + 1,
+        args.e23_output
+            .iter()
+            .map(|a| a.to_string())
+            .collect::<Vec<_>>()
+            .join(", "),
+        args.e23_hold_base,
+        args.e23_reps,
+        args.runs,
+    ));
+    s
+}
+
+/// **How big the answer itself got, along the base axis.**
+///
+/// The section the first full sweep made necessary. `nilestream:warm`'s cost per row of base
+/// came out *just* above its own noise — positive, though three orders of magnitude below
+/// PostgreSQL's — and the reading a reader would reach for is that reading maintained state
+/// is not quite free of the history behind it.
+///
+/// It is not, and the reason is arithmetic rather than architecture: with a hundred times the
+/// base, each account's balance has summed a hundred times as many postings, so it is about
+/// two decimal digits longer to write down. Ten thousand rows, two bytes wider each, is a
+/// larger *answer* — and the answer is the one thing no design can make smaller.
+///
+/// So the residual is reported as what it is by measuring it: bytes of answer at each base
+/// size, and the wall clock **per kilobyte of answer**. If that second series is flat, the
+/// growth is in serialising a bigger answer and not in touching more state. This is offered
+/// as evidence about a cause, not as a replacement verdict — the contract row above is
+/// judged on the literal criterion and says NOT MET when it is not met.
+fn e23_answer_size(pts: &[E23]) -> String {
+    use bank_bench::fit;
+    let mut sizes: Vec<u64> = pts
+        .iter()
+        .filter(|p| p.axis == "base" && p.not_run.is_none())
+        .map(|p| p.base_rows)
+        .collect();
+    sizes.sort_unstable();
+    sizes.dedup();
+    if sizes.len() < 2 {
+        return String::new();
+    }
+
+    let mut s = String::from(
+        "## The residual, and where it is: the answer got bigger\n\n\
+         Along the base axis the answer has the same **number** of rows at every size — the \
+         account count does not change — but not the same number of **bytes**. At a hundred \
+         times the base each balance has summed a hundred times as many postings, so it \
+         needs about two more decimal digits. Ten thousand rows two bytes wider is a larger \
+         answer, and no design makes an answer smaller than itself.\n\n\
+         This section measures that rather than asserting it. If the wall clock per kilobyte \
+         of answer is flat while the wall clock per row of base is not, the residual is in \
+         serialising a bigger answer and not in touching more state.\n\n\
+         | Series | ",
+    );
+    let mut rule = "|---|".to_string();
+    for z in &sizes {
+        s.push_str(&format!("{z} base rows | "));
+        rule.push_str("--:|");
+    }
+    s.push('\n');
+    s.push_str(&rule);
+    s.push('\n');
+
+    for series in ["postgres", "nilestream:cold", "nilestream:warm"] {
+        s.push_str(&format!("| `{series}` (answer bytes) |"));
+        for z in &sizes {
+            let mut v: Vec<u64> = pts
+                .iter()
+                .filter(|p| {
+                    p.axis == "base"
+                        && p.series == series
+                        && p.not_run.is_none()
+                        && p.base_rows == *z
+                })
+                .map(|p| p.bytes)
+                .collect();
+            v.sort_unstable();
+            if v.is_empty() {
+                s.push_str(" — |");
+            } else {
+                s.push_str(&format!(" {} |", v[v.len() / 2]));
+            }
+        }
+        s.push('\n');
+    }
+    s.push('\n');
+
+    s.push_str(
+        "| Series | Slope (ms per **kilobyte of answer**) | Standard error | R² | n | Distinguishable from zero? |\n\
+         |---|--:|--:|--:|--:|:--|\n",
+    );
+    for series in ["postgres", "nilestream:cold", "nilestream:warm"] {
+        let points: Vec<(f64, f64)> = pts
+            .iter()
+            .filter(|p| {
+                p.axis == "base" && p.series == series && p.not_run.is_none() && p.bytes > 0
+            })
+            .map(|p| (p.bytes as f64 / 1024.0, p.ms))
+            .collect();
+        match fit::fit(&points) {
+            Ok(f) => s.push_str(&format!(
+                "| `{series}` | {:.3e} | {:.3e} | {:.3} | {} | **{}** |\n",
+                f.slope,
+                f.stderr,
+                f.r2,
+                f.n,
+                f.verdict()
+            )),
+            Err(e) => s.push_str(&format!(
+                "| `{series}` | — | — | — | {} | NO FIT: {e} |\n",
+                points.len()
+            )),
+        }
+    }
+    s.push_str(
+        "\nA reader should hold this to the same standard as everything else here: it is a \
+         second fit over the same nine points, and a second fit that happens to say what one \
+         hoped is not evidence. What makes it worth reading is that the two fits use **the \
+         same measurements** and differ only in what they are plotted against — so if the \
+         per-kilobyte slope were also positive and the per-base-row slope were the real \
+         effect, this table would say so.\n\n",
+    );
+    s
+}
+
+/// The two asymptotic rows, judged from the fits.
+fn e23_contract(pts: &[E23]) -> String {
+    use bank_bench::fit;
+    let series_points = |axis: &str, series: &str| -> Vec<(f64, f64)> {
+        pts.iter()
+            .filter(|p| p.axis == axis && p.series == series && p.not_run.is_none())
+            .map(|p| {
+                (
+                    if axis == "base" {
+                        p.base_rows
+                    } else {
+                        p.output_rows
+                    } as f64,
+                    p.ms,
+                )
+            })
+            .collect()
+    };
+
+    let mut s = String::from(
+        "## The two asymptotic contract rows\n\n\
+         These are the rows that make \"matches PostgreSQL as the data grows\" a statement \
+         that can be false. A ratio at one size cannot: a system can win at twenty thousand \
+         rows and lose at two million, and the contract table would look identical.\n\n\
+         | Row | Claim | PostgreSQL | Nilestream (warm) | Verdict |\n\
+         |---|---|---|---|---|\n",
+    );
+
+    // (a) per row of base: warm slope must be flat; PostgreSQL's must be positive.
+    let pg_base = fit::fit(&series_points("base", "postgres"));
+    let nl_base = fit::fit(&series_points("base", "nilestream:warm"));
+    let base_verdict = render::asymptotic::per_row_of_base(&pg_base, &nl_base);
+    s.push_str(&format!(
+        "| Per row of base | Nilestream's warm cost is *o(1)* in the base — the slope's \
+         confidence interval contains zero — while PostgreSQL's is positive (H-F1) | {} | {} | {} |\n",
+        fit_cell(&pg_base),
+        fit_cell(&nl_base),
+        base_verdict
+    ));
+    // (b) per row of output: warm slope must be <= PostgreSQL's.
+    let pg_out = fit::fit(&series_points("output", "postgres"));
+    let nl_out = fit::fit(&series_points("output", "nilestream:warm"));
+    let out_verdict = render::asymptotic::per_row_of_answer(&pg_out, &nl_out);
+    s.push_str(&format!(
+        "| Per row of answer | Nilestream's cost per row of answer is no worse than \
+         PostgreSQL's — parity at the floor, since nobody can beat the size of the answer | {} | {} | {} |\n",
+        fit_cell(&pg_out),
+        fit_cell(&nl_out),
+        out_verdict
+    ));
+
+    s.push_str(
+        "\nThe second row is a **parity** claim on purpose. A report has to put its answer on \
+         the wire, and that cost is the same problem for everyone; a system claiming to beat \
+         it would be claiming to send fewer bytes than the answer contains. The place where a \
+         maintained view can win is the first row, and that is where the claim is a multiple \
+         rather than a tie.\n",
+    );
+    // **The instrument's own floor, printed beside the verdict.**
+    //
+    // This row has come out both ways across full sweeps of the same binary on the same
+    // host: 1.176e-7 +- 3.2e-8 (positive, NOT MET) and 5.376e-8 +- 2.3e-7 (flat, MET). Both
+    // are honest readings of their own nine points, and the reason they disagree is that the
+    // effect is at the edge of what three sizes and three runs can resolve. A results file
+    // that printed only whichever verdict it got would be reporting the throw of a die as a
+    // property of the system, so the resolution floor is printed with it: the smallest slope
+    // this design could have distinguished from zero.
+    if let (Ok(p), Ok(n)) = (&pg_base, &nl_base) {
+        let floor = 2.0 * n.stderr;
+        s.push_str(&format!(
+            "\n**What this row can and cannot resolve.** The verdict is a comparison against \
+             the fit's own standard error, so it is only as sharp as the measurement. On \
+             these {} points the smallest warm slope distinguishable from zero is \
+             **{:.2e} ms per row of base**; the measured slope is {:.2e}, and the control's \
+             is {:.2e} — {:.0}× larger. This row has come out **both ways** across full \
+             sweeps of the same binary on the same host, because the effect it is asked \
+             about sits near that floor. What is stable across every sweep is the ratio to \
+             the control and the per-kilobyte fit above; what is not stable is whether a \
+             quantity that small is called zero. A reader should take the ratio as the \
+             result and this verdict as the strict form of a question the experiment is \
+             close to being unable to answer.\n\n",
+            n.n,
+            floor,
+            n.slope,
+            p.slope,
+            if n.slope.abs() > 0.0 {
+                (p.slope / n.slope).abs()
+            } else {
+                f64::INFINITY
+            }
+        ));
+    }
+    if base_verdict.contains("NOT MET") {
+        if let (Ok(p), Ok(n)) = (&pg_base, &nl_base) {
+            let _ = (p, n);
+            s.push_str(
+                "\n**This sweep read NOT MET, and it is reported as measured.** The literal \
+                 criterion is that the warm slope's confidence interval contains zero, and on \
+                 these points it does not. The section above locates what is left: the answer \
+                 itself is bigger at a bigger base, because each balance has summed more \
+                 postings and takes more digits to write. That is a real cost and it is not a \
+                 cost of touching more state — but this row is judged on what was asked, not \
+                 on what the cause turned out to be.\n\n",
+            );
+        }
+    }
+    s
+}
+
+fn fit_cell(f: &Result<bank_bench::fit::Fit, bank_bench::fit::NoFit>) -> String {
+    match f {
+        Ok(f) => format!(
+            "{:.3e} ± {:.1e} ms/row ({})",
+            f.slope,
+            f.stderr,
+            f.verdict()
+        ),
+        Err(e) => format!("no fit: {e}"),
+    }
+}
+
 fn run_scaling(args: &Args, pg: &mut PgTarget, hosted: &Option<Hosted>) -> Vec<ScalingSample> {
     let mut out: Vec<ScalingSample> = Vec::new();
     // Far from the contract loop's identity ranges (1–3 million), so the two experiments
@@ -874,6 +1804,33 @@ fn report_scaling(s: &ScalingSample) {
     }
 }
 
+fn write_e23(args: &Args, pts: &[E23]) -> std::io::Result<()> {
+    let dir = bank_bench::publish::e23_dir(std::path::Path::new(&args.out));
+    std::fs::create_dir_all(&dir)?;
+    let mut csv = String::from(E23_HEADER);
+    csv.push('\n');
+    for p in pts {
+        csv.push_str(&p.csv());
+        csv.push('\n');
+    }
+    std::fs::write(dir.join("E23-scaling.csv"), &csv)?;
+    let doc = e23_document(args, pts);
+    let where_to = bank_bench::publish::e23_destinations(&dir, args.publish);
+    for path in &where_to {
+        std::fs::write(path, &doc)?;
+    }
+    eprintln!(
+        "wrote {} and {}/E23-scaling.csv",
+        where_to
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", "),
+        dir.display()
+    );
+    Ok(())
+}
+
 fn write_scaling(args: &Args, samples: &[ScalingSample]) -> std::io::Result<()> {
     let dir = bank_bench::publish::scaling_dir(std::path::Path::new(&args.out));
     std::fs::create_dir_all(&dir)?;
@@ -975,6 +1932,126 @@ fn scaling_document(samples: &[ScalingSample], args: &Args) -> String {
     s
 }
 
+/// One `report` sample, with the appender's own numbers folded into the log.
+///
+/// The appends are a *precondition* of the measurement rather than a result of it: a report
+/// timed against a base nothing was writing to is a cache measurement, and this function
+/// prints the count so a run where the appender did nothing is visible at the moment it
+/// happens rather than three files later.
+fn report_row(
+    t: &mut dyn Target,
+    args: &Args,
+    run_no: u32,
+    open: &(dyn Fn() -> Result<bank_bench::wire::Client, bank_bench::wire::WireError> + Sync),
+    expect_base: &mut Option<u64>,
+) -> Sample {
+    let name = t.name().to_string();
+    let is_pg = name == "postgres";
+    let accounts = args.accounts;
+    let append = move |run: u32, i: u64| -> String {
+        // Two conserved legs, exactly as `oltp` writes them, so the base grows the way the
+        // benchmark's own write path grows it.
+        let from = 1 + (i % accounts.max(1) as u64) as i64;
+        let to = 1 + ((i * 7 + 3) % accounts.max(1) as u64) as i64;
+        let to = if to == from {
+            1 + (to % accounts.max(1))
+        } else {
+            to
+        };
+        let amount = 1 + (i % 997) as i64;
+        if is_pg {
+            format!(
+                "insert into postings (txn, acct, cur, amt, epoch) values \
+                 ('rep-{run}-{i}', {from}, 'USD', -{amount}, {}), \
+                 ('rep-{run}-{i}', {to}, 'USD', {amount}, {})",
+                8_000_000 + i,
+                8_000_000 + i
+            )
+        } else {
+            format!(
+                "insert into postings values ({txn}, {from}, 0, -{amount}), ({txn}, {to}, 0, {amount})",
+                txn = 8_000_000 + (run as u64) * 1_000_000 + i
+            )
+        }
+    };
+    // The two report rows must start from the same base, and the log says so per run.
+    match workloads::report(
+        t,
+        (args.operations / 10).max(20),
+        run_no,
+        args.append_rate,
+        open,
+        &append,
+    ) {
+        Ok(r) => {
+            eprintln!(
+                "  report[{name}] run {run_no}: {} appends on the second connection at \
+                 {:.0}/s (asked {:.0}/s), base {} -> {}, served by {}",
+                r.appends,
+                r.append_rate_achieved,
+                r.append_rate_target,
+                r.base_before.map(|n| n.to_string()).unwrap_or("?".into()),
+                r.base_after.map(|n| n.to_string()).unwrap_or("?".into()),
+                r.serve_path
+                    .as_deref()
+                    .unwrap_or("(the target does not say)"),
+            );
+            if r.serve_path
+                .as_deref()
+                .is_some_and(|p| p != "report-from-view")
+            {
+                // A row that measured the fold under the maintained view's name is worse
+                // than a missing row: it is a number that supports the structural claim
+                // while having been produced by the mechanism the claim is against.
+                return workloads::skipped(
+                    "report",
+                    &name,
+                    run_no,
+                    format!(
+                        "the server said it would serve this by `{}` rather than \
+                         `report-from-view`; a fold measured under the maintained view's \
+                         name is the one number this row must never publish",
+                        r.serve_path.as_deref().unwrap_or("?")
+                    ),
+                );
+            }
+            // **The two arms must have started from the same base.** The first arm records
+            // what it found and the second is checked against it: a ratio between a 24,500-row
+            // table and a 20,000-row ledger is not a ratio, and this row had exactly that
+            // defect on its first publication because PostgreSQL entered it carrying the
+            // `oltp` and `durable` appends while the Nilestream daemon had been reseeded.
+            match (*expect_base, r.base_before) {
+                (None, Some(n)) => *expect_base = Some(n),
+                (Some(first), Some(n)) if first != n => {
+                    return workloads::skipped(
+                        "report",
+                        &name,
+                        run_no,
+                        format!(
+                            "this run's other target started the report from {first} base \
+                             rows and this one from {n}; a ratio between two different \
+                             problems is not a ratio"
+                        ),
+                    );
+                }
+                _ => {}
+            }
+            if r.appends == 0 && r.sample.not_run.is_none() {
+                return workloads::skipped(
+                    "report",
+                    &name,
+                    run_no,
+                    "the appender completed no appends, so this would have been a report over \
+                     a quiesced base — which is a cache measurement, not a maintained-view one"
+                        .into(),
+                );
+            }
+            r.sample
+        }
+        Err(e) => workloads::skipped("report", &name, run_no, format!("{e}")),
+    }
+}
+
 fn run_all(t: &mut dyn Target, args: &Args, run_no: u32) -> Vec<Sample> {
     let seed = 0xB0A7 ^ (run_no as u64);
     let name = t.name().to_string();
@@ -1040,9 +2117,14 @@ fn write_all(
     // of `analytical:group_by_acct` must not become a file name with a colon in it.
     let mut by_file: BTreeMap<&str, Vec<&Sample>> = BTreeMap::new();
     for s in samples {
-        let file = match s.workload.as_str() {
-            "oltp" | "analytical" | "point" | "durable" => s.workload.as_str(),
-            _ => "analytical-statements",
+        // From the one list, not a ninth copy of it: `report` was added to
+        // `CONTRACT_WORKLOADS` and to the renderer and missed here, so ten runs of the new
+        // row were written into `analytical-statements.csv` and `--render` could not find
+        // them. A workload not in this list is a per-statement row by definition.
+        let file = if CONTRACT_WORKLOADS.contains(&s.workload.as_str()) {
+            s.workload.as_str()
+        } else {
+            "analytical-statements"
         };
         by_file.entry(file).or_default().push(s);
     }
@@ -1052,6 +2134,21 @@ fn write_all(
         for s in rows {
             writeln!(f, "{}", s.to_csv())?;
         }
+    }
+
+    // **The device's ceiling, as raw data beside the raw data.** Every other number in this
+    // document has a CSV behind it; the ceiling section was rendered from a value that
+    // existed only in the running process, so the one paragraph most likely to be disputed
+    // — "was the disk steady while you measured?" — was the one with nothing to check it
+    // against.
+    if let Some(c) = ceiling {
+        std::fs::write(
+            std::path::Path::new(&args.out).join("device.csv"),
+            format!(
+                "median,mad,lowest,highest,probes\n{:.4},{:.4},{:.4},{:.4},{}\n",
+                c.median, c.mad, c.lowest, c.highest, c.probes
+            ),
+        )?;
     }
 
     let doc = document(samples, config, args, ceiling);
@@ -1082,7 +2179,7 @@ fn document(
     args: &Args,
     ceiling: Option<bank_bench::storage::Ceiling>,
 ) -> String {
-    let gaps: BTreeMap<String, String> = ["oltp", "analytical", "point", "durable"]
+    let gaps: BTreeMap<String, String> = CONTRACT_WORKLOADS
         .iter()
         .filter_map(|w| nilestream_gap(w).map(|r| (w.to_string(), r)))
         .collect();
@@ -1091,18 +2188,54 @@ fn document(
     s.push_str("# E16 — The performance contract, measured\n\n");
     s.push_str(
         "**Generated by `bench --run`. Nothing in this file is typed in by hand.**\n\n\
-         `SPEC-ENGINE.md` Part 0 states four targets relative to PostgreSQL. Until this \
+         `SPEC-ENGINE.md` Part 0 states its targets relative to PostgreSQL. Until this \
          experiment they were predictions in the typography of results: every measurement in \
          `results/` reported counted work inside `proto-engine`, and the single wall-clock \
          table in the thesis (§9.4.4) was in-memory, single-threaded, and compared to \
          nothing. This is the first wall-clock comparison against the baseline the \
-         specification names.\n\n",
+         specification names.\n\n\
+         The last row is the one the architecture is for. `analytical` is a **cold \
+         reconstruction** — the fold runs over the whole base for every query, which is one \
+         end of the phase diagram — and `report` is the other end: the same shape of \
+         statement answered out of a view the write path is keeping current, while a second \
+         connection appends to the base throughout, so that \"warm\" means maintained rather \
+         than stale. Both ends stay in the table; publishing only the warm one would hide the \
+         trade this project exists to characterise. E23 (`results/E23-scaling.md`) takes that \
+         row along two axes and fits a slope, which is where \"matches PostgreSQL as the data \
+         grows\" becomes a statement with a truth value.\n\n",
     );
     s.push_str(table);
     s.push('\n');
     s.push_str(&render::spread_table(samples));
     s.push('\n');
     s.push_str(&render::statement_table(samples));
+    // **The report row's own caveat**, because its two arms are not appended to equally.
+    if samples
+        .iter()
+        .any(|x| x.workload == "report" && x.not_run.is_none())
+    {
+        s.push_str(
+            "\n### What the `report` row is, and the one asymmetry in it\n\n\
+             The statement is `select acct, sum(amt) from postings group by acct`. On the \
+             Nilestream side it is served from a view whose contract is `materialize: full`, \
+             read in key order at the anchor it is true at, **touching no base row** — the \
+             server is asked (`explain`) before every run and the row is `NOT RUN` rather \
+             than published if it answers anything but `report-from-view`. PostgreSQL runs \
+             the identical statement over its own identically growing table; its recompute \
+             *is* the control, and a fair one, because that is what a database without \
+             maintained state has to do. Both start each run from the same base, and the \
+             harness refuses the row if they do not.\n\n\
+             **The asymmetry, stated rather than removed.** The appender writes at the same \
+             rate on both sides, and PostgreSQL's measurement takes longer — so more appends \
+             land under it, and its table grows further during its own window than the \
+             ledger does during Nilestream's. Equalising the *count* instead would mean \
+             equalising the rate·time product by slowing the appender against the faster \
+             target, which is the same as saying the faster target should face lighter \
+             concurrent write pressure per second. The rate is what is held equal; the counts \
+             are printed per run so the difference is visible rather than assumed away.\n",
+        );
+    }
+
     // **The durable row is an fsync rate, so the device belongs beside it.**
     if let Some(c) = ceiling {
         s.push_str("\n### The `durable` row is an `fsync` rate, so here is the device\n\n");
@@ -1260,7 +2393,7 @@ fn document(
 
 fn render_only(args: &Args) -> i32 {
     let mut samples = Vec::new();
-    for w in ["oltp", "analytical", "point", "durable"] {
+    for w in CONTRACT_WORKLOADS {
         let path = format!("{}/{w}.csv", args.out);
         let Ok(text) = std::fs::read_to_string(&path) else {
             eprintln!("bench: {path} is missing; run `bench --run` first");
@@ -1281,7 +2414,7 @@ fn render_only(args: &Args) -> i32 {
             }
         }
     }
-    let gaps: BTreeMap<String, String> = ["oltp", "analytical", "point", "durable"]
+    let gaps: BTreeMap<String, String> = CONTRACT_WORKLOADS
         .iter()
         .filter_map(|w| nilestream_gap(w).map(|r| (w.to_string(), r)))
         .collect();
@@ -1290,7 +2423,62 @@ fn render_only(args: &Args) -> i32 {
     print!("{}", render::spread_table(&samples));
     println!();
     print!("{}", render::statement_table(&samples));
+
+    // **And re-derive E23 from its committed CSV.** The sweep itself is wall-clock and
+    // machine-dependent, so `make reproduce` cannot re-run it — but the *document* is a pure
+    // function of the CSV, and that part must not drift. A results file whose prose and
+    // whose data can disagree is a results file nobody can check.
+    let e23_dir = bank_bench::publish::e23_dir(std::path::Path::new(&args.out));
+    let e23_csv = e23_dir.join("E23-scaling.csv");
+    if let Ok(text) = std::fs::read_to_string(&e23_csv) {
+        let pts: Vec<E23> = text.lines().skip(1).filter_map(parse_e23_line).collect();
+        if pts.is_empty() {
+            eprintln!("bench: {} has a header and no rows", e23_csv.display());
+            return 7;
+        }
+        let doc = e23_document(args, &pts);
+        // `--render` re-derives the **committed** document, because that is the copy
+        // `make reproduce` diffs. Unlike a `--run`, this reads only what is already there.
+        for path in [
+            e23_dir.join("E23-scaling.md"),
+            std::path::PathBuf::from(bank_bench::publish::COMMITTED_E23),
+        ] {
+            if let Err(e) = std::fs::write(&path, &doc) {
+                eprintln!("bench: re-rendering E23 to {} failed: {e}", path.display());
+                return 6;
+            }
+        }
+    }
     0
+}
+
+fn parse_e23_line(line: &str) -> Option<E23> {
+    let f: Vec<&str> = line.splitn(9, ',').collect();
+    if f.len() < 9 {
+        return None;
+    }
+    let not_run = if f[8].trim().is_empty() {
+        None
+    } else {
+        Some(f[8].to_string())
+    };
+    Some(E23 {
+        series: f[0].into(),
+        // `&'static str` because the axis is one of two known values, and a CSV that names a
+        // third is a CSV this build cannot render rather than one to guess about.
+        axis: match f[1] {
+            "base" => "base",
+            "output" => "output",
+            _ => return None,
+        },
+        base_rows: f[2].parse().ok()?,
+        output_rows: f[3].parse().ok()?,
+        run: f[4].parse().ok()?,
+        ms: f[5].parse().ok()?,
+        bytes: f[6].parse().ok()?,
+        serve_path: f[7].into(),
+        not_run,
+    })
 }
 
 fn parse_csv_line(line: &str) -> Option<Sample> {

@@ -25,6 +25,28 @@ pub const COMMITTED_SCALING: &str = "results/E19-scaling.md";
 pub const DEFAULT_OUT: &str = "results/E16-wallclock";
 pub const DEFAULT_SCALING_OUT: &str = "results/E19-scaling";
 
+/// The committed E23 document, and its default CSV directory. Same rule as E19's.
+pub const COMMITTED_E23: &str = "results/E23-scaling.md";
+pub const DEFAULT_E23_OUT: &str = "results/E23-scaling";
+
+/// Where an E23 sweep's CSV goes, given `--out`.
+pub fn e23_dir(out: &Path) -> PathBuf {
+    if out == Path::new(DEFAULT_OUT) {
+        PathBuf::from(DEFAULT_E23_OUT)
+    } else {
+        out.join("E23-scaling")
+    }
+}
+
+/// Every path the E23 document is written to. Same rule as [`destinations`].
+pub fn e23_destinations(dir: &Path, publish: bool) -> Vec<PathBuf> {
+    let mut out = vec![dir.join("E23-scaling.md")];
+    if publish {
+        out.push(PathBuf::from(COMMITTED_E23));
+    }
+    out
+}
+
 /// Where a scaling run's CSVs go, given `--out`.
 ///
 /// The default `--out` means "the committed layout", and E19 then sits beside E16 in
@@ -143,5 +165,27 @@ mod tests {
         // started from 19999" is: 1,250 legs is exactly one run of `oltp` plus `durable`.
         assert!(why.contains("19999") && why.contains("21249"), "{why}");
         assert!(why.contains("run 2"), "{why}");
+    }
+
+    #[test]
+    fn an_unpublished_e23_sweep_writes_nothing_a_repository_tracks() {
+        let scratch = Path::new("/tmp/e23-scratch");
+        assert!(!e23_destinations(&e23_dir(scratch), false)
+            .iter()
+            .any(|p| p == Path::new(COMMITTED_E23)));
+        assert!(e23_destinations(&e23_dir(scratch), true)
+            .iter()
+            .any(|p| p == Path::new(COMMITTED_E23)));
+        // The default `--out` puts E23 beside E16 and E19 rather than inside E16's
+        // directory, which is where it landed the first time and where its CSV would have
+        // been mistaken for one of E16's.
+        assert_eq!(e23_dir(Path::new(DEFAULT_OUT)), Path::new(DEFAULT_E23_OUT));
+        assert_eq!(e23_dir(scratch), scratch.join("E23-scaling"));
+        // Three experiments, three directories, none of them a prefix of another's file.
+        assert_ne!(e23_dir(Path::new(DEFAULT_OUT)), Path::new(DEFAULT_OUT));
+        assert_ne!(
+            e23_dir(Path::new(DEFAULT_OUT)),
+            scaling_dir(Path::new(DEFAULT_OUT))
+        );
     }
 }

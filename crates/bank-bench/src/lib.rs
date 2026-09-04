@@ -19,6 +19,7 @@
 //! ```
 
 pub mod analysis;
+pub mod fit;
 pub mod generator;
 pub mod publish;
 pub mod render;

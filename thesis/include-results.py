@@ -274,6 +274,12 @@ EXTRACTORS = {
     "kwnovel": lambda t: keyword_column(t, "## Novel Niles keywords"),
     "kwreserved": reserved_list,
     "curve": lambda t: table_after(t, "### The curve"),
+    # E23's two slope tables and its verdict table, by the headings the harness writes.
+    "basemedians": lambda t: table_after(t, "## Along the base"),
+    "baseslopes": lambda t: table_after(t, "### The slopes, per row of base"),
+    "outputmedians": lambda t: table_after(t, "## Along the answer"),
+    "outputslopes": lambda t: table_after(t, "### The slopes, per row of answer"),
+    "asymptotic": lambda t: table_after(t, "## The two asymptotic contract rows"),
     "table": lambda t: table_after(t, "### The table"),
     "statustable": status_table,
     "statussummary": status_summary,

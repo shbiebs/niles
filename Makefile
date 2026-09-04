@@ -16,7 +16,18 @@ test:
 # `--test-threads=1`: a `#[global_allocator]` is process-wide, so a test allocating on
 # another thread lands in whatever region is being measured. The test checks a known-quiet
 # region first and says so rather than reporting a wrong number.
+#
+# Two invocations, not one. `--ignored` *filters out* every non-ignored test, so a single
+# `-- --ignored` run never executed `the_counting_allocator_is_actually_installed` or
+# `every_measured_scenario_has_a_budget_and_the_lists_agree` — and `memprobe` is outside the
+# workspace, so `make test` never ran them either. Two of this gate's own checks were
+# therefore running nowhere. The first line runs them; the second runs the measurement.
+# Both lines are `--test-threads=1` for the same reason: the counters are process-global, so
+# a second test allocating on another thread lands in whichever region is being measured.
+# `a_reading_reports_what_a_region_kept_apart_from_what_it_touched` measured 58 bytes of
+# another test's allocations the first time it was ever actually run.
 memory:
+	cargo test --release --manifest-path tools/memprobe/Cargo.toml -- --test-threads=1
 	cargo test --release --manifest-path tools/memprobe/Cargo.toml \
 	      -- --ignored --test-threads=1
 

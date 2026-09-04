@@ -57,6 +57,17 @@ fn every_measured_scenario_has_a_budget_and_the_lists_agree() {
 #[test]
 #[ignore = "a measurement: run with --release -- --ignored --test-threads=1"]
 fn every_scenario_is_within_its_allocation_budget() {
+    // **The counters must be live in the process that reads them.** `make memory` runs this
+    // binary with `--ignored`, which filters out `the_counting_allocator_is_actually_installed`
+    // — so before this gate existed the only check that the allocator was installed was in a
+    // test the gate did not run. Without the allocator every counter reads zero and every
+    // budget below passes on a table of zeros, which is the one failure that would make this
+    // whole file vacuous. Probed here, in the test that uses the numbers.
+    assert!(
+        memory::installed(),
+        "the counting allocator is not live in this process, so every budget below would pass \
+         against zeros. Re-run with the budget test's own `#[global_allocator]` in scope."
+    );
     a_quiet_region_is_quiet();
     // Not `assert!(!cfg!(debug_assertions))`: that is a constant, and clippy is right to
     // refuse it. Read at run time so the message is what a reader gets rather than a

@@ -340,16 +340,18 @@ fn the_two_surfaces_denote_the_same_zset_wherever_both_are_written() {
     // cases stopped being compared. The list is printed and its length is bounded, so
     // adding a case that silently opts out of the comparison fails here.
     assert!(
-        skipped.len() <= 41,
+        skipped.len() <= 40,
         "{} cases are skipped by this comparison, which is more than the corpus leaves \
-         uncompared today (41: thirty-eight written in one surface, three refused in both). The \
-         three most recent are `58_order_by_aggregate`, `59_order_by_alias` and \
-         `65_top_k_negative_sums_and_ties`, and the reason \
-         is a gap in the *pipeline* surface rather than in the corpus: its `order_by` stage \
-         has no descending spelling — `key_of` maps every key to `(k, true)` — so the case \
-         that discriminates a working `order by` from a silently empty one cannot be \
-         written there. An ascending one cannot: the broken lowering and a correct \
-         ascending sort pick the same rows:\n{}",
+         uncompared today (40: thirty-seven written in one surface, three refused in both).\n\n\
+         The bound went *down* by one when the pipeline surface learned to sort descending. \
+         `58_order_by_aggregate` used to be here, and the reason it was here was a gap in the \
+         surface rather than in the corpus: `order_by` mapped every key to `(k, true)`, so \
+         `t.order_by(|r| desc(r.sum)).limit(2)` returned the *smallest* two and the case that \
+         would have caught it could not be written. It is now written in both spellings and \
+         compared, which is what the generality claim means. The remaining one-surface cases \
+         are SQL forms with no pipeline spelling — `FROM t, u`, a correlated `EXISTS` — plus \
+         `65_top_k_negative_sums_and_ties`, whose `limit` cuts into a tie and so needs the \
+         `desc` that `59_order_by_alias`'s aliasing still cannot reach:\n{}",
         skipped.len(),
         skipped.join("\n")
     );

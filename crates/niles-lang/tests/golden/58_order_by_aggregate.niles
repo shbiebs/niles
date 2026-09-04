@@ -1,0 +1,1 @@
+t.group_by(|r| r.k).sum(|r| r.v).order_by(|r| desc(r.sum)).limit(2)

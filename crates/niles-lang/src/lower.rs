@@ -608,7 +608,7 @@ impl<'a> Lx<'a> {
                 // claim is marketing, and that includes how they fail.
                 let mut names = Vec::new();
                 if let Some(a) = args.first() {
-                    collect_field_names(&a.value, &mut names);
+                    collect_order_keys(&a.value, true, &mut names);
                 }
                 if names.is_empty() {
                     self.d.push(
@@ -622,7 +622,7 @@ impl<'a> Lx<'a> {
                     return None;
                 }
                 let mut keys = Vec::with_capacity(names.len());
-                for n in &names {
+                for (n, asc) in &names {
                     let Some(i) = self.col_index(input, n) else {
                         self.d.push(
                             Diagnostic::error(
@@ -637,7 +637,7 @@ impl<'a> Lx<'a> {
                         );
                         return None;
                     };
-                    keys.push((i, true));
+                    keys.push((i, *asc));
                 }
                 (Op::OrderBy { keys }, in_schema.clone())
             }
@@ -1937,6 +1937,44 @@ fn collect_field_names(e: &Expr, out: &mut Vec<String>) {
         Expr::Path(p) => out.push(p.last().text.clone()),
         Expr::Tuple { elems, .. } => elems.iter().for_each(|x| collect_field_names(x, out)),
         Expr::Closure { body, .. } => collect_field_names(body, out),
+        _ => {}
+    }
+}
+
+/// The columns an `order_by` stage names, **with their direction**.
+///
+/// The pipeline surface had no descending spelling: every key came out `(i, true)`, so
+/// `t.order_by(|r| desc(r.amt)).limit(10)` silently returned the *ten smallest* — and the
+/// case that would have caught it could not be written in the corpus, because the surface
+/// could not express it. `desc(x)` and `asc(x)` are ordinary unreserved names in the keyword
+/// registry with samples in exactly this form, so every artefact generated from the registry
+/// described a construct the compiler did not have.
+///
+/// `asc` is the default and is accepted for symmetry. A direction applies to the columns
+/// inside its own call, so `order_by(|r| (desc(r.a), r.b))` is descending then ascending.
+///
+/// A call to anything else contributes **no** key rather than a wrong one; an empty key list
+/// is refused with NL0509 by the caller, which is what makes `order_by(|r| descending(r.x))`
+/// — a plausible misspelling — a diagnostic instead of a silently ascending sort.
+fn collect_order_keys(e: &Expr, asc: bool, out: &mut Vec<(String, bool)>) {
+    match e {
+        Expr::Call { callee, args, .. } => {
+            let Expr::Path(p) = callee.as_ref() else {
+                return;
+            };
+            let dir = match p.last().text.as_str() {
+                "desc" => false,
+                "asc" => true,
+                _ => return,
+            };
+            for a in args {
+                collect_order_keys(&a.value, dir, out);
+            }
+        }
+        Expr::Field { name, .. } => out.push((name.text.clone(), asc)),
+        Expr::Path(p) => out.push((p.last().text.clone(), asc)),
+        Expr::Tuple { elems, .. } => elems.iter().for_each(|x| collect_order_keys(x, asc, out)),
+        Expr::Closure { body, .. } => collect_order_keys(body, asc, out),
         _ => {}
     }
 }

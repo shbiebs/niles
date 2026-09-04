@@ -78,6 +78,21 @@ pub struct Rows {
     pub tag: String,
 }
 
+/// What a reply contained, without a copy of it.
+///
+/// The workloads time statements and discard their answers, so what they need from a reply is
+/// that it arrived and how much of it there was. Columns and the completion tag are kept
+/// because they cost one allocation for the whole reply rather than one per cell.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Counted {
+    pub rows: u64,
+    pub cells: u64,
+    /// Bytes of cell payload, excluding the framing. What the server actually sent as data.
+    pub bytes: u64,
+    pub columns: Vec<String>,
+    pub tag: String,
+}
+
 impl Rows {
     /// Column `col` of the first row, parsed as an `i128`.
     ///
@@ -302,6 +317,78 @@ impl Client {
         match failure {
             Some(e) => Err(e),
             None => Ok(rows),
+        }
+    }
+
+    /// **Run a statement and count what came back, without materialising it.**
+    ///
+    /// The workloads throw their results away — a point lookup is timed, not read — and the
+    /// client was building a `Vec` per row and a `String` per cell anyway. At ten thousand
+    /// rows that is forty thousand allocations and, measured, 2.7 ms: a client-side cost
+    /// charged to whichever server was being timed, and large enough to be most of the
+    /// difference between them on the row-returning statements.
+    ///
+    /// This reads the same bytes and skips over the cells instead of copying them, so the
+    /// reply is still fully received — a client that stopped reading would leave the socket
+    /// desynchronised and would be measuring a truncated answer. Nothing is allocated per row.
+    ///
+    /// **Used identically against both targets**, which is the rule this harness exists to
+    /// keep: a client that was lean against one server and eager against the other would be
+    /// measuring the client. It is also format-agnostic, because skipping a cell needs its
+    /// length and not its type.
+    pub fn simple_counted(&mut self, sql: &str) -> Result<Counted, WireError> {
+        let mut body = Vec::with_capacity(sql.len() + 1);
+        body.extend_from_slice(sql.as_bytes());
+        body.push(0);
+        self.send(b'Q', &body)?;
+
+        let mut out = Counted::default();
+        let mut failure: Option<WireError> = None;
+        loop {
+            let (tag, body) = self.read_message()?;
+            match tag {
+                b'T' => out.columns = parse_row_description(&body),
+                b'D' => {
+                    // Walk the cells for their lengths only. `-1` is a NULL and carries no
+                    // bytes; anything else is skipped, not copied.
+                    if body.len() >= 2 {
+                        let n = i16::from_be_bytes([body[0], body[1]]) as usize;
+                        let mut at = 2usize;
+                        for _ in 0..n {
+                            if at + 4 > body.len() {
+                                break;
+                            }
+                            let len = i32::from_be_bytes([
+                                body[at],
+                                body[at + 1],
+                                body[at + 2],
+                                body[at + 3],
+                            ]);
+                            at += 4;
+                            out.cells += 1;
+                            if len > 0 {
+                                out.bytes += len as u64;
+                                at += len as usize;
+                            }
+                        }
+                    }
+                    out.rows += 1;
+                }
+                b'C' => out.tag = cstr_at(&body, 0).0,
+                b'E' => failure = Some(error_from(&body)),
+                b'Z' => break,
+                b'N' | b'S' | b'I' | b'1' | b'2' | b'3' | b'n' | b's' | b't' => {}
+                other => {
+                    return Err(WireError::Protocol(format!(
+                        "unexpected message `{}`",
+                        other as char
+                    )))
+                }
+            }
+        }
+        match failure {
+            Some(e) => Err(e),
+            None => Ok(out),
         }
     }
 

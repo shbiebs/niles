@@ -559,6 +559,55 @@ is installed, that the base holds one currency, and that the entry is true at th
 was asked for — and each of those falls back to `index-fold`, so `explain` says "view" for a
 shape that *can* be a view read rather than for one that certainly will be.
 
+## The wire (T-32): binary formats, streamed replies, and a client that stopped charging both sides
+
+Three things, and the third moved the contract table most.
+
+**The reply's peak memory is a constant.** A served answer used to be assembled whole before
+the first byte reached the socket. `Backend::Rows` carries the Z-set instead and `write_all`
+renders it through a 64 KB buffer, flushing as it fills. E18, at two sizes an order of
+magnitude apart:
+
+| scenario | allocations | peak bytes |
+|---|--:|--:|
+| `wire_reply_10k` | 1 | 69,632 |
+| `wire_reply_100k` | 1 | 69,632 |
+
+Ten times the answer, the same cost to the byte. With the flush removed those read 4 / 835 KB
+and 7 / 6.7 MB, which is the shape the budget refuses. What remains O(rows) is the Z-set — the
+fold's own per-group accumulator, which PostgreSQL's hash aggregate has too.
+
+**Binary result formats, negotiated per column** in `Bind` as the protocol specifies, with a
+`set nilestream.binary = on` extension for the simple protocol, which has no field to carry a
+format code. `RowDescription` reports what was actually chosen, so a client is never told one
+thing and sent another. `int8` is eight big-endian bytes; `numeric` is PostgreSQL's own
+decimal encoding, and it is checked against a running PostgreSQL rather than against a decoder
+of our own — see `crates/bank-bench/tests/numeric_binary_oracle.rs`. An encoding is defined by
+one implementation, and the money boundary is not a place to trust one nobody compared.
+
+**The harness client stopped charging both sides for work neither asked for.** The workloads
+time statements and discard their answers; the client was building a `Vec` per row and a
+`String` per cell anyway — about forty thousand allocations and 2.7 ms on a ten-thousand-row
+reply. `simple_counted` reads the same bytes and skips the cells rather than copying them.
+Used identically against both targets, which is the rule: a client lean against one server and
+eager against the other would be measuring the client.
+
+That last change is why the analytical figures moved again:
+
+| statement | before T-32 | after |
+|---|--:|--:|
+| `group_by_acct` | 1.04× | **1.58×** |
+| `top_ten_by_sum` | 1.18× | **1.77×** |
+| composite | 1.32× | **1.88×** |
+
+**The `durable` row fell out of the parity band in this run**, 0.87× → 0.78×, and it is
+recorded rather than re-run. Nothing in T-32 touches the append path — `durable` returns no
+rows, so the lean client cannot have moved it — and the host was slower across the board this
+session: PostgreSQL's own `oltp` read 4,429 ops/s against 5,740 in the previous publication.
+Within-run MAD is 2.9% and 7.6% for the two `durable` rows, which does not cover a 10% ratio
+movement, so this is between-session drift the interleaving cannot remove rather than noise
+inside the run. It is a row to watch, not a regression to attribute.
+
 ## Concurrency (E19), and why it is a separate document
 
 `SPEC-ENGINE.md` Part 0 states its four targets without a concurrency qualifier, and E16

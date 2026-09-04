@@ -687,10 +687,10 @@ Every measurement in §§9.1–9.4 and §9.13 reported *counted work* inside the
 
 | Workload | Contract (SPEC-ENGINE Part 0) | PostgreSQL | Nilestream | Ratio | Verdict |
 |---|---|---|---|---|---|
-| oltp | 5–10× PostgreSQL | 5740 ops/s | 5441 ops/s | 0.95× | **NOT MET** |
-| analytical | 10–12× PostgreSQL | 273.0 ops/s | 361.3 ops/s | 1.32× | **NOT MET** |
-| point | parity with PostgreSQL | 107.0 µs p99 | 94.1 µs p99 | 1.14× | **PARITY** |
-| durable | parity with PostgreSQL | 6291 ops/s | 5503 ops/s | 0.87× | **PARITY** |
+| oltp | 5–10× PostgreSQL | 4429 ops/s | 4297 ops/s | 0.97× | **NOT MET** |
+| analytical | 10–12× PostgreSQL | 235.3 ops/s | 441.3 ops/s | 1.88× | **NOT MET** |
+| point | parity with PostgreSQL | 114.5 µs p99 | 104.4 µs p99 | 1.10× | **PARITY** |
+| durable | parity with PostgreSQL | 5398 ops/s | 4228 ops/s | 0.78× | **NOT MET** |
 
 <!-- END:E16-contract -->
 

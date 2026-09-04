@@ -15,7 +15,7 @@
 //! configuration that would change the numbers, because a durable-commit figure with
 //! `synchronous_commit = off` is a different measurement wearing the same name.
 
-use crate::wire::{Client, Rows, WireError};
+use crate::wire::{Client, Counted, Rows, WireError};
 
 /// One system under test.
 pub trait Target {
@@ -48,8 +48,14 @@ pub trait Target {
         None
     }
 
-    /// Run one statement, returning what came back.
-    fn run(&mut self, sql: &str) -> Result<Rows, WireError>;
+    /// Run one statement, returning **how much** came back rather than a copy of it.
+    ///
+    /// The workloads time statements and discard their answers, and the client was building a
+    /// `Vec` per row and a `String` per cell to be discarded — forty thousand allocations and
+    /// 2.7 ms on a ten-thousand-row reply, charged to whichever server was being timed. The
+    /// reply is still fully read; the cells are skipped rather than copied. A target that
+    /// needs the values uses its own client directly, as `base_rows` does.
+    fn run(&mut self, sql: &str) -> Result<Counted, WireError>;
 
     /// Prepare a statement for repeated execution.
     fn prepare_statement(&mut self, sql: &str) -> Result<String, WireError>;
@@ -201,8 +207,8 @@ impl Target for PgTarget {
         Ok(())
     }
 
-    fn run(&mut self, sql: &str) -> Result<Rows, WireError> {
-        self.client.simple(sql)
+    fn run(&mut self, sql: &str) -> Result<Counted, WireError> {
+        self.client.simple_counted(sql)
     }
 
     fn prepare_statement(&mut self, sql: &str) -> Result<String, WireError> {
@@ -311,8 +317,8 @@ impl Target for NilestreamTarget {
         Ok(())
     }
 
-    fn run(&mut self, sql: &str) -> Result<Rows, WireError> {
-        self.client.simple(sql)
+    fn run(&mut self, sql: &str) -> Result<Counted, WireError> {
+        self.client.simple_counted(sql)
     }
 
     fn prepare_statement(&mut self, sql: &str) -> Result<String, WireError> {

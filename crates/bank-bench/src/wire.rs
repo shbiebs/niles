@@ -242,6 +242,69 @@ impl Client {
         self.collect_until_ready()
     }
 
+    /// Execute a prepared statement asking for **every column in binary**, and return the
+    /// raw cell bytes rather than text.
+    ///
+    /// For `crates/bank-bench/tests/numeric_binary_oracle.rs`: the only test of a wire
+    /// encoding worth anything is one against the implementation it has to match, and a real
+    /// PostgreSQL is that implementation. Nothing in the benchmark path uses this — the two
+    /// targets are driven identically, and asking one of them for binary would be measuring
+    /// the format rather than the engine.
+    pub fn execute_binary(&mut self, name: &str) -> Result<Vec<Vec<Option<Vec<u8>>>>, WireError> {
+        let mut bind = Vec::new();
+        put_cstr(&mut bind, "");
+        put_cstr(&mut bind, name);
+        bind.extend_from_slice(&0i16.to_be_bytes()); // no parameters
+        bind.extend_from_slice(&0i16.to_be_bytes());
+        // One result format code, which the protocol applies to every column.
+        bind.extend_from_slice(&1i16.to_be_bytes());
+        bind.extend_from_slice(&1i16.to_be_bytes()); // 1 = binary
+        self.send(b'B', &bind)?;
+
+        let mut exec = Vec::new();
+        put_cstr(&mut exec, "");
+        exec.extend_from_slice(&0i32.to_be_bytes());
+        self.send(b'E', &exec)?;
+        self.send(b'S', &[])?;
+
+        let mut rows = Vec::new();
+        let mut failure: Option<WireError> = None;
+        loop {
+            let (tag, body) = self.read_message()?;
+            match tag {
+                b'D' => {
+                    let n = i16::from_be_bytes([body[0], body[1]]) as usize;
+                    let mut at = 2usize;
+                    let mut row = Vec::with_capacity(n);
+                    for _ in 0..n {
+                        let w = i32::from_be_bytes([
+                            body[at],
+                            body[at + 1],
+                            body[at + 2],
+                            body[at + 3],
+                        ]);
+                        at += 4;
+                        if w < 0 {
+                            row.push(None);
+                        } else {
+                            let w = w as usize;
+                            row.push(Some(body[at..at + w].to_vec()));
+                            at += w;
+                        }
+                    }
+                    rows.push(row);
+                }
+                b'E' => failure = Some(error_from(&body)),
+                b'Z' => break,
+                _ => {}
+            }
+        }
+        match failure {
+            Some(e) => Err(e),
+            None => Ok(rows),
+        }
+    }
+
     fn send(&mut self, tag: u8, body: &[u8]) -> Result<(), WireError> {
         let mut msg = Vec::with_capacity(body.len() + 5);
         msg.push(tag);

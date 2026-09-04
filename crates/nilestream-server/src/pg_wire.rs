@@ -843,3 +843,97 @@ mod tests {
         assert_eq!(rows[3], vec![Some("3".into()), None, Some("-3".into())]);
     }
 }
+
+/// **PostgreSQL's binary wire encodings, for the types this server sends.**
+///
+/// Binary is not smaller than text for a small integer — `1` is one byte of text and eight of
+/// `int8` — so bandwidth is not the reason it is here. Parsing is. A text reply makes the
+/// server format every integer into digits and the client parse every one back, and that
+/// round trip is the bulk of what a large answer costs at both ends.
+///
+/// A format is negotiated **per column**, as the protocol specifies: `Bind` carries a result
+/// format code for each, and `RowDescription` reports what was chosen. `psql` and every other
+/// text client are unaffected, because text stays the default and is what an unrequested
+/// column gets.
+pub mod binary {
+    /// `int8`: eight bytes, big-endian, two's complement.
+    ///
+    /// The value is an `i128` here because that is what the engine carries. One that does not
+    /// fit is **refused by the caller**, never truncated — see `session`'s 22003 path. A
+    /// balance that silently lost its high bits would be the §1.1.1 defect at the last hop.
+    pub fn int8(v: i64, out: &mut Vec<u8>) {
+        out.extend_from_slice(&v.to_be_bytes());
+    }
+
+    /// `numeric`: PostgreSQL's own decimal encoding, from exact minor units and a scale.
+    ///
+    /// The format, from `src/backend/utils/adt/numeric.c`: `ndigits`, `weight`, `sign`,
+    /// `dscale`, each an `i16`, then `ndigits` base-10000 groups as `i16`. `weight` is the
+    /// base-10000 exponent of the **first** group, so a value's integer part occupies groups
+    /// `weight` down to 0 and its fraction the negative ones. `dscale` is the number of
+    /// decimal digits to display after the point, which is the column's declared scale and
+    /// not a property of the value — that is what keeps `1.50` from being sent as `1.5`.
+    ///
+    /// Written out rather than reached for from a crate, because this repository's kernel and
+    /// engine have no dependencies, and because the encoding is the *money* boundary: a
+    /// rounding here is a rounding of a balance. It is checked against the real PostgreSQL
+    /// in `crates/bank-bench/tests/numeric_binary_oracle.rs`, which asks a running server to
+    /// send the same values in binary and compares the bytes — the only test of an encoding
+    /// that is worth anything is one against the implementation it has to match.
+    pub fn numeric(minor: i128, scale: u32, out: &mut Vec<u8>) {
+        const NBASE: i128 = 10_000;
+        // Sign is carried separately; PostgreSQL's zero is positive with no digits.
+        let neg = minor < 0;
+        // Accumulate on the negative side so `i128::MIN` does not overflow on negation.
+        let mut n = if neg { minor } else { -minor };
+
+        // Split at the decimal point. `scale` digits are fractional; the rest are integral.
+        // The fraction is padded on the right to a whole number of base-10000 groups, which
+        // is what makes the group boundaries line up with the point.
+        let pad = (4 - (scale % 4)) % 4;
+        for _ in 0..pad {
+            n *= 10;
+        }
+        let frac_groups = (scale as usize + pad as usize) / 4;
+
+        // Digits, least significant group first.
+        let mut groups: Vec<i16> = Vec::new();
+        if n == 0 {
+            // Zero: no digit groups at all, weight 0, and the declared scale still shown.
+            out.extend_from_slice(&0i16.to_be_bytes());
+            out.extend_from_slice(&0i16.to_be_bytes());
+            out.extend_from_slice(&0u16.to_be_bytes());
+            out.extend_from_slice(&(scale as i16).to_be_bytes());
+            return;
+        }
+        while n != 0 {
+            groups.push((-(n % NBASE)) as i16);
+            n /= NBASE;
+        }
+        // `weight` counts base-10000 places of the integer part, less one. The groups below
+        // the point are the fractional ones.
+        let mut weight = groups.len() as i32 - frac_groups as i32 - 1;
+
+        // Most significant first, which is the order the wire wants.
+        groups.reverse();
+        // Leading zero groups carry no information and PostgreSQL does not send them; each
+        // one dropped lowers the weight by a place.
+        while groups.first() == Some(&0) {
+            groups.remove(0);
+            weight -= 1;
+        }
+        // Trailing zero groups are equally redundant: `dscale` says how much to display, so
+        // the digits need not be padded out to it.
+        while groups.last() == Some(&0) {
+            groups.pop();
+        }
+
+        out.extend_from_slice(&(groups.len() as i16).to_be_bytes());
+        out.extend_from_slice(&(weight as i16).to_be_bytes());
+        out.extend_from_slice(&(if neg { 0x4000u16 } else { 0x0000u16 }).to_be_bytes());
+        out.extend_from_slice(&(scale as i16).to_be_bytes());
+        for g in groups {
+            out.extend_from_slice(&g.to_be_bytes());
+        }
+    }
+}

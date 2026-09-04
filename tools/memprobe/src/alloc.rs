@@ -225,6 +225,23 @@ pub fn budget(scenario: &str) -> Option<f64> {
         // own postings and the reply — not the base. The plan is borrowed from the circuit
         // rather than cloned out of it, which was four of these on its own.
         "served_point" => 13.0,
+        // **The same question, twice more, and both used to scan the whole base.**
+        //
+        // `where acct = 4242 and cur = 0` gave up on the `and`; `group by acct having
+        // acct = 4242` gave up on the filter above the aggregate. Both restrict to one
+        // account, and 76,696 allocations to find one group out of ten thousand is not a
+        // cost the shape of the question justifies. The budget is `served_point`'s plus room
+        // for the extra conjunct, because that is all either one now is.
+        // Three more than `served_point` because it is *not* a plain balance read: the
+        // extra conjunct means the maintained view cannot answer it (the view is keyed by
+        // account and currency and knows nothing about a query's other conditions), so the
+        // account-restricted scan folds instead. Fifteen allocations, against thirty-two.
+        "served_point_conjunct" => 17.0,
+        // The `having` copy costs a rewritten predicate — two boxes for a comparison, the
+        // vector holding it, and the filter above the aggregate still being evaluated over
+        // the one group that survives. Nine allocations for a query, against seventy-six
+        // thousand.
+        "served_having_on_key" => 24.0,
         // The REV runtime's hit path: the key is cloned into the recency map, and the answer
         // is a `Copy` struct.
         "rev_read_hit" => 2.2,
@@ -244,6 +261,8 @@ pub const SCENARIOS: &[&str] = &[
     "served_top_ten",
     "served_sum_negative",
     "served_point",
+    "served_point_conjunct",
+    "served_having_on_key",
     "rev_read_hit",
     "append_in_memory",
 ];

@@ -491,6 +491,74 @@ What is left in `served_group_by_acct` is the Z-set itself: one row vector per g
 what the type is, plus the tree holding it. Going below that needs a different `ZSet`, which is
 not an efficiency task but a change to the reference semantics' representation.
 
+## Knowing what a query costs before running it (T-10)
+
+The engine answers a statement in one of four ways, and they differ by three orders of
+magnitude:
+
+| class | what it does | cost |
+|---|---|---|
+| `view` | a maintained REV entry, read at the requested anchor, reconstructed on a miss | no base rows on a hit |
+| `index-fold` | one pass over **one account's** postings, through the anchor index | that account's history |
+| `fold` | one pass over the base, per-group accumulator, no intermediate Z-set | base rows + groups |
+| `materialise` | the base as a Z-set and the circuit evaluated over it | a row and an allocation per base row |
+
+Until this cycle the only way to find out which one a statement took was to measure it, and
+two statements that fall into the cheap classes were falling into the most expensive one:
+
+```
+select acct, sum(amt) from postings where acct = 4242 group by acct              20 allocs, 0.8µs
+select acct, sum(amt) from postings where acct = 4242 and cur = 0 group by acct  32 allocs, 1,014µs
+select acct, sum(amt) from postings group by acct having acct = 4242         76,696 allocs, 13,955µs
+```
+
+Three spellings of one question, and adding a condition that *narrows* it made it a thousand
+times more expensive. The causes were separate and both were cliffs rather than costs: the
+scan restriction understood only a filter whose entire predicate was `acct = k`, so an `and`
+made it give up; and a `Filter` above the aggregate made the fold planner refuse the shape
+outright, so a `having` materialised the base to select one group out of ten thousand.
+
+Now: a **conjunct** `acct = k` anywhere in any filter restricts the scan, which is sound
+because every row surviving a filter satisfies every conjunct of its predicate, so `acct = k`
+is a necessary condition on every row that reaches the aggregate — and the filters are all
+still applied, so the restriction can neither drop a row nor keep one. A disjunction is
+deliberately *not* split: neither side of an `or` is necessary, so `acct = 1 or acct = 2`
+stays one leaf and restricts nothing. And a `having` whose columns are all grouping keys is
+rewritten onto the source's column indices and pushed below the aggregate; one that names an
+aggregate's value is not, because that value does not exist before the aggregation.
+
+| E18 scenario | before | after | budget |
+|---|--:|--:|--:|
+| `served_point_conjunct` | 32 | **15** | 17 |
+| `served_having_on_key` | 76,696 | **21** | 24 |
+
+`served_point_conjunct` is three above `served_point` rather than equal to it, and the three
+are a correctness finding the tests produced. The **maintained view** may only answer when
+`acct = k` is the *whole* restriction: it is keyed by account and currency and knows nothing
+about a query's other conditions, so answering `where acct = 7 and cur = 99` from it returned
+account 7's balance for a query that selects no rows. A scan may be restricted whenever the
+conjunct is necessary; a view may only answer when it is sufficient. Those are different
+questions and the code now asks both — `account_restriction` and `sole_account_filter`.
+
+**`explain` says which class**, from `rev_engine::serve_path` — the function `query` itself
+branches on, so the two cannot become different descriptions of the same engine:
+
+```sh
+psql -h 127.0.0.1 -p 5434 -U bench bank \
+  -c "explain select acct, sum(amt) from postings group by acct having acct = 7"
+   property    |                        value
+---------------+------------------------------------------------------
+ serve path    | index-fold
+ what it costs | one pass over one account's postings, reached through…
+ circuit nodes | 4
+```
+
+`nilesc explain FILE` prints the same class per view under the circuit dump. It is a *static*
+answer: `view` additionally requires conditions a compiler cannot see — that the balance view
+is installed, that the base holds one currency, and that the entry is true at the anchor that
+was asked for — and each of those falls back to `index-fold`, so `explain` says "view" for a
+shape that *can* be a view read rather than for one that certainly will be.
+
 ## Concurrency (E19), and why it is a separate document
 
 `SPEC-ENGINE.md` Part 0 states its four targets without a concurrency qualifier, and E16

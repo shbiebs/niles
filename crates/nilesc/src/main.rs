@@ -186,6 +186,22 @@ fn main() -> ExitCode {
                 "explain" => {
                     println!("circuit ({} nodes):", lowered.circuit.nodes.len());
                     print!("{}", lowered.circuit.explain());
+                    // **What the engine would do with each view, not only what it lowered
+                    // to.** A circuit dump says what the query means; it says nothing about
+                    // whether answering it reads one maintained entry or materialises the
+                    // whole base, and those differ by three orders of magnitude. The class
+                    // comes from `nilestream_server::rev_engine::serve_path`, which is the
+                    // function the engine itself branches on.
+                    let mut named: Vec<&String> = lowered.circuit.outputs.keys().collect();
+                    named.sort();
+                    if !named.is_empty() {
+                        println!("\nserve path:");
+                        for out in named {
+                            let p =
+                                nilestream_server::rev_engine::serve_path(&lowered.circuit, out);
+                            println!("  {out}: {} — {}", p.as_str(), p.describe());
+                        }
+                    }
                 }
                 "plan" => {
                     // The observed load a running engine would supply. Offline, these are

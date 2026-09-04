@@ -58,9 +58,11 @@ use niles_ir::value::Value;
 /// planning a single-account read cost six allocations, four of them for structures the
 /// circuit was still holding unchanged a stack frame below. The plan cannot outlive the
 /// circuit it describes, and the borrow says so.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum Step<'c> {
-    Filter(&'c Scalar),
+    /// Borrowed where the predicate is the circuit's own; owned where it is a `having`
+    /// rewritten onto the source's column indices (see [`push_having`]).
+    Filter(std::borrow::Cow<'c, Scalar>),
     Map(&'c [Scalar]),
 }
 
@@ -101,6 +103,145 @@ impl FoldPlan<'_> {
     pub fn filters_only(&self) -> bool {
         self.steps.iter().all(|s| matches!(s, Step::Filter(_)))
     }
+
+    /// **The single account this plan's filters restrict the scan to, if there is one.**
+    ///
+    /// Asked of the *plan* rather than of the circuit, and that is what removes two cliffs at
+    /// once. The circuit-level version looked for a `Filter` whose whole predicate was
+    /// `acct = k` and gave up on anything else, so `where acct = 4242 and cur = 0` scanned
+    /// the entire base — 32 allocations and 1,014µs against 20 and 0.8µs for the same
+    /// question without the second conjunct — and `group by acct having acct = 4242` never
+    /// reached this code at all. A plan's steps already carry a pushed `having`, and the
+    /// conjuncts of each filter are split here.
+    ///
+    /// **Why a top-level conjunct is enough to restrict a scan.** Every row that survives a
+    /// `Filter` satisfies every conjunct of its predicate, so a conjunct `acct = k` is a
+    /// necessary condition on every row that reaches the aggregate. Restricting the *source*
+    /// to that account therefore cannot drop a row the circuit would have kept — and the
+    /// filters are all still applied, so it cannot keep one either. A disjunction is not
+    /// split: `acct = 1 or acct = 2` is a single leaf here and matches nothing, which is the
+    /// conservative answer.
+    ///
+    /// Two conjuncts naming different accounts mean no row survives; the restriction is
+    /// abandoned rather than guessed at, and the filters answer correctly and slowly.
+    pub fn account_restriction(&self, acct_col: ColIdx) -> Option<u64> {
+        use niles_ir::operator::ScalarOp;
+        // A `Map` between the source and the aggregate changes what the column indices mean,
+        // so a restriction derived from them would restrict on the wrong column.
+        if !self.filters_only() {
+            return None;
+        }
+        let mut found: Option<u64> = None;
+        let mut conflict = false;
+        for step in &self.steps {
+            let Step::Filter(p) = step else { continue };
+            // A visitor rather than a collected list: this runs on every served query, and
+            // a `Vec` here was one allocation per query for a walk of at most a handful of
+            // nodes.
+            conjuncts(p, &mut |leaf| {
+                let Scalar::Binary {
+                    op: ScalarOp::Eq,
+                    lhs,
+                    rhs,
+                } = leaf
+                else {
+                    return;
+                };
+                let k = match (&**lhs, &**rhs) {
+                    (Scalar::Column(c), Scalar::LitInt(k))
+                    | (Scalar::LitInt(k), Scalar::Column(c))
+                        if *c == acct_col =>
+                    {
+                        match u64::try_from(*k) {
+                            Ok(k) => k,
+                            Err(_) => return,
+                        }
+                    }
+                    _ => return,
+                };
+                match found {
+                    Some(prev) if prev != k => conflict = true,
+                    _ => found = Some(k),
+                }
+            });
+        }
+        if conflict {
+            return None;
+        }
+        found
+    }
+    /// **The account this plan restricts to when it restricts to nothing else.**
+    ///
+    /// The distinction between this and [`account_restriction`] is a correctness one, and it
+    /// was found by a test rather than by reading. A *scan* may be restricted whenever
+    /// `acct = k` is a necessary condition, because the filters are still applied afterwards
+    /// and remove whatever else they remove. A **maintained view** may only answer when
+    /// `acct = k` is the *whole* of the restriction: the balance view is keyed by account and
+    /// currency and knows nothing about a query's other conditions, so answering
+    /// `where acct = 7 and cur = 99` from it returns account 7's balance for a query that
+    /// selects no rows at all.
+    ///
+    /// `None` therefore means "not a plain balance read", and the fold answers instead —
+    /// correctly, and more slowly, which is the right way round.
+    pub fn sole_account_filter(&self, acct_col: ColIdx) -> Option<u64> {
+        use niles_ir::operator::ScalarOp;
+        if !self.filters_only() {
+            return None;
+        }
+        let mut acct: Option<u64> = None;
+        let mut other = false;
+        for step in &self.steps {
+            let Step::Filter(p) = step else { continue };
+            conjuncts(p, &mut |leaf| {
+                let k = match leaf {
+                    Scalar::Binary {
+                        op: ScalarOp::Eq,
+                        lhs,
+                        rhs,
+                    } => match (&**lhs, &**rhs) {
+                        (Scalar::Column(c), Scalar::LitInt(k))
+                        | (Scalar::LitInt(k), Scalar::Column(c))
+                            if *c == acct_col =>
+                        {
+                            u64::try_from(*k).ok()
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                match k {
+                    Some(k) if acct.is_none_or(|prev| prev == k) => acct = Some(k),
+                    // A second account, or any condition that is not the account: this is
+                    // not a plain balance read.
+                    _ => other = true,
+                }
+            });
+        }
+        if other {
+            return None;
+        }
+        acct
+    }
+}
+
+/// The top-level conjuncts of a predicate: what every surviving row must satisfy.
+///
+/// Splits `and` and nothing else. An `or` node is one leaf, because neither of its sides is
+/// a necessary condition, and a conjunct list that pretended otherwise would license a scan
+/// restriction that drops rows.
+fn conjuncts(p: &Scalar, f: &mut impl FnMut(&Scalar)) {
+    use niles_ir::operator::ScalarOp;
+    match p {
+        Scalar::Binary {
+            op: ScalarOp::And,
+            lhs,
+            rhs,
+        } => {
+            conjuncts(lhs, f);
+            conjuncts(rhs, f);
+        }
+        other => f(other),
+    }
 }
 
 /// Find the aggregate this circuit's output rests on, if the path down to the base is inside
@@ -115,6 +256,8 @@ pub fn plan<'c>(c: &'c Circuit, output: &str) -> Option<FoldPlan<'c>> {
     // for one. `order by` and `limit` are evaluated by the reference from the folded value,
     // so they may sit here; anything else means this is not the shape.
     let mut id = out;
+    // `having` predicates rewritten onto the source's columns, innermost last.
+    let mut pushed: Vec<Scalar> = Vec::new();
     loop {
         let n = c.nodes.iter().find(|n| n.id == id)?;
         match &n.op {
@@ -123,18 +266,87 @@ pub fn plan<'c>(c: &'c Circuit, output: &str) -> Option<FoldPlan<'c>> {
                 {
                     return None;
                 }
-                let steps = chain(c, *n.inputs.first()?)?;
+                let (relation, mut steps) = chain(c, *n.inputs.first()?)?;
+                steps.extend(
+                    pushed
+                        .into_iter()
+                        .map(|p| Step::Filter(std::borrow::Cow::Owned(p))),
+                );
                 return Some(FoldPlan {
-                    relation: steps.0,
+                    relation,
                     node: n.id,
-                    steps: steps.1,
+                    steps,
                     group_key,
                     aggs,
                 });
             }
             Op::OrderBy { .. } | Op::Limit { .. } | Op::Distinct => id = *n.inputs.first()?,
+            // **A `having` over group-key columns only, pushed below the aggregate.**
+            //
+            // `having acct = 4242` used to make `plan` return `None`, so the query
+            // materialised the whole base: 76,696 allocations and 14ms against 20 and 0.8µs
+            // for `where acct = 4242 group by acct`, which is the same question. The filter
+            // sits above the aggregate and its columns index the aggregate's *output*, so
+            // pushing it means rewriting those indices onto the source's — which is only
+            // possible when every column it names is a grouping key, because an aggregate's
+            // value does not exist before the aggregation.
+            //
+            // The filter stays in the circuit above the aggregate as well, and applying it
+            // twice is harmless: a group whose key satisfied the predicate before the
+            // aggregation still satisfies it after. The pushed copy is what makes the scan
+            // small; the original is what keeps the semantics the reference evaluator's.
+            Op::Filter { predicate } => {
+                let input = *n.inputs.first()?;
+                let below = c.nodes.iter().find(|m| m.id == input)?;
+                let Op::Aggregate { group_key, .. } = &below.op else {
+                    return None;
+                };
+                // Names an aggregate's value, so it cannot be evaluated before the
+                // aggregation: not this shape, and the caller materialises.
+                pushed.push(push_having(predicate, group_key)?);
+                id = input;
+            }
             _ => return None,
         }
+    }
+}
+
+/// Rewrite a `having` predicate onto the source's column indices, if it names only keys.
+///
+/// The aggregate's output is the group key followed by one column per aggregate, so output
+/// column `i` is source column `group_key[i]` exactly when `i < group_key.len()`. A predicate
+/// naming anything at or beyond that names an aggregated value and has no meaning before the
+/// aggregation; `None` says so, and the caller refuses rather than pushing something that
+/// would filter on the wrong column.
+fn push_having(p: &Scalar, group_key: &[ColIdx]) -> Option<Scalar> {
+    let mut ok = true;
+    let out = rewrite_columns(p, &mut |c| match group_key.get(c as usize) {
+        Some(src) => *src,
+        None => {
+            ok = false;
+            c
+        }
+    });
+    ok.then_some(out)
+}
+
+/// A copy of a scalar with every column index passed through `f`.
+fn rewrite_columns(s: &Scalar, f: &mut impl FnMut(ColIdx) -> ColIdx) -> Scalar {
+    match s {
+        Scalar::Column(c) => Scalar::Column(f(*c)),
+        Scalar::Binary { op, lhs, rhs } => Scalar::Binary {
+            op: *op,
+            lhs: Box::new(rewrite_columns(lhs, f)),
+            rhs: Box::new(rewrite_columns(rhs, f)),
+        },
+        Scalar::IsNull(x) => Scalar::IsNull(Box::new(rewrite_columns(x, f))),
+        Scalar::Not(x) => Scalar::Not(Box::new(rewrite_columns(x, f))),
+        Scalar::Neg(x) => Scalar::Neg(Box::new(rewrite_columns(x, f))),
+        Scalar::Udf { id, args } => Scalar::Udf {
+            id: *id,
+            args: args.iter().map(|a| rewrite_columns(a, f)).collect(),
+        },
+        other => other.clone(),
     }
 }
 
@@ -157,7 +369,7 @@ fn chain<'c>(c: &'c Circuit, from: NodeId) -> Option<(&'c str, Vec<Step<'c>>)> {
                 return Some((relation.as_str(), steps));
             }
             Op::Filter { predicate } => {
-                steps.push(Step::Filter(predicate));
+                steps.push(Step::Filter(std::borrow::Cow::Borrowed(predicate)));
                 id = *n.inputs.first()?;
             }
             Op::Map { exprs } => {

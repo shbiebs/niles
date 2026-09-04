@@ -15,3 +15,7 @@ niles-ir = { path = "../niles-ir" }
 # `run` executes a function; the interpreter is the thing that executes it.
 niles-interp = { path = "../niles-interp" }
 nilestream-optimizer = { path = "../nilestream-optimizer" }
+# **`explain` names the serve path, and the name comes from the engine.** A second
+# classifier here would be a second opinion about a system this compiler does not contain,
+# and it would drift the first time the engine learned a new shape.
+nilestream-server = { path = "../nilestream-server" }

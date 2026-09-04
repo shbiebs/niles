@@ -15,8 +15,10 @@ The tool lives outside the workspace. `GlobalAlloc` cannot be implemented withou
 | `served_group_by_cur` | query | 3 | 39 | 13.0 | 5454 | 1818 | 0 | 1664 |
 | `served_group_by_acct` | query | 3 | 37806 | 12602.0 | 11387166 | 3795722 | 0 | 2841312 |
 | `served_top_ten` | query | 3 | 37884 | 12628.0 | 14536794 | 4845598 | 0 | 2841312 |
-| `served_sum_negative` | query | 3 | 36 | 12.0 | 5376 | 1792 | 0 | 1664 |
-| `served_point` | query | 200 | 2400 | 12.0 | 178000 | 890 | 0 | 762 |
+| `served_sum_negative` | query | 3 | 36 | 12.0 | 5568 | 1856 | 0 | 1728 |
+| `served_point` | query | 200 | 2400 | 12.0 | 190800 | 954 | 0 | 826 |
+| `served_point_conjunct` | query | 200 | 3000 | 15.0 | 427600 | 2138 | 0 | 1792 |
+| `served_having_on_key` | query | 200 | 4200 | 21.0 | 635600 | 3178 | 0 | 1856 |
 | `rev_read_hit` | read | 1000 | 2000 | 2.0 | 32000 | 32 | 0 | 16 |
 | `append_in_memory` | transaction | 500 | 3500 | 7.0 | 257392 | 515 | 67392 | 67624 |
 
@@ -33,6 +35,8 @@ Allocations per operation, asserted exactly — an allocation count is not a tol
 | `served_top_ten` | 14100.0 | 12628.0 | 10% |
 | `served_sum_negative` | 14.0 | 12.0 | 14% |
 | `served_point` | 13.0 | 12.0 | 8% |
+| `served_point_conjunct` | 17.0 | 15.0 | 12% |
+| `served_having_on_key` | 24.0 | 21.0 | 12% |
 | `rev_read_hit` | 2.2 | 2.0 | 9% |
 | `append_in_memory` | 7.7 | 7.0 | 9% |
 

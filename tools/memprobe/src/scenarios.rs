@@ -205,6 +205,34 @@ pub fn served_point() -> Row {
     )
 }
 
+/// **The same question with a second conjunct.**
+///
+/// `where acct = 4242 and cur = 0` restricts to one account exactly as `served_point` does,
+/// and the engine used to scan the entire base for it: the restriction was derived from a
+/// filter whose *whole* predicate had to be `acct = k`, and an `and` made it give up. A
+/// second condition that narrows the query made it a thousand times more expensive.
+pub fn served_point_conjunct() -> Row {
+    served(
+        "served_point_conjunct",
+        "select acct, sum(amt) from postings where acct = 4242 and cur = 0 group by acct",
+        200,
+    )
+}
+
+/// **The same question spelled as a `having` over the group key.**
+///
+/// `group by acct having acct = 4242` selects one group, and every row of the base was read
+/// to find it: a filter above the aggregate made the fold planner refuse the shape entirely,
+/// so the query materialised. A `having` that names only grouping columns is a `where` in a
+/// different position, and the aggregate does not need computing to know that.
+pub fn served_having_on_key() -> Row {
+    served(
+        "served_having_on_key",
+        "select acct, sum(amt) from postings group by acct having acct = 4242",
+        200,
+    )
+}
+
 /// **The REV runtime's hit path** — the mechanism the thesis is about, which the wire path
 /// does not yet use. Measured so that the difference between the two is a number.
 pub fn rev_read_hit() -> Row {
@@ -360,6 +388,8 @@ pub fn all() -> Vec<Row> {
         served_top_ten(),
         served_sum_negative(),
         served_point(),
+        served_point_conjunct(),
+        served_having_on_key(),
         rev_read_hit(),
         append_in_memory(),
     ]

@@ -294,7 +294,31 @@ impl crate::session::Serving for RevEngine {
         // This is the mechanism the phase diagram is about, and until now nothing on the wire
         // used it: every read was an anchored reconstruction and the `miss_rate` column read
         // 1.00 by construction rather than by measurement.
-        if let (Some(p), Some(acct)) = (planned.as_ref(), account_predicate(circuit)) {
+        // **The account restriction comes from the plan where there is one.** The
+        // circuit-level version below understands only a filter whose *whole* predicate is
+        // `acct = k`; the plan's version splits conjuncts and sees a `having` that has been
+        // pushed below the aggregate, which is two cliffs the same query used to fall off.
+        let restricted = planned
+            .as_ref()
+            .and_then(|p| p.account_restriction(ACCT_COL))
+            .or_else(|| account_predicate(circuit));
+        // **The view answers only when the account is the whole of the restriction.**
+        // `restricted` above is enough to narrow a *scan*, because the circuit's filters are
+        // applied to whatever the scan returns. It is not enough to answer from the balance
+        // view, which is keyed by account and currency and knows nothing about a query's
+        // other conditions: `where acct = 7 and cur = 99` selects no rows, and answering it
+        // from the view returned account 7's balance. A test found that, not a reading.
+        //
+        // The condition is `serve_path`'s, so `explain` and the engine cannot describe
+        // different engines: one function decides, and both read it.
+        let sole = planned
+            .as_ref()
+            .and_then(|p| p.sole_account_filter(ACCT_COL));
+        if let (Some(p), Some(acct), ServePath::View) = (
+            planned.as_ref(),
+            sole,
+            serve_path_of(planned.as_ref(), circuit, output),
+        ) {
             if let Some(rows) = self.answer_from_view(p, circuit, output, acct, anchor) {
                 return Ok(rows);
             }
@@ -310,7 +334,7 @@ impl crate::session::Serving for RevEngine {
                 // nothing holds the base at all.
                 let mut folder = crate::scan_fold::Folder::new(&p);
                 let mut scanned = 0u64;
-                self.scan(account_predicate(circuit), anchor, |row| {
+                self.scan(restricted, anchor, |row| {
                     scanned += 1;
                     folder.row(&row[..]);
                 });
@@ -347,7 +371,7 @@ impl crate::session::Serving for RevEngine {
             // shape outside the fragment, and it is the oracle the fast path is tested
             // against.
             _ => {
-                let sources = match account_predicate(circuit) {
+                let sources = match restricted {
                     Some(acct) => self.base_for_account(acct, anchor),
                     None => self.base_at(anchor),
                 };
@@ -691,11 +715,112 @@ impl RevEngine {
 /// or a second filter naming a different account. A pushdown that guessed would restrict a
 /// scan the circuit does not restrict, and the answer would be missing rows — which is the
 /// one thing an optimisation must never do.
+/// The column `postings.acct` occupies in the source schema. Declared order:
+/// `txn, acct, cur, amt, idem`.
+pub const ACCT_COL: u16 = 1;
+
+/// **How the engine would answer a statement.**
+///
+/// Four classes, ordered from cheapest to most expensive, and the difference between the
+/// first and the last is three orders of magnitude. Until this existed, the only way to find
+/// out which one a query would take was to measure it: the decision was spread over three
+/// `if let`s inside `query`, and a query that fell off a cliff — `where acct = k and cur = 0`
+/// used to, and `group by acct having acct = k` used to — looked exactly like one that did
+/// not.
+///
+/// [`serve_path`] computes this from the same functions `query` branches on, and `query` now
+/// branches on *this*, so the two cannot drift into describing different engines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServePath {
+    /// A maintained REV entry: one key, read from partial state, reconstructed on a miss.
+    /// This is the mechanism the phase diagram characterises.
+    View,
+    /// A fold over the rows of **one account**, reached through the anchor index.
+    IndexFold,
+    /// A fold over the whole base, in one pass, with no intermediate Z-set.
+    Fold,
+    /// The whole base materialised as a Z-set and the circuit evaluated over it: the honest
+    /// cost of a shape outside the keyed-aggregate fragment.
+    Materialise,
+}
+
+impl ServePath {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ServePath::View => "view",
+            ServePath::IndexFold => "index-fold",
+            ServePath::Fold => "fold",
+            ServePath::Materialise => "materialise",
+        }
+    }
+
+    /// One line saying what the class means and what it costs, for `explain`.
+    pub fn describe(self) -> &'static str {
+        match self {
+            ServePath::View => {
+                "a maintained REV entry, read at the requested anchor and reconstructed on a miss; touches no base rows on a hit"
+            }
+            ServePath::IndexFold => {
+                "one pass over one account's postings, reached through the anchor index; O(that account's history)"
+            }
+            ServePath::Fold => {
+                "one pass over the base with a per-group accumulator and no intermediate Z-set; O(base rows + groups)"
+            }
+            ServePath::Materialise => {
+                "the base materialised as a Z-set and the circuit evaluated over it — the shape is outside the keyed-aggregate fragment; O(base rows) with an allocation per row"
+            }
+        }
+    }
+}
+
+/// The class [`RevEngine::query`] would choose for this statement.
+///
+/// **Static**: it answers from the circuit alone. `View` additionally requires conditions the
+/// engine knows and a compiler does not — that the balance view is installed, that the base
+/// holds exactly one currency, and that the requested anchor is the one the entry is true at
+/// — and each of those falls back to `IndexFold`, which is why `explain` says "view" for a
+/// shape that *can* be a view read rather than for one that certainly will be.
+pub fn serve_path(circuit: &niles_ir::circuit::Circuit, output: &str) -> ServePath {
+    serve_path_of(
+        crate::scan_fold::plan(circuit, output).as_ref(),
+        circuit,
+        output,
+    )
+}
+
+/// [`serve_path`] for a caller that has already planned.
+///
+/// `query` has, and planning twice per query would make `explain` cost the engine an
+/// allocation to agree with itself.
+pub fn serve_path_of(
+    plan: Option<&crate::scan_fold::FoldPlan<'_>>,
+    circuit: &niles_ir::circuit::Circuit,
+    output: &str,
+) -> ServePath {
+    use niles_ir::operator::{Agg, Scalar};
+    const CUR: u16 = 2;
+    const AMT: u16 = 3;
+    let Some(p) = plan else {
+        return ServePath::Materialise;
+    };
+    let sole = p.sole_account_filter(ACCT_COL);
+    if sole.is_some()
+        && circuit.outputs.get(output) == Some(&p.node)
+        && p.filters_only()
+        && p.aggs() == [(Agg::Sum, Scalar::Column(AMT))]
+        && matches!(p.group_key(), [ACCT_COL] | [ACCT_COL, CUR])
+    {
+        return ServePath::View;
+    }
+    if p.account_restriction(ACCT_COL).is_some() {
+        return ServePath::IndexFold;
+    }
+    ServePath::Fold
+}
+
 fn account_predicate(circuit: &niles_ir::circuit::Circuit) -> Option<u64> {
     use niles_ir::operator::{Op, Scalar, ScalarOp};
-    /// The column `postings.acct` occupies in the source schema. Declared order:
-    /// `txn, acct, cur, amt, idem`.
-    const ACCT: u16 = 1;
+    const ACCT: u16 = ACCT_COL;
     let mut found: Option<u64> = None;
     for n in &circuit.nodes {
         let Op::Filter { predicate } = &n.op else {
@@ -968,6 +1093,166 @@ mod tests {
              on a premise that no longer holds"
         );
         assert!(keys.len() > 1, "the case is trivial if there is one group");
+    }
+
+    /// **The two cliffs, and the property that makes removing them safe.**
+    ///
+    /// `where acct = 4242 and cur = 0` and `group by acct having acct = 4242` both restrict
+    /// to one account, and both used to read every row of the base: the first because the
+    /// scan restriction understood only a filter whose whole predicate was `acct = k`, the
+    /// second because a filter above the aggregate made the fold planner refuse the shape.
+    ///
+    /// Restricting a scan is only sound if it cannot change the answer, so every shape here
+    /// is compared against the reference evaluator over the *unrestricted* base. The
+    /// negative cases matter as much: a disjunction over two accounts and a pair of
+    /// contradictory conjuncts must **not** be restricted, and would silently lose rows if
+    /// they were.
+    #[test]
+    fn a_restricted_scan_and_the_full_one_answer_the_same_question() {
+        use crate::session::Serving;
+        let mut e = RevEngine::seeded(60, 3, 20, ViewMode::Demand, EvictionPolicy::Lru);
+        let anchor = e.frontier();
+
+        for sql in [
+            // The two shapes this task made cheap.
+            "select acct, sum(amt) from postings where acct = 7 and cur = 0 group by acct",
+            "select acct, sum(amt) from postings group by acct having acct = 7",
+            // A conjunct that excludes everything the account has: the restriction is right
+            // and the answer is still empty.
+            "select acct, sum(amt) from postings where acct = 7 and cur = 99 group by acct",
+            // The conjunct in the other order, and with the literal on the left.
+            "select acct, sum(amt) from postings where cur = 0 and acct = 7 group by acct",
+            // A `having` that names a key *and* an aggregate: not pushable, and it must
+            // still answer.
+            "select acct, sum(amt) from postings group by acct having acct = 7",
+            // A `having` over the aggregate alone: never pushable.
+            "select acct, sum(amt) from postings group by acct having sum(amt) > 0",
+            // **Must not be restricted**: neither is a necessary condition on a row.
+            "select acct, sum(amt) from postings where acct = 7 or acct = 9 group by acct",
+            // Contradictory conjuncts: no row survives, and a scan restricted to one of the
+            // two accounts would be answering a different query.
+            "select acct, sum(amt) from postings where acct = 7 and acct = 9 group by acct",
+        ] {
+            let lowered = compile(sql);
+            let served = e
+                .query(&lowered.circuit, "__wire_result", anchor)
+                .expect("answers");
+            let sources = e.base_at(anchor);
+            let (oracle, _) = niles_ir::eval::try_run(&lowered.circuit, "__wire_result", &sources)
+                .expect("the reference answers");
+            assert_eq!(
+                served.text(),
+                rendered(&oracle, anchor),
+                "`{sql}`: the restricted scan and the full base denote different things"
+            );
+        }
+    }
+
+    /// The restriction itself, asserted directly rather than inferred from an answer.
+    ///
+    /// A scan that is restricted when it should not be gives a wrong answer, which the test
+    /// above catches. A scan that is *not* restricted when it could be is merely slow, and
+    /// nothing catches that except a budget — so the decision is asserted here too, where a
+    /// reader can see which shapes are expected to be cheap.
+    #[test]
+    fn the_scan_is_restricted_exactly_where_a_conjunct_makes_it_safe() {
+        let restriction = |sql: &str| -> Option<u64> {
+            let lowered = compile(sql);
+            let p = crate::scan_fold::plan(&lowered.circuit, "__wire_result")?;
+            p.account_restriction(ACCT_COL)
+        };
+        for (sql, want) in [
+            (
+                "select acct, sum(amt) from postings where acct = 7 group by acct",
+                Some(7),
+            ),
+            (
+                "select acct, sum(amt) from postings where acct = 7 and cur = 0 group by acct",
+                Some(7),
+            ),
+            (
+                "select acct, sum(amt) from postings where cur = 0 and acct = 7 group by acct",
+                Some(7),
+            ),
+            (
+                "select acct, sum(amt) from postings group by acct having acct = 7",
+                Some(7),
+            ),
+            // A disjunction is one leaf: neither side is necessary, so no restriction.
+            (
+                "select acct, sum(amt) from postings where acct = 7 or acct = 9 group by acct",
+                None,
+            ),
+            // Two accounts required at once: nothing survives, and guessing one of them
+            // would answer a different query.
+            (
+                "select acct, sum(amt) from postings where acct = 7 and acct = 9 group by acct",
+                None,
+            ),
+            (
+                "select acct, sum(amt) from postings where cur = 0 group by acct",
+                None,
+            ),
+            ("select acct, sum(amt) from postings group by acct", None),
+        ] {
+            assert_eq!(restriction(sql), want, "`{sql}`");
+        }
+    }
+
+    /// **The cliff, measured in base rows rather than in allocations.**
+    ///
+    /// `served_point_conjunct`'s allocation budget does not catch this one, and that is worth
+    /// saying rather than leaving as a gap: an unrestricted fold streams the base without
+    /// allocating per row, so reading forty thousand postings to answer a one-account
+    /// question costs *time* and not *memory*. The counted-work figure is what moves — 1,014µs
+    /// against 0.8µs in the audit — and `read_stats().rows_touched` is where it is visible.
+    ///
+    /// So this asserts the number of base rows the three spellings of one question touch. It
+    /// is deterministic, unlike a wall clock, and it fails if either cliff comes back.
+    #[test]
+    fn one_account_is_answered_by_reading_one_account() {
+        use crate::session::Serving;
+        let accounts = 200i64;
+        let rows_for = |sql: &str| -> u64 {
+            let mut e = RevEngine::seeded(accounts, 2, 50, ViewMode::Demand, EvictionPolicy::Lru);
+            let anchor = e.frontier();
+            let lowered = compile(sql);
+            let before = e.read_stats().3;
+            e.query(&lowered.circuit, "__wire_result", anchor)
+                .expect("answers");
+            e.read_stats().3 - before
+        };
+
+        // The whole base is 200 accounts x 2 rounds x 2 legs = 800 postings. A query that
+        // names one account must not read all of them.
+        let whole = rows_for("select acct, sum(amt) from postings group by acct");
+        assert_eq!(whole, 800, "the control reads the base");
+
+        for sql in [
+            "select acct, sum(amt) from postings where acct = 7 and cur = 0 group by acct",
+            "select acct, sum(amt) from postings group by acct having acct = 7",
+            "select acct, count(amt) from postings where acct = 7 and cur = 0 group by acct",
+        ] {
+            let touched = rows_for(sql);
+            assert!(
+                touched * 20 < whole,
+                "`{sql}` touched {touched} of {whole} base rows: the scan was not restricted \
+                 to the account the query names"
+            );
+        }
+
+        // And the shapes that must *not* be restricted still read the base, because
+        // restricting them would drop rows.
+        for sql in [
+            "select acct, sum(amt) from postings where acct = 7 or acct = 9 group by acct",
+            "select acct, sum(amt) from postings where cur = 0 group by acct",
+        ] {
+            assert_eq!(
+                rows_for(sql),
+                whole,
+                "`{sql}` was restricted, and neither of its conditions is necessary"
+            );
+        }
     }
 
     /// A `sum` over no non-null rows is **null**, and the fold must say so too.
@@ -1513,5 +1798,78 @@ mod tests {
             "and the same names: a client that reads the descriptor to lay out a report must \
              not have to guess the width of an empty answer"
         );
+    }
+
+    /// **`explain` and the engine agree, by construction and by test.**
+    ///
+    /// `serve_path` exists so a reader can find out what a statement costs without measuring
+    /// it, and that is only true if it describes the engine rather than a second opinion
+    /// about it. `query` branches on the same three functions, so the two agree by
+    /// construction; this pins the classification itself, which is what a reader actually
+    /// relies on — including the two shapes that used to be classified `materialise` and cost
+    /// three orders of magnitude more than the question deserved.
+    #[test]
+    fn explain_names_the_path_the_engine_takes() {
+        for (sql, want) in [
+            (
+                "select acct, sum(amt) from postings where acct = 7 group by acct",
+                ServePath::View,
+            ),
+            (
+                "select acct, cur, sum(amt) from postings where acct = 7 group by acct, cur",
+                ServePath::View,
+            ),
+            // One account, but not a plain balance: the extra conjunct means the view — keyed
+            // by account and currency — cannot answer it, so the scan is restricted and
+            // folded. This used to be `materialise`.
+            (
+                "select acct, sum(amt) from postings where acct = 7 and cur = 0 group by acct",
+                ServePath::IndexFold,
+            ),
+            // A `having` over the group key is a `where` in a different position. This used
+            // to be `materialise` too.
+            (
+                "select acct, sum(amt) from postings group by acct having acct = 7",
+                ServePath::IndexFold,
+            ),
+            // A count is in the fragment but is not a balance, so no view read.
+            (
+                "select acct, count(amt) from postings where acct = 7 group by acct",
+                ServePath::IndexFold,
+            ),
+            // No account restriction: the whole base, in one pass.
+            (
+                "select acct, sum(amt) from postings group by acct",
+                ServePath::Fold,
+            ),
+            (
+                "select cur, sum(amt) from postings group by cur",
+                ServePath::Fold,
+            ),
+            // An ordering above the aggregate means the output is not the aggregate, so the
+            // view cannot answer even for one account — the reference evaluates the rest.
+            (
+                "select acct, sum(amt) from postings group by acct order by sum(amt) desc limit 10",
+                ServePath::Fold,
+            ),
+            // Outside the fragment: `min` is not a running fold over a signed multiset.
+            (
+                "select acct, min(amt) from postings group by acct",
+                ServePath::Materialise,
+            ),
+            ("select distinct acct from postings", ServePath::Materialise),
+            // A disjunction is not a restriction, and the shape is otherwise a plain fold.
+            (
+                "select acct, sum(amt) from postings where acct = 7 or acct = 9 group by acct",
+                ServePath::Fold,
+            ),
+        ] {
+            let lowered = compile(sql);
+            assert_eq!(
+                serve_path(&lowered.circuit, "__wire_result"),
+                want,
+                "`{sql}`"
+            );
+        }
     }
 }

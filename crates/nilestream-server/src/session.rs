@@ -509,6 +509,41 @@ impl Session {
             _ => {}
         }
 
+        // **`explain <statement>`: what this server would do to answer it, before it does.**
+        //
+        // The four serve classes differ by three orders of magnitude, and the only way to
+        // find out which one a statement took used to be to measure it — so a query that
+        // fell off a cliff (`where acct = k and cur = 0` did; `group by acct having
+        // acct = k` did) looked exactly like one that did not. The class comes from
+        // `rev_engine::serve_path`, which is the function `query` itself branches on, so
+        // this cannot become a second opinion about the engine.
+        if lower.starts_with("explain ") {
+            let inner = trimmed[..].split_at("explain ".len()).1.trim();
+            let lowered = match self.compile_cached(inner) {
+                Ok(l) => l,
+                Err(e) => return e,
+            };
+            let path = crate::rev_engine::serve_path(&lowered.circuit, "__wire_result");
+            let rows = vec![
+                vec![Some("serve path".to_string()), Some(path.as_str().into())],
+                vec![Some("what it costs".into()), Some(path.describe().into())],
+                vec![
+                    Some("circuit nodes".into()),
+                    Some(lowered.circuit.nodes.len().to_string()),
+                ],
+            ];
+            let n = rows.len();
+            let mut buf = Vec::new();
+            for r in &rows {
+                pg_wire::encode_into(&mut buf, &Backend::DataRow(r.clone()));
+            }
+            return vec![
+                Backend::RowDescription(vec![Field::text("property"), Field::text("value")]),
+                Backend::Raw(buf),
+                Backend::CommandComplete(format!("EXPLAIN {n}")),
+            ];
+        }
+
         // Two introspection queries, because a client that cannot list what it can read is
         // not usable from `psql`.
         if lower == "\\d" || lower.starts_with("select * from nilestream_views") {
@@ -1730,6 +1765,53 @@ schema bank {
             pg_wire::sqlstate_for("ZZ9999"),
             "XX000",
             "an unclassified code is an internal error, not a guess"
+        );
+    }
+
+    /// **`explain` reaches the wire and names a class a client can act on.**
+    #[test]
+    fn explain_over_the_wire_names_the_serve_path() {
+        let mut e = engine();
+        let mut s = session();
+        for (sql, want) in [
+            (
+                "explain select acct, sum(amt) from postings where acct = 7 group by acct",
+                "view",
+            ),
+            (
+                "explain select acct, sum(amt) from postings where acct = 7 and cur = 0 group by acct",
+                "index-fold",
+            ),
+            (
+                "explain select acct, sum(amt) from postings group by acct having acct = 7",
+                "index-fold",
+            ),
+            (
+                "explain select acct, sum(amt) from postings group by acct",
+                "fold",
+            ),
+            ("explain select distinct acct from postings", "materialise"),
+        ] {
+            let out = s.handle(Frontend::Query(sql.into()), &mut e);
+            let rows = pg_wire::decoded_rows(&out);
+            assert_eq!(rows[0][0], Some("serve path".into()), "`{sql}`: {out:?}");
+            assert_eq!(rows[0][1], Some(want.into()), "`{sql}`");
+            // And the second row says what the class costs, so a reader who does not know
+            // the four names is not left with a word.
+            assert!(
+                rows[1][1].as_deref().unwrap_or("").len() > 30,
+                "`{sql}`: the class is named and not explained"
+            );
+        }
+        // A statement that does not compile is a diagnostic, not a class.
+        let out = s.handle(
+            Frontend::Query("explain select nope from postings".into()),
+            &mut e,
+        );
+        assert!(
+            out.iter()
+                .any(|m| matches!(m, Backend::ErrorResponse { .. })),
+            "{out:?}"
         );
     }
 }

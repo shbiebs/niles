@@ -133,11 +133,18 @@ corpus, the projection path does not yet emit an `Apply` for one.
 immediately exposed that there was nothing to compare: `nilestreamd` served reads from a hash
 map, so the point-lookup row measured the protocol path rather than the read-model runtime.
 
-**Built.** `nilestream-server::rev_engine` implements `Serving` over
-`proto_engine::{Ledger, PartialView}`: partial materialisation, the absence lattice, an
-anchored upquery on a miss. A historical read (`anchor < head`) reconstructs from the base
-rather than reusing a fresher slot — the view's hit rule is right for a bounded-staleness rung
-and wrong for the as-of read a dispute asks.
+**Built.** `nilestream-server::rev_engine` implements `Serving` over a `proto_engine::Ledger`
+and the **REV runtime**: partial materialisation, the absence lattice, an anchored upquery on
+a miss. A historical read (`anchor < head`) reconstructs from the base rather than reusing a
+fresher slot — a partial view's hit rule is right for a bounded-staleness rung and wrong for
+the as-of read a dispute asks.
+
+It held *two* read models for a while: the runtime the wire path reads, and a
+`proto_engine::PartialView` beside it that `read_point`, `stats()` and `evict_all` read and
+that no query ever consulted. Nothing in the type said which of the two a caller was looking
+at, so a test could warm one and assert about the other — and six of them did. The second one
+is gone; `proto_engine::PartialView` itself stays, because `nilestream sweep` and the E-series
+experiments are built on it.
 
 **Gate — met.** `results/E16-wallclock.md` reports the `point` row at **PARITY**: 130µs p99
 against PostgreSQL's 128µs, at an **8–14% miss rate**, each miss a real reconstruction over a

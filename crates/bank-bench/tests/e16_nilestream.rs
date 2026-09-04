@@ -170,6 +170,27 @@ fn eviction_does_not_change_an_answer_served_over_the_wire() {
 /// ```sh
 /// cargo test --release -p bank-bench --test e16_nilestream -- --ignored --nocapture
 /// ```
+/// `(reads, hits, misses, rows_touched, resident)` as named fields.
+struct Reads {
+    reads: u64,
+    misses: u64,
+    rows_touched: u64,
+    resident: usize,
+}
+
+fn read_stats(
+    engine: &std::sync::Arc<std::sync::Mutex<nilestream_server::rev_engine::RevEngine>>,
+) -> Reads {
+    use nilestream_server::session::Serving;
+    let (reads, _hits, misses, rows_touched, resident) = engine.lock().unwrap().read_stats();
+    Reads {
+        reads,
+        misses,
+        rows_touched,
+        resident,
+    }
+}
+
 #[test]
 #[ignore = "a measurement, not a check: run explicitly with --ignored"]
 fn e16_point_workload_against_the_rev_runtime() {
@@ -182,9 +203,13 @@ fn e16_point_workload_against_the_rev_runtime() {
 
     let mut lines = Vec::new();
     for run in 1..=RUNS {
-        let before = engine.lock().unwrap().stats();
+        // Through `Serving::read_stats`, which is what the wire reports and what the E16
+        // document's `miss_rate` column is rendered from. `RevEngine::stats()` used to read a
+        // second read model that sat beside the runtime and that no query consulted, so the
+        // rate printed here described a cache the workload never touched.
+        let before = read_stats(&engine);
         let (ops, p50, p99) = point_workload(port, ACCOUNTS, OPERATIONS, 0xB0A7 ^ run as u64);
-        let after = engine.lock().unwrap().stats();
+        let after = read_stats(&engine);
         // **The miss rate belongs beside the latency.** A parity result at a 0% miss rate and
         // one at a 40% miss rate are different findings — the first says a warm view is fast,
         // the second says reconstruction is — and the phase diagram of thesis §9.3 is built

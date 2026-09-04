@@ -26,7 +26,7 @@
 //! server that reported only latency would let the more interesting of the two disappear, so
 //! [`RevEngine::stats`] carries it out to the harness.
 
-use proto_engine::{EvictionPolicy, Ledger, PartialView, Posting, Row, ViewMode};
+use proto_engine::{EvictionPolicy, Ledger, Posting, Row, ViewMode};
 
 /// What a read cost, in the units that distinguish one parity result from another.
 #[derive(Debug, Clone, Copy, Default)]
@@ -49,10 +49,15 @@ impl ReadStats {
     }
 }
 
-/// A ledger, a partial view over it, and the mapping from a wire query to a read.
+/// A ledger, **one** read model over it, and the mapping from a wire query to a read.
+///
+/// "One" is the repair. `RevEngine` used to hold two: `proto_engine::PartialView`, a
+/// hard-coded balance cache keyed `(account, currency)`, and the REV runtime that the thesis
+/// is actually about. The wire path read the runtime; `stats()`, `read_point` and
+/// `evict_all` read the other one; and nothing in the type said which of the two a caller was
+/// looking at. A test that warmed one and measured the other would have passed.
 pub struct RevEngine {
     ledger: Ledger,
-    view: PartialView,
     /// The currency index every wire query uses. The demo schema declares one currency, and a
     /// server that silently answered in whichever currency it found first would be making the
     /// per-currency conservation rule invisible from the outside.
@@ -187,13 +192,7 @@ impl RevEngine {
             }
         }
 
-        let mut view = PartialView::new(mode, budget, policy);
-        // Bring the view up to the ledger's head, so a read at the frontier is answered from
-        // maintained state rather than by reconstructing the entire history on first touch.
-        for e in 1..=ledger.head() {
-            view.apply_epoch(&ledger, e);
-        }
-
+        let _ = (mode, policy);
         // The REV runtime, dragged to the same frontier. `advance` applies each epoch's
         // deltas to whichever entries are *resident*, which is the whole saving partiality
         // buys and is why this is cheap over twenty thousand epochs on an empty view.
@@ -210,7 +209,6 @@ impl RevEngine {
 
         RevEngine {
             ledger,
-            view,
             currency: 0,
             views: vec![("__wire_result".to_string(), 2)],
             scan_work: 0,
@@ -222,24 +220,23 @@ impl RevEngine {
         }
     }
 
-    pub fn stats(&self) -> ReadStats {
-        let s = self.view.counters();
-        ReadStats {
-            reads: s.reads,
-            hits: s.hits,
-            misses: s.misses,
-            rows_touched: s.rows_touched,
-            resident: self.view.resident(),
-        }
-    }
-
-    /// Drop everything the view holds, so the next reads all miss.
+    /// Drop everything the read model holds, so the next reads all miss.
     ///
     /// The lever the phase diagram is swept with: measuring at a 0% miss rate and at a high
     /// one are different experiments, and a server that could only be measured warm would
     /// only ever produce the flattering half.
+    ///
+    /// It now wipes **the view the wire path reads**. It used to wipe the other one, so a
+    /// test could evict, observe a rising miss rate, and be measuring a cache no query
+    /// consulted.
     pub fn evict_all(&mut self) {
-        self.view.wipe();
+        if let Some(v) = self
+            .runtime
+            .as_mut()
+            .and_then(|rt| rt.view_mut(BALANCE_VIEW))
+        {
+            v.wipe();
+        }
     }
 
     pub fn head(&self) -> u64 {
@@ -266,8 +263,8 @@ impl crate::session::Serving for RevEngine {
     /// it by the same `niles_ir::eval` the golden corpus uses. That is a full fold, and it
     /// is the honest cost of an arbitrary query against a partial-state engine: the
     /// partially-materialised view is a *fast path for one shape*, not a general answer, and
-    /// `read_point` below is where it is spent. `the_scan_and_the_point_path_agree` holds
-    /// the two to the same answer.
+    /// `answer_from_view` below is where it is spent, and it answers through the same REV
+    /// runtime the phase diagram measures rather than through a cache beside it.
     fn query(
         &mut self,
         circuit: &niles_ir::circuit::Circuit,
@@ -407,7 +404,6 @@ impl crate::session::Serving for RevEngine {
             sink.record(txn_id, epoch.to_string().into_bytes())
                 .map_err(crate::session::ServeError::NotDurable)?;
         }
-        self.view.apply_epoch(&self.ledger, epoch);
         // The maintained view moves with the ledger, or the next read answers at an anchor
         // the base has already passed. `advance` touches only *resident* entries, which is
         // the saving partiality buys and is why this is not a per-epoch scan of the key
@@ -463,13 +459,9 @@ impl crate::session::Serving for RevEngine {
                     v.resident_count() as usize,
                 )
             }
-            None => (
-                self.served,
-                0,
-                self.served,
-                self.served_rows,
-                self.view.resident(),
-            ),
+            // No runtime: the server has no partial state at all, so nothing is resident
+            // and every served read is a reconstruction over the base.
+            None => (self.served, 0, self.served, self.served_rows, 0),
         }
     }
 }
@@ -689,57 +681,6 @@ impl RevEngine {
         let mut m = std::collections::BTreeMap::new();
         m.insert("postings".to_string(), z);
         m
-    }
-
-    /// The **point path**: one account's balance out of the partially materialised view.
-    ///
-    /// Not part of `Serving`, and deliberately so. This is the mechanism the phase diagram
-    /// measures — a read that hits a resident entry, or misses and reconstructs through the
-    /// anchor index — and it answers one shape of question. The general answer is
-    /// [`Serving::query`], and `the_scan_and_the_point_path_agree` asserts the two do not
-    /// diverge; a fast path that could disagree with the semantics is the seam this thesis
-    /// argues against.
-    pub fn read_point(&mut self, key: &[i64], anchor: u64) -> Option<i128> {
-        let acct = *key.first()? as u64;
-        if self.ledger.is_empty() {
-            return None;
-        }
-        // Epochs in this ledger are **zero-based**: `head()` is `len() - 1`, so epoch 0 is a
-        // real record and must not be treated as "nothing". Getting that wrong would have
-        // made the ledger's first transaction invisible, which is the kind of off-by-one that
-        // a conservation suite finds three months later.
-        let head = self.ledger.head();
-        let anchor = anchor.min(head);
-
-        // An account the base has never posted to has no value, which is not zero. The
-        // distinction is the absence lattice's, and this is the layer where it would be
-        // quietest to lose: the return is an `Option`, and a fold over an empty history has
-        // no value to return.
-        if self.ledger.key_update_count(acct, anchor) == 0 {
-            return None;
-        }
-
-        let value = if anchor < head {
-            // **A historical read is an anchored reconstruction, not a cache hit.**
-            //
-            // `PartialView::read` treats a slot materialised at a *later* anchor as a hit for
-            // an earlier one — it returns the value together with the anchor it is actually
-            // true at, which is the bounded-staleness rung and is correct for a "no older
-            // than X" read. It is not correct for "as of X", which is what a historical query
-            // means and what a dispute asks.
-            //
-            // So an as-of read goes to the base: `reconstruct_balance` folds the account's
-            // own entries up to `anchor` through the anchor index. That is exactly the
-            // anchored upquery of thesis §3, spent where it is needed rather than avoided by
-            // answering a different question.
-            self.ledger.reconstruct_balance(acct, self.currency, anchor)
-        } else {
-            let (v, _at, _hit) =
-                self.view
-                    .read(&mut self.ledger, acct, self.currency, anchor, 0.0, 0.0);
-            v
-        };
-        Some(value)
     }
 }
 
@@ -1332,8 +1273,43 @@ mod tests {
         RevEngine::seeded(100, 3, 1_000, ViewMode::Demand, EvictionPolicy::Lru)
     }
 
+    /// **One account's balance, through the wire path.**
+    ///
+    /// The tests below used to call `RevEngine::read_point`, which read a `PartialView` that
+    /// sat beside the REV runtime and that no query ever consulted. They warmed one read
+    /// model and asserted about the other, and would have passed with the served path
+    /// disconnected entirely. They now ask the same question the way a client does.
+    ///
+    /// `None` is "this account has no balance", which is not zero: an aggregate over no rows
+    /// forms no group, so the answer is no row at all.
+    fn balance(e: &mut RevEngine, acct: i64, anchor: u64) -> Option<i128> {
+        use crate::session::Serving;
+        let lowered = compile(&format!(
+            "select acct, sum(amt) from postings where acct = {acct} group by acct"
+        ));
+        let rows = e
+            .query(&lowered.circuit, "__wire_result", anchor)
+            .expect("serves");
+        let text = rows.text();
+        let r = text.first()?;
+        r[1].as_ref().map(|v| v.parse().expect("an integer"))
+    }
+
+    /// `read_stats` as a named struct, so a test reads like a claim rather than like a tuple.
+    fn stats(e: &RevEngine) -> ReadStats {
+        use crate::session::Serving;
+        let (reads, hits, misses, rows_touched, resident) = e.read_stats();
+        ReadStats {
+            reads,
+            hits,
+            misses,
+            rows_touched,
+            resident,
+        }
+    }
+
     #[test]
-    fn a_read_is_answered_by_the_partial_view_over_the_ledger() {
+    fn a_read_is_answered_by_the_read_model_over_the_ledger() {
         let mut e = engine();
         // Epochs are zero-based, so 300 transfers put the head at 299.
         assert_eq!(
@@ -1341,11 +1317,10 @@ mod tests {
             299,
             "one epoch per seeded transfer, zero-based"
         );
-        let v = e
-            .read_point(&[7], e.frontier())
-            .expect("account 7 has postings");
+        let head = e.frontier();
+        let v = balance(&mut e, 7, head).expect("account 7 has postings");
         assert!(v > 0, "a real fold, not a placeholder: {v}");
-        assert!(e.stats().reads > 0);
+        assert!(stats(&e).reads > 0);
     }
 
     #[test]
@@ -1354,21 +1329,23 @@ mod tests {
         // "this account does not exist" indistinguishable from "this account has no money",
         // which is the §1.1.1 defect at the protocol boundary.
         let mut e = engine();
-        assert_eq!(e.read_point(&[9_999], e.frontier()), None);
-        assert!(e.read_point(&[1], e.frontier()).is_some());
+        let head = e.frontier();
+        assert_eq!(balance(&mut e, 9_999, head), None);
+        assert!(balance(&mut e, 1, head).is_some());
     }
 
     #[test]
     fn a_read_at_a_past_anchor_answers_what_was_true_then() {
         let mut e = engine();
-        let late = e.read_point(&[5], e.frontier()).unwrap();
-        let early = e.read_point(&[5], 5).unwrap();
+        let head = e.frontier();
+        let late = balance(&mut e, 5, head).unwrap();
+        let early = balance(&mut e, 5, 5).unwrap();
         assert!(early < late, "the past holds less: {early} vs {late}");
 
         // And it is stable: asking again gives the same answer, because the prefix cannot
         // change and the reconstruction is a pure function of (key, anchor).
         for _ in 0..20 {
-            assert_eq!(e.read_point(&[5], 5), Some(early));
+            assert_eq!(balance(&mut e, 5, 5), Some(early));
         }
     }
 
@@ -1377,20 +1354,25 @@ mod tests {
         // The property Contribution 1 is about, exercised through the wire path: eviction
         // followed by reconstruction can neither create nor destroy money.
         let mut e = engine();
-        let warm: Vec<Option<i128>> = (1..=20).map(|a| e.read_point(&[a], e.frontier())).collect();
-        let hits_before = e.stats().hits;
+        let head = e.frontier();
+        let warm: Vec<Option<i128>> = (1..=20).map(|a| balance(&mut e, a, head)).collect();
+        let hits_before = stats(&e).hits;
 
         e.evict_all();
-        assert_eq!(e.stats().resident, 0);
+        assert_eq!(
+            stats(&e).resident,
+            0,
+            "and it wipes the view the wire path reads, not one beside it"
+        );
 
-        let cold: Vec<Option<i128>> = (1..=20).map(|a| e.read_point(&[a], e.frontier())).collect();
+        let cold: Vec<Option<i128>> = (1..=20).map(|a| balance(&mut e, a, head)).collect();
         assert_eq!(warm, cold, "eviction changed an answer");
         assert!(
-            e.stats().misses > 0,
+            stats(&e).misses > 0,
             "and the cold reads really did reconstruct"
         );
-        assert!(e.stats().rows_touched > 0, "touching base rows to do it");
-        assert!(e.stats().hits >= hits_before);
+        assert!(stats(&e).rows_touched > 0, "touching base rows to do it");
+        assert!(stats(&e).hits >= hits_before);
     }
 
     #[test]
@@ -1398,24 +1380,29 @@ mod tests {
         // A parity result at a 0% miss rate and one at a 40% miss rate are different
         // findings. A server that reported only latency would let the more interesting of
         // the two disappear.
+        //
+        // Through `query` and `read_stats`, so the rate reported is the rate of the reads
+        // the server actually answered. The version this replaced drove `read_point` and
+        // read a `PartialView` the wire path never touched: the three rates below were true
+        // of a cache no query consulted.
         let mut e = engine();
         let head = e.frontier();
         let pass = |e: &mut RevEngine| {
             for a in 1..=50 {
-                e.read_point(&[a], head);
+                balance(e, a, head);
             }
         };
 
         // Pass one is cold: in demand mode a key is materialised when it is first read, so
         // every one of these misses and reconstructs.
         pass(&mut e);
-        let cold = e.stats();
+        let cold = stats(&e);
         assert_eq!(cold.misses, 50, "every first touch is a miss");
         assert!((cold.miss_rate() - 1.0).abs() < 1e-9);
 
         // Pass two is warm: the same keys, now resident, so the cumulative rate halves.
         pass(&mut e);
-        let warm = e.stats();
+        let warm = stats(&e);
         assert_eq!(warm.misses, 50, "no new misses");
         assert_eq!(warm.hits, 50, "and fifty hits");
         assert!(
@@ -1427,7 +1414,7 @@ mod tests {
         // Eviction puts it back: the third pass reconstructs everything again.
         e.evict_all();
         pass(&mut e);
-        let after = e.stats();
+        let after = stats(&e);
         assert!(
             after.miss_rate() > warm.miss_rate(),
             "eviction raises the miss rate"
@@ -1443,14 +1430,15 @@ mod tests {
     #[test]
     fn an_anchor_beyond_the_head_is_answered_at_the_head_rather_than_invented() {
         let mut e = engine();
-        let at_head = e.read_point(&[3], e.frontier());
-        assert_eq!(e.read_point(&[3], u64::MAX), at_head);
+        let head = e.frontier();
+        let at_head = balance(&mut e, 3, head);
+        assert_eq!(balance(&mut e, 3, u64::MAX), at_head);
     }
 
     #[test]
     fn an_empty_ledger_answers_nothing_rather_than_zero() {
         let mut e = RevEngine::seeded(0, 0, 10, ViewMode::Demand, EvictionPolicy::Lru);
-        assert_eq!(e.read_point(&[1], 0), None);
+        assert_eq!(balance(&mut e, 1, 0), None);
     }
 
     #[test]
@@ -1461,32 +1449,34 @@ mod tests {
         let mut e = RevEngine::seeded(3, 1, 100, ViewMode::Demand, EvictionPolicy::Lru);
         assert_eq!(e.frontier(), 2, "three transfers, epochs 0..=2");
         assert!(
-            e.read_point(&[1], 0).is_some(),
+            balance(&mut e, 1, 0).is_some(),
             "account 1 posted at epoch 0"
         );
-        assert_eq!(e.read_point(&[2], 0), None, "account 2 has not yet");
-        assert!(e.read_point(&[2], 1).is_some());
+        assert_eq!(balance(&mut e, 2, 0), None, "account 2 has not yet");
+        assert!(balance(&mut e, 2, 1).is_some());
     }
 
     #[test]
     fn a_historical_read_reconstructs_rather_than_reusing_a_fresher_slot() {
-        // `PartialView` treats a slot anchored later as a hit for an earlier read — correct
-        // for a "no older than X" rung, wrong for "as of X", which is what a dispute asks.
-        // Warming the view at the head must not change what a past anchor answers.
+        // A partially materialised view treats a slot anchored later as a hit for an earlier
+        // read — correct for a "no older than X" rung, wrong for "as of X", which is what a
+        // dispute asks. Warming the view at the head must not change what a past anchor
+        // answers, and `answer_from_view` enforces that by falling back to the fold whenever
+        // the entry's effective anchor is not the one that was requested.
         let mut e = engine();
         let head = e.frontier();
         let past = 5;
-        let cold = e.read_point(&[5], past).unwrap();
+        let cold = balance(&mut e, 5, past).unwrap();
 
         for a in 1..=50 {
-            e.read_point(&[a], head);
+            balance(&mut e, a, head);
         }
         assert_eq!(
-            e.read_point(&[5], past),
+            balance(&mut e, 5, past),
             Some(cold),
             "a warm view answered a historical query with a fresher value"
         );
-        assert_ne!(e.read_point(&[5], head), Some(cold), "and the head differs");
+        assert_ne!(balance(&mut e, 5, head), Some(cold), "and the head differs");
     }
 
     /// **An empty answer describes the same columns as a non-empty one.**

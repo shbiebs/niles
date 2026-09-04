@@ -239,6 +239,11 @@ on; a gap attributed to "it is a prototype" is not attributed at all.
    3.4x and 2.4x, and two of them are now faster than PostgreSQL. The remaining gap on
    `group_by_acct` and `top_ten_by_sum` is not the fold: those return 10,001 groups, and the
    cost is producing and framing 10,001 rows.
+
+   The fold itself is no longer a plausible suspect, which is worth stating because it was
+   the obvious one. At 20,000 postings and 10,001 groups it costs 26.5 M instructions and
+   4.3 ms in process, down from 97.9 M and 7.3 ms — see the callgrind section above for what
+   moved and why. The rows and the reply are what is left.
 5. **Incremental maintenance, on the served path.** A single account's balance is answered
    by the REV runtime — partial materialisation under a budget, the absence lattice, an
    anchored upquery on a miss — over the circuit the daemon's own schema compiles to. The
@@ -325,6 +330,61 @@ monotonically across the five runs and the committed median was the median of th
 first run — rows for PostgreSQL, epochs for Nilestream, never compared across targets. A
 difference **aborts the run** rather than being noted, because two runs of one target that
 started from different bases are not two measurements of one thing.
+
+## Instruction counts (callgrind), and the one binary that makes them cheap
+
+Allocation counts are what the E18 gate asserts, because they are deterministic. They do not
+settle every question — whether a change moved *work*, or merely moved it from the heap to the
+stack — and where they do not, the deterministic answer is an instruction count.
+
+`crates/nilestream-server/examples/fold_ir.rs` serves one statement against the engine E18 is
+configured for and does nothing else, so a profile takes seconds and describes one query
+rather than eight scenarios mixed together:
+
+```sh
+cargo build --release -p nilestream-server --example fold_ir
+valgrind --tool=callgrind --callgrind-out-file=/tmp/fold.out \
+    ./target/release/examples/fold_ir \
+    "select acct, sum(amt) from postings group by acct" 1
+callgrind_annotate --inclusive=yes /tmp/fold.out | grep -E 'Folder::row|Folder::finish'
+```
+
+The trailing `1` is the rounds — one conserved pair per account, 20,000 postings and 10,001
+groups, matching E16's committed recipe. Omit it and the example seeds two, as E18's scenarios
+do; an instruction count that did not say which is a figure for an unnamed base.
+
+**The T-04 measurement**, at 20,000 postings and 10,001 groups:
+
+| | `Folder::row` | `Folder::finish` | total | in-process |
+|---|--:|--:|--:|--:|
+| before | 57.99 M Ir | 39.89 M Ir | 97.9 M | 7.3 ms |
+| after | 21.46 M Ir | 5.08 M Ir | **26.5 M** | **4.3 ms** |
+
+Three costs went, and all three were the same mistake in different places: a one-column group
+key is one integer, and it was being stored, compared and rebuilt as a boxed vector.
+
+* The accumulator map is keyed by `Option<i128>` when the key is one column. `Value` has
+  exactly two variants, so that mapping is total and needs no schema, no column kinds and no
+  type inference — and the `match` that performs it is exhaustive, so a third variant would
+  be a compile error rather than a silently wrong grouping.
+* Every group's accumulators live end to end in one arena and the map holds an index. A
+  `Vec<Acc>` per group was ten thousand allocations to hold, for almost every query in the
+  fragment, a single running total.
+* `finish` builds the output Z-set **in bulk**. Both accumulator maps iterate in ascending key
+  order, the orderings agree, and two groups with different keys give two rows that differ in
+  their first columns — so the rows arrive sorted and distinct, and `eval::add`'s
+  get-then-insert was doing thirteen `Vec<Value>` comparisons down a rebalancing tree, ten
+  thousand times, to find a slot whose position was already known. Collecting into the
+  `BTreeMap` takes std's bulk path instead: sort (linear on ordered input), then build
+  bottom-up with no rebalancing. That one change is 39.9 M → 5.1 M.
+
+E18's `served_group_by_acct` budget moved from 105,000 to **80,000** allocations per query
+(measured: 73,536, from 95,035). What remains is O(groups) and none of it is O(base rows): the
+10,001 that stay are the output rows themselves, which are what the `ZSet` type *is*. Taking
+those off the served path is T-05's job.
+
+The 26.5 M is below the 30.9 M a hand-written reference fold needed for the same Z-set from
+the same postings, which is the number this task was aimed at rather than a round figure.
 
 ## Concurrency (E19), and why it is a separate document
 

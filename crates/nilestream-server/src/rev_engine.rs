@@ -934,6 +934,89 @@ mod tests {
         }
     }
 
+    /// **The scalar-key fold denotes exactly what the generic one did.**
+    ///
+    /// T-04 gave a one-column group key its own accumulator table, keyed by `Option<i128>`
+    /// instead of by a boxed one-element `Vec<Value>`, and made `finish` insert straight into
+    /// the Z-set on the strength of the two orderings agreeing. Three things could go wrong
+    /// and none of them would be visible in a throughput number:
+    ///
+    /// * a **null key** could sort into the wrong place, or worse, merge with a group;
+    /// * the **emission order** could stop being Z-set order, which the `insert` shortcut
+    ///   assumes and which nothing else would notice, because a `BTreeMap` re-sorts what is
+    ///   put into it — the rows would be right and the shortcut's premise would be false;
+    /// * a `Map` between the source and the aggregate could shift the key column, so the
+    ///   fold would group by the wrong one.
+    ///
+    /// Each is compared against the reference evaluator over the same base, which is the only
+    /// judge either path answers to.
+    #[test]
+    fn the_scalar_key_fold_agrees_with_the_reference_on_the_cases_it_specialises() {
+        use crate::session::Serving;
+        let mut e = RevEngine::seeded(40, 2, 15, ViewMode::Demand, EvictionPolicy::Lru);
+        let anchor = e.frontier();
+
+        for sql in [
+            // A single integer key, the shape the specialisation exists for.
+            "select acct, sum(amt) from postings group by acct",
+            "select acct, count(amt) from postings group by acct",
+            // **A key that is null for every row.** `idem` is the text column, materialised
+            // as null, so this forms exactly one group whose key is `Null` — the slot the
+            // scalar path keeps separately, as `None`, and which must sort before every
+            // integer key and merge with nothing.
+            "select idem, sum(amt) from postings group by idem",
+            "select idem, count(amt) from postings group by idem",
+            // Two key columns: the generic path, kept working, and the reason `Groups` still
+            // has a `Wide` arm.
+            "select acct, cur, sum(amt) from postings group by acct, cur",
+            // No key at all: also the generic path.
+            "select sum(amt) from postings",
+            // A single key with a filter that keeps a scattered subset, so the groups are
+            // sparse and the tree is not being walked in insertion order.
+            "select acct, sum(amt) from postings where amt < 0 group by acct",
+            // Ordering and limiting above a scalar-keyed fold: the reference evaluates these
+            // from the folded node, so this is where a wrong emission order would surface.
+            "select acct, sum(amt) from postings group by acct order by acct limit 7",
+            "select acct, sum(amt) from postings group by acct order by sum(amt) desc limit 5",
+        ] {
+            let lowered = compile(sql);
+            let by_fold = e
+                .query(&lowered.circuit, "__wire_result", anchor)
+                .expect("the fold answers");
+            let sources = e.base_at(anchor);
+            let (oracle, _) = niles_ir::eval::try_run(&lowered.circuit, "__wire_result", &sources)
+                .expect("the reference answers");
+            assert_eq!(
+                by_fold.rows,
+                rendered(&oracle, anchor),
+                "`{sql}`: the scalar-key fold and the reference denote different things"
+            );
+        }
+
+        // **The premise of the `insert` shortcut, checked directly.** `finish` puts rows into
+        // the output Z-set with `insert` rather than `eval::add`, which is only sound if the
+        // groups arrive in ascending row order. A `BTreeMap` would hide a violation — the
+        // answer would still be right — so the order is asserted here rather than inferred
+        // from the answers above.
+        let lowered = compile("select acct, sum(amt) from postings group by acct");
+        let plan = crate::scan_fold::plan(&lowered.circuit, "__wire_result").expect("in fragment");
+        let sources = e.base_at(anchor);
+        let base: Vec<Vec<niles_ir::value::Value>> = sources
+            .get("postings")
+            .expect("the base is there")
+            .keys()
+            .cloned()
+            .collect();
+        let (z, _) = crate::scan_fold::fold(&plan, base.iter().map(|r| r.as_slice()));
+        let keys: Vec<&Vec<niles_ir::value::Value>> = z.keys().collect();
+        assert!(
+            keys.windows(2).all(|w| w[0] < w[1]),
+            "the fold emitted its groups out of order, so `insert` was standing in for `add` \
+             on a premise that no longer holds"
+        );
+        assert!(keys.len() > 1, "the case is trivial if there is one group");
+    }
+
     /// A `sum` over no non-null rows is **null**, and the fold must say so too.
     ///
     /// Called out separately because it is the one place a one-pass accumulator most easily

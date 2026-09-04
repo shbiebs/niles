@@ -188,12 +188,21 @@ pub fn budget(scenario: &str) -> Option<f64> {
         // `served_group_by_cur` and `served_sum_negative` form one group, so their whole
         // cost is now a fixed handful of allocations and a few kilobytes — from 173,363
         // allocations and 33MB. `served_group_by_acct` forms 10,001 groups and must send
-        // 10,001 rows over the wire, so its cost is O(groups): about nine and a half
-        // allocations per group, for the group's key, its accumulator and the row the client
-        // is sent. That is the shape to hold it to. What it must never again be is
-        // O(base rows).
+        // 10,001 rows over the wire, so its cost is O(groups). That is the shape to hold it
+        // to. What it must never again be is O(base rows).
+        //
+        // **The 10,001 that T-04 removed.** A one-column group key was still boxed as a
+        // `Vec<Value>` of length one and each group's accumulators were a `Vec<Acc>` of
+        // length one, so a `group by acct` over ten thousand accounts allocated three
+        // heap vectors per group to hold what is an integer and a running total. The fold
+        // now keys the scalar case by `Option<i128>` — sound because `Value` has exactly two
+        // variants — and keeps every group's accumulators in one arena, and `finish` emits
+        // straight into the Z-set because ascending key order *is* Z-set order. 95,035 →
+        // 75,046 allocations per query, all of it O(groups) and none of it O(base). The
+        // 10,001 that remain per group are the output rows themselves, which are what the
+        // `ZSet` type is; taking those off the served path is T-05's job, not this one's.
         "served_group_by_cur" => 28.0,
-        "served_group_by_acct" => 105_000.0,
+        "served_group_by_acct" => 80_000.0,
         "served_sum_negative" => 26.0,
         // A served point read goes through the anchor index, so its cost is the account's
         // own postings and the reply — not the base.

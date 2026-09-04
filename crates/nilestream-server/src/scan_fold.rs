@@ -188,8 +188,42 @@ pub struct Folder<'p> {
     cur: Vec<Value>,
     spare: Vec<Value>,
     key: Row,
-    groups: std::collections::BTreeMap<Row, Vec<Acc>>,
+    groups: Groups,
+    /// Every group's accumulators, `plan.aggs.len()` of them per group, in the order the
+    /// groups were first seen. The map holds the group's index into this.
+    accs: Vec<Acc>,
     work: u64,
+}
+
+/// The accumulator table, in one of two shapes.
+///
+/// **The scalar shape is the whole of T-04.** A single-column group key was still stored as a
+/// `Vec<Value>` of length one, so a `group by acct` over ten thousand accounts allocated a
+/// one-element heap vector per group to look one up and another to keep it, and then `finish`
+/// allocated a second one-element vector per group to build the output row and reached it
+/// through `eval::add`'s lookup. That is three allocations and two tree descents per group
+/// where the key is one integer sitting inside a box.
+///
+/// `Value` has exactly two variants, so **a one-column key is always an `Option<i128>`** —
+/// `None` for `Null`, `Some(x)` for `Int(x)`. No schema, no column kinds, no type inference:
+/// the specialisation is sound by the shape of `Value` itself, and the `match` in
+/// [`Folder::scalar_key`] is exhaustive, so a third variant would be a compile error here
+/// rather than a silently wrong grouping.
+///
+/// The orderings agree, which is what lets `finish` emit straight into the Z-set. `Value`
+/// derives `Ord` with `Null` declared first, so `Null < Int(_)`; `Option` orders `None`
+/// before `Some`; and two rows whose first column differs are ordered by that column alone.
+/// A `BTreeMap<Option<i128>, _>` therefore yields groups in exactly the order the output
+/// `ZSet` wants them, and each row can be `insert`ed rather than `add`ed.
+/// The map holds an **index**, not a vector of accumulators. Every group's accumulators live
+/// end to end in one arena, so a group costs no allocation of its own at all: `Vec<Acc>` per
+/// group was the second of the three, and ten thousand two-word vectors is ten thousand
+/// allocations to hold what is, for almost every query in the fragment, a single integer.
+enum Groups {
+    /// One integer (or null) per group.
+    Scalar(std::collections::BTreeMap<Option<i128>, u32>),
+    /// Anything else: no key columns at all, or two or more.
+    Wide(std::collections::BTreeMap<Row, u32>),
 }
 
 impl<'p> Folder<'p> {
@@ -199,8 +233,28 @@ impl<'p> Folder<'p> {
             cur: Vec::with_capacity(8),
             spare: Vec::with_capacity(8),
             key: Vec::with_capacity(plan.group_key.len()),
-            groups: Default::default(),
+            // The specialisation is chosen once, from the plan, and never re-decided per
+            // row: a fold that could change shape half way through would be two folds.
+            groups: if plan.group_key.len() == 1 {
+                Groups::Scalar(Default::default())
+            } else {
+                Groups::Wide(Default::default())
+            },
+            accs: Vec::new(),
             work: 0,
+        }
+    }
+
+    /// The one-column key as an `Option<i128>`.
+    ///
+    /// Exhaustive on purpose. `Value` has two variants today and this mapping is total; if a
+    /// third is ever added, this match stops compiling and whoever adds it has to decide what
+    /// it means for a group key, rather than discovering that some values silently grouped
+    /// together.
+    fn scalar_key(v: Value) -> Option<i128> {
+        match v {
+            Value::Null => None,
+            Value::Int(x) => Some(x),
         }
     }
 
@@ -225,26 +279,50 @@ impl<'p> Folder<'p> {
                 }
             }
         }
-        self.key.clear();
-        for c in &self.plan.group_key {
-            self.key
-                .push(self.cur.get(*c as usize).copied().unwrap_or(Value::Null));
-        }
-        // One allocation per **group**, not per row: the key is cloned only the first time
-        // its group is seen. That is the whole difference between O(base) and O(groups).
         let plan = self.plan;
-        let slot = match self.groups.get_mut(&self.key) {
-            Some(s) => s,
-            None => self.groups.entry(self.key.clone()).or_insert_with(|| {
-                vec![
-                    Acc {
-                        total: 0,
-                        any: false
-                    };
-                    plan.aggs.len()
-                ]
-            }),
+        let n = plan.aggs.len();
+        // Look the group up (or open it) and come away with an **index**, so the borrow of
+        // the map ends before the arena is touched. A group costs no allocation of its own:
+        // on the scalar path not even a key, since `Option<i128>` is `Copy` and lives in the
+        // tree node.
+        let next = (self.accs.len() / n.max(1)) as u32;
+        let at = match &mut self.groups {
+            Groups::Scalar(g) => {
+                let k = Self::scalar_key(
+                    self.cur
+                        .get(plan.group_key[0] as usize)
+                        .copied()
+                        .unwrap_or(Value::Null),
+                );
+                match g.get(&k) {
+                    Some(i) => *i,
+                    None => *g.entry(k).or_insert(next),
+                }
+            }
+            Groups::Wide(g) => {
+                self.key.clear();
+                for c in &plan.group_key {
+                    self.key
+                        .push(self.cur.get(*c as usize).copied().unwrap_or(Value::Null));
+                }
+                // The key is cloned only the first time its group is seen. That is the whole
+                // difference between O(base) and O(groups).
+                match g.get(&self.key) {
+                    Some(i) => *i,
+                    None => *g.entry(self.key.clone()).or_insert(next),
+                }
+            }
         };
+        if at == next {
+            self.accs.resize(
+                self.accs.len() + n,
+                Acc {
+                    total: 0,
+                    any: false,
+                },
+            );
+        }
+        let slot = &mut self.accs[at as usize * n..at as usize * n + n];
         for (i, (a, e)) in plan.aggs.iter().enumerate() {
             match a {
                 // `count` counts the weight whatever the expression evaluates to, which is
@@ -270,11 +348,10 @@ impl<'p> Folder<'p> {
     /// read, one per group emitted.
     pub fn finish(self) -> (ZSet, u64) {
         let mut work = self.work;
-        let mut out = ZSet::new();
-        for (k, accs) in self.groups {
-            work += 1;
-            let mut row = k;
-            for (i, (a, _)) in self.plan.aggs.iter().enumerate() {
+        let aggs = &self.plan.aggs;
+        // The aggregated cells of one group, appended to a row that already holds its key.
+        let close = |row: &mut Row, accs: &[Acc]| {
+            for (i, (a, _)) in aggs.iter().enumerate() {
                 row.push(match a {
                     Agg::Count => Value::Int(accs[i].total),
                     // `sum` over no non-null rows is null, not zero.
@@ -282,9 +359,50 @@ impl<'p> Folder<'p> {
                     _ => Value::Null,
                 });
             }
-            eval::add(&mut out, row, 1);
+        };
+        let n = aggs.len();
+        let arena = &self.accs;
+        let of = |i: u32| &arena[i as usize * n..i as usize * n + n];
+        // **The rows come out in ascending order, so the Z-set is built in bulk.**
+        //
+        // Both accumulator maps are `BTreeMap`s, so they iterate in ascending key order; the
+        // orderings agree (see [`Groups`]); and two groups with different keys give two rows
+        // that differ in their first columns. So the rows arrive sorted and distinct, and
+        // `eval::add`'s get-then-insert — thirteen `Vec<Value>` comparisons down a tree that
+        // is being rebalanced as it grows, ten thousand times — is doing a search whose
+        // answer is already known.
+        //
+        // `collect` into a `BTreeMap` takes std's bulk path: it sorts (linear on input that
+        // is already ordered) and then builds the tree bottom-up with no rebalancing at all.
+        // The intermediate `Vec` costs a handful of allocations from its growth, against ten
+        // thousand tree insertions.
+        let mut rows: Vec<(Row, i128)> = Vec::with_capacity(match &self.groups {
+            Groups::Scalar(g) => g.len(),
+            Groups::Wide(g) => g.len(),
+        });
+        match &self.groups {
+            Groups::Scalar(g) => {
+                for (k, i) in g {
+                    work += 1;
+                    let mut row = Row::with_capacity(1 + n);
+                    row.push(match k {
+                        None => Value::Null,
+                        Some(x) => Value::Int(*x),
+                    });
+                    close(&mut row, of(*i));
+                    rows.push((row, 1));
+                }
+            }
+            Groups::Wide(g) => {
+                for (k, i) in g {
+                    work += 1;
+                    let mut row = k.clone();
+                    close(&mut row, of(*i));
+                    rows.push((row, 1));
+                }
+            }
         }
-        (out, work)
+        (rows.into_iter().collect(), work)
     }
 }
 

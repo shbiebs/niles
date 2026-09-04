@@ -6,23 +6,23 @@
 
 | Workload | Contract (SPEC-ENGINE Part 0) | PostgreSQL | Nilestream | Ratio | Verdict |
 |---|---|---|---|---|---|
-| oltp | 5–10× PostgreSQL | 2676 ops/s | 2800 ops/s | 1.05× | **NOT MET** |
-| analytical | 10–12× PostgreSQL | 155.0 ops/s | 88.4 ops/s | 0.57× | **NOT MET** |
-| point | parity with PostgreSQL | 203.4 µs p99 | 167.4 µs p99 | 1.22× | **PARITY** |
-| durable | parity with PostgreSQL | 2804 ops/s | 3007 ops/s | 1.07× | **PARITY** |
+| oltp | 5–10× PostgreSQL | 5001 ops/s | 4985 ops/s | 1.00× | **NOT MET** |
+| analytical | 10–12× PostgreSQL | 271.2 ops/s | 178.9 ops/s | 0.66× | **NOT MET** |
+| point | parity with PostgreSQL | 90.2 µs p99 | 92.2 µs p99 | 0.98× | **PARITY** |
+| durable | parity with PostgreSQL | 6402 ops/s | 5056 ops/s | 0.79× | **NOT MET** |
 
 ### Runs and spread
 
 | Workload | Target | Runs | Median | MAD | MAD as % of median |
 |---|---|---|---|---|---|
-| oltp | postgres | 5 | 2675.6 ops/s | 118.8 | 4.4% |
-| oltp | nilestream | 5 | 2800.0 ops/s | 205.3 | 7.3% |
-| analytical | postgres | 5 | 155.0 ops/s | 2.3 | 1.5% |
-| analytical | nilestream | 5 | 88.4 ops/s | 0.9 | 1.0% |
-| point | postgres | 5 | 7908.4 ops/s | 191.2 | 2.4% |
-| point | nilestream | 5 | 13001.3 ops/s | 934.2 | 7.2% |
-| durable | postgres | 5 | 2803.7 ops/s | 182.3 | 6.5% |
-| durable | nilestream | 5 | 3007.2 ops/s | 167.0 | 5.6% |
+| oltp | postgres | 5 | 5000.8 ops/s | 113.5 | 2.3% |
+| oltp | nilestream | 5 | 4985.1 ops/s | 540.4 | 10.8% |
+| analytical | postgres | 5 | 271.2 ops/s | 1.2 | 0.4% |
+| analytical | nilestream | 5 | 178.9 ops/s | 4.7 | 2.6% |
+| point | postgres | 5 | 16303.3 ops/s | 1337.3 | 8.2% |
+| point | nilestream | 5 | 22077.5 ops/s | 232.2 | 1.1% |
+| durable | postgres | 5 | 6402.2 ops/s | 498.2 | 7.8% |
+| durable | nilestream | 5 | 5056.4 ops/s | 223.6 | 4.4% |
 
 ### The analytical workload, statement by statement
 
@@ -30,12 +30,12 @@ Median of the per-run medians, with the median absolute deviation beside it. The
 
 | Statement | In the ratio | PostgreSQL | Nilestream | Nilestream speed ÷ PostgreSQL |
 |---|---|---|---|---|
-| `count_star` | no | 1.31 ± 0.02 ms | — | — |
-| `group_by_cur` | common | 3.99 ± 0.02 ms | 1.45 ± 0.06 ms | 2.75× |
-| `group_by_acct` | common | 10.73 ± 0.11 ms | 22.98 ± 0.19 ms | 0.47× |
-| `top_ten_by_sum` | common | 8.90 ± 0.37 ms | 16.54 ± 0.13 ms | 0.54× |
-| `count_distinct_acct` | no | 4.45 ± 0.11 ms | — | — |
-| `sum_negative` | common | 2.05 ± 0.05 ms | 1.73 ± 0.11 ms | 1.18× |
+| `count_star` | no | 0.78 ± 0.02 ms | — | — |
+| `group_by_cur` | common | 2.48 ± 0.07 ms | 0.61 ± 0.03 ms | 4.06× |
+| `group_by_acct` | common | 6.07 ± 0.09 ms | 12.69 ± 0.22 ms | 0.48× |
+| `top_ten_by_sum` | common | 4.65 ± 0.04 ms | 7.88 ± 0.04 ms | 0.59× |
+| `count_distinct_acct` | no | 2.42 ± 0.01 ms | — | — |
+| `sum_negative` | common | 1.32 ± 0.02 ms | 0.56 ± 0.01 ms | 2.38× |
 
 **Coverage.** 2 of 6 statements are outside Nilestream's lowered fragment. They are measured on PostgreSQL — so their cost is on the record — and excluded from the ratio, because a composite that averaged a statement one side cannot express is not a comparison:
 
@@ -47,6 +47,9 @@ Median of the per-run medians, with the median absolute deviation beside it. The
 * Accounts: 10000
 * Operations per run: 500
 * Runs per workload: 5 (medians reported)
+* Rounds per account: 1 (conserved pairs, **on both targets**)
+* Base rows per target: 20000 (2 legs per account x 10000 accounts)
+* Targets are **interleaved**: PostgreSQL run 1, Nilestream run 1, PostgreSQL run 2, and so on, so host drift over a session lands on both sides of the ratio rather than one.
 * Both targets are driven **over the PostgreSQL wire protocol through the same client** (`bank-bench::wire`), so neither side is spared the protocol cost the other pays.
 * Access pattern is seeded and reproducible (SplitMix64), 90% of point lookups landing in the hottest 1% of accounts.
 
@@ -64,7 +67,7 @@ Median of the per-run medians, with the median absolute deviation beside it. The
 ### nilestream
 
 * `engine` = `nilestreamd`
-* `frontier` = `19999`
+* `frontier` = `9999`
 
 ## What the `point` row is
 

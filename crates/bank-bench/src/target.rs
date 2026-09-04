@@ -30,7 +30,23 @@ pub trait Target {
     fn configuration(&mut self) -> Vec<(String, String)>;
 
     /// Create the schema and load the data a workload needs.
-    fn prepare(&mut self, accounts: i64) -> Result<(), WireError>;
+    /// Load the base: `accounts` accounts, `rounds` conserved pairs each.
+    ///
+    /// **`rounds` is on the trait because the two targets have to hold the same base.** The
+    /// PostgreSQL side seeded one pair per account and the Nilestream side seeded
+    /// `--nls-rounds` (defaulting to two), so every full-scan statement read twice the rows on
+    /// one side of the comparison, and nothing in the recipe, the results header or the drift
+    /// test mentioned it. A ratio between two different problems is not a ratio.
+    fn prepare(&mut self, accounts: i64, rounds: u32) -> Result<(), WireError>;
+
+    /// The number of rows in the base, counted the same way on every target.
+    ///
+    /// `count(amt)` rather than `count(*)`: `amt` is `not null` on both sides so the two
+    /// count the same thing, and `count(*)` is not in the Niles surface. `None` where a
+    /// target cannot be asked.
+    fn base_rows(&mut self) -> Option<u64> {
+        None
+    }
 
     /// Run one statement, returning what came back.
     fn run(&mut self, sql: &str) -> Result<Rows, WireError>;
@@ -147,7 +163,7 @@ impl Target for PgTarget {
         out
     }
 
-    fn prepare(&mut self, accounts: i64) -> Result<(), WireError> {
+    fn prepare(&mut self, accounts: i64, rounds: u32) -> Result<(), WireError> {
         self.teardown()?;
         // The schema mirrors what the engine serves: an append-only postings table, and a
         // balance is a fold over it. Deliberately *not* a balances table with an UPDATE —
@@ -165,16 +181,22 @@ impl Target for PgTarget {
         )?;
         self.client
             .simple("create index ix_postings_acct on postings (acct, epoch)")?;
-        // Seed: one opening posting per account, and its contra against a house account, so
-        // the table conserves exactly as the ledger does.
-        self.client.simple(&format!(
-            "insert into postings (txn, acct, cur, amt, epoch)
-             select 'seed-' || g, g, 'USD', g * 100, g from generate_series(1, {accounts}) g"
-        ))?;
-        self.client.simple(&format!(
-            "insert into postings (txn, acct, cur, amt, epoch)
-             select 'seed-' || g, 0, 'USD', -g * 100, g from generate_series(1, {accounts}) g"
-        ))?;
+        // Seed: `rounds` opening postings per account, each with its contra against a house
+        // account, so the table conserves exactly as the ledger does — and so that the two
+        // targets hold the same number of rows, which is what `rounds` is here for.
+        for round in 0..rounds as i64 {
+            let amt = 100 + round * 7;
+            self.client.simple(&format!(
+                "insert into postings (txn, acct, cur, amt, epoch)
+                 select 'seed-{round}-' || g, g, 'USD', {amt} + (g % 13), g + {round} * {accounts}
+                 from generate_series(1, {accounts}) g"
+            ))?;
+            self.client.simple(&format!(
+                "insert into postings (txn, acct, cur, amt, epoch)
+                 select 'seed-{round}-' || g, 0, 'USD', -({amt} + (g % 13)), g + {round} * {accounts}
+                 from generate_series(1, {accounts}) g"
+            ))?;
+        }
         self.client.simple("analyze postings")?;
         Ok(())
     }
@@ -220,8 +242,12 @@ impl Target for PgTarget {
     }
 
     fn base_marker(&mut self) -> Option<u64> {
+        self.base_rows()
+    }
+
+    fn base_rows(&mut self) -> Option<u64> {
         self.client
-            .simple("select count(*) from postings")
+            .simple("select count(amt) from postings")
             .ok()
             .and_then(|r| r.rows.first()?.first()?.clone())
             .and_then(|v| v.trim().parse().ok())
@@ -269,10 +295,10 @@ impl Target for NilestreamTarget {
         out
     }
 
-    fn prepare(&mut self, accounts: i64) -> Result<(), WireError> {
-        // The server is started with `--accounts N`, so preparation is a check that the data
-        // is there rather than a load. Verified rather than assumed: a run against an empty
-        // server would report excellent latencies for queries that returned nothing.
+    fn prepare(&mut self, accounts: i64, _rounds: u32) -> Result<(), WireError> {
+        // The server is started with `--accounts N --rounds R`, so preparation is a check
+        // that the data is there rather than a load; the harness compares the two targets'
+        // `base_rows()` afterwards, which is what actually holds the two bases equal.
         self.accounts = accounts;
         let probe = self
             .client
@@ -325,6 +351,14 @@ impl Target for NilestreamTarget {
         // runs — an epoch is not a row.
         self.client
             .simple("select nilestream_frontier")
+            .ok()
+            .and_then(|r| r.rows.first()?.first()?.clone())
+            .and_then(|v| v.trim().parse().ok())
+    }
+
+    fn base_rows(&mut self) -> Option<u64> {
+        self.client
+            .simple("select count(amt) from postings")
             .ok()
             .and_then(|r| r.rows.first()?.first()?.clone())
             .and_then(|v| v.trim().parse().ok())

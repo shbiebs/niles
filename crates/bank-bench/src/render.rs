@@ -160,7 +160,12 @@ pub fn judge(
             }
         }
         None => {
-            if (0.8..=1.25).contains(&ratio) {
+            // **One-sided, because the specification is one-sided.** SPEC-ENGINE Part 0 says
+            // the engine "MUST NOT regress below parity on point lookups and selective indexed
+            // access". A two-sided band reported `NOT MET` on runs where Nilestream's p99 was
+            // 1.30x and 1.46x *better* than PostgreSQL's — a contract that was met, recorded as
+            // failed, in two runs out of three. The overshoot is reported as the number it is.
+            if ratio >= 0.8 {
                 Verdict::Parity
             } else {
                 Verdict::NotMet
@@ -424,10 +429,10 @@ mod tests {
     }
 
     #[test]
-    fn a_parity_row_is_a_band_and_overshooting_it_is_not_parity() {
-        // Deliberate: a parity claim that overshoots is still not the claim that was written
-        // down, and reporting it as met would let a specification be satisfied by a number it
-        // did not predict.
+    fn a_parity_row_is_a_floor_because_the_specification_is_a_floor() {
+        // `docs/SPEC-ENGINE.md`: "MUST NOT regress below parity on point lookups and selective
+        // indexed access". A floor, not a band. The band this replaced reported `NOT MET` on a
+        // run where the engine was 46% faster than the baseline it is held to.
         let row = ContractRow {
             workload: "point",
             target: "parity",
@@ -437,7 +442,9 @@ mod tests {
         assert_eq!(judge(&row, Some(85.0), Some(100.0), None), Verdict::Parity);
         assert_eq!(judge(&row, Some(120.0), Some(100.0), None), Verdict::Parity);
         assert_eq!(judge(&row, Some(50.0), Some(100.0), None), Verdict::NotMet);
-        assert_eq!(judge(&row, Some(200.0), Some(100.0), None), Verdict::NotMet);
+        // Faster than the baseline is parity met, not parity missed.
+        assert_eq!(judge(&row, Some(200.0), Some(100.0), None), Verdict::Parity);
+        assert_eq!(judge(&row, Some(146.0), Some(100.0), None), Verdict::Parity);
     }
 
     #[test]

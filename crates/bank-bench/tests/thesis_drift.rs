@@ -365,11 +365,18 @@ fn the_benchmark_recipe_reproduces_the_committed_numbers() {
     let accounts = field(&results, "* Accounts:");
     let operations = field(&results, "* Operations per run:");
     let runs = field(&results, "* Runs per workload:");
+    // **The seeding is part of the recipe.** It was not, and that is how the two targets came
+    // to hold 20,000 and 40,000 rows: `--nls-rounds` defaulted to 2 on one side and did not
+    // exist on the other, appeared in neither this recipe nor the results header, and so
+    // nothing could catch it. A parameter that changes what is measured and is not in the
+    // command that reproduces it is a parameter nobody can check.
+    let rounds = field(&results, "* Rounds per account:");
 
     for (flag, want) in [
         ("--accounts", &accounts),
         ("--operations", &operations),
         ("--runs", &runs),
+        ("--rounds", &rounds),
     ] {
         let needle = format!("{flag} {want}");
         assert!(
@@ -379,6 +386,18 @@ fn the_benchmark_recipe_reproduces_the_committed_numbers() {
              from the run it documents reproduces something else."
         );
     }
+
+    // The two targets held the same base, and the header says how big it was.
+    let base = field(&results, "* Base rows per target:");
+    let expected: i64 =
+        accounts.parse::<i64>().expect("accounts") * 2 * rounds.parse::<i64>().expect("rounds");
+    assert_eq!(
+        base.parse::<i64>().ok(),
+        Some(expected),
+        "the results header says the base is {base} rows, but {accounts} accounts x {rounds} \
+         rounds x 2 legs is {expected}. The header is what a reader checks the comparison \
+         against; if it is not arithmetic, it is decoration."
+    );
 }
 
 // ===================== the theorems say what their proofs prove =====================

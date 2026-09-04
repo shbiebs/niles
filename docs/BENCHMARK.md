@@ -26,7 +26,7 @@ pg_ctlcluster 16 main start            # or: initdb -D … && pg_ctl -D … star
 cargo run --release -p bank-bench --bin bench -- \
       --calibrate --run --render --publish \
       --pg-port 5432 --host-nls \
-      --accounts 10000 --operations 500 --runs 5
+      --accounts 10000 --operations 500 --runs 5 --rounds 1
 ```
 
 **`--publish` is what overwrites the committed `results/E16-wallclock.md`.** Without it a run
@@ -42,6 +42,14 @@ out of `results/E16-wallclock.md`'s own "How it was run" section by
 This line said `--operations 2000 --runs 10` while the committed table came from 500 and 5, so
 the one command a reader would type was not the command that produced the numbers underneath
 it — which is the whole of what a reproduction recipe is for.
+
+`--rounds` is in that list for the same reason and is the newer half of the finding. It sets
+how many conserved pairs are seeded per account, and it used to be `--nls-rounds`, applied to
+one target only, defaulted to `2`, and appeared in neither this recipe nor the results header.
+PostgreSQL was therefore measured over 20,000 rows and Nilestream over 40,000, and every ratio
+in the table was a ratio between two different bases. The flag now seeds **both** targets, the
+run aborts if the two bases end up unequal, and `* Base rows per target:` is printed in the
+results header so the check is one a reader can make without running anything.
 
 `--host-nls` starts `nilestreamd` on a thread of the same process and drives it over TCP with
 the same client, with a durable sink at `results/E16-wallclock/nilestream-bench.seg` under

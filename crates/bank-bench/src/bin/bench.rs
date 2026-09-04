@@ -76,7 +76,11 @@ struct Args {
     runs: u32,
     /// Host Nilestream's listener on a thread of this process.
     host_nls: bool,
-    nls_rounds: u32,
+    /// Conserved pairs per account, on **both** targets. Named `rounds` because it is no
+    /// longer a Nilestream-only knob: the two bases must be the same size or the analytical
+    /// ratio compares two different problems. `--nls-rounds` is still accepted, and means the
+    /// same thing on both sides.
+    rounds: u32,
     nls_budget: usize,
     /// Overwrite the **committed** `results/E16-wallclock.md`.
     ///
@@ -105,7 +109,7 @@ impl Args {
             operations: 2_000,
             runs: 10,
             host_nls: false,
-            nls_rounds: 2,
+            rounds: 1,
             // **A budget that binds.** It was 100,000 against 10,000 accounts, so after
             // warm-up the view held every key and nothing was ever evicted: the point
             // workload measured the hit path exclusively while being presented as a
@@ -159,8 +163,8 @@ impl Args {
                 }
                 "--host-nls" => a.host_nls = true,
                 "--publish" => a.publish = true,
-                "--nls-rounds" => {
-                    a.nls_rounds = argv[i + 1].parse().unwrap_or(a.nls_rounds);
+                "--rounds" | "--nls-rounds" => {
+                    a.rounds = argv[i + 1].parse().unwrap_or(a.rounds);
                     i += 1;
                 }
                 "--nls-budget" => {
@@ -258,7 +262,7 @@ fn calibrate(args: &Args, pg: &mut PgTarget) -> bool {
         cost.ceiling_per_second()
     );
 
-    if let Err(e) = pg.prepare(args.accounts) {
+    if let Err(e) = pg.prepare(args.accounts, args.rounds) {
         eprintln!("bench: could not prepare PostgreSQL: {e}");
         return false;
     }
@@ -320,26 +324,15 @@ fn run(args: &Args) -> i32 {
     // series is a number with no referent.
     let mut base_of: BTreeMap<String, u64> = BTreeMap::new();
 
-    eprintln!("== postgres ==");
-    for run_no in 1..=args.runs {
-        // Re-prepare between runs so each starts from the same table: an OLTP run that
-        // appended two million rows would otherwise make the next run's analytical scan a
-        // different measurement wearing the same name.
-        if let Err(e) = pg.prepare(args.accounts) {
-            eprintln!("bench: prepare failed on run {run_no}: {e}");
-            return 5;
-        }
-        if let Err(why) = same_base(&mut pg, &mut base_of, run_no) {
-            eprintln!("bench: {why}");
-            return 9;
-        }
-        for s in run_all(&mut pg, args, run_no) {
-            report(&s);
-            samples.push(s);
-        }
-    }
-
-    eprintln!("== nilestream ==");
+    // **The two targets are measured in one interleaved loop.**
+    //
+    // Every PostgreSQL run used to happen before any Nilestream run, so a host that drifted
+    // over the few minutes of a session put all of the drift on one side of the ratio. It
+    // produced an anti-correlated pair last cycle: PostgreSQL's analytical figure was the
+    // highest of the session and Nilestream's the lowest, in the same run, from a change that
+    // cannot slow an analytical query. Alternating makes the control mean what a control is
+    // for — the two targets see the same minute.
+    eprintln!("== interleaved: postgres, nilestream, per run ==");
     // Host the daemon on a thread of this process when asked to, so one command reproduces
     // the whole result and no run can silently measure a stale server holding the port.
     let mut hosted: Option<Hosted> = None;
@@ -348,7 +341,7 @@ fn run(args: &Args) -> i32 {
             Ok(listener) => {
                 eprintln!(
                     "  hosting the daemon on 127.0.0.1:{} — {} accounts x {} rounds, budget {}",
-                    args.nls_port, args.accounts, args.nls_rounds, args.nls_budget
+                    args.nls_port, args.accounts, args.rounds, args.nls_budget
                 );
                 if args.nls_budget >= args.accounts as usize {
                     eprintln!(
@@ -371,7 +364,7 @@ fn run(args: &Args) -> i32 {
                 let _ = std::fs::remove_file(&seg);
                 let base = nilestream_server::rev_engine::RevEngine::seeded(
                     args.accounts,
-                    args.nls_rounds,
+                    args.rounds,
                     args.nls_budget,
                     proto_engine::ViewMode::Demand,
                     proto_engine::EvictionPolicy::Lru,
@@ -399,7 +392,7 @@ fn run(args: &Args) -> i32 {
                     engine: std::sync::Arc::clone(&engine),
                     seg,
                     accounts: args.accounts,
-                    rounds: args.nls_rounds,
+                    rounds: args.rounds,
                     budget: args.nls_budget,
                 });
                 let schema = nilestream_server::daemon::DEFAULT_SCHEMA.to_string();
@@ -419,7 +412,31 @@ fn run(args: &Args) -> i32 {
     let _ = bound;
 
     let mut described = false;
+    // The two targets' base sizes, compared once both have been prepared. A ratio between a
+    // 20,000-row table and a 40,000-posting ledger is not a ratio, and nothing said so.
+    let mut base_size: BTreeMap<String, u64> = BTreeMap::new();
     for run_no in 1..=args.runs {
+        // ---- PostgreSQL's half of this run ----
+        // Re-prepare between runs so each starts from the same table: an OLTP run that
+        // appended two million rows would otherwise make the next run's analytical scan a
+        // different measurement wearing the same name.
+        if let Err(e) = pg.prepare(args.accounts, args.rounds) {
+            eprintln!("bench: prepare failed on run {run_no}: {e}");
+            return 5;
+        }
+        if let Err(why) = same_base(&mut pg, &mut base_of, run_no) {
+            eprintln!("bench: {why}");
+            return 9;
+        }
+        if let Some(n) = pg.base_rows() {
+            base_size.insert("postgres".into(), n);
+        }
+        for s in run_all(&mut pg, args, run_no) {
+            report(&s);
+            samples.push(s);
+        }
+
+        // ---- Nilestream's half of the same run ----
         // **A fresh engine per run**, mirroring PostgreSQL's `prepare`. Without it every
         // Nilestream run began with the previous run's `oltp` and `durable` appends still in
         // the base — about 1,250 legs, six percent, compounding — while PostgreSQL started
@@ -458,7 +475,7 @@ fn run(args: &Args) -> i32 {
             config.push(("nilestream".into(), nls.configuration()));
             described = true;
         }
-        if let Err(e) = nls.prepare(args.accounts) {
+        if let Err(e) = nls.prepare(args.accounts, args.rounds) {
             eprintln!("  unavailable: {e}");
             for w in ["oltp", "analytical", "point", "durable"] {
                 samples.push(workloads::skipped(w, "nilestream", run_no, format!("{e}")));
@@ -469,10 +486,43 @@ fn run(args: &Args) -> i32 {
             eprintln!("bench: {why}");
             return 9;
         }
+        if let Some(n) = nls.base_rows() {
+            base_size.insert("nilestream".into(), n);
+        }
+        // **The two targets must hold the same base, and the run says so or does not run.**
+        //
+        // Not a warning: an analytical ratio computed over two different row counts is a
+        // number with no meaning, and it was published for two cycles. Every workload of this
+        // run becomes `NOT RUN` with the two counts in the reason, so the difference appears
+        // in the CSV and in the rendered table rather than in a log nobody kept.
+        if let (Some(p), Some(n)) = (base_size.get("postgres"), base_size.get("nilestream")) {
+            if p != n {
+                let why = format!(
+                    "the two targets do not hold the same base: postgres has {p} rows and \
+                     nilestream has {n}. A ratio between different problems is not a ratio. \
+                     Both are seeded with `--rounds` conserved pairs per account; check that \
+                     nilestreamd was started with the same `--rounds` as this harness ({})",
+                    args.rounds
+                );
+                eprintln!("bench: {why}");
+                for w in ["oltp", "analytical", "point", "durable"] {
+                    samples.push(workloads::skipped(w, "postgres", run_no, why.clone()));
+                    samples.push(workloads::skipped(w, "nilestream", run_no, why.clone()));
+                }
+                continue;
+            }
+        }
         for s in run_all(&mut nls, args, run_no) {
             report(&s);
             samples.push(s);
         }
+    }
+    if let (Some(p), Some(n)) = (base_size.get("postgres"), base_size.get("nilestream")) {
+        eprintln!(
+            "  base: postgres {p} rows, nilestream {n} rows ({} per account x {} accounts)",
+            args.rounds * 2,
+            args.accounts
+        );
     }
 
     let _ = pg.teardown();
@@ -582,7 +632,14 @@ fn run_all(t: &mut dyn Target, args: &Args, run_no: u32) -> Vec<Sample> {
     let point = workloads::point(t, args.accounts, args.operations, run_no, seed);
     push(&mut out, "point", &name, run_no, point.map(|s| vec![s]));
 
-    let analytical = workloads::analytical(t, args.accounts, (args.operations / 20).max(6), run_no);
+    // **Twenty-five executions of the common set per run, not six.**
+    //
+    // `(operations / 20).max(6)` gave six executions of a four-statement set at the committed
+    // `--operations 500`, so a per-statement median rested on thirty numbers across five runs
+    // and moved by tens of percent between sessions. A quarter of `operations`, floored at
+    // twenty-five, costs about five seconds more per recipe run and is what makes a
+    // per-statement figure worth reading.
+    let analytical = workloads::analytical(t, args.accounts, (args.operations / 4).max(25), run_no);
     push(&mut out, "analytical", &name, run_no, analytical);
 
     let oltp = workloads::oltp(t, args.accounts, args.operations, run_no, seed);
@@ -688,11 +745,22 @@ fn document(samples: &[Sample], config: &[(String, Vec<(String, String)>)], args
     s.push_str("\n## How it was run\n\n");
     s.push_str(&format!(
         "* Accounts: {}\n* Operations per run: {}\n* Runs per workload: {} (medians reported)\n\
+         * Rounds per account: {} (conserved pairs, **on both targets**)\n\
+         * Base rows per target: {} ({} legs per account x {} accounts)\n\
+         * Targets are **interleaved**: PostgreSQL run 1, Nilestream run 1, PostgreSQL run 2, \
+         and so on, so host drift over a session lands on both sides of the ratio rather than \
+         one.\n\
          * Both targets are driven **over the PostgreSQL wire protocol through the same \
          client** (`bank-bench::wire`), so neither side is spared the protocol cost the \
          other pays.\n* Access pattern is seeded and reproducible (SplitMix64), 90% of point \
          lookups landing in the hottest 1% of accounts.\n\n",
-        args.accounts, args.operations, args.runs
+        args.accounts,
+        args.operations,
+        args.runs,
+        args.rounds,
+        args.accounts * 2 * args.rounds as i64,
+        args.rounds * 2,
+        args.accounts
     ));
     for (name, settings) in config {
         s.push_str(&format!("### {name}\n\n"));

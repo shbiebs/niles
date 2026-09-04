@@ -349,7 +349,19 @@ impl crate::session::Serving for RevEngine {
         // contract between the two, and it carries indices rather than names — so the
         // columns are named positionally and the *anchor* is appended, because a served
         // answer without the moment it is true at is a number a dispute cannot use.
-        let width = z.keys().next().map(|r| r.len()).unwrap_or(0);
+        //
+        // **The width comes from the circuit, not from the first row.** It was
+        // `z.keys().next().map(|r| r.len()).unwrap_or(0)`, so a query that returned nothing
+        // described *one* column where the same query with rows described three: a client
+        // saw a different schema for the same statement depending on the data. A result set
+        // is described by the query, and an empty one is still a result set.
+        let width = circuit
+            .outputs
+            .get(output)
+            .and_then(|id| circuit.nodes.iter().find(|n| n.id == *id))
+            .map(|n| n.arity as usize)
+            .filter(|w| *w > 0)
+            .unwrap_or_else(|| z.keys().next().map(|r| r.len()).unwrap_or(0));
         let mut columns: Vec<String> = (0..width).map(|i| format!("c{i}")).collect();
         columns.push("anchor".into());
         let mut rows = Vec::new();
@@ -1379,5 +1391,41 @@ mod tests {
             "a warm view answered a historical query with a fresher value"
         );
         assert_ne!(e.read_point(&[5], head), Some(cold), "and the head differs");
+    }
+
+    /// **An empty answer describes the same columns as a non-empty one.**
+    ///
+    /// The width came from the first row, so a statement that matched nothing described one
+    /// column and the same statement with rows described three. A client that prepared once
+    /// and executed twice would see its result schema change with the data — and a benchmark
+    /// or a driver that trusted the description would be reading a different shape from the
+    /// one it was told about.
+    #[test]
+    fn an_empty_answer_describes_its_columns() {
+        use crate::session::Serving;
+        let mut e = RevEngine::seeded(50, 1, 25, ViewMode::Demand, EvictionPolicy::Lru);
+        let anchor = e.frontier();
+        let full = compile("select acct, sum(amt) from postings where acct = 7 group by acct");
+        let empty =
+            compile("select acct, sum(amt) from postings where acct = 999999 group by acct");
+        let with_rows = e
+            .query(&full.circuit, "__wire_result", anchor)
+            .expect("serves");
+        let without = e
+            .query(&empty.circuit, "__wire_result", anchor)
+            .expect("serves");
+        assert!(!with_rows.rows.is_empty(), "the control has rows");
+        assert!(without.rows.is_empty(), "and the case has none");
+        assert_eq!(
+            with_rows.columns.len(),
+            without.columns.len(),
+            "the same statement shape must describe the same number of columns whether or \
+             not it matched anything"
+        );
+        assert_eq!(
+            with_rows.columns, without.columns,
+            "and the same names: a client that reads the descriptor to lay out a report must \
+             not have to guess the width of an empty answer"
+        );
     }
 }

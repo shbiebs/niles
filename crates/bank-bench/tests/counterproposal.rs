@@ -13,9 +13,11 @@
 //! compiler, so it can be part of the gate — which is where a number a chapter depends on
 //! belongs.
 
+use std::path::PathBuf;
 use std::process::Command;
+use std::sync::OnceLock;
 
-fn repo_root() -> std::path::PathBuf {
+fn repo_root() -> PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
@@ -24,6 +26,103 @@ enum Verdict {
     Refused,
     Warned,
     Accepted,
+}
+
+/// **The compiler binary, found once — not `cargo run` per case.**
+///
+/// This used to spawn `cargo run -q -p nilesc` for every corpus file and classify
+/// `status.code() != Some(0)` as [`Verdict::Refused`]. A cargo that could not run — a build
+/// directory lock held by the outer `cargo test`, which is what happens whenever
+/// `CARGO_TARGET_DIR` is set, as most CI sets it — was therefore indistinguishable from a
+/// compiler that refused a program. On a ten-core machine with that variable set, this test
+/// reported twelve refusals and zero warnings against the eleven and one the corpus actually
+/// produces, and §6.10.3's table would have been "corrected" to a number no compiler ever
+/// emitted.
+///
+/// Two changes close it. The binary is invoked directly, so the exit status is the
+/// compiler's own; and the verdict is read from the compiler's markers rather than from an
+/// exit code, so *no output at all* is a distinct outcome (`BLOCKED-nilesc`) instead of
+/// being silently counted as a refusal.
+fn nilesc_binary() -> &'static PathBuf {
+    static BIN: OnceLock<PathBuf> = OnceLock::new();
+    BIN.get_or_init(|| {
+        let root = repo_root();
+        // Honour `CARGO_TARGET_DIR`; the cause of the defect above is also where the binary
+        // lands when it is set.
+        let target = std::env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| root.join("target"));
+        for profile in ["release", "debug"] {
+            let p = target.join(profile).join("nilesc");
+            if p.is_file() {
+                return p;
+            }
+        }
+        // Build it once, and only if it is absent. A build failure is reported as
+        // `BLOCKED-nilesc` by the caller when the binary still does not exist — never as a
+        // verdict about the language.
+        let _ = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
+            .args(["build", "--quiet", "-p", "nilesc"])
+            .current_dir(&root)
+            .status();
+        for profile in ["release", "debug"] {
+            let p = target.join(profile).join("nilesc");
+            if p.is_file() {
+                return p;
+            }
+        }
+        panic!(
+            "BLOCKED-nilesc: no `nilesc` binary under {} and `cargo build -p nilesc` did not \
+             produce one. These verdicts are what §6.10.3 reports, so running them without a \
+             compiler would put a number in the thesis that no compiler emitted. Build it and \
+             re-run.",
+            target.display()
+        )
+    })
+}
+
+/// The compiler's verdict on one file, read from its own markers.
+///
+/// `nilesc check` prints `ok: …` on stdout when it accepts, and `error[NLnnnn]` on stderr
+/// when it refuses. Exactly one of those is present whenever the compiler ran. Neither being
+/// present means it did not run, which is a blocked test and not a refusal — the distinction
+/// the old exit-code rule could not make.
+fn verdict_of(file: &std::path::Path) -> Verdict {
+    let bin = nilesc_binary();
+    let out = Command::new(bin)
+        .arg("check")
+        .arg(file)
+        .current_dir(repo_root())
+        .output()
+        .unwrap_or_else(|e| panic!("BLOCKED-nilesc: cannot run {}: {e}", bin.display()));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    let accepted = stdout.trim_start().starts_with("ok:");
+    let refused = stderr.contains("error[");
+    assert!(
+        accepted || refused,
+        "BLOCKED-nilesc: `{} check {}` produced neither an `ok:` line nor an `error[` \
+         diagnostic (exit {:?}). The compiler did not run, or ran and said nothing; either \
+         way this is not a verdict about the program.\nstdout: {stdout}\nstderr: {stderr}",
+        bin.display(),
+        file.display(),
+        out.status.code(),
+    );
+    assert!(
+        !(accepted && refused),
+        "`{}` both accepted and refused {}; the marker rule cannot classify that",
+        bin.display(),
+        file.display()
+    );
+
+    if refused {
+        Verdict::Refused
+    } else if stderr.contains("warning[") {
+        Verdict::Warned
+    } else {
+        Verdict::Accepted
+    }
 }
 
 fn corpus() -> Vec<(String, Verdict)> {
@@ -38,28 +137,8 @@ fn corpus() -> Vec<(String, Verdict)> {
     files
         .into_iter()
         .map(|p| {
-            // `nilesc` lives in another crate, so `CARGO_BIN_EXE_` is not set for this
-            // test binary. Driving it through `cargo run` is what `run.sh` does, and using
-            // the same path keeps the two from diverging.
-            let out = Command::new("cargo")
-                .args(["run", "-q", "-p", "nilesc", "--", "check"])
-                .arg(&p)
-                .current_dir(repo_root())
-                .output()
-                .expect("run nilesc");
-            let text = format!(
-                "{}{}",
-                String::from_utf8_lossy(&out.stdout),
-                String::from_utf8_lossy(&out.stderr)
-            );
             let name = p.file_stem().unwrap().to_string_lossy().into_owned();
-            let verdict = if out.status.code() != Some(0) {
-                Verdict::Refused
-            } else if text.contains("warning[") {
-                Verdict::Warned
-            } else {
-                Verdict::Accepted
-            };
+            let verdict = verdict_of(&p);
             (name, verdict)
         })
         .collect()
@@ -132,5 +211,28 @@ fn the_silently_accepted_case_is_the_one_the_thesis_names() {
         silent,
         vec!["d6_wall_clock_predicate".to_string()],
         "exactly one case is accepted with no diagnostic, and §6.10.3 says which"
+    );
+}
+
+/// **The verdict may not be read from an exit code, and this test says so in the source.**
+///
+/// The repair above is invisible to any assertion about behaviour: a test that spawns
+/// `cargo run` and one that runs the binary produce identical verdicts on a machine where
+/// cargo happens to work, which is exactly why the defect survived. So the guard is
+/// structural — it fails if a `cargo run` subprocess comes back into this file.
+#[test]
+fn the_corpus_verdicts_do_not_come_from_a_nested_cargo() {
+    let src = include_str!("counterproposal.rs");
+    // The `.args([…"run"…])` form, in any spelling, spawning cargo.
+    let spawns_cargo_run = src
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .any(|l| l.contains("\"run\"") && (l.contains("args") || l.contains("arg(")));
+    assert!(
+        !spawns_cargo_run,
+        "this file spawns `cargo run` again. A cargo that cannot run — a build-directory \
+         lock, which is what happens whenever CARGO_TARGET_DIR is set — is then \
+         indistinguishable from a compiler that refused the program, and §6.10.3's table \
+         gets a number no compiler emitted. Invoke the binary and read its markers."
     );
 }

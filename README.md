@@ -159,6 +159,7 @@ this table.
 | `docs/HANDOFF-OPUS.md` | The handoff blueprint an earlier cycle worked from. |
 | `docs/WORK-ORDER-2-REPORT.md` | What the second work order changed, which claims it weakened, and what it could not settle. |
 | `docs/WORK-ORDER-3-REPORT.md` | The efficiency cycle: what was measured, what moved, the two contracts shown to be out of reach in the shape they are written, and the one decision it would not make alone. |
+| `docs/WORK-ORDER-4-REPORT.md` | The second efficiency cycle: the analytical composite from 0.66× PostgreSQL to 1.32×, the concurrency instrument and what it found, the two tasks closed by measurement rather than by code, and fifteen constructs the keyword registry documents and the compiler does not have. |
 | `docs/VALIDATION-RUN.md` | That blueprint's validation protocol, run, with the two items it did not meet. A record of a past run, kept rather than deleted. |
 | `docs/adr/` | Architecture decision records. |
 | `docs/research/` | The searches and landscape reviews the design rests on. |

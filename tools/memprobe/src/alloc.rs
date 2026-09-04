@@ -215,6 +215,12 @@ pub fn budget(scenario: &str) -> Option<f64> {
         "served_group_by_cur" => 15.0,
         "served_group_by_acct" => 14_000.0,
         "served_sum_negative" => 14.0,
+        // **An ordering and a limit above the fold.** Ten rows out of ten thousand groups,
+        // so the cost that matters is whether it is proportional to the ten or to the ten
+        // thousand. The fold's own groups are still built — a top-ten over an aggregate has
+        // to aggregate first — so this sits just above `served_group_by_acct`; what T-06
+        // removed is the second copy of all ten thousand and the full sort of them.
+        "served_top_ten" => 14_100.0,
         // A served point read goes through the anchor index, so its cost is the account's
         // own postings and the reply — not the base. The plan is borrowed from the circuit
         // rather than cloned out of it, which was four of these on its own.
@@ -235,6 +241,7 @@ pub const SCENARIOS: &[&str] = &[
     "zset_base_at",
     "served_group_by_cur",
     "served_group_by_acct",
+    "served_top_ten",
     "served_sum_negative",
     "served_point",
     "rev_read_hit",

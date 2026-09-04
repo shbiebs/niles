@@ -183,6 +183,20 @@ pub fn served_sum_negative() -> Row {
     )
 }
 
+/// **The top-ten shape: an ordering and a limit above a folded aggregate.**
+///
+/// Measured separately from `served_group_by_acct` because it is the one common statement
+/// where the fold's ten thousand groups are *not* the answer — ten of them are — so a cost
+/// proportional to the groups is a cost that should not be there. Before T-06 the limit
+/// cloned every group into a vector and sorted all of them to keep ten.
+pub fn served_top_ten() -> Row {
+    served(
+        "served_top_ten",
+        "select acct, sum(amt) from postings group by acct order by sum(amt) desc limit 10",
+        3,
+    )
+}
+
 pub fn served_point() -> Row {
     served(
         "served_point",
@@ -343,6 +357,7 @@ pub fn all() -> Vec<Row> {
         zset_base_at(),
         served_group_by_cur(),
         served_group_by_acct(),
+        served_top_ten(),
         served_sum_negative(),
         served_point(),
         rev_read_hit(),

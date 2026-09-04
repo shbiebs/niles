@@ -6,23 +6,23 @@
 
 | Workload | Contract (SPEC-ENGINE Part 0) | PostgreSQL | Nilestream | Ratio | Verdict |
 |---|---|---|---|---|---|
-| oltp | 5–10× PostgreSQL | 6019 ops/s | 5356 ops/s | 0.89× | **NOT MET** |
-| analytical | 10–12× PostgreSQL | 267.3 ops/s | 279.9 ops/s | 1.05× | **NOT MET** |
-| point | parity with PostgreSQL | 115.2 µs p99 | 88.8 µs p99 | 1.30× | **PARITY** |
-| durable | parity with PostgreSQL | 6290 ops/s | 5298 ops/s | 0.84× | **PARITY** |
+| oltp | 5–10× PostgreSQL | 5740 ops/s | 5441 ops/s | 0.95× | **NOT MET** |
+| analytical | 10–12× PostgreSQL | 273.0 ops/s | 361.3 ops/s | 1.32× | **NOT MET** |
+| point | parity with PostgreSQL | 107.0 µs p99 | 94.1 µs p99 | 1.14× | **PARITY** |
+| durable | parity with PostgreSQL | 6291 ops/s | 5503 ops/s | 0.87× | **PARITY** |
 
 ### Runs and spread
 
 | Workload | Target | Runs | Median | MAD | MAD as % of median |
 |---|---|---|---|---|---|
-| oltp | postgres | 5 | 6018.7 ops/s | 100.1 | 1.7% |
-| oltp | nilestream | 5 | 5356.1 ops/s | 138.5 | 2.6% |
-| analytical | postgres | 5 | 267.3 ops/s | 1.4 | 0.5% |
-| analytical | nilestream | 5 | 279.9 ops/s | 1.4 | 0.5% |
-| point | postgres | 5 | 16050.4 ops/s | 265.8 | 1.7% |
-| point | nilestream | 5 | 22880.2 ops/s | 312.9 | 1.4% |
-| durable | postgres | 5 | 6290.2 ops/s | 160.0 | 2.5% |
-| durable | nilestream | 5 | 5298.0 ops/s | 261.8 | 4.9% |
+| oltp | postgres | 5 | 5740.3 ops/s | 169.4 | 3.0% |
+| oltp | nilestream | 5 | 5441.1 ops/s | 413.9 | 7.6% |
+| analytical | postgres | 5 | 273.0 ops/s | 1.9 | 0.7% |
+| analytical | nilestream | 5 | 361.3 ops/s | 3.8 | 1.0% |
+| point | postgres | 5 | 14949.4 ops/s | 755.7 | 5.1% |
+| point | nilestream | 5 | 22032.0 ops/s | 1029.7 | 4.7% |
+| durable | postgres | 5 | 6290.7 ops/s | 8.9 | 0.1% |
+| durable | nilestream | 5 | 5502.6 ops/s | 35.2 | 0.6% |
 
 ### The analytical workload, statement by statement
 
@@ -30,12 +30,12 @@ Median of the per-run medians, with the median absolute deviation beside it. The
 
 | Statement | In the ratio | PostgreSQL | Nilestream | Nilestream speed ÷ PostgreSQL |
 |---|---|---|---|---|
-| `count_star` | no | 0.78 ± 0.02 ms | — | — |
-| `group_by_cur` | common | 2.48 ± 0.06 ms | 0.55 ± 0.01 ms | 4.50× |
-| `group_by_acct` | common | 5.98 ± 0.03 ms | 8.95 ± 0.17 ms | 0.67× |
-| `top_ten_by_sum` | common | 4.64 ± 0.03 ms | 3.92 ± 0.02 ms | 1.18× |
-| `count_distinct_acct` | no | 2.49 ± 0.10 ms | — | — |
-| `sum_negative` | common | 1.32 ± 0.03 ms | 0.58 ± 0.03 ms | 2.26× |
+| `count_star` | no | 0.77 ± 0.02 ms | — | — |
+| `group_by_cur` | common | 2.43 ± 0.03 ms | 0.54 ± 0.01 ms | 4.47× |
+| `group_by_acct` | common | 6.11 ± 0.19 ms | 5.86 ± 0.03 ms | 1.04× |
+| `top_ten_by_sum` | common | 4.62 ± 0.04 ms | 3.92 ± 0.05 ms | 1.18× |
+| `count_distinct_acct` | no | 2.41 ± 0.00 ms | — | — |
+| `sum_negative` | common | 1.30 ± 0.02 ms | 0.58 ± 0.00 ms | 2.27× |
 
 **Coverage.** 2 of 6 statements are outside Nilestream's lowered fragment. They are measured on PostgreSQL — so their cost is on the record — and excluded from the ratio, because a composite that averaged a statement one side cannot express is not a comparison:
 

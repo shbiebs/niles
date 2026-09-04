@@ -246,11 +246,16 @@ on; a gap attributed to "it is a prototype" is not attributed at all.
    moved and why.
 
    Nor is the reply, any longer. T-05 took the whole served path from 51.0 M instructions to
-   27.8 M and from 95,035 allocations to 12,602, and the effect is visible in the contract
-   table: the `analytical` composite went from 0.66× PostgreSQL to **1.05×**, and
-   `top_ten_by_sum` from 0.59× to 1.18×. `group_by_acct` remains the one common statement
-   behind, at 0.67×, and what it is behind on is producing and sending 10,001 rows — the
-   Z-set's own row vectors and the socket, not the aggregation.
+   27.8 M and from 95,035 allocations to 12,602, and T-06 took the top-ten shape from 50.7 M
+   to 32.8 M. The effect is visible in the contract table: the `analytical` composite went
+   from 0.66× PostgreSQL to **1.32×**, and all four common statements are now at or above the
+   baseline — `group_by_cur` 4.47×, `sum_negative` 2.27×, `top_ten_by_sum` 1.18×,
+   `group_by_acct` 1.04×, where the last was 0.48×.
+
+   `group_by_acct` is the one at the margin, and what remains in it is producing and sending
+   10,001 rows: the Z-set's own row vectors and the socket, not the aggregation. Its
+   run-to-run figure also moves more than the others between sessions, so 1.04× should be
+   read as parity rather than as a lead.
 5. **Incremental maintenance, on the served path.** A single account's balance is answered
    by the REV runtime — partial materialisation under a budget, the absence lattice, an
    anchored upquery on a miss — over the circuit the daemon's own schema compiles to. The
@@ -285,7 +290,7 @@ on; a gap attributed to "it is a prototype" is not attributed at all.
 | row | verdict | attributed to |
 |---|---|---|
 | `oltp` | NOT MET (≈1× against a 5–10× contract) | item 6, and the arithmetic below. Not item 3: an `INSERT` does not go through the compiler at all, and not the ledger — the durable row shows the write path at parity with PostgreSQL's, on the same device at the same `fsync` cost. |
-| `analytical` | NOT MET (still, against a 10–12× contract) — though the composite is now **above** 1.0× | no longer item 4 at all. After T-04 and T-05 the composite is faster than PostgreSQL rather than two thirds of it, and `top_ten_by_sum` crossed with it: three of the four common statements are now ahead. What remains is `group_by_acct`, which returns 10,001 rows and is dominated by sending them, and the protocol floor — a round trip is ~120µs here, so five statements per composite cannot be answered in the 0.25–0.30ms the contract's multiple implies whatever the engine does. See "Is this contract reachable" below. |
+| `analytical` | NOT MET (still, against a 10–12× contract) — though the composite is now **above** 1.0× | no longer item 4 at all. After T-04, T-05 and T-06 the composite is 1.32× PostgreSQL rather than two thirds of it, and all four common statements are at or above the baseline. What remains between 1.32× and 10× is the protocol floor: a round trip is ~120µs here, so five statements per composite cannot be answered in the 0.25–0.30ms the contract's multiple implies whatever the engine does. See "Is this contract reachable" below. |
 
 Neither is attributed to the engine's correctness, and neither should be read as one. What
 they are is a **measured baseline and a characterised gap**, which is the claim §9.14.1 can
@@ -435,11 +440,44 @@ server's tests decode rows with `pg_wire::decoded_rows` rather than matching on
 `Backend::DataRow`, so they assert what reaches a client rather than which representation
 carried it.
 
-E18 after both tasks:
+### The top-k step (T-06)
+
+`limit 10` over a `group by acct` sorted ten thousand rows to keep ten, and cloned every one
+of them into a vector before sorting. The rows are borrowed now, and only the prefix that can
+reach the answer is ordered: `select_nth_unstable_by` partitions at `offset + count`, and the
+sort runs over that prefix alone. The same recipe, on the top-ten statement:
+
+| | `RevEngine::query`, inclusive | of which the reference | in-process | E18 |
+|---|--:|--:|--:|--:|
+| before | 50.7 M Ir | 20.5 M | 3.8 ms | 22,631 |
+| after | **32.8 M Ir** | **2.5 M** | **2.4 ms** | **12,628** |
+
+`served_top_ten` is now the fold's own cost plus 26 allocations — the ten rows and the
+selection's one vector — where it used to be the fold's cost plus a second copy of all ten
+thousand groups.
+
+**The bound is `offset + count` rows, and it is safe** because every row in a Z-set is
+distinct and carries a positive weight, so each fills at least one of the slots the limit has
+to give away; a row outside the first `offset + count` in the ordering cannot reach the output
+however large the weights ahead of it are. And the answer is *identical* rather than similar,
+because `order_rows` falls back to comparing the rows themselves: the ordering is total over
+distinct rows, so the prefix is unique and there are no ties for a selection algorithm to break
+differently from a sort.
+
+That last point is where the change could have gone wrong invisibly, so it is tested twice.
+`a_bounded_limit_answers_exactly_what_a_full_sort_would` writes the replaced implementation out
+again inside the test and compares the two over equal keys, negatives, nulls, weights above
+one, offsets that start inside a repeated row, and limits at and past the end — the reference
+evaluator cannot be its own judge here, because comparing it against itself would compare the
+new code with the new code. Golden `65_top_k_negative_sums_and_ties` pins the same property in
+the corpus: a `limit 3` that cuts into a three-way tie at a negative sum.
+
+E18 after all three tasks:
 
 | Scenario | before T-04 | after T-05 | budget |
 |---|--:|--:|--:|
 | `served_group_by_acct` | 95,035 | **12,602** | 14,000 |
+| `served_top_ten` | 22,631 | **12,628** | 14,100 |
 | `served_point` | 20 | **12** | 13 |
 | `served_group_by_cur` | 25 | **13** | 15 |
 | `served_sum_negative` | 23 | **12** | 14 |

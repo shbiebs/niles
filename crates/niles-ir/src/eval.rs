@@ -522,12 +522,34 @@ impl<'a> Eval<'a> {
             Op::Limit { count, offset } => {
                 let inp = self.node(n.inputs[0]);
                 let keys = self.upstream_order(n.inputs[0]);
-                let mut rows: Vec<(Row, i128)> = inp
+                // **Bounded selection, not a full sort.**
+                //
+                // `limit 10` over a `group by acct` sorted ten thousand rows to keep ten,
+                // and cloned every one of them into a vector first. The rows here are
+                // borrowed and only the prefix that can reach the answer is ordered.
+                //
+                // The bound is `offset + count` **rows**, and it is safe because every row
+                // in a Z-set is distinct and carries a positive weight, so it fills at least
+                // one of the slots the limit has to give away. A row outside the first
+                // `offset + count` in the ordering cannot reach the output however large the
+                // weights ahead of it are.
+                //
+                // This produces the same answer as the sort it replaces and not merely a
+                // similar one: `order_rows` falls back to comparing the rows themselves, so
+                // it is a *total* order over distinct rows and the prefix is unique. There
+                // are no ties to break arbitrarily, which is exactly why the fallback is
+                // there.
+                let mut rows: Vec<(&Row, i128)> = inp
                     .iter()
                     .filter(|(_, w)| **w > 0)
-                    .map(|(r, w)| (r.clone(), *w))
+                    .map(|(r, w)| (r, *w))
                     .collect();
-                rows.sort_by(|a, b| order_rows(&a.0, &b.0, &keys));
+                let want = (offset.saturating_add(*count)).min(rows.len() as u64) as usize;
+                if want < rows.len() {
+                    rows.select_nth_unstable_by(want, |a, b| order_rows(a.0, b.0, &keys));
+                    rows.truncate(want);
+                }
+                rows.sort_unstable_by(|a, b| order_rows(a.0, b.0, &keys));
                 let mut out = ZSet::new();
                 let (mut skipped, mut taken) = (0u64, 0u64);
                 for (r, w) in rows {
@@ -1176,5 +1198,95 @@ mod tests {
             work2 < work,
             "the set-at-a-time form must cost less: {work} vs {work2}"
         );
+    }
+
+    /// **The bounded `limit` is the full sort, on every case that could tell them apart.**
+    ///
+    /// T-06 replaced "clone every row, sort all of them, keep n" with a bounded selection.
+    /// That is only a performance change if the answer is identical, and the reference
+    /// evaluator cannot be its own judge here — comparing it against itself would compare the
+    /// new implementation with the new implementation. So the old one is written out again in
+    /// this test and the two are compared over cases chosen for where a selection algorithm
+    /// differs from a sort: equal ordering keys resolved by the row fallback, negative values,
+    /// weights above one that consume more slots than they occupy rows, an `offset` that
+    /// starts inside a repeated row, and limits at and beyond the end.
+    #[test]
+    fn a_bounded_limit_answers_exactly_what_a_full_sort_would() {
+        /// The implementation this replaced: clone everything, sort everything, take n.
+        fn by_full_sort(z: &ZSet, keys: &[(ColIdx, bool)], count: u64, offset: u64) -> ZSet {
+            let mut rows: Vec<(Row, i128)> = z
+                .iter()
+                .filter(|(_, w)| **w > 0)
+                .map(|(r, w)| (r.clone(), *w))
+                .collect();
+            rows.sort_by(|a, b| order_rows(&a.0, &b.0, keys));
+            let mut out = ZSet::new();
+            let (mut skipped, mut taken) = (0u64, 0u64);
+            for (r, w) in rows {
+                for _ in 0..w {
+                    if skipped < offset {
+                        skipped += 1;
+                        continue;
+                    }
+                    if taken >= count {
+                        return out;
+                    }
+                    add(&mut out, r.clone(), 1);
+                    taken += 1;
+                }
+            }
+            out
+        }
+
+        let v = |a: i128, b: i128| vec![Value::Int(a), Value::Int(b)];
+        // Sums that tie (three rows at 50), a negative, a null in the ordered column, and
+        // weights above one.
+        let mut z = ZSet::new();
+        for (row, w) in [
+            (v(1, 50), 1i128),
+            (v(2, 50), 3),
+            (v(3, 50), 1),
+            (v(4, -20), 2),
+            (v(5, 100), 1),
+            (v(6, 0), 1),
+            (vec![Value::Int(7), Value::Null], 1),
+        ] {
+            z.insert(row, w);
+        }
+
+        for keys in [
+            vec![],
+            vec![(1u16, false)],
+            vec![(1u16, true)],
+            vec![(1u16, false), (0u16, true)],
+            vec![(0u16, true)],
+        ] {
+            for count in [0u64, 1, 2, 3, 5, 10, 100] {
+                for offset in [0u64, 1, 3, 4, 20] {
+                    let mut c = Circuit::new();
+                    let s = src(&mut c, "t");
+                    let o = c.add(
+                        Op::OrderBy { keys: keys.clone() },
+                        vec![s],
+                        internal_contract(),
+                        "ord",
+                    );
+                    let l = c.add(
+                        Op::Limit { count, offset },
+                        vec![o],
+                        internal_contract(),
+                        "lim",
+                    );
+                    c.outputs.insert("out".into(), l);
+                    let sources = BTreeMap::from([("t".to_string(), z.clone())]);
+                    let (got, _) = run(&c, "out", &sources);
+                    assert_eq!(
+                        got,
+                        by_full_sort(&z, &keys, count, offset),
+                        "keys {keys:?}, limit {count} offset {offset}"
+                    );
+                }
+            }
+        }
     }
 }

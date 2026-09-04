@@ -38,7 +38,18 @@ schema g {
         retain forever;
     }
 
+    // Negative and tying sums, for the bounded top-k case. A separate relation because
+    // `t`'s values are all positive and every case above is written against them: a
+    // selection algorithm and a full sort differ exactly where the ordering key ties and
+    // where the sign changes, and neither is expressible over `t`.
+    base q {
+        k: Int,
+        v: Int,
+        retain forever;
+    }
+
     index ix_t on t (k) anchor;
     index ix_u on u (k) anchor;
     index ix_edges on edges (src) anchor;
+    index ix_q on q (k) anchor;
 }

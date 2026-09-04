@@ -1,0 +1,18 @@
+# 65_top_k_negative_sums_and_ties
+# **Where a bounded selection and a full sort would differ, if the tie-break were not total.**
+#
+# T-06 stopped `limit` cloning every row and sorting all of them to keep n, and answers it by
+# a bounded selection instead. That is the same answer only because `order_rows` falls back to
+# comparing the rows themselves, so the ordering is total over distinct rows and the prefix is
+# unique — there is no tie for a selection algorithm to break differently from a sort.
+#
+# `q` sums to k=1 -> -50, k=2 -> -50, k=3 -> -50, k=4 -> 100, k=5 -> 0. Descending by the sum,
+# the first two are k=4 and k=5; the third comes out of the three-way tie at -50, and the
+# stated rule — the rows' own lexicographic order — makes it k=1. The `limit 3` therefore cuts
+# *into* the tie, which is the case that discriminates.
+#
+# Rendered in the Z-set's own order, so k=1 prints first: what this pins down is which three
+# rows survive.
+1 -50 x1
+4 100 x1
+5 0 x1

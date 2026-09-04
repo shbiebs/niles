@@ -67,6 +67,21 @@ fn sources() -> BTreeMap<String, ZSet> {
         .collect();
     *t = nulled.into_iter().collect();
 
+    // Sums that are negative and that tie: `q` groups to 1 -> -50, 2 -> -50, 3 -> -50,
+    // 4 -> 100, 5 -> 0. A `limit 3` descending therefore cuts *into* the three-way tie,
+    // which is where a bounded selection and a full sort would differ if the tie-break
+    // were not total.
+    m.insert(
+        "q".to_string(),
+        eval::zset(&[
+            (&[1, -50], 1),
+            (&[2, -50], 1),
+            (&[3, -50], 1),
+            (&[4, 100], 1),
+            (&[5, 0], 1),
+        ]),
+    );
+
     m.insert(
         "u".to_string(),
         eval::zset(&[(&[1, 1], 1), (&[2, 2], 1), (&[4, 4], 1)]),
@@ -325,10 +340,11 @@ fn the_two_surfaces_denote_the_same_zset_wherever_both_are_written() {
     // cases stopped being compared. The list is printed and its length is bounded, so
     // adding a case that silently opts out of the comparison fails here.
     assert!(
-        skipped.len() <= 40,
+        skipped.len() <= 41,
         "{} cases are skipped by this comparison, which is more than the corpus leaves \
-         uncompared today (40: thirty-seven written in one surface, three refused in both). The \
-         two most recent are `58_order_by_aggregate` and `59_order_by_alias`, and the reason \
+         uncompared today (41: thirty-eight written in one surface, three refused in both). The \
+         three most recent are `58_order_by_aggregate`, `59_order_by_alias` and \
+         `65_top_k_negative_sums_and_ties`, and the reason \
          is a gap in the *pipeline* surface rather than in the corpus: its `order_by` stage \
          has no descending spelling — `key_of` maps every key to `(k, true)` — so the case \
          that discriminates a working `order by` from a silently empty one cannot be \

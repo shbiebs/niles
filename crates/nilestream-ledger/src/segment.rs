@@ -801,4 +801,116 @@ mod durability_tests {
         assert_eq!(rec.records.len(), 5);
         assert!(rec.was_clean());
     }
+
+    /// **The chain is independent of the sidecar, and that is the whole arrangement.**
+    ///
+    /// If a byte of the detachable store reached the chain hash, erasure — which destroys those
+    /// bytes — would break verification, and the design would collapse back into the
+    /// contradiction it exists to resolve: either the history is evidence or a subject can have
+    /// their data destroyed, but not both.
+    ///
+    /// So this writes a segment whose records carry *commitments*, records the head hash,
+    /// erases from the sidecar beside it, and asserts the head hash is the same byte string.
+    /// Not "verification still passes" — the same bytes. A verifier that recomputed a different
+    /// head and accepted it would be a verifier that accepts anything.
+    #[test]
+    fn erasing_from_the_sidecar_leaves_the_chain_head_byte_identical() {
+        use crate::sidecar::Sidecar;
+        let p = tmp("sidecar-independence");
+        let side = Sidecar::beside(&p);
+        let _ = std::fs::remove_file(side.path());
+
+        let key = [0x11u8; crate::aead::KEY_LEN];
+        // Two confidential values go into the sidecar; the chain carries their commitments.
+        let a = side
+            .put(&key, [1u8; 16], b"a narrative about a person")
+            .unwrap();
+        let b = side.put(&key, [1u8; 16], b"another narrative").unwrap();
+
+        let head_before;
+        {
+            let (mut s, _) = Segment::open(&p, SyncPolicy::Always).unwrap();
+            // A record of the shape Part B specifies: structural bytes plus commitments, and
+            // no erasable byte anywhere in it.
+            let mut r1 = vec![0u8; 8];
+            r1.extend_from_slice(&a);
+            s.append(r1).unwrap();
+            let mut r2 = vec![1u8; 8];
+            r2.extend_from_slice(&b);
+            s.append(r2).unwrap();
+            head_before = s.head_hash();
+        }
+
+        side.zero(&a).unwrap();
+        side.compact().unwrap();
+        assert_eq!(side.present().unwrap(), vec![b], "the erasure did happen");
+
+        let rec = recover(&p).unwrap();
+        assert!(
+            rec.was_clean(),
+            "the segment no longer recovers after an erasure"
+        );
+        assert_eq!(
+            rec.head_hash(),
+            head_before,
+            "the chain head changed when a sidecar entry was destroyed; the chain is not \
+             independent of the sidecar and erasure cannot be made compatible with audit"
+        );
+
+        // And the harder case: delete the sidecar entirely. Recovery must not need it.
+        std::fs::remove_file(side.path()).unwrap();
+        let rec = recover(&p).unwrap();
+        assert!(rec.was_clean(), "recovery needed the sidecar");
+        assert_eq!(rec.head_hash(), head_before);
+        assert_eq!(
+            rec.records.len(),
+            2,
+            "the structural records are still there"
+        );
+
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// **A flipped byte in the sidecar does not break the chain.**
+    ///
+    /// The other direction of the same property, and it has to be tested separately: a chain
+    /// that hashed the sidecar would break on an *erasure* (above) and also on corruption. This
+    /// says corruption of the detachable store is a sidecar problem — the entry stops
+    /// authenticating — and never a chain problem.
+    #[test]
+    fn a_flipped_sidecar_byte_does_not_break_the_chain() {
+        use crate::sidecar::Sidecar;
+        let p = tmp("sidecar-flip");
+        let side = Sidecar::beside(&p);
+        let _ = std::fs::remove_file(side.path());
+
+        let key = [0x22u8; crate::aead::KEY_LEN];
+        let c = side.put(&key, [2u8; 16], b"a value").unwrap();
+        let head_before;
+        {
+            let (mut s, _) = Segment::open(&p, SyncPolicy::Always).unwrap();
+            let mut r = vec![9u8; 8];
+            r.extend_from_slice(&c);
+            s.append(r).unwrap();
+            head_before = s.head_hash();
+        }
+
+        let mut bytes = std::fs::read(side.path()).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xff;
+        std::fs::write(side.path(), &bytes).unwrap();
+
+        let rec = recover(&p).unwrap();
+        assert!(rec.was_clean());
+        assert_eq!(rec.head_hash(), head_before);
+        // The sidecar itself does notice, which is the half that must not be lost: an
+        // unreadable value has to be an error rather than a shrug.
+        assert!(
+            side.get(&key, &c).is_err(),
+            "a corrupted sidecar entry authenticated"
+        );
+
+        let _ = std::fs::remove_file(&p);
+        let _ = std::fs::remove_file(side.path());
+    }
 }

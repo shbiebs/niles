@@ -3,6 +3,12 @@
 **`nilestream-ledger`**
 
 ```rust
+pub const KEY_LEN: usize
+pub const NONCE_LEN: usize
+pub const TAG_LEN: usize
+pub fn hchacha20(key: &[u8
+pub fn seal(key: &[u8
+pub fn open(
 pub struct Hasher256
 pub fn sha256(bytes: &[u8]) -> [u8
 pub fn chain_hash(parent: &[u8
@@ -11,6 +17,9 @@ pub struct Frontier
 pub struct Snapshot
 pub type Minor
 pub struct Epoch(pub u64)
+pub enum RandomError
+pub fn fill(out: &mut [u8]) -> Result<(), RandomError>
+pub fn bytes<const N: usize>() -> Result<[u8
 pub enum SyncPolicy
 pub struct Record
 pub enum TruncationCause
@@ -21,6 +30,11 @@ pub struct Txn
 pub enum Rejected
 pub struct SequencerStats
 pub struct Sequencer
+pub type Commitment
+pub type KeyId
+pub enum SidecarError
+pub fn commit(salt: &[u8
+pub struct Sidecar
 ```
 
 **`nilestream-core`**

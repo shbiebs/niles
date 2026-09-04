@@ -30,7 +30,7 @@ component is for is not derivable from its source.
 | `nilestream` | The engine binary: sweep and serve | 0 |
 | `nilestream-consensus` | A single-process, deterministic simulator for replication and cross-shard commit. No sockets, no clock | 21 |
 | `nilestream-core` | REV runtime: resident maps, anchor indices, apply loop, upqueries, contracts | 19 |
-| `nilestream-ledger` | Epoch segments, sequencer, hash chain, durability, admission and commit rules | 18 |
+| `nilestream-ledger` | Epoch segments, sequencer, hash chain, durability, admission and commit rules | 32 |
 | `nilestream-optimizer` | Plan-time mode selection and the eviction policies (the adaptive optimizer of §4.6 is specified and not built) | 37 |
 | `nilestream-server` | Daemon: sessions, PostgreSQL wire surface, conformance | 76 |
 | `proto-engine` | The research prototype the counted-work experiments run on | 20 |
@@ -51,6 +51,12 @@ themselves are whatever the source has.
 **`nilestream-ledger`**
 
 ```rust
+pub const KEY_LEN: usize
+pub const NONCE_LEN: usize
+pub const TAG_LEN: usize
+pub fn hchacha20(key: &[u8
+pub fn seal(key: &[u8
+pub fn open(
 pub struct Hasher256
 pub fn sha256(bytes: &[u8]) -> [u8
 pub fn chain_hash(parent: &[u8
@@ -59,6 +65,9 @@ pub struct Frontier
 pub struct Snapshot
 pub type Minor
 pub struct Epoch(pub u64)
+pub enum RandomError
+pub fn fill(out: &mut [u8]) -> Result<(), RandomError>
+pub fn bytes<const N: usize>() -> Result<[u8
 pub enum SyncPolicy
 pub struct Record
 pub enum TruncationCause
@@ -69,6 +78,11 @@ pub struct Txn
 pub enum Rejected
 pub struct SequencerStats
 pub struct Sequencer
+pub type Commitment
+pub type KeyId
+pub enum SidecarError
+pub fn commit(salt: &[u8
+pub struct Sidecar
 ```
 
 **`nilestream-core`**

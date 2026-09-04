@@ -149,10 +149,28 @@ construction path.
 
 No single change reaches 10%. Closed without code, as the audit expected.
 
-### T-13 — blocked on DM-02
+### T-13 — closed as moot, because DM-02 was answered (b)
 
-The trigger is "proceed only if DM-02 is decided **against** per-key checkpoints". DM-02 is
-still open. **This is a decision the author still owes**, and it is the only one blocking a
+The trigger was "proceed only if DM-02 is decided **against** per-key checkpoints". It was
+decided **for** them, in the narrow form: frontier-only, memory-only, written by the reader,
+unreachable from a product. The full account is in `gbs/docs/WORK-ORDER-4.md`; the short
+version is that measuring the question first changed it.
+
+E25 (`gbs/results/E25-fold-census.md`) is the measurement. The argument for checkpoints had
+rested on a constant — 394µs for a fold over a twenty-thousand-entry "house" account — and
+that account exists only in `memprobe`'s fixture. The real shape is `Facility::drawdown`,
+which reads the drawn balance before it can honour a draw: a revolving facility folds its
+whole history once per drawdown, so the reads are linear in its life and their cost is
+**quadratic**. At four thousand cycles that is 176 million entries walked, and 86% of the
+product suite's wall time.
+
+Checkpoints made it linear: entries per fold went from the facility's whole life to a flat
+33–34 (the *C/2+1* of SC7 at `INTERVAL = 64`), growth per doubling from 4.00× to 2.01×, and
+the four-thousand-cycle workload from 3,779 ms to 110 ms. That is foundational hypothesis F1
+holding on the product that most needed it and was contradicting it.
+
+T-13's own objective — a local accumulator worth 1.66× on the fold — would now improve the
+constant of a loop that runs over 34 entries instead of twenty thousand. Nothing blocks any
 task in this cycle.
 
 ## Findings this cycle produced that were not in the audit
@@ -189,7 +207,17 @@ task in this cycle.
    *reserves* these words and the compiler does not implement them. Either the samples are
    aspirational and should be marked as such in the registry, or the constructs are owed.
 
-3. **`memprobe`'s own budget test could not have failed** (found before the compaction, recorded
+3. **A differential test can pass for the wrong reason, and only a mutation finds out.**
+   DM-02's checkpointed fold is held sound by comparing it against the unchecked fold over
+   randomised histories. Four mutations were run against that comparison and the fourth
+   survived: collapsing the two checkpoint scopes — `balance` and `balance_in` are different
+   prefix sums over the same entries — into one. The comparison calls `balance` first at
+   every anchor, so the unfiltered mark was always installed first and the confusion never
+   showed. The test was not wrong; its *call order* was doing work nobody had accounted for.
+   `a_checkpoint_written_by_one_filter_is_not_read_by_another` closes it, and the general
+   lesson is that a differential test is worth exactly what a mutation run says it is worth.
+
+4. **`memprobe`'s own budget test could not have failed** (found before the compaction, recorded
    here for completeness): the counting allocator was not installed in the test binary, so every
    budget was compared against zeros. Fixed with a `#[global_allocator]` under `cfg(test)` and a
    `memory::installed()` assertion at the top of the test.

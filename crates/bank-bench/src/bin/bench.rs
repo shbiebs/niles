@@ -50,7 +50,7 @@
 
 use bank_bench::render::{self, CSV_HEADER};
 use bank_bench::target::{nilestream_gap, NilestreamTarget, PgTarget, Target};
-use bank_bench::workloads::{self, Sample};
+use bank_bench::workloads::{self, Sample, ScalingSample};
 use std::collections::BTreeMap;
 use std::io::Write;
 
@@ -82,6 +82,20 @@ struct Args {
     /// same thing on both sides.
     rounds: u32,
     nls_budget: usize,
+    /// Connection counts for the scaling experiment (E19), e.g. `1,2,4`.
+    ///
+    /// Empty means the experiment does not run, and that is the default: the contract table
+    /// is a single-connection measurement and must not change because a scaling flag was
+    /// passed. E19 is written to its own directory and its own document.
+    connections: Vec<u32>,
+    /// Run **only** the scaling experiment, leaving the contract table alone.
+    ///
+    /// Here because E19 and E16 are published at different run counts, and re-rendering E16
+    /// as a side effect of re-running E19 would overwrite a committed table with one measured
+    /// under this invocation's flags. With this set, no `Sample` is produced and `write_all`
+    /// is never reached, so `results/E16-wallclock.md` cannot be touched however `--publish`
+    /// is passed.
+    scaling_only: bool,
     /// Overwrite the **committed** `results/E16-wallclock.md`.
     ///
     /// Off by default, and that is the repair. `write_all` wrote the committed document on
@@ -117,6 +131,8 @@ impl Args {
             // space forces the miss path to run, which is the path the phase diagram is
             // about. Override with `--nls-budget`.
             nls_budget: 2_500,
+            connections: Vec::new(),
+            scaling_only: false,
             publish: false,
         };
         let mut i = 1;
@@ -162,9 +178,28 @@ impl Args {
                     i += 1;
                 }
                 "--host-nls" => a.host_nls = true,
+                "--scaling-only" => a.scaling_only = true,
                 "--publish" => a.publish = true,
                 "--rounds" | "--nls-rounds" => {
                     a.rounds = argv[i + 1].parse().unwrap_or(a.rounds);
+                    i += 1;
+                }
+                "--connections" => {
+                    // `1,2,4`. A level that does not parse is dropped with a message rather
+                    // than silently becoming a default: a scaling table missing its widest
+                    // level is the one shape a reader would not notice.
+                    a.connections = argv[i + 1]
+                        .split(',')
+                        .filter_map(|x| match x.trim().parse::<u32>() {
+                            Ok(0) | Err(_) => {
+                                eprintln!("bench: ignoring unusable connection level `{x}`");
+                                None
+                            }
+                            Ok(n) => Some(n),
+                        })
+                        .collect();
+                    a.connections.sort_unstable();
+                    a.connections.dedup();
                     i += 1;
                 }
                 "--nls-budget" => {
@@ -181,6 +216,10 @@ impl Args {
 
 fn main() {
     let args = Args::parse();
+    if args.scaling_only && args.connections.is_empty() {
+        eprintln!("bench: --scaling-only needs --connections, or it would measure nothing");
+        std::process::exit(2);
+    }
     if !(args.calibrate || args.run || args.render) {
         eprintln!("bench: one of --calibrate, --run, --render is required");
         std::process::exit(2);
@@ -415,7 +454,12 @@ fn run(args: &Args) -> i32 {
     // The two targets' base sizes, compared once both have been prepared. A ratio between a
     // 20,000-row table and a 40,000-posting ledger is not a ratio, and nothing said so.
     let mut base_size: BTreeMap<String, u64> = BTreeMap::new();
-    for run_no in 1..=args.runs {
+    // `--scaling-only` skips the contract loop entirely: no `Sample` is produced, so
+    // `write_all` below has nothing to write and the committed E16 document cannot be
+    // reached. The two experiments are published at different run counts and re-rendering one
+    // as a side effect of re-running the other would overwrite a measured table.
+    let contract_runs = if args.scaling_only { 0 } else { args.runs };
+    for run_no in 1..=contract_runs {
         // ---- PostgreSQL's half of this run ----
         // Re-prepare between runs so each starts from the same table: an OLTP run that
         // appended two million rows would otherwise make the next run's analytical scan a
@@ -525,10 +569,26 @@ fn run(args: &Args) -> i32 {
         );
     }
 
+    // ---- E19: the scaling experiment, if it was asked for ----
+    //
+    // **After the contract loop and into its own document.** The contract table is a
+    // single-connection measurement of four targets the specification states without a
+    // concurrency qualifier; a 4-connection figure must not be able to reach it. Nothing
+    // above this line reads `args.connections`, and `scaling` returns a different type.
+    if !args.connections.is_empty() {
+        let scaling = run_scaling(args, &mut pg, &hosted);
+        if let Err(e) = write_scaling(args, &scaling) {
+            eprintln!("bench: writing the scaling results failed: {e}");
+            return 6;
+        }
+    }
+
     let _ = pg.teardown();
-    if let Err(e) = write_all(args, &samples, &config) {
-        eprintln!("bench: writing results failed: {e}");
-        return 6;
+    if !args.scaling_only {
+        if let Err(e) = write_all(args, &samples, &config) {
+            eprintln!("bench: writing results failed: {e}");
+            return 6;
+        }
     }
     // **A `NOT RUN` row is a failed run, and the process says so.** It used to exit 0: a CI
     // job or a script driving this harness could not tell a complete measurement from one
@@ -618,6 +678,277 @@ fn report(s: &Sample) {
             s.p99.as_nanos() as f64 / 1000.0
         ),
     }
+}
+
+/// **E19: does a second and a fourth connection buy anything?**
+///
+/// Two workloads — a point read and a durable append — driven from 1, 2, 4… connections
+/// against both targets, `--runs` times each. Every level re-prepares PostgreSQL and re-seeds
+/// the hosted engine, for the same reason the contract loop does: a level that began with the
+/// previous level's appends in its base is a different measurement wearing the same name.
+///
+/// Transaction identities are composed from the run, the level, the thread and the operation
+/// index, in a range no other workload in this binary uses. The audit's scratch harness reused
+/// one sequence across levels; the ledger refused the repeats as duplicates, and idempotency
+/// working exactly as designed was read as a throughput collapse at four connections.
+fn run_scaling(args: &Args, pg: &mut PgTarget, hosted: &Option<Hosted>) -> Vec<ScalingSample> {
+    let mut out: Vec<ScalingSample> = Vec::new();
+    // Far from the contract loop's identity ranges (1–3 million), so the two experiments
+    // cannot collide even if a future change stops re-seeding between them.
+    let txn_base = |run: u32, level: usize, thread: u32, i: u64| -> i64 {
+        900_000_000
+            + (run as i64) * 10_000_000
+            + (level as i64) * 1_000_000
+            + (thread as i64) * 100_000
+            + i as i64
+    };
+    // A key drawn without shared state, so a thread needs no `&mut` and the draw is still
+    // reproducible from `(seed, thread, i)`.
+    let key = |seed: u64, thread: u32, i: u64, accounts: i64| -> i64 {
+        workloads::Rng::seeded(seed ^ ((thread as u64) << 40) ^ i.wrapping_mul(0x9E37_79B9))
+            .skewed_key(accounts, 0.9)
+    };
+
+    for run_no in 1..=args.runs {
+        for (level, &conns) in args.connections.iter().enumerate() {
+            let seed = 0xE19 ^ ((run_no as u64) << 8) ^ (conns as u64);
+
+            // ---- PostgreSQL ----
+            if let Err(e) = pg.prepare(args.accounts, args.rounds) {
+                let why = format!("PostgreSQL could not be prepared for the level: {e}");
+                for w in ["point", "durable"] {
+                    out.push(workloads::scaling_skipped(
+                        w,
+                        "postgres",
+                        conns,
+                        run_no,
+                        why.clone(),
+                    ));
+                }
+                continue;
+            }
+            let (host, port, user, db) = (
+                args.pg_host.clone(),
+                args.pg_port,
+                args.pg_user.clone(),
+                args.pg_db.clone(),
+            );
+            let open_pg = move || bank_bench::wire::Client::connect(&host, port, &user, &db);
+            let s = workloads::concurrent(
+                workloads::Level {
+                    workload: "point",
+                    target: "postgres",
+                    connections: conns,
+                    run: run_no,
+                    per_connection: args.operations,
+                    durable: false,
+                },
+                &open_pg,
+                &|thread, i| {
+                    let k = key(seed, thread, i, args.accounts);
+                    format!("select acct, sum(amt) from postings where acct = {k} group by acct")
+                },
+            );
+            report_scaling(&s);
+            out.push(s);
+            let s = workloads::concurrent(
+                workloads::Level {
+                    workload: "durable",
+                    target: "postgres",
+                    connections: conns,
+                    run: run_no,
+                    per_connection: (args.operations / 4).max(50),
+                    durable: true,
+                },
+                &open_pg,
+                &|thread, i| {
+                    let acct = key(seed, thread, i, args.accounts);
+                    let id = txn_base(run_no, level, thread, i);
+                    format!(
+                        "insert into postings (txn, acct, cur, amt, epoch) values \
+                         ('scale-{id}', {acct}, 'USD', 0, {id})"
+                    )
+                },
+            );
+            report_scaling(&s);
+            out.push(s);
+
+            // ---- Nilestream ----
+            if let Some(h) = hosted {
+                if let Err(e) = h.reseed() {
+                    let why = format!("the hosted engine could not be re-seeded: {e}");
+                    for w in ["point", "durable"] {
+                        out.push(workloads::scaling_skipped(
+                            w,
+                            "nilestream",
+                            conns,
+                            run_no,
+                            why.clone(),
+                        ));
+                    }
+                    continue;
+                }
+            }
+            let nls_port = args.nls_port;
+            let open_nls =
+                move || bank_bench::wire::Client::connect("127.0.0.1", nls_port, "bench", "bank");
+            let s = workloads::concurrent(
+                workloads::Level {
+                    workload: "point",
+                    target: "nilestream",
+                    connections: conns,
+                    run: run_no,
+                    per_connection: args.operations,
+                    durable: false,
+                },
+                &open_nls,
+                &|thread, i| {
+                    let k = key(seed, thread, i, args.accounts);
+                    format!("select acct, sum(amt) from postings where acct = {k} group by acct")
+                },
+            );
+            report_scaling(&s);
+            out.push(s);
+            let s = workloads::concurrent(
+                workloads::Level {
+                    workload: "durable",
+                    target: "nilestream",
+                    connections: conns,
+                    run: run_no,
+                    per_connection: (args.operations / 4).max(50),
+                    durable: true,
+                },
+                &open_nls,
+                &|thread, i| {
+                    let acct = key(seed, thread, i, args.accounts);
+                    let id = txn_base(run_no, level, thread, i);
+                    format!("insert into postings values ({id}, {acct}, 0, 0)")
+                },
+            );
+            report_scaling(&s);
+            out.push(s);
+        }
+    }
+    out
+}
+
+fn report_scaling(s: &ScalingSample) {
+    match &s.not_run {
+        Some(why) => eprintln!(
+            "  E19 {} {} @{} conn run {} — NOT RUN: {why}",
+            s.workload, s.target, s.connections, s.run
+        ),
+        None => eprintln!(
+            "  E19 {} {} @{} conn run {} — {:.0} ops/s, p99 {:.0}µs",
+            s.workload,
+            s.target,
+            s.connections,
+            s.run,
+            s.ops_per_second(),
+            s.p99.as_nanos() as f64 / 1000.0
+        ),
+    }
+}
+
+fn write_scaling(args: &Args, samples: &[ScalingSample]) -> std::io::Result<()> {
+    let dir = bank_bench::publish::scaling_dir(std::path::Path::new(&args.out));
+    std::fs::create_dir_all(&dir)?;
+    let mut by_file: BTreeMap<&str, Vec<&ScalingSample>> = BTreeMap::new();
+    for s in samples {
+        by_file.entry(s.workload.as_str()).or_default().push(s);
+    }
+    for (w, rows) in &by_file {
+        let mut f = std::fs::File::create(dir.join(format!("{w}.csv")))?;
+        writeln!(f, "{}", workloads::SCALING_CSV_HEADER)?;
+        for s in rows {
+            writeln!(f, "{}", s.to_csv())?;
+        }
+    }
+    let doc = scaling_document(samples, args);
+    let where_to = bank_bench::publish::scaling_destinations(&dir, args.publish);
+    for path in &where_to {
+        std::fs::write(path, &doc)?;
+    }
+    eprintln!(
+        "\nwrote {} and {}/*.csv",
+        where_to
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", "),
+        dir.display()
+    );
+    Ok(())
+}
+
+fn scaling_document(samples: &[ScalingSample], args: &Args) -> String {
+    let mut s = String::new();
+    s.push_str("# E19 — Throughput against connection count\n\n");
+    s.push_str(
+        "**Generated by `bench --run --connections …`. Nothing in this file is typed in by \
+         hand, and none of it is a contract result.**\n\n\
+         `SPEC-ENGINE.md` Part 0 states its four targets without a concurrency qualifier, and \
+         E16 measures them from one connection. This experiment asks a different question: \
+         when a second and a fourth connection are added, does throughput rise? A server that \
+         serialises its sessions answers a level of four connections at the speed of one, and \
+         until this table existed nothing in the repository could have said whether either \
+         target does.\n\n",
+    );
+    s.push_str(
+        "> **This host has 2 cores.** These rows say whether throughput rises from 1 to 2 to \
+         4 connections *on two cores*. They say nothing about 16 or 48, and a reader who \
+         extrapolates them to a server-class machine is reading a number this experiment did \
+         not measure. The saturation point of a 2-core host is a property of the host.\n\n",
+    );
+    s.push_str(&render::scaling_table(samples));
+    s.push_str("\n### The top step\n\n");
+    s.push_str(&render::scaling_verdicts(samples));
+    s.push_str("\n## How it was run\n\n");
+    s.push_str(&format!(
+        "* Connection levels: {}\n\
+         * Runs per level: {} (medians reported)\n\
+         * Point-read operations **per connection**: {} — so a level of four connections \
+         issues four times the work of a level of one. That is the shape the question needs: \
+         if the server scales, the wall clock stays flat and ops/s rises; if it serialises, \
+         the wall clock grows and ops/s does not.\n\
+         * Durable-append operations per connection: {}\n\
+         * Accounts: {}; rounds per account: {} (conserved pairs, on both targets)\n\
+         * Every level re-prepares PostgreSQL and re-seeds the hosted engine, so no level \
+         starts from the previous level's appends.\n\
+         * Transaction identities are composed from `(run, level, thread, operation)` in a \
+         range no other workload uses, so no append is ever a duplicate of another level's.\n\
+         * Connections are opened **before** the clock starts: a level is charged for its \
+         operations, not for its sockets.\n\
+         * Latencies are pooled across every thread of a level before the percentiles are \
+         taken, so `p99` is what a client saw and not the median thread's p99.\n\n\
+         ### Why the step from 1 to 2 can exceed the core count\n\n\
+         The single-connection level is **round-trip bound, not core bound**: the client \
+         sends, blocks, and reads, so the server is idle for much of each operation and one \
+         core is never saturated. A second connection fills that idle time as well as using \
+         the second core, so a ratio above 2.00x at two connections is the pipeline being \
+         filled rather than superlinear scaling. The ratio worth reading is the one from 2 to \
+         4, where both cores are already busy: a target that keeps rising there is \
+         parallelising, and one that falls is contending.\n\n",
+        args.connections
+            .iter()
+            .map(|c| c.to_string())
+            .collect::<Vec<_>>()
+            .join(", "),
+        args.runs,
+        args.operations,
+        (args.operations / 4).max(50),
+        args.accounts,
+        args.rounds,
+    ));
+    s.push_str(
+        "## What this table is not\n\n\
+         It is **not** a contract result. `results/E16-wallclock.md` holds the four rows of \
+         `SPEC-ENGINE.md` Part 0, measured from one connection, and no figure from this \
+         document belongs in them. The two experiments are written by different code paths \
+         into different types for that reason: a `ScalingSample` cannot be rendered into the \
+         contract table, and a `Sample` carries no connection count.\n",
+    );
+    s
 }
 
 fn run_all(t: &mut dyn Target, args: &Args, run_no: u32) -> Vec<Sample> {

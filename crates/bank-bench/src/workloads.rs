@@ -513,6 +513,210 @@ pub fn durable(
     })
 }
 
+/// **One level of a scaling run**: a workload, a target, a connection count, one run.
+///
+/// A separate type from [`Sample`] on purpose. The contract table is a **single-connection**
+/// measurement — `SPEC-ENGINE.md` Part 0 states its four targets without a concurrency
+/// qualifier — and a row from a four-connection level must never be able to reach it. Two
+/// types with two CSV schemas and two documents is what makes that a compile-time property
+/// rather than a convention someone has to remember at the call site.
+///
+/// The threads are **pooled**: `operations` is the total across every connection, `wall` is
+/// the elapsed time of the level as a whole, and the percentiles are taken over every
+/// thread's latencies together. A per-thread median averaged across threads would report the
+/// latency of a typical connection while the question is what the *client* saw.
+#[derive(Debug, Clone)]
+pub struct ScalingSample {
+    pub workload: String,
+    pub target: String,
+    /// How many connections drove this level. **The column that makes the row mean
+    /// something**: without it a scaling table is four unlabelled throughput figures.
+    pub connections: u32,
+    pub run: u32,
+    /// Operations across **all** connections.
+    pub operations: u64,
+    /// Elapsed time of the level, measured from the barrier release — connection setup is
+    /// outside it, so a level is not charged for opening its own sockets.
+    pub wall: Duration,
+    pub p50: Duration,
+    pub p99: Duration,
+    pub durable: bool,
+    pub not_run: Option<String>,
+}
+
+/// The scaling CSV's schema, in one place, asserted by `render`'s tests.
+pub const SCALING_CSV_HEADER: &str =
+    "workload,target,connections,run,operations,wall_ms,p50_us,p99_us,ops_per_second,durable,not_run";
+
+impl ScalingSample {
+    pub fn ops_per_second(&self) -> f64 {
+        if self.wall.as_secs_f64() <= 0.0 {
+            return 0.0;
+        }
+        self.operations as f64 / self.wall.as_secs_f64()
+    }
+
+    pub fn to_csv(&self) -> String {
+        format!(
+            "{},{},{},{},{},{:.3},{:.1},{:.1},{:.1},{},{}",
+            self.workload,
+            self.target,
+            self.connections,
+            self.run,
+            self.operations,
+            self.wall.as_secs_f64() * 1000.0,
+            self.p50.as_nanos() as f64 / 1000.0,
+            self.p99.as_nanos() as f64 / 1000.0,
+            self.ops_per_second(),
+            self.durable,
+            self.not_run
+                .as_deref()
+                .unwrap_or("")
+                .replace(',', ";")
+                .replace('\n', " ")
+        )
+    }
+}
+
+/// A level that did not run, and why — the scaling table's equivalent of [`skipped`].
+pub fn scaling_skipped(
+    workload: &str,
+    target: &str,
+    connections: u32,
+    run: u32,
+    reason: String,
+) -> ScalingSample {
+    ScalingSample {
+        workload: workload.into(),
+        target: target.into(),
+        connections,
+        run,
+        operations: 0,
+        wall: Duration::ZERO,
+        p50: Duration::ZERO,
+        p99: Duration::ZERO,
+        durable: false,
+        not_run: Some(reason),
+    }
+}
+
+/// Which level of a scaling run is about to be driven.
+///
+/// A struct rather than six positional parameters: `(u32, u32, u64)` in a row is three
+/// numbers a caller can transpose silently, and a level that ran `run` connections for
+/// `connections` operations would produce a plausible table nobody could see was wrong.
+#[derive(Debug, Clone, Copy)]
+pub struct Level<'a> {
+    pub workload: &'a str,
+    pub target: &'a str,
+    pub connections: u32,
+    pub run: u32,
+    /// Operations **per connection**. A level of four connections therefore issues four times
+    /// the work of a level of one, which is the shape the question needs: a server that
+    /// scales keeps the wall clock flat and raises ops/s, and one that serialises does not.
+    pub per_connection: u64,
+    pub durable: bool,
+}
+
+/// **Drive one level from `connections` threads and pool what they saw.**
+///
+/// `open` returns a fresh client per thread — every connection is its own socket, because a
+/// shared one would serialise in the harness and the number would be measuring this file.
+/// `statement` is handed `(thread, operation)` and returns the SQL that thread should send;
+/// composing an identity out of both is how appends stay distinct. The audit's scratch
+/// harness reused one sequence across levels, so the four-connection level re-submitted the
+/// one-connection level's transaction ids and the ledger refused every one of them as a
+/// duplicate — idempotency working exactly as designed, reported as a throughput collapse.
+///
+/// Every thread opens its connection, then waits on a barrier. The clock starts when the
+/// barrier releases, so a level is charged for its operations and not for its sockets.
+pub fn concurrent(
+    level: Level<'_>,
+    open: &(dyn Fn() -> Result<crate::wire::Client, WireError> + Sync),
+    statement: &(dyn Fn(u32, u64) -> String + Sync),
+) -> ScalingSample {
+    use std::sync::Barrier;
+    let Level {
+        workload,
+        target,
+        connections,
+        run,
+        per_connection,
+        durable,
+    } = level;
+    let n = connections.max(1);
+    // `n + 1`: the main thread waits too, and takes the clock the moment the gate opens.
+    let gate = Barrier::new(n as usize + 1);
+    let (per_thread, wall) = std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for thread in 0..n {
+            let gate = &gate;
+            handles.push(scope.spawn(move || -> Result<Vec<Duration>, WireError> {
+                // Open before the gate: connection setup is not part of the measurement.
+                let mut client = match open() {
+                    Ok(c) => {
+                        gate.wait();
+                        c
+                    }
+                    Err(e) => {
+                        // Still release the gate, or the other threads and the main thread
+                        // block forever on a failure this function is meant to report.
+                        gate.wait();
+                        return Err(e);
+                    }
+                };
+                let mut lat = Vec::with_capacity(per_connection as usize);
+                for i in 0..per_connection {
+                    let sql = statement(thread, i);
+                    let at = Instant::now();
+                    client.simple(&sql)?;
+                    lat.push(at.elapsed());
+                }
+                Ok(lat)
+            }));
+        }
+        gate.wait();
+        let started = Instant::now();
+        let mut per_thread: Vec<Result<Vec<Duration>, WireError>> = Vec::new();
+        for h in handles {
+            per_thread.push(h.join().unwrap_or_else(|_| {
+                Err(WireError::Protocol("a connection thread panicked".into()))
+            }));
+        }
+        (per_thread, started.elapsed())
+    });
+
+    let mut pooled = Vec::new();
+    for r in per_thread {
+        match r {
+            Ok(l) => pooled.extend(l),
+            Err(e) => {
+                return scaling_skipped(
+                    workload,
+                    target,
+                    connections,
+                    run,
+                    format!("a connection failed part-way through the level: {e}"),
+                )
+            }
+        }
+    }
+    let operations = pooled.len() as u64;
+    let (p50, p99) = percentiles(pooled);
+    ScalingSample {
+        workload: workload.into(),
+        target: target.into(),
+        connections,
+        run,
+        operations,
+        wall,
+        p50,
+        p99,
+        durable,
+        not_run: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

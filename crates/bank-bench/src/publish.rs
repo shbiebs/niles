@@ -20,6 +20,34 @@ use std::path::{Path, PathBuf};
 /// The committed results document, relative to the repository root.
 pub const COMMITTED: &str = "results/E16-wallclock.md";
 
+/// The committed scaling document (E19), and the default output directories.
+pub const COMMITTED_SCALING: &str = "results/E19-scaling.md";
+pub const DEFAULT_OUT: &str = "results/E16-wallclock";
+pub const DEFAULT_SCALING_OUT: &str = "results/E19-scaling";
+
+/// Where a scaling run's CSVs go, given `--out`.
+///
+/// The default `--out` means "the committed layout", and E19 then sits beside E16 in
+/// `results/`. **Any other `--out` keeps the scaling run inside it**, so an exploratory run —
+/// the audit's baseline capture, a bisect, a CI job — cannot write a CSV into the committed
+/// tree by naming an output directory and forgetting that E19 has one of its own.
+pub fn scaling_dir(out: &Path) -> PathBuf {
+    if out == Path::new(DEFAULT_OUT) {
+        PathBuf::from(DEFAULT_SCALING_OUT)
+    } else {
+        out.join("E19-scaling")
+    }
+}
+
+/// Every path the scaling document is written to. Same rule as [`destinations`].
+pub fn scaling_destinations(dir: &Path, publish: bool) -> Vec<PathBuf> {
+    let mut out = vec![dir.join("E19-scaling.md")];
+    if publish {
+        out.push(PathBuf::from(COMMITTED_SCALING));
+    }
+    out
+}
+
 /// Every path the rendered document is written to.
 ///
 /// The run's own directory always; the committed artifact only under `publish`. A caller
@@ -75,6 +103,35 @@ mod tests {
         assert!(
             published.iter().any(|p| p.starts_with(dir)),
             "and must still write the run's own copy, so the two can be diffed"
+        );
+    }
+
+    #[test]
+    fn a_scaling_run_under_a_custom_out_stays_out_of_the_committed_tree() {
+        // The same rule as the contract document, and it needs its own test because E19 has
+        // its own default directory: a caller who passed `--out /tmp/...` and nothing else
+        // would otherwise have written `results/E19-scaling/*.csv` from an exploratory run.
+        let scratch = Path::new("/tmp/wo4/t02-before");
+        let dir = scaling_dir(scratch);
+        assert!(
+            dir.starts_with(scratch),
+            "a custom --out must contain its own scaling directory, got {dir:?}"
+        );
+        assert!(
+            !scaling_destinations(&dir, false)
+                .iter()
+                .any(|p| p.starts_with("results")),
+            "an unpublished scaling run reached the committed tree"
+        );
+        assert!(scaling_destinations(&dir, true)
+            .iter()
+            .any(|p| p == Path::new(COMMITTED_SCALING)));
+
+        // And the default `--out` puts E19 beside E16 rather than inside it: the two are
+        // separate experiments and their CSVs must not share a directory.
+        assert_eq!(
+            scaling_dir(Path::new(DEFAULT_OUT)),
+            Path::new(DEFAULT_SCALING_OUT)
         );
     }
 

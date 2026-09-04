@@ -10,7 +10,7 @@
 //! reason the target gave. Nothing is typed in by hand, which is why `bench --render` exists
 //! rather than a paragraph explaining how to fill the table in.
 
-use crate::workloads::Sample;
+use crate::workloads::{Sample, ScalingSample};
 use std::collections::BTreeMap;
 
 /// The CSV header. Asserted against `Sample::to_csv` by a test, so the two cannot drift.
@@ -377,6 +377,145 @@ pub fn spread_table(samples: &[Sample]) -> String {
     out
 }
 
+/// **The E19 scaling table.**
+///
+/// A separate document from the contract table, and the separation is the point: the four
+/// contract rows are single-connection measurements, and a reader who found a 4-connection
+/// figure in them would be reading a number the specification does not state a target for.
+///
+/// Rows are grouped by `(workload, target)` and ordered by connection count, with each
+/// level's throughput expressed **relative to that target's own 1-connection level**. The
+/// absolute figures are hardware; the ratio is the finding — whether a second and a fourth
+/// connection buy anything, or whether the server serialises them.
+pub fn scaling_table(samples: &[ScalingSample]) -> String {
+    let mut s = String::new();
+    s.push_str(
+        "| Workload | Target | Connections | Median ops/s | MAD | vs 1 connection | Median p99 |\n\
+         |---|---|---|---|---|---|---|\n",
+    );
+
+    // BTreeMap so the ordering is the data's, not a hash's: (workload, target, connections).
+    let mut by: BTreeMap<(String, String), BTreeMap<u32, Vec<&ScalingSample>>> = BTreeMap::new();
+    for x in samples {
+        by.entry((x.workload.clone(), x.target.clone()))
+            .or_default()
+            .entry(x.connections)
+            .or_default()
+            .push(x);
+    }
+
+    for ((workload, target), levels) in &by {
+        // The denominator of the `vs 1 connection` column, taken from this target's own
+        // single-connection level. Never from the other target's: the two run on the same
+        // host but not on the same code, and a cross-target ratio here would be the contract
+        // table's job, done without the contract table's care.
+        let one = levels
+            .get(&1)
+            .and_then(|v| median_scaling_ops(v))
+            .filter(|x| *x > 0.0);
+        for (conns, rows) in levels {
+            let ran: Vec<&&ScalingSample> = rows.iter().filter(|r| r.not_run.is_none()).collect();
+            if ran.is_empty() {
+                let why = rows
+                    .iter()
+                    .find_map(|r| r.not_run.clone())
+                    .unwrap_or_else(|| "no sample".into());
+                s.push_str(&format!(
+                    "| {workload} | {target} | {conns} | **NOT RUN** | — | — | {why} |\n"
+                ));
+                continue;
+            }
+            let series: Vec<f64> = ran.iter().map(|r| r.ops_per_second()).collect();
+            let med = median_of(&series).unwrap_or(0.0);
+            let spread = mad(&series).unwrap_or(0.0);
+            let mut p99s: Vec<f64> = ran
+                .iter()
+                .map(|r| r.p99.as_nanos() as f64 / 1000.0)
+                .collect();
+            p99s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let p99 = p99s[p99s.len() / 2];
+            let rel = match one {
+                Some(base) => format!("{:.2}×", med / base),
+                None => "—".into(),
+            };
+            s.push_str(&format!(
+                "| {workload} | {target} | {conns} | {med:.0} | {spread:.0} | {rel} | {p99:.0} µs |\n"
+            ));
+        }
+    }
+    s
+}
+
+/// **Does the widest level buy anything over the one below it?**
+///
+/// The question E19 exists to answer, rendered rather than left to a reader to compute from
+/// twelve rows. The step from 1 to 2 connections is not the interesting one — a
+/// single-connection level is round-trip bound, so filling the pipeline flatters it — and the
+/// top step is: at that point both cores are already busy, and a target that keeps rising is
+/// parallelising while one that falls is contending on something.
+///
+/// The bands are ±10%, and they are bands for the same reason the contract table's parity is:
+/// a 2-core container is a noisy host, and a difference smaller than the run-to-run spread is
+/// not a finding.
+pub fn scaling_verdicts(samples: &[ScalingSample]) -> String {
+    let mut by: BTreeMap<(String, String), BTreeMap<u32, Vec<&ScalingSample>>> = BTreeMap::new();
+    for x in samples {
+        by.entry((x.workload.clone(), x.target.clone()))
+            .or_default()
+            .entry(x.connections)
+            .or_default()
+            .push(x);
+    }
+    let mut s = String::new();
+    s.push_str("| Workload | Target | Top step | Ratio | Reading |\n|---|---|---|---|---|\n");
+    for ((workload, target), levels) in &by {
+        let mut ks: Vec<u32> = levels.keys().copied().collect();
+        ks.sort_unstable();
+        if ks.len() < 2 {
+            s.push_str(&format!(
+                "| {workload} | {target} | — | — | only one connection level was run |\n"
+            ));
+            continue;
+        }
+        let (below, top) = (ks[ks.len() - 2], ks[ks.len() - 1]);
+        let a = levels.get(&below).and_then(|v| median_scaling_ops(v));
+        let b = levels.get(&top).and_then(|v| median_scaling_ops(v));
+        let (Some(a), Some(b)) = (a, b) else {
+            s.push_str(&format!(
+                "| {workload} | {target} | {below} → {top} | — | **NOT RUN** at one of the two levels |\n"
+            ));
+            continue;
+        };
+        if a <= 0.0 {
+            s.push_str(&format!(
+                "| {workload} | {target} | {below} → {top} | — | the lower level answered nothing |\n"
+            ));
+            continue;
+        }
+        let r = b / a;
+        let reading = if r > 1.10 {
+            "**rises** — the added connection is doing work"
+        } else if r < 0.90 {
+            "**falls** — the added connection costs more than it brings"
+        } else {
+            "**flat** — the added connection buys nothing measurable"
+        };
+        s.push_str(&format!(
+            "| {workload} | {target} | {below} → {top} | {r:.2}× | {reading} |\n"
+        ));
+    }
+    s
+}
+
+fn median_scaling_ops(rows: &[&ScalingSample]) -> Option<f64> {
+    let v: Vec<f64> = rows
+        .iter()
+        .filter(|r| r.not_run.is_none())
+        .map(|r| r.ops_per_second())
+        .collect();
+    median_of(&v)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -520,6 +659,123 @@ mod tests {
             median_ops(&[&c]),
             None,
             "and all-skipped is no measurement at all"
+        );
+    }
+
+    /// **A scaling row names its connection count, and pools every thread.**
+    ///
+    /// The guard T-02 exists to leave behind. Two properties, both of which the audit's
+    /// scratch harness got wrong:
+    ///
+    /// * The connection count reaches the table. Without it E19 is a column of unlabelled
+    ///   throughput figures in which a reader cannot tell 1 from 4 — which is the entire
+    ///   question the experiment asks.
+    /// * The throughput of a level is its **pooled** operations over the level's wall clock,
+    ///   not the mean of its threads. A four-connection level that answered at the speed of
+    ///   one must show `1.00×`, and one that scaled must show `4.00×`; averaging per-thread
+    ///   rates reports a serialising server and a scaling one identically.
+    #[test]
+    fn a_scaling_row_names_its_connection_count_and_pools_every_thread() {
+        use crate::workloads::ScalingSample;
+        use std::time::Duration;
+
+        let level = |connections: u32, operations: u64, ms: u64| ScalingSample {
+            workload: "point".into(),
+            target: "nilestream".into(),
+            connections,
+            run: 1,
+            operations,
+            wall: Duration::from_millis(ms),
+            p50: Duration::from_micros(100),
+            p99: Duration::from_micros(400),
+            durable: false,
+            not_run: None,
+        };
+
+        // One connection: 1,000 operations in a second. Four connections: 4,000 operations,
+        // still in a second — a server that scaled perfectly.
+        let scaled = vec![level(1, 1_000, 1_000), level(4, 4_000, 1_000)];
+        let t = scaling_table(&scaled);
+        assert!(
+            t.contains("| point | nilestream | 1 |") && t.contains("| point | nilestream | 4 |"),
+            "the connection count is not in the row: {t}"
+        );
+        assert!(
+            t.contains("4.00×"),
+            "a level that answered four times the work in the same wall clock must read \
+             4.00×, or the table cannot distinguish a scaling server from a serialising one: \
+             {t}"
+        );
+
+        // The same 4,000 operations taking four times as long: a server that serialises.
+        // The per-thread rate is unchanged between these two cases and the pooled rate is
+        // not, which is why the pooled one is what is reported.
+        let serial = vec![level(1, 1_000, 1_000), level(4, 4_000, 4_000)];
+        let t = scaling_table(&serial);
+        assert!(
+            t.contains("1.00×"),
+            "a level that took four times as long for four times the work bought nothing, \
+             and the table must say so: {t}"
+        );
+        assert!(
+            !t.contains("4.00×"),
+            "a serialising server was reported as scaling: {t}"
+        );
+
+        // The top-step reading is computed from the same pooled rates, and it is the
+        // sentence the experiment exists to produce: a server that kept rising at its widest
+        // level parallelises, and one that fell contends.
+        let v = scaling_verdicts(&scaled);
+        assert!(v.contains("1 → 4") && v.contains("rises"), "{v}");
+        let v = scaling_verdicts(&serial);
+        assert!(v.contains("flat"), "{v}");
+        let dropping = vec![level(2, 2_000, 1_000), level(4, 4_000, 4_000)];
+        let v = scaling_verdicts(&dropping);
+        assert!(v.contains("2 → 4") && v.contains("falls"), "{v}");
+
+        // A level that did not run is a row with its reason, never an omission: a missing
+        // row invites a reader to assume the number was unremarkable.
+        let skipped = vec![
+            level(1, 1_000, 1_000),
+            crate::workloads::scaling_skipped(
+                "point",
+                "nilestream",
+                4,
+                1,
+                "the server refused a fourth connection".into(),
+            ),
+        ];
+        let t = scaling_table(&skipped);
+        assert!(t.contains("| point | nilestream | 4 | **NOT RUN**"), "{t}");
+        assert!(t.contains("refused a fourth connection"), "{t}");
+    }
+
+    /// The scaling CSV's header matches what a `ScalingSample` writes.
+    #[test]
+    fn the_scaling_csv_header_matches_its_rows() {
+        use crate::workloads::{ScalingSample, SCALING_CSV_HEADER};
+        use std::time::Duration;
+        let s = ScalingSample {
+            workload: "durable".into(),
+            target: "postgres".into(),
+            connections: 2,
+            run: 3,
+            operations: 100,
+            wall: Duration::from_millis(50),
+            p50: Duration::from_micros(400),
+            p99: Duration::from_micros(900),
+            durable: true,
+            not_run: None,
+        };
+        assert_eq!(
+            SCALING_CSV_HEADER.split(',').count(),
+            s.to_csv().split(',').count(),
+            "header: {SCALING_CSV_HEADER}\nrow: {}",
+            s.to_csv()
+        );
+        assert!(
+            SCALING_CSV_HEADER.contains("connections"),
+            "the column that makes the row mean something is not in the schema"
         );
     }
 }

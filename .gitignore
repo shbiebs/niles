@@ -13,3 +13,10 @@ results/E16-wallclock/nilestream-bench.seg
 results/E16-wallclock/nilestream-report.seg
 results/E16-wallclock/E16-wallclock.md
 results/E23-scaling/E23-scaling.md
+
+# Python bytecode caches. `thesis/include-results.py` is run by `make reproduce`, and its
+# cache was tracked for several cycles: 22,935 bytes carrying the absolute path of the
+# machine that built it, in a repository whose whole argument is that what is committed can
+# be accounted for.
+__pycache__/
+*.py[cod]

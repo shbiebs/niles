@@ -26,6 +26,18 @@ schema g {
         retain forever;
     }
 
+    // A relation with a sealed column, for the confidentiality goldens. `owner` is
+    // `@confidential`, so the engine may carry it to a caller and may not compute on it;
+    // `who` is the subject the seal names, and is readable because an erasure has to look it
+    // up to find the keys it must destroy. Typed `Int` because the golden corpus's data is
+    // integers — confidentiality is a property of a column, not of its type.
+    base p {
+        who: Int,
+        owner: Int @confidential(e2ee, subject = who),
+        n: Int,
+        retain forever;
+    }
+
     index ix_t on t (k) anchor;
     index ix_u on u (k) anchor;
     index ix_edges on edges (src) anchor;

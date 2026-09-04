@@ -82,6 +82,7 @@ fn circuit(rung: Consistency) -> Circuit {
             relation: "postings".into(),
             is_base: true,
             anchor_key: vec![0],
+            confidential: Vec::new(),
         },
         vec![],
         contract(Consistency::LedgerConsistent),

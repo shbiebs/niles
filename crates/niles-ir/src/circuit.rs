@@ -483,6 +483,7 @@ mod tests {
                 relation: name.into(),
                 is_base: true,
                 anchor_key,
+                confidential: Vec::new(),
             },
             vec![],
             internal_contract(),

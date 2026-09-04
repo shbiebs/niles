@@ -289,6 +289,7 @@ mod tests {
                 relation: "postings".into(),
                 is_base: true,
                 anchor_key: vec![0],
+                confidential: Vec::new(),
             },
             vec![],
             internal_contract(),

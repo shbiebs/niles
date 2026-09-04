@@ -338,6 +338,16 @@ impl<'a> Lx<'a> {
                 relation: name.to_string(),
                 is_base: rel.is_base(),
                 anchor_key,
+                // Carried into the circuit so the verifier can enforce the confidentiality
+                // rule independently of the type checker. One checker, one surface, is how
+                // `group by legal_name` compiled.
+                confidential: rel
+                    .columns
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, c)| c.confidential.is_some())
+                    .map(|(i, _)| i as ColIdx)
+                    .collect(),
             },
             vec![],
             contract,

@@ -1,0 +1,6 @@
+# 66_confidential_sql_where_refused
+# **Refused, where the SQL surface used to compile it.** The confidentiality rule ran for
+# pipeline stages only, so `postings.where(|p| p.owner == x)` was refused and this — the same
+# query, on the surface every wire client speaks — lowered to a filter over ciphertext. The
+# engine cannot evaluate it: the predicate would either not filter, or leak through timing.
+REFUSED NL0260

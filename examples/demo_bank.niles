@@ -12,7 +12,7 @@ schema demo_bank {
 
     table accounts {
         id: Id<Account> primary key,
-        owner: Text @confidential(e2ee),
+        owner: Text @confidential(e2ee, subject = id),
         opened_at: Instant,
     }
 

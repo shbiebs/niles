@@ -1422,6 +1422,7 @@ impl<'a> Cx<'a> {
     }
 
     fn select(&mut self, s: &SelectStmt, sc: &mut Scope) {
+        self.check_confidential_in_select(s);
         for t in &s.from {
             self.table_ref(t, sc);
         }
@@ -1963,24 +1964,91 @@ impl<'a> Cx<'a> {
         let Some(rel) = self.root_relation(recv) else {
             return;
         };
-        let confidential: Vec<(String, String, Span)> = rel
-            .columns
-            .iter()
-            .filter_map(|c| c.confidential.clone().map(|l| (c.name.clone(), l, c.span)))
-            .collect();
+        let confidential = confidential_columns(rel);
+        let exprs: Vec<&Expr> = args.iter().map(|a| &a.value).collect();
+        self.refuse_confidential(
+            &confidential,
+            &exprs,
+            "used in a predicate, key or aggregate",
+            span,
+        );
+    }
+
+    /// **The same rule for the SQL surface**, which had none.
+    ///
+    /// W17 ran only for pipeline stages, so with `legal_name: Text @confidential(e2ee)` the
+    /// statement `select legal_name, count(id) from parties group by legal_name` passed
+    /// `nilesc check` with `ok` and lowered to `aggregate(by=[1], count)` — the engine
+    /// grouping by a column it is declared unable to read. Every wire client uses this
+    /// surface, so the one static confidentiality guarantee the design makes was false
+    /// exactly where it is relied upon.
+    ///
+    /// A *bare* projection of a confidential column stays legal: carrying a sealed value
+    /// through to the caller is the one thing the engine can do with it. Everything else —
+    /// a predicate, a grouping key, a join key, an aggregate's argument, an expression over
+    /// it — is refused.
+    fn check_confidential_in_select(&mut self, s: &SelectStmt) {
+        let mut confidential: Vec<(String, String, Span)> = Vec::new();
+        collect_relation_names(&s.from, &mut |n| {
+            if let Some(rel) = self.cat.relations.get(n) {
+                confidential.extend(confidential_columns(rel));
+            }
+        });
         if confidential.is_empty() {
             return;
         }
-        for a in args {
+        if let Some(f) = &s.filter {
+            self.refuse_confidential(&confidential, &[f], "used in a `where` predicate", f.span());
+        }
+        if let Some(h) = &s.having {
+            self.refuse_confidential(
+                &confidential,
+                &[h],
+                "used in a `having` predicate",
+                h.span(),
+            );
+        }
+        for g in &s.group_by {
+            self.refuse_confidential(&confidential, &[g], "used as a grouping key", g.span());
+        }
+        for (e, _) in &s.projections {
+            // The identity projection is the permitted use.
+            if matches!(e, Expr::Path(_) | Expr::Field { .. }) {
+                continue;
+            }
+            self.refuse_confidential(
+                &confidential,
+                &[e],
+                "computed over in the projection",
+                e.span(),
+            );
+        }
+        collect_join_conditions(&s.from, &mut |o: &Expr| {
+            let cols = confidential.clone();
+            self.refuse_confidential(&cols, &[o], "used in a join condition", o.span());
+        });
+    }
+
+    fn refuse_confidential(
+        &mut self,
+        confidential: &[(String, String, Span)],
+        exprs: &[&Expr],
+        what: &str,
+        span: Span,
+    ) {
+        if confidential.is_empty() {
+            return;
+        }
+        for e in exprs {
             let mut used = Vec::new();
-            collect_fields(&a.value, &mut used);
+            collect_fields(e, &mut used);
             for (name, span_of_use) in used {
                 if let Some((_, level, decl)) = confidential.iter().find(|(c, _, _)| *c == name) {
                     self.push(
                         Diagnostic::error("NL0260", format!("`{name}` is `@confidential({level})` and cannot be used here"))
                             .primary(span_of_use, "the engine cannot compute on this column")
                             .secondary(*decl, format!("declared `@confidential({level})` here"))
-                            .secondary(span, "used in a predicate, key or aggregate")
+                            .secondary(span, what.to_string())
                             .note("an encrypted column is opaque to the engine: a filter over it would either not filter, or leak through timing")
                             .note("to use it, `declassify(..)` it with a capability — which is audited, and is the point"),
                     );
@@ -2001,6 +2069,13 @@ impl<'a> Cx<'a> {
 fn collect_fields(e: &Expr, out: &mut Vec<(String, Span)>) {
     match e {
         Expr::Field { name, span, .. } => out.push((name.text.clone(), *span)),
+        // **A bare name is a column too.** This arm was missing, and it is the mechanical
+        // reason the SQL surface had no confidentiality check even where one was called: the
+        // pipeline writes `|p| p.legal_name` (a `Field`) and SQL writes `legal_name` (a
+        // `Path`), so every SQL use of a confidential column was invisible to the walk. The
+        // callee of a `Call` is not traversed, so a function's *name* is never mistaken for a
+        // column.
+        Expr::Path(p) => out.push((p.last().text.clone(), p.span)),
         Expr::Closure { body, .. } => collect_fields(body, out),
         Expr::Binary { lhs, rhs, .. } => {
             collect_fields(lhs, out);
@@ -2351,5 +2426,62 @@ fn collect_sources_in_select(
     }
     if let Some((_, next)) = &s.set_op {
         collect_sources_in_select(next, cat, out);
+    }
+}
+
+/// The `@confidential` columns of a relation, as `(column, level, declaration span)`.
+fn confidential_columns(rel: &crate::resolve::RelationInfo) -> Vec<(String, String, Span)> {
+    rel.columns
+        .iter()
+        .filter_map(|c| c.confidential.clone().map(|l| (c.name.clone(), l, c.span)))
+        .collect()
+}
+
+/// Every relation named in a from-list, including both sides of every join.
+fn collect_relation_names(from: &[TableRef], f: &mut impl FnMut(&str)) {
+    for t in from {
+        walk_table_ref(t, f);
+    }
+}
+
+fn walk_table_ref(t: &TableRef, f: &mut impl FnMut(&str)) {
+    match t {
+        TableRef::Named { name, .. } => f(&name.text),
+        TableRef::Join { left, right, .. } => {
+            walk_table_ref(left, f);
+            walk_table_ref(right, f);
+        }
+        TableRef::Sub { query, .. } => {
+            for t in &query.from {
+                walk_table_ref(t, f);
+            }
+        }
+    }
+}
+
+/// Every `on` condition in a from-list.
+fn collect_join_conditions(from: &[TableRef], f: &mut impl FnMut(&Expr)) {
+    for t in from {
+        walk_join_conditions(t, f);
+    }
+}
+
+fn walk_join_conditions(t: &TableRef, f: &mut impl FnMut(&Expr)) {
+    match t {
+        TableRef::Named { .. } => {}
+        TableRef::Join {
+            left, right, on, ..
+        } => {
+            walk_join_conditions(left, f);
+            walk_join_conditions(right, f);
+            if let Some(o) = on {
+                f(o);
+            }
+        }
+        TableRef::Sub { query, .. } => {
+            for t in &query.from {
+                walk_join_conditions(t, f);
+            }
+        }
     }
 }

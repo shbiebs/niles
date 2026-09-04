@@ -71,6 +71,13 @@ fn sources() -> BTreeMap<String, ZSet> {
         "u".to_string(),
         eval::zset(&[(&[1, 1], 1), (&[2, 2], 1), (&[4, 4], 1)]),
     );
+    // `p` carries a sealed column. Its data is ordinary integers — what makes `owner`
+    // confidential is the schema, not the bytes — so a case that is *allowed* to project it
+    // has rows to produce.
+    m.insert(
+        "p".to_string(),
+        eval::zset(&[(&[1, 700, 10], 1), (&[2, 800, 20], 1)]),
+    );
     m.insert(
         "edges".to_string(),
         eval::zset(&[
@@ -129,6 +136,13 @@ fn compile(body: &str, surface: &str) -> Result<(niles_ir::circuit::Circuit, ZSe
     let (prog, mut d) = parser::parse_program(&src);
     let (cat, rd) = resolve::resolve_program(&prog, 0);
     d.extend(rd);
+    // **The corpus typechecks its cases.** It did not, so every refusal the *type checker*
+    // produces — the confidentiality rule above all — was invisible here: a case asserting
+    // `REFUSED NL0260` would have compiled, and the corpus would have reported the rule
+    // working while never running it. Parse, resolve, typecheck, lower: the front end a
+    // client's statement goes through, in the order it goes through it.
+    let (_report, td) = niles_lang::typecheck::check_program(&prog, &cat);
+    d.extend(td);
     let (lowered, ld) = lower::lower_program(&prog, &cat);
     d.extend(ld);
     let errors: Vec<String> = d
@@ -140,6 +154,10 @@ fn compile(body: &str, surface: &str) -> Result<(niles_ir::circuit::Circuit, ZSe
     if !errors.is_empty() {
         return Err(errors);
     }
+    // The IR verifier is deliberately *not* run here: over a synthetic one-view program it
+    // reports contract and anchor violations (IR004, IR014, IR018, IR019) that are properties
+    // of the harness's wrapper rather than of the case. Its own rules are tested in
+    // `niles-ir`, against circuits built for them.
     match eval::try_run(&lowered.circuit, "golden", &sources()) {
         Ok((z, _work)) => Ok((lowered.circuit, z)),
         Err(e) => Err(vec![format!("EVAL {e}")]),
@@ -307,9 +325,9 @@ fn the_two_surfaces_denote_the_same_zset_wherever_both_are_written() {
     // cases stopped being compared. The list is printed and its length is bounded, so
     // adding a case that silently opts out of the comparison fails here.
     assert!(
-        skipped.len() <= 37,
+        skipped.len() <= 40,
         "{} cases are skipped by this comparison, which is more than the corpus leaves \
-         uncompared today (37: thirty-five written in one surface, two refused in both). The \
+         uncompared today (40: thirty-seven written in one surface, three refused in both). The \
          two most recent are `58_order_by_aggregate` and `59_order_by_alias`, and the reason \
          is a gap in the *pipeline* surface rather than in the corpus: its `order_by` stage \
          has no descending spelling — `key_of` maps every key to `(k, true)` — so the case \
@@ -340,6 +358,7 @@ fn a_non_terminating_fixpoint_is_refused_rather_than_answered() {
             relation: "edges".into(),
             is_base: true,
             anchor_key: vec![0],
+            confidential: Vec::new(),
         },
         vec![],
         c,
@@ -396,6 +415,7 @@ fn a_non_terminating_fixpoint_is_refused_rather_than_answered() {
             relation: "edges".into(),
             is_base: true,
             anchor_key: vec![0],
+            confidential: Vec::new(),
         },
         vec![],
         c,

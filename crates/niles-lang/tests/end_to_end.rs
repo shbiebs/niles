@@ -59,7 +59,7 @@ schema bank {
     currency usd { scale: 2 }
     currency eur { scale: 2 }
     currency jpy { scale: 0 }
-    table accounts { id: Id<Account> primary key, owner: Text @confidential(e2ee) }
+    table accounts { id: Id<Account> primary key, owner: Text @confidential(e2ee, subject = id) }
     ledger postings {
         txn: TxnId, acct: Id<Account>, cur: Currency, amt: Money,
         idem: IdemKey window 30.days,

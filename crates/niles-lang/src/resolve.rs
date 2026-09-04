@@ -70,6 +70,11 @@ pub struct ColumnInfo {
     /// `Money`, whose currency comes from a sibling `Currency` column.
     pub money_currency: Option<Option<String>>,
     pub confidential: Option<String>,
+    /// The column naming whose value this is, from `@confidential(<level>, subject = <col>)`.
+    ///
+    /// `None` on a column that is not confidential, and a refusal (NL0261) on one that is:
+    /// a sealed value whose owner the schema does not name is a value no erasure can find.
+    pub confidential_subject: Option<String>,
     pub idem_window: bool,
     pub span: Span,
 }
@@ -461,19 +466,33 @@ fn relation_info(r: &RelDecl) -> RelationInfo {
             }
             _ => None,
         };
-        let confidential = f
-            .attrs
-            .iter()
-            .find(|a| a.name.text == "confidential")
-            .map(|a| match a.args.first() {
-                Some(AttrArg::Word(w)) => w.text.clone(),
-                _ => "e2ee".to_string(),
-            });
+        let conf_attr = f.attrs.iter().find(|a| a.name.text == "confidential");
+        let confidential = conf_attr.map(|a| match a.args.first() {
+            Some(AttrArg::Word(w)) => w.text.clone(),
+            _ => "e2ee".to_string(),
+        });
+        // **The subject: whose value this is.**
+        //
+        // A confidential value is encrypted under a key, and a key belongs to somebody. Until
+        // the schema says who, an erasure has no way to name the values it must destroy: it
+        // would have to scan every column of every row and guess. `subject = <column>` states
+        // it once, where the column is declared, and the erasure path reads it.
+        let confidential_subject = conf_attr.and_then(|a| {
+            a.args.iter().find_map(|arg| match arg {
+                AttrArg::KeyValue(k, v) if k.text == "subject" => match v {
+                    Expr::Path(p) => Some(p.last().text.clone()),
+                    Expr::Field { name, .. } => Some(name.text.clone()),
+                    _ => None,
+                },
+                _ => None,
+            })
+        });
         info.columns.push(ColumnInfo {
             name: f.name.text.clone(),
             ty: f.ty.clone(),
             money_currency,
             confidential,
+            confidential_subject,
             idem_window: f.default.is_some()
                 && matches!(&f.ty, Ty::Path { path, .. } if path.last().text == "IdemKey"),
             span: f.name.span,
@@ -542,6 +561,64 @@ fn check_schema_item(si: &SchemaItem, cat: &Catalog, d: &mut Diagnostics) {
 fn check_relation(r: &RelDecl, cat: &Catalog, d: &mut Diagnostics) {
     let info = cat.relations.get(&r.name.text);
     let Some(info) = info else { return };
+
+    // **A sealed value must name whose it is.**
+    //
+    // `@confidential(<level>)` says the engine may not read a column. It does not say who the
+    // value belongs to, and without that an erasure has nothing to aim at: destroying "this
+    // person's data" means destroying the values encrypted under this person's key, and the
+    // key is chosen by the subject. A column declared confidential and unattributed is a value
+    // that can be sealed and never lawfully destroyed, which is the worst of both properties.
+    for c in &info.columns {
+        let Some(level) = &c.confidential else {
+            continue;
+        };
+        match &c.confidential_subject {
+            None => d.push(
+                Diagnostic::error(
+                    "NL0261",
+                    format!("`{}` is `@confidential({level})` and names no subject", c.name),
+                )
+                .primary(c.span, "no `subject = <column>`")
+                .note("a confidential value is encrypted under a key, and a key belongs to somebody; the subject is the column that says who")
+                .suggest(
+                    c.span,
+                    format!("@confidential({level}, subject = <column>)"),
+                    "name the column this value belongs to",
+                    Applicability::HasPlaceholders,
+                ),
+            ),
+            Some(subject) => {
+                if !info.columns.iter().any(|x| &x.name == subject) {
+                    d.push(
+                        Diagnostic::error(
+                            "NL0261",
+                            format!("`{}`'s subject `{subject}` is not a column of `{}`", c.name, r.name.text),
+                        )
+                        .primary(c.span, "no such column")
+                        .note(format!(
+                            "the columns of `{}` are: {}",
+                            r.name.text,
+                            info.columns.iter().map(|x| x.name.as_str()).collect::<Vec<_>>().join(", ")
+                        )),
+                    );
+                } else if info
+                    .columns
+                    .iter()
+                    .any(|x| &x.name == subject && x.confidential.is_some())
+                {
+                    d.push(
+                        Diagnostic::error(
+                            "NL0261",
+                            format!("`{}`'s subject `{subject}` is itself confidential", c.name),
+                        )
+                        .primary(c.span, "the subject must be readable")
+                        .note("an erasure has to look the subject up to find the keys it must destroy; a subject the engine cannot read is a subject it cannot find"),
+                    );
+                }
+            }
+        }
+    }
 
     // W1: a base or ledger must be fully retained. Proposition 3.4 makes full retention
     // *necessary*, not merely sufficient, for reconstructibility — a base you can evict
@@ -787,4 +864,63 @@ fn unknown_name(d: &mut Diagnostics, n: &Name, what: &str, candidates: Vec<&str>
         );
     }
     d.push(diag);
+}
+
+#[cfg(test)]
+mod confidentiality_tests {
+    use crate::{parser, resolve};
+
+    fn codes(src: &str) -> Vec<String> {
+        let (prog, mut d) = parser::parse_program(src);
+        let (_cat, rd) = resolve::resolve_program(&prog, 0);
+        d.extend(rd);
+        d.items
+            .iter()
+            .filter(|x| x.severity == crate::diagnostics::Severity::Error)
+            .map(|x| x.code.to_string())
+            .collect()
+    }
+
+    const HEAD: &str = "schema s { currency usd { scale: 2 }\n";
+
+    /// **A sealed value must say whose it is.**
+    ///
+    /// Not a style rule: `erase(subject)` has to enumerate the values encrypted under that
+    /// subject's key, and the only thing that can tell it which rows those are is a column
+    /// the schema names. A confidential column with no subject is a value that can be sealed
+    /// and never lawfully destroyed.
+    #[test]
+    fn a_confidential_column_must_name_a_subject() {
+        assert!(codes(&format!(
+            "{HEAD} table p {{ id: Id<A> primary key, owner: Text @confidential(e2ee) }} }}"
+        ))
+        .contains(&"NL0261".to_string()));
+
+        assert!(
+            codes(&format!(
+                "{HEAD} table p {{ id: Id<A> primary key, owner: Text @confidential(e2ee, subject = id) }} }}"
+            ))
+            .is_empty(),
+            "a subject that resolves is accepted"
+        );
+    }
+
+    #[test]
+    fn a_subject_must_be_a_column_of_the_same_relation() {
+        assert!(codes(&format!(
+            "{HEAD} table p {{ id: Id<A> primary key, owner: Text @confidential(e2ee, subject = nope) }} }}"
+        ))
+        .contains(&"NL0261".to_string()));
+    }
+
+    /// The subject has to be readable, because the erasure path looks it up.
+    #[test]
+    fn a_subject_may_not_itself_be_confidential() {
+        assert!(codes(&format!(
+            "{HEAD} table p {{ id: Id<A> primary key, \
+             who: Text @confidential(e2ee, subject = id), \
+             owner: Text @confidential(e2ee, subject = who) }} }}"
+        ))
+        .contains(&"NL0261".to_string()));
+    }
 }

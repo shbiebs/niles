@@ -2,7 +2,7 @@ schema bank {
     currency usd { scale: 2 }
     currency eur { scale: 2 }
     currency jpy { scale: 0 }
-    table accounts { id: Id<A> primary key, owner: Text @confidential(e2ee) }
+    table accounts { id: Id<A> primary key, owner: Text @confidential(e2ee, subject = id) }
     // `value_date` is declared because the view groups by it and the SQL side's `postings`
     // has it (`sql/schema.sql:32`). It was missing, so this case's `group_by` named a column
     // that does not exist: the pipeline surface dropped the unresolvable key, grouped by

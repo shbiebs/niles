@@ -211,6 +211,16 @@ pub enum Op {
         /// in bases is reconstructible; one rooted in a mutable table is not, because the
         /// history it would fold no longer exists.
         is_base: bool,
+        /// The columns the schema declared `@confidential`.
+        ///
+        /// Carried into the IR so the guarantee does not rest on one checker. The type
+        /// checker refused a confidential column in a predicate, a key or an aggregate — on
+        /// *one* of the two surfaces, for two years, while the other silently lowered
+        /// `group by legal_name` to an aggregate over ciphertext. A circuit is what the
+        /// engine executes, so the circuit is where a rule about what the engine may compute
+        /// on has to be checkable; `verify` refuses one that reads these columns anywhere but
+        /// a projection.
+        confidential: Vec<ColIdx>,
         /// The column indices forming the anchor index, if one is declared.
         anchor_key: Vec<ColIdx>,
     },
@@ -574,6 +584,7 @@ impl fmt::Display for Op {
                 relation,
                 is_base,
                 anchor_key,
+                confidential,
             } => {
                 write!(f, "source({relation}")?;
                 if *is_base {
@@ -581,6 +592,9 @@ impl fmt::Display for Op {
                 }
                 if !anchor_key.is_empty() {
                     write!(f, ", anchor={anchor_key:?}")?;
+                }
+                if !confidential.is_empty() {
+                    write!(f, ", confidential={confidential:?}")?;
                 }
                 write!(f, ")")
             }
@@ -739,12 +753,14 @@ mod tests {
             relation: "p".into(),
             is_base: true,
             anchor_key: vec![],
+            confidential: Vec::new(),
         };
         assert_eq!(bare.derive_key(&[]), None);
         let indexed = Op::Source {
             relation: "p".into(),
             is_base: true,
             anchor_key: vec![0, 1],
+            confidential: Vec::new(),
         };
         assert_eq!(indexed.derive_key(&[]), Some(vec![0, 1]));
     }
@@ -819,7 +835,8 @@ mod tests {
             Op::Source {
                 relation: "p".into(),
                 is_base: true,
-                anchor_key: vec![]
+                anchor_key: vec![],
+                confidential: Vec::new(),
             }
             .arity(),
             0

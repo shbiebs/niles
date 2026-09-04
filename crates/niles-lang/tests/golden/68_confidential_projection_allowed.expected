@@ -1,0 +1,6 @@
+# 68_confidential_projection_allowed
+# The one legal use, kept beside the refusals so that closing the hole cannot be mistaken for
+# forbidding the column outright: carrying a sealed value through to the caller is exactly what
+# end-to-end encryption is for. The engine moves the bytes and never looks inside them.
+1 700 x1
+2 800 x1

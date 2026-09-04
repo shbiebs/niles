@@ -1,0 +1,5 @@
+# 67_confidential_sql_group_refused
+# Grouping is an equality test, and equality is a computation. This passed `nilesc check`
+# with `ok` and lowered to `aggregate(by=[1], count)` — the engine grouping rows by a column
+# the schema declares it cannot read.
+REFUSED NL0260

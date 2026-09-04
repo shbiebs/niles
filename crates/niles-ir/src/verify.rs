@@ -20,7 +20,7 @@
 //! would otherwise reach the engine and panic somewhere less informative.
 
 use crate::circuit::{Anchor, Circuit, NodeId};
-use crate::operator::{JoinKind, Op};
+use crate::operator::{ColIdx, JoinKind, Op, Scalar};
 use crate::upquery_path;
 use crate::{Consistency, Materialize, Retention};
 use std::fmt;
@@ -307,6 +307,11 @@ pub fn verify(c: &Circuit) -> VerifyReport {
         }
     }
 
+    // ---- confidentiality (IR022) ----
+    for v in confidential_use(c) {
+        r.violations.push(v);
+    }
+
     // ---- the accessed-field audit ----
     // Runs last, because the checks above are what read the fields. If the verifier itself
     // stopped reading one, this would catch that too.
@@ -320,6 +325,200 @@ pub fn verify(c: &Circuit) -> VerifyReport {
     }
 
     r
+}
+
+/// **A circuit may not compute on a column the schema sealed.**
+///
+/// The rule the type checker enforces, enforced again here on the artefact the engine
+/// actually runs — because for two years it was enforced on *one of two surfaces*:
+/// `postings.where(|p| p.legal_name == x)` was refused and `select … where legal_name = 'x'`
+/// compiled, so the one static confidentiality guarantee the design makes was false on the
+/// surface every wire client uses. A guarantee that lives in a single checker is a guarantee
+/// with a single point of silent failure, and this is the second.
+///
+/// Confidentiality is propagated through the circuit rather than read only at the source: a
+/// `Map` output is sealed if its expression reads a sealed column, an `Aggregate` key column
+/// inherits from the column it groups, and an aggregate's output is sealed if its argument
+/// was — so laundering a sealed value through a projection and then filtering on it is
+/// refused too. Carrying a sealed value to the output is the one legal use; every predicate,
+/// key, join key and aggregate argument is a violation.
+fn confidential_use(c: &Circuit) -> Vec<Violation> {
+    use std::collections::BTreeMap;
+    let mut sealed: BTreeMap<NodeId, Vec<bool>> = BTreeMap::new();
+    let mut out = Vec::new();
+
+    // Nodes are in dependency order except through `Delay`, which the structural rules above
+    // already police, so one forward pass suffices.
+    for n in &c.nodes {
+        let input_sealed = |m: &BTreeMap<NodeId, Vec<bool>>, k: usize| -> Vec<bool> {
+            n.inputs
+                .get(k)
+                .and_then(|i| m.get(i))
+                .cloned()
+                .unwrap_or_default()
+        };
+        let reads_sealed = |sc: &Scalar, cols: &[bool]| -> bool {
+            let mut hit = false;
+            scalar_columns(sc, &mut |i| {
+                if cols.get(i as usize).copied().unwrap_or(false) {
+                    hit = true;
+                }
+            });
+            hit
+        };
+        let mut violate = |code: &'static str, msg: String| {
+            out.push(Violation {
+                code,
+                node: Some(n.id),
+                msg,
+            })
+        };
+
+        let here: Vec<bool> = match &n.op {
+            Op::Source {
+                confidential,
+                anchor_key: _,
+                ..
+            } => {
+                let width = confidential
+                    .iter()
+                    .map(|i| *i as usize + 1)
+                    .max()
+                    .unwrap_or(0);
+                let mut v = vec![false; width.max(n.arity as usize)];
+                for i in confidential {
+                    if (*i as usize) < v.len() {
+                        v[*i as usize] = true;
+                    }
+                }
+                v
+            }
+            Op::Filter { predicate } => {
+                let cols = input_sealed(&sealed, 0);
+                if reads_sealed(predicate, &cols) {
+                    violate(
+                        "IR022",
+                        "a filter predicate reads a column declared `@confidential`; the \
+                         engine cannot compute on ciphertext, so the filter would either not \
+                         filter or leak through timing"
+                            .into(),
+                    );
+                }
+                cols
+            }
+            Op::Map { exprs } => {
+                let cols = input_sealed(&sealed, 0);
+                exprs.iter().map(|e| reads_sealed(e, &cols)).collect()
+            }
+            Op::Aggregate { group_key, aggs } => {
+                let cols = input_sealed(&sealed, 0);
+                for k in group_key {
+                    if cols.get(*k as usize).copied().unwrap_or(false) {
+                        violate(
+                            "IR022",
+                            format!(
+                                "column {k} is declared `@confidential` and is a grouping key; \
+                                 grouping is an equality test the engine cannot perform on a \
+                                 value it cannot read"
+                            ),
+                        );
+                    }
+                }
+                let mut v: Vec<bool> = group_key
+                    .iter()
+                    .map(|k| cols.get(*k as usize).copied().unwrap_or(false))
+                    .collect();
+                for (_, arg) in aggs {
+                    if reads_sealed(arg, &cols) {
+                        violate(
+                            "IR022",
+                            "an aggregate's argument reads a column declared `@confidential`"
+                                .into(),
+                        );
+                    }
+                    v.push(false);
+                }
+                v
+            }
+            Op::Index { key } => {
+                let cols = input_sealed(&sealed, 0);
+                for k in key {
+                    if cols.get(*k as usize).copied().unwrap_or(false) {
+                        violate(
+                            "IR022",
+                            format!("column {k} is declared `@confidential` and is an index key"),
+                        );
+                    }
+                }
+                cols
+            }
+            Op::OrderBy { keys } => {
+                let cols = input_sealed(&sealed, 0);
+                for (k, _) in keys {
+                    if cols.get(*k as usize).copied().unwrap_or(false) {
+                        violate(
+                            "IR022",
+                            format!(
+                                "column {k} is declared `@confidential` and is an ordering key; \
+                                 an order over ciphertext is an order over nothing the reader \
+                                 asked for"
+                            ),
+                        );
+                    }
+                }
+                cols
+            }
+            Op::Join {
+                left_key,
+                right_key,
+                residual,
+                ..
+            } => {
+                let l = input_sealed(&sealed, 0);
+                let rgt = input_sealed(&sealed, 1);
+                for k in left_key {
+                    if l.get(*k as usize).copied().unwrap_or(false) {
+                        violate("IR022", format!("left join key {k} is `@confidential`"));
+                    }
+                }
+                for k in right_key {
+                    if rgt.get(*k as usize).copied().unwrap_or(false) {
+                        violate("IR022", format!("right join key {k} is `@confidential`"));
+                    }
+                }
+                let mut both = l.clone();
+                both.extend(rgt.iter().copied());
+                if let Some(res) = residual {
+                    if reads_sealed(res, &both) {
+                        violate(
+                            "IR022",
+                            "a join's residual predicate reads a `@confidential` column".into(),
+                        );
+                    }
+                }
+                both
+            }
+            // Everything else passes its input's sealing through unchanged: these operators
+            // move rows, they do not read columns.
+            _ => input_sealed(&sealed, 0),
+        };
+        sealed.insert(n.id, here);
+    }
+    out
+}
+
+/// Every column index a scalar reads.
+fn scalar_columns(s: &Scalar, f: &mut impl FnMut(ColIdx)) {
+    match s {
+        Scalar::Column(i) => f(*i),
+        Scalar::Binary { lhs, rhs, .. } => {
+            scalar_columns(lhs, f);
+            scalar_columns(rhs, f);
+        }
+        Scalar::IsNull(x) | Scalar::Not(x) | Scalar::Neg(x) => scalar_columns(x, f),
+        Scalar::Udf { args, .. } => args.iter().for_each(|a| scalar_columns(a, f)),
+        _ => {}
+    }
 }
 
 /// **Operators the circuit contains and the evaluator cannot evaluate.**
@@ -347,6 +546,141 @@ pub fn unevaluable(c: &Circuit, implemented: impl Fn(&Op) -> bool) -> Vec<Violat
             ),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod confidentiality {
+    use super::*;
+    use crate::circuit::Circuit;
+    use crate::operator::{Agg, Scalar};
+    use crate::{Consistency, Materialize, Retention, ServeContract};
+
+    fn contract() -> ServeContract {
+        ServeContract {
+            consistency: Consistency::Snapshot,
+            materialize: Materialize::Auto,
+            retain: Retention::Forever,
+            lineage: crate::Lineage::Key,
+        }
+    }
+
+    /// A source with column 1 sealed, and `f` applied to it.
+    fn circuit_with(op: Op) -> Circuit {
+        let mut c = Circuit::new();
+        let src = c.add(
+            Op::Source {
+                relation: "p".into(),
+                is_base: true,
+                anchor_key: vec![],
+                confidential: vec![1],
+            },
+            vec![],
+            contract(),
+            "p",
+        );
+        let n = c.add(op, vec![src], contract(), "under test");
+        c.outputs.insert("v".into(), n);
+        c
+    }
+
+    fn codes(c: &Circuit) -> Vec<&'static str> {
+        super::confidential_use(c)
+            .into_iter()
+            .map(|v| v.code)
+            .collect()
+    }
+
+    /// **The rule the type checker enforces, enforced again on the circuit.**
+    ///
+    /// Written against hand-built circuits rather than through the compiler on purpose: the
+    /// point of this rule is that it holds for a circuit *whatever produced it*, including
+    /// one an optimizer rewrote or a future surface emitted. A guarantee that only holds for
+    /// circuits the current front end happens to build is not a guarantee about the engine.
+    #[test]
+    fn a_circuit_may_not_compute_on_a_sealed_column() {
+        assert_eq!(
+            codes(&circuit_with(Op::Filter {
+                predicate: Scalar::Binary {
+                    op: crate::operator::ScalarOp::Eq,
+                    lhs: Box::new(Scalar::Column(1)),
+                    rhs: Box::new(Scalar::LitInt(1)),
+                },
+            })),
+            vec!["IR022"],
+            "a predicate over a sealed column"
+        );
+        assert_eq!(
+            codes(&circuit_with(Op::Aggregate {
+                group_key: vec![1],
+                aggs: vec![(Agg::Count, Scalar::Column(0))],
+            })),
+            vec!["IR022"],
+            "a sealed grouping key"
+        );
+        assert_eq!(
+            codes(&circuit_with(Op::Aggregate {
+                group_key: vec![0],
+                aggs: vec![(Agg::Sum, Scalar::Column(1))],
+            })),
+            vec!["IR022"],
+            "a sealed aggregate argument"
+        );
+        assert_eq!(
+            codes(&circuit_with(Op::OrderBy {
+                keys: vec![(1, true)],
+            })),
+            vec!["IR022"],
+            "a sealed ordering key"
+        );
+        assert!(
+            codes(&circuit_with(Op::Map {
+                exprs: vec![Scalar::Column(0), Scalar::Column(1)],
+            }))
+            .is_empty(),
+            "carrying a sealed value to the output is the one legal use"
+        );
+    }
+
+    /// Laundering: project the sealed column through a `Map`, then filter on the copy.
+    /// Refused, because confidentiality propagates with the value rather than staying on the
+    /// column index it started at.
+    #[test]
+    fn a_sealed_value_does_not_become_readable_by_being_projected() {
+        let mut c = Circuit::new();
+        let src = c.add(
+            Op::Source {
+                relation: "p".into(),
+                is_base: true,
+                anchor_key: vec![],
+                confidential: vec![1],
+            },
+            vec![],
+            contract(),
+            "p",
+        );
+        let m = c.add(
+            Op::Map {
+                exprs: vec![Scalar::Column(1)],
+            },
+            vec![src],
+            contract(),
+            "launder",
+        );
+        let f = c.add(
+            Op::Filter {
+                predicate: Scalar::Binary {
+                    op: crate::operator::ScalarOp::Eq,
+                    lhs: Box::new(Scalar::Column(0)),
+                    rhs: Box::new(Scalar::LitInt(1)),
+                },
+            },
+            vec![m],
+            contract(),
+            "filter",
+        );
+        c.outputs.insert("v".into(), f);
+        assert_eq!(codes(&c), vec!["IR022"]);
+    }
 }
 
 #[cfg(test)]
@@ -408,6 +742,7 @@ mod tests {
                 relation: "postings".into(),
                 is_base: true,
                 anchor_key: vec![0, 1],
+                confidential: Vec::new(),
             },
             vec![],
             contract(
@@ -451,6 +786,7 @@ mod tests {
                 relation: "postings".into(),
                 is_base: true,
                 anchor_key: vec![0],
+                confidential: Vec::new(),
             },
             vec![],
             contract(
@@ -476,6 +812,7 @@ mod tests {
                 relation: "postings".into(),
                 is_base: true,
                 anchor_key: vec![0],
+                confidential: Vec::new(),
             },
             vec![],
             contract(
@@ -502,6 +839,7 @@ mod tests {
                 relation: "staging".into(),
                 is_base: false,
                 anchor_key: vec![0],
+                confidential: Vec::new(),
             },
             vec![],
             contract(
@@ -545,6 +883,7 @@ mod tests {
                 relation: "p".into(),
                 is_base: true,
                 anchor_key: vec![0],
+                confidential: Vec::new(),
             },
             vec![],
             contract(

@@ -23,7 +23,7 @@ schema std_bank {
     table accounts {
         id: Id<Account> primary key,
         product: Text,
-        owner: Text @confidential(e2ee),
+        owner: Text @confidential(e2ee, subject = id),
         opened_at: Instant,
         closed_at: Instant,
     }

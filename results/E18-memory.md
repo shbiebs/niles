@@ -10,7 +10,7 @@ The tool lives outside the workspace. `GlobalAlloc` cannot be implemented withou
 
 | Scenario | Unit | Ops | Allocations | per op | Bytes | per op | Live | Peak |
 |---|---|--:|--:|--:|--:|--:|--:|--:|
-| `ledger_seeded` | posting | 40000 | 150251 | 3.8 | 21132989 | 528 | 8428139 | 9492956 |
+| `ledger_seeded` | posting | 40000 | 150254 | 3.8 | 21133237 | 528 | 8428171 | 9492956 |
 | `zset_base_at` | row | 40000 | 46665 | 1.2 | 9583856 | 240 | 9583856 | 9583856 |
 | `served_group_by_cur` | query | 3 | 39 | 13.0 | 5454 | 1818 | 0 | 1664 |
 | `served_group_by_acct` | query | 3 | 37806 | 12602.0 | 11387166 | 3795722 | 0 | 2841312 |

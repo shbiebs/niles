@@ -311,6 +311,14 @@ impl crate::session::Serving for RevEngine {
         //
         // The condition is `serve_path`'s, so `explain` and the engine cannot describe
         // different engines: one function decides, and both read it.
+        // **A report first**, because a fully maintained view answers one without touching
+        // the base at all. Refused for every shape that is not one — see `report_from_view`.
+        if let Some(p) = planned.as_ref() {
+            if let Some(rows) = self.report_from_view(p, circuit, output, anchor) {
+                self.served += 1;
+                return Ok(rows);
+            }
+        }
         let sole = planned
             .as_ref()
             .and_then(|p| p.sole_account_filter(ACCT_COL));
@@ -496,6 +504,91 @@ impl RevEngine {
     pub fn with_durable(mut self, path: impl AsRef<std::path::Path>) -> std::io::Result<Self> {
         self.durable = Some(DurableSink::open(path)?);
         Ok(self)
+    }
+
+    /// **A whole report, out of a fully maintained view.**
+    ///
+    /// The other end of the trade `answer_from_view` is one end of. That answers one key from
+    /// partial state; this answers *every* key from state that has been maintained through
+    /// every append since it was installed, so a report over ten thousand accounts touches no
+    /// base rows at all.
+    ///
+    /// `None` — meaning "fold the base" — whenever any condition of that claim fails, and
+    /// each of them is a way the answer could otherwise be wrong rather than slow:
+    ///
+    /// * **The view must be full.** A partial view's resident entries are the accounts that
+    ///   happen to be in memory. Serving those as "every account's balance" is a different
+    ///   question presented as the one that was asked, and it is the single most dangerous
+    ///   thing this file could do.
+    /// * **There must be no restriction.** A filtered query is a point read, and
+    ///   `answer_from_view` is its path.
+    /// * **The shape must match** — `group by acct` or `group by acct, cur` summing `amt`,
+    ///   with the aggregate as the output. Anything above it is evaluated by the reference
+    ///   from a folded value, and this path does not produce one.
+    /// * **One currency**, for the `group by acct` spelling, for the reason
+    ///   `answer_from_view` gives: a server that picked a currency for the caller would make
+    ///   the per-currency conservation rule invisible from outside.
+    /// * **The anchor must be the one the view is true at.** A report is a set of rows true
+    ///   at one moment; serving it at another would answer as of a moment nobody asked about.
+    fn report_from_view(
+        &mut self,
+        p: &crate::scan_fold::FoldPlan,
+        circuit: &niles_ir::circuit::Circuit,
+        output: &str,
+        anchor: u64,
+    ) -> Option<crate::session::Rows> {
+        use niles_ir::operator::{Agg, Scalar};
+        use niles_ir::value::Value;
+        const ACCT: u16 = 1;
+        const CUR: u16 = 2;
+        const AMT: u16 = 3;
+
+        if circuit.outputs.get(output) != Some(&p.node) || !p.steps_are_empty() {
+            return None;
+        }
+        if p.aggs() != [(Agg::Sum, Scalar::Column(AMT))] {
+            return None;
+        }
+        let with_currency = match p.group_key() {
+            [ACCT] => false,
+            [ACCT, CUR] => true,
+            _ => return None,
+        };
+        if !with_currency && self.currencies.len() != 1 {
+            return None;
+        }
+        let rt = self.runtime.as_ref()?;
+        let view = rt.view(BALANCE_VIEW)?;
+        if !view.is_full() || view.applied_through() != anchor {
+            return None;
+        }
+
+        let mut columns: Vec<String> = (0..p.width()).map(|i| format!("c{i}")).collect();
+        columns.push("anchor".into());
+
+        // Built straight into the Z-set the framer streams, in key order — which is Z-set
+        // order, so this is a bulk build and not ten thousand tree insertions. No
+        // intermediate row vector, and no base row read.
+        let mut rows: Vec<(Vec<Value>, i128)> = Vec::with_capacity(view.resident_count() as usize);
+        for (key, value, _at) in view.iter_resident() {
+            let (Some(acct), Some(cur)) = (key.first(), key.get(1)) else {
+                return None;
+            };
+            let mut row = vec![Value::Int(*acct as i128)];
+            if with_currency {
+                row.push(Value::Int(*cur as i128));
+            }
+            row.push(Value::Int(value));
+            rows.push((row, 1));
+        }
+
+        Some(crate::session::Rows {
+            columns,
+            rows: crate::session::RowSource::Evaluated {
+                z: rows.into_iter().collect(),
+                anchor,
+            },
+        })
     }
 
     /// **One account's balance, out of the maintained REV** — or `None`, meaning this query
@@ -864,8 +957,15 @@ fn account_predicate(circuit: &niles_ir::circuit::Circuit) -> Option<u64> {
 /// answers something else.
 fn install_balance_view(budget: usize) -> Option<nilestream_core::rev::Runtime> {
     const BALANCE: &str = "select acct, cur, sum(amt) from postings group by acct, cur";
+    // **The contract is what decides whether this view holds everything.** `full` makes the
+    // runtime install a key on its first delta rather than waiting for a read, which is what
+    // "every account's balance" needs and what `auto` does not give: a view with no budget
+    // that has never been read holds nothing, and a report over it would return the empty
+    // set. The budget sentinel is how the caller asks, and the contract is how the runtime is
+    // told — the two must agree or `is_full` refuses and the fold answers.
+    let materialize = if budget == usize::MAX { "full" } else { "auto" };
     let program = format!(
-        "{}\nview {BALANCE_VIEW} = sql {{ {BALANCE} }} serve {{ consistency: snapshot, materialize: auto }};\n",
+        "{}\nview {BALANCE_VIEW} = sql {{ {BALANCE} }} serve {{ consistency: snapshot, materialize: {materialize} }};\n",
         crate::daemon::DEFAULT_SCHEMA
     );
     let (prog, d) = niles_lang::parser::parse_program(&program);
@@ -882,7 +982,11 @@ fn install_balance_view(budget: usize) -> Option<nilestream_core::rev::Runtime> 
     }
     nilestream_core::rev::Runtime::install(
         lowered.circuit,
-        Some(budget as u64),
+        // `usize::MAX` is the harness's way of asking for a view that never evicts, which is
+        // what a *report* needs: a partial view's resident subset is the accounts that happen
+        // to be in memory, not every account, and answering "every balance" from it would be
+        // answering a different question.
+        (budget != usize::MAX).then_some(budget as u64),
         nilestream_core::rev::Policy::Lru,
     )
     .ok()
@@ -1255,6 +1359,86 @@ mod tests {
         }
     }
 
+    /// **A warm report touches no base rows, and that is counted rather than timed.**
+    ///
+    /// The claim T-33 exists to make testable: a view maintained through every append already
+    /// holds the answer, so producing it reads nothing. A timing would be flaky and would not
+    /// say *why* it was fast; `rows_touched` says exactly which path served the query.
+    #[test]
+    fn a_warm_report_is_served_by_the_maintained_view() {
+        use crate::session::Serving;
+        // A budget of `usize::MAX` is the ask for a view that never evicts. Without that the
+        // view is partial and a report must not come from it — see the case below.
+        let mut e = RevEngine::seeded(200, 2, usize::MAX, ViewMode::Demand, EvictionPolicy::Lru);
+        let anchor = e.frontier();
+        let lowered = compile("select acct, sum(amt) from postings group by acct");
+
+        let before = e.read_stats().3;
+        let served = e
+            .query(&lowered.circuit, "__wire_result", anchor)
+            .expect("answers");
+        let touched = e.read_stats().3 - before;
+
+        assert_eq!(
+            touched, 0,
+            "a warm report read {touched} base rows; the maintained view is supposed to hold \
+             the answer already, and a report that folds is the cold path wearing the warm \
+             path's name"
+        );
+
+        // And it is the *right* answer, judged by the reference evaluator over the base —
+        // fast and wrong is the only outcome worse than slow.
+        let sources = e.base_at(anchor);
+        let (oracle, _) = niles_ir::eval::try_run(&lowered.circuit, "__wire_result", &sources)
+            .expect("the reference answers");
+        assert_eq!(
+            served.text(),
+            rendered(&oracle, anchor),
+            "the maintained view and the base disagree about every account's balance"
+        );
+        assert!(served.len() > 100, "and it is a report, not a row");
+    }
+
+    /// **A partial view never serves a report.**
+    ///
+    /// Its resident entries are the accounts that happen to be in memory. Serving those as
+    /// "every account's balance" would be answering a different question in the shape of the
+    /// one that was asked — the single most dangerous thing the engine could do with partial
+    /// state, and the reason `is_full` exists.
+    #[test]
+    fn a_partial_view_never_serves_a_report() {
+        use crate::session::Serving;
+        // A budget well below the key count, so the view evicts and is never full.
+        let mut e = RevEngine::seeded(200, 2, 20, ViewMode::Demand, EvictionPolicy::Lru);
+        let anchor = e.frontier();
+
+        // Warm it, so it has resident entries a careless report would happily return.
+        let point = compile("select acct, sum(amt) from postings where acct = 7 group by acct");
+        for _ in 0..30 {
+            let _ = e.query(&point.circuit, "__wire_result", anchor);
+        }
+
+        let lowered = compile("select acct, sum(amt) from postings group by acct");
+        let before = e.read_stats().3;
+        let served = e
+            .query(&lowered.circuit, "__wire_result", anchor)
+            .expect("answers");
+        let touched = e.read_stats().3 - before;
+
+        assert!(
+            touched > 0,
+            "a report over a partial view was answered without reading the base, which means \
+             it was answered from whichever accounts were resident"
+        );
+        let sources = e.base_at(anchor);
+        let (oracle, _) = niles_ir::eval::try_run(&lowered.circuit, "__wire_result", &sources)
+            .expect("the reference answers");
+        assert_eq!(
+            served.text(),
+            rendered(&oracle, anchor),
+            "and it is still every account, folded from the base"
+        );
+    }
     /// A `sum` over no non-null rows is **null**, and the fold must say so too.
     ///
     /// Called out separately because it is the one place a one-pass accumulator most easily

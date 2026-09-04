@@ -150,6 +150,16 @@ pub struct Rev {
     policy: Policy,
     /// The epoch through which deltas have been applied to this view as a whole.
     applied: Epoch,
+    /// The next epoch this view has yet to see.
+    ///
+    /// Separate from `applied` because **epoch 0 is a real record**, and a single field
+    /// cannot say whether `applied == 0` means "through epoch zero" or "nothing yet".
+    /// `advance` computed its range as `applied + 1 ..= e`, so the very first call —
+    /// `advance(base, 0)` — iterated `1..=0`, which is empty: the ledger's first transaction
+    /// was never folded into any view. It was invisible while nothing was resident, because
+    /// a demand view's first read reconstructs from the base and picks the epoch up on the
+    /// way; it became a wrong answer the moment a view was asked to hold everything.
+    next_to_apply: Epoch,
     /// Keys whose resident entry is **not** certified through `applied`, because it was
     /// installed at an anchor below the frontier the view had already applied. Such an
     /// entry has not seen the deltas between its own anchor and `applied`, so it may
@@ -312,6 +322,22 @@ impl Rev {
                     *stamp = e;
                     self.stats.deltas_applied += 1;
                 }
+                // **A view that materialises everything installs the key.** Under
+                // `Materialize::Full` there is no budget and nothing is ever evicted, so a
+                // key that is not resident is one this view has not seen before — and a
+                // full view is exactly the promise that it will hold every key. Installing
+                // it here is what makes the view's contents *every* key rather than every
+                // key somebody happened to read, which is the difference between a report
+                // and a sample of one.
+                //
+                // Sound because a key's first delta is its whole value: the base is
+                // append-only and this runtime sees every epoch in order, so there is no
+                // earlier history for the new entry to be missing.
+                None if self.mode == Materialize::Full => {
+                    self.slots.insert(key, Slot::Present(delta, e));
+                    self.resident += 1;
+                    self.stats.deltas_applied += 1;
+                }
                 // Not resident: the delta is skipped, and correctly so. The entry's hole
                 // still carries its old version, so a later read reconstructs from the
                 // base and picks this delta up along the way. This is the saving.
@@ -332,6 +358,62 @@ impl Rev {
 
     pub fn slot(&self, key: &Key) -> Slot<Value> {
         self.slots.get(key).cloned().unwrap_or(Slot::Bottom)
+    }
+
+    /// Whether this view holds **every** key the base has ever had a delta for.
+    ///
+    /// Three conditions, and the first is the one a careless version would leave out.
+    /// `Materialize::Full` is what makes `apply_epoch` *install* a key it has not seen
+    /// rather than skip it; without that a view with no budget still holds only what
+    /// somebody has read, and a report over it would return whichever accounts happened to
+    /// be warm. A test found that, not a reading of this file.
+    ///
+    /// The precondition for serving a *report* from the view rather than from the base. A
+    /// partial view's resident subset is not an answer to "every account's balance": it is
+    /// the accounts that happen to be in memory, which is a different question and one
+    /// nobody asked. A report over a partial view is answered by folding the base, and the
+    /// benchmark row says which path served it.
+    pub fn is_full(&self) -> bool {
+        self.mode == Materialize::Full && self.budget.is_none() && self.stats.evictions == 0
+    }
+
+    /// Every resident entry, in key order, with the epoch each is true at.
+    ///
+    /// **The whole view, by iteration** — what a report needs and what nothing could ask for
+    /// before. `read` answers one key and is the mechanism the phase diagram is about;
+    /// this is the other end of the same trade, where the view has been maintained through
+    /// every append and the answer is already there.
+    ///
+    /// Only `Present` entries are yielded. A `Hole` is an evicted value whose version is
+    /// kept, and including it — or its version without its value — would be inventing a
+    /// number; a caller wanting a report over a view with holes must fold the base instead,
+    /// which is what [`is_full`](Self::is_full) is for.
+    ///
+    /// The effective anchor of an entry is the later of its own stamp and the view-wide
+    /// `applied` epoch, for entries that are not pinned — the same inheritance rule `read`
+    /// uses, and stated once here rather than twice, because two copies of that rule would
+    /// disagree the first time either changed.
+    pub fn iter_resident(&self) -> impl Iterator<Item = (&Key, Value, Epoch)> + '_ {
+        self.slots.iter().filter_map(move |(k, s)| match s {
+            Slot::Present(v, stamp) => {
+                let anchor = if self.pinned.contains(k) {
+                    *stamp
+                } else {
+                    (*stamp).max(self.applied)
+                };
+                Some((k, *v, anchor))
+            }
+            _ => None,
+        })
+    }
+
+    /// The epoch through which this view as a whole has had deltas applied.
+    ///
+    /// A report's rows are all true at one moment, and this is that moment. A report that
+    /// stamped each row with its own entry's anchor would be a set of answers to different
+    /// questions presented as one table.
+    pub fn applied_through(&self) -> Epoch {
+        self.applied
     }
 }
 
@@ -450,6 +532,7 @@ impl Runtime {
                 budget: effective_budget,
                 policy,
                 applied: 0,
+                next_to_apply: 0,
                 pinned: BTreeSet::new(),
                 reads_of: BTreeMap::new(),
                 clock: 0,
@@ -496,10 +579,10 @@ impl Runtime {
                 // Applying only `e` would leave the view certified through `e` while
                 // the `stride - 1` epochs before it had never been folded into anyone,
                 // which is a wrong answer rather than a stale one.
-                let from = v.applied.saturating_add(1);
-                for epoch in from..=e {
+                for epoch in v.next_to_apply..=e {
                     v.apply_epoch(base, epoch);
                 }
+                v.next_to_apply = e.saturating_add(1);
                 v.stats.maintenance_passes += 1;
             } else {
                 // Still accrue the memory integral: the entries are resident whether or

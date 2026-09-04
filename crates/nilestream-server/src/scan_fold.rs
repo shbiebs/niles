@@ -100,6 +100,15 @@ impl FoldPlan<'_> {
     /// The question a caller asks before answering from a maintained view instead of the
     /// base: a `Map` between the source and the aggregate changes what is being aggregated,
     /// so a view maintained over the unmapped rows is not an answer to this query.
+    /// Whether the chain from the base is empty: no filter, no map, the whole relation.
+    ///
+    /// What a *report* is, as opposed to a point read. A restricted query is answered by
+    /// `answer_from_view`; an unrestricted one over a fully maintained view is answered by
+    /// iterating it.
+    pub fn steps_are_empty(&self) -> bool {
+        self.steps.is_empty()
+    }
+
     pub fn filters_only(&self) -> bool {
         self.steps.iter().all(|s| matches!(s, Step::Filter(_)))
     }

@@ -6,6 +6,8 @@ served_group_by_acct,query,3,37806,11387166,0,2841312,12602.0,3795722.0
 served_top_ten,query,3,37884,14536794,0,2841312,12628.0,4845598.0
 served_sum_negative,query,3,36,5568,0,1728,12.0,1856.0
 served_point,query,200,2400,190800,0,826,12.0,954.0
+wire_reply_10k,reply,5,5,348160,0,69632,1.0,69632.0
+wire_reply_100k,reply,5,5,348160,0,69632,1.0,69632.0
 served_point_conjunct,query,200,3000,427600,0,1792,15.0,2138.0
 served_having_on_key,query,200,4200,635600,0,1856,21.0,3178.0
 rev_read_hit,read,1000,2000,32000,0,16,2.0,32.0

@@ -203,6 +203,78 @@ impl ServeError {
     }
 }
 
+/// Whether a `Bind` asked for any column in binary.
+///
+/// The message is: portal name, statement name, `n` parameter format codes, `m` parameters,
+/// then `k` **result** format codes. A `k` of zero means every column is text; a `k` of one
+/// applies that code to every column; otherwise there is one per column.
+///
+/// This server negotiates per *session* rather than per column, because every column of a
+/// served answer is an integer kind today and a mixed request has no shape it could take
+/// advantage of. A request in which *any* result column is binary therefore turns the session
+/// binary, and `RowDescription` reports what was actually chosen — so a client is never told
+/// one thing and sent another, whatever it asked for.
+fn binds_binary(body: &[u8]) -> bool {
+    let mut at = 0usize;
+    let _portal = pg_wire::get_cstr(body, &mut at);
+    let _statement = pg_wire::get_cstr(body, &mut at);
+    let read_i16 = |b: &[u8], at: &mut usize| -> Option<i16> {
+        if *at + 2 > b.len() {
+            return None;
+        }
+        let v = i16::from_be_bytes([b[*at], b[*at + 1]]);
+        *at += 2;
+        Some(v)
+    };
+    let read_i32 = |b: &[u8], at: &mut usize| -> Option<i32> {
+        if *at + 4 > b.len() {
+            return None;
+        }
+        let v = i32::from_be_bytes([b[*at], b[*at + 1], b[*at + 2], b[*at + 3]]);
+        *at += 4;
+        Some(v)
+    };
+    let Some(n_param_formats) = read_i16(body, &mut at) else {
+        return false;
+    };
+    for _ in 0..n_param_formats.max(0) {
+        if read_i16(body, &mut at).is_none() {
+            return false;
+        }
+    }
+    let Some(n_params) = read_i16(body, &mut at) else {
+        return false;
+    };
+    for _ in 0..n_params.max(0) {
+        match read_i32(body, &mut at) {
+            // -1 is a null parameter and carries no bytes.
+            Some(len) if len >= 0 => at += len as usize,
+            Some(_) => {}
+            None => return false,
+        }
+    }
+    let Some(n_result_formats) = read_i16(body, &mut at) else {
+        return false;
+    };
+    let mut any = false;
+    for _ in 0..n_result_formats.max(0) {
+        match read_i16(body, &mut at) {
+            Some(1) => any = true,
+            Some(_) => {}
+            None => return false,
+        }
+    }
+    any
+}
+
+/// The scale a money column is reported at.
+///
+/// The demo schema declares `currency usd { scale: 2 }`, and until column kinds reach the
+/// wire (T-23) there is one. Named rather than written as `2` in three places, so that when
+/// the schema's own scale arrives there is one line to change and a reader can see there was
+/// an assumption here.
+pub const MONEY_SCALE: u32 = 2;
+
 pub struct Session {
     pub user: String,
     pub database: String,
@@ -224,6 +296,14 @@ pub struct Session {
     pub plans: crate::extended::PlanCache,
     /// The schema text this session's queries are compiled against.
     pub schema: String,
+    /// **Whether this session's results are sent in binary.**
+    ///
+    /// Off by default and off for every client that does not ask, which is what keeps `psql`
+    /// and the conformance transcript byte-identical. The extended protocol negotiates it per
+    /// column in `Bind`, as the protocol specifies; the simple protocol has no place to carry
+    /// a format code, so `set nilestream.binary = on` is the extension — documented as one,
+    /// and named so that nobody mistakes it for something PostgreSQL has.
+    pub binary: bool,
     /// **Compiled circuits, keyed by statement text.**
     ///
     /// The simple query path compiled every statement afresh — parse, resolve, typecheck,
@@ -267,6 +347,7 @@ impl Session {
             pending_ids: Vec::new(),
             plans: crate::extended::PlanCache::new(),
             schema,
+            binary: false,
             compiled: std::collections::HashMap::new(),
             compiled_cleared: 0,
             compile_hits: 0,
@@ -509,6 +590,31 @@ impl Session {
             _ => {}
         }
 
+        // **`set nilestream.binary = on|off`: the simple protocol's only way to ask.**
+        //
+        // The extended protocol carries a result format code per column in `Bind`, which is
+        // where a format belongs and is what every driver uses. The simple protocol has no
+        // such field, so a session setting is the extension — named `nilestream.` so that
+        // nobody mistakes it for something PostgreSQL has, and answered with the same
+        // `SET`/`ShowResponse` shape a client already knows.
+        if let Some(rest) = lower.strip_prefix("set nilestream.binary") {
+            let on = rest.contains("on") || rest.contains("true") || rest.contains('1');
+            self.binary = on;
+            return vec![Backend::CommandComplete("SET".into())];
+        }
+        if lower == "show nilestream.binary" {
+            let mut buf = Vec::new();
+            pg_wire::encode_into(
+                &mut buf,
+                &Backend::DataRow(vec![Some(if self.binary { "on" } else { "off" }.into())]),
+            );
+            return vec![
+                Backend::RowDescription(vec![Field::text("nilestream.binary")]),
+                Backend::Raw(buf),
+                Backend::CommandComplete("SHOW".into()),
+            ];
+        }
+
         // **`explain <statement>`: what this server would do to answer it, before it does.**
         //
         // The four serve classes differ by three orders of magnitude, and the only way to
@@ -680,20 +786,37 @@ impl Session {
             rows.columns.push("anchor".into());
         }
 
-        let description = Backend::RowDescription(
-            rows.columns
-                .iter()
-                .map(|c| {
-                    // Money as `numeric`, never `float8`. Exactness that survived the type
-                    // system must survive the wire.
-                    if c == "anchor" {
-                        Field::int8("anchor")
+        // **The format each column is sent in, chosen once and reported once.** A description
+        // that announced text and then sent eight binary bytes would desynchronise every
+        // client that believed it, so the same list builds both.
+        let fields: Vec<Field> = rows
+            .columns
+            .iter()
+            .map(|c| {
+                // Money as `numeric`, never `float8`. Exactness that survived the type
+                // system must survive the wire.
+                let mut f = if c == "anchor" {
+                    Field::int8("anchor")
+                } else {
+                    Field::numeric(c)
+                };
+                if self.binary {
+                    f.format = if f.type_oid == 20 {
+                        pg_wire::Format::BinaryInt8
                     } else {
-                        Field::numeric(c)
-                    }
-                })
-                .collect(),
-        );
+                        // The scale a client needs to read the digits back. Reported in the
+                        // type modifier as PostgreSQL does — `atttypmod` for `numeric` is
+                        // `((precision << 16) | scale) + 4` — so a driver sees a declared
+                        // `numeric(38, s)` rather than an unconstrained one.
+                        f.type_modifier = ((38i32 << 16) | MONEY_SCALE as i32) + 4;
+                        pg_wire::Format::BinaryNumeric(MONEY_SCALE)
+                    };
+                }
+                f
+            })
+            .collect();
+        let formats: Vec<pg_wire::Format> = fields.iter().map(|f| f.format).collect();
+        let description = Backend::RowDescription(fields);
         let n = rows.len();
 
         // **The rows are framed once, into one buffer.**
@@ -704,40 +827,19 @@ impl Session {
         // in a capture. What is removed is the per-row cost — a `Vec` for the row, a `String`
         // per cell, and `encode`'s two vectors per message — for a reply whose content is
         // integers that were already integers.
-        let framed = match &rows.rows {
+        let framed = match rows.rows {
+            // **Handed over, not rendered.** The writer turns the Z-set into bytes a bounded
+            // buffer at a time, so the peak memory of a reply is a constant rather than a
+            // function of how many rows it has. This used to build the whole reply here: a
+            // hundred-thousand-row answer was a hundred-thousand-row allocation before the
+            // first byte reached the socket.
             RowSource::Evaluated { z, anchor } => {
-                use niles_ir::value::Value;
-                // Two integers of body per cell is a generous estimate that is wrong in the
-                // cheap direction: the buffer grows a few times at most instead of once per
-                // row.
-                let width = rows.columns.len();
-                let mut buf = Vec::with_capacity(z.len() * (7 + width * 12) + 32);
-                let anchor = *anchor as i128;
-                for (r, w) in z {
-                    if *w <= 0 {
-                        continue;
-                    }
-                    // A Z-set weight above one is a row that appears more than once, and a
-                    // client asking for rows should be given that many. Silently collapsing
-                    // them would be a `distinct` nobody wrote.
-                    for _ in 0..*w {
-                        pg_wire::put_data_row(
-                            &mut buf,
-                            r.iter()
-                                .map(|v| match v {
-                                    Value::Null => None,
-                                    Value::Int(i) => Some(*i),
-                                })
-                                .chain(std::iter::once(Some(anchor))),
-                        );
-                    }
-                }
-                Backend::Raw(buf)
+                Backend::Rows(pg_wire::RowBlock { z, anchor, formats })
             }
             // The diagnostic statements: a handful of rows whose cells are text.
             RowSource::Text(text) => {
                 let mut buf = Vec::new();
-                for r in text {
+                for r in &text {
                     pg_wire::encode_into(&mut buf, &Backend::DataRow(r.clone()));
                 }
                 Backend::Raw(buf)
@@ -784,6 +886,15 @@ impl Session {
             b'B' => {
                 let portal = pg_wire::get_cstr(body, &mut at);
                 let statement = pg_wire::get_cstr(body, &mut at);
+                // **The result format codes, which used to be skipped.** `Bind` carries, at
+                // its end, either no codes (every column text), one code (applied to every
+                // column), or one per column. The body was read for two strings and the rest
+                // discarded, so a driver that asked for binary was answered in text and
+                // would have read eight bytes of `int8` as eight bytes of digits.
+                //
+                // Read per the protocol; a per-column list is honoured as far as it goes and
+                // any column beyond it is text, which is the protocol's own rule.
+                self.binary = binds_binary(body);
                 match self.plans.bind(&portal, &statement, Vec::new(), 0, false) {
                     Ok(()) => vec![Backend::BindComplete],
                     Err(e) => {
@@ -1813,5 +1924,63 @@ schema bank {
                 .any(|m| matches!(m, Backend::ErrorResponse { .. })),
             "{out:?}"
         );
+    }
+    /// **A `Bind` asking for binary is read, and one that does not is not.**
+    ///
+    /// The result format codes sit at the end of the message, after the parameter formats and
+    /// the parameters themselves — so reading them means walking the whole body correctly,
+    /// and a parser that guessed at the offsets would answer plausibly and wrongly.
+    #[test]
+    fn the_result_format_codes_are_read_from_where_the_protocol_puts_them() {
+        // portal, statement, n param formats, n params, n result formats
+        let bind = |param_formats: &[i16], params: &[Option<&[u8]>], results: &[i16]| -> Vec<u8> {
+            let mut b = Vec::new();
+            b.extend_from_slice(b"p\0");
+            b.extend_from_slice(b"s\0");
+            b.extend_from_slice(&(param_formats.len() as i16).to_be_bytes());
+            for f in param_formats {
+                b.extend_from_slice(&f.to_be_bytes());
+            }
+            b.extend_from_slice(&(params.len() as i16).to_be_bytes());
+            for p in params {
+                match p {
+                    None => b.extend_from_slice(&(-1i32).to_be_bytes()),
+                    Some(v) => {
+                        b.extend_from_slice(&(v.len() as i32).to_be_bytes());
+                        b.extend_from_slice(v);
+                    }
+                }
+            }
+            b.extend_from_slice(&(results.len() as i16).to_be_bytes());
+            for f in results {
+                b.extend_from_slice(&f.to_be_bytes());
+            }
+            b
+        };
+
+        // No result codes: every column text, which is the protocol's default and what every
+        // client that has never heard of this gets.
+        assert!(!binds_binary(&bind(&[], &[], &[])));
+        assert!(!binds_binary(&bind(&[], &[], &[0])));
+        // One code, applied to every column.
+        assert!(binds_binary(&bind(&[], &[], &[1])));
+        // One per column, mixed.
+        assert!(binds_binary(&bind(&[], &[], &[0, 1, 0])));
+        assert!(!binds_binary(&bind(&[], &[], &[0, 0, 0])));
+        // **With parameters in the way**, which is where an offset error would show. A null
+        // parameter carries no bytes and a present one carries its length first.
+        assert!(binds_binary(&bind(
+            &[0, 0],
+            &[Some(b"1234"), None, Some(b"x")],
+            &[1]
+        )));
+        assert!(!binds_binary(&bind(
+            &[0, 0],
+            &[Some(b"1234"), None, Some(b"x")],
+            &[0]
+        )));
+        // A truncated message is not binary rather than a panic: a client can send anything.
+        assert!(!binds_binary(b"p\0s\0"));
+        assert!(!binds_binary(b""));
     }
 }

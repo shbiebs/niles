@@ -233,6 +233,71 @@ pub fn served_having_on_key() -> Row {
     )
 }
 
+/// **What writing a reply costs, at two sizes an order of magnitude apart.**
+///
+/// The claim T-32 makes is that a reply's peak memory is a constant. That is a claim about
+/// *writing*, not about evaluating, so these measure the write: the engine's answer is
+/// produced once, outside the counted region, and what is counted is turning it into bytes on
+/// a socket.
+///
+/// Two sizes, because a constant is only visibly a constant against something that grew. The
+/// Z-set the block borrows stays O(groups) — it is the fold's own per-group accumulator, and
+/// PostgreSQL's hash aggregate holds one too — so what these compare is the envelope around
+/// it.
+fn wire_write(scenario: &'static str, rows: i128, reps: u64) -> Row {
+    use nilestream_server::pg_wire::{self, Backend, Format, RowBlock};
+
+    let mut z = niles_ir::eval::ZSet::new();
+    for i in 0..rows {
+        z.insert(
+            vec![
+                niles_ir::value::Value::Int(i),
+                niles_ir::value::Value::Int(i * 7),
+            ],
+            1,
+        );
+    }
+    let block = Backend::Rows(RowBlock {
+        z,
+        anchor: 4_200,
+        formats: vec![Format::Text; 3],
+    });
+    // A sink that keeps nothing: what is being measured is what the *writer* holds, and a
+    // buffer that grew to hold the whole reply would be measuring the test's own `Vec`.
+    struct Discard;
+    impl std::io::Write for Discard {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            std::hint::black_box(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let _ = pg_wire::write_all(&mut Discard, std::slice::from_ref(&block));
+    let (_, counted) = count(|| {
+        for _ in 0..reps {
+            pg_wire::write_all(&mut Discard, std::slice::from_ref(&block)).expect("writes");
+        }
+    });
+    Row {
+        scenario,
+        unit: "reply",
+        operations: reps,
+        counted,
+    }
+}
+
+/// Ten thousand rows on the wire: the shape E16's `group_by_acct` sends.
+pub fn wire_reply_10k() -> Row {
+    wire_write("wire_reply_10k", 10_000, 5)
+}
+
+/// A hundred thousand rows, ten times the answer. **Peak must not follow it.**
+pub fn wire_reply_100k() -> Row {
+    wire_write("wire_reply_100k", 100_000, 5)
+}
+
 /// **The REV runtime's hit path** — the mechanism the thesis is about, which the wire path
 /// does not yet use. Measured so that the difference between the two is a number.
 pub fn rev_read_hit() -> Row {
@@ -388,6 +453,8 @@ pub fn all() -> Vec<Row> {
         served_top_ten(),
         served_sum_negative(),
         served_point(),
+        wire_reply_10k(),
+        wire_reply_100k(),
         served_point_conjunct(),
         served_having_on_key(),
         rev_read_hit(),

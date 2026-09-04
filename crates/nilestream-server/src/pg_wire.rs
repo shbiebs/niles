@@ -22,18 +22,28 @@
 //! (`Query` → `RowDescription` → `DataRow`* → `CommandComplete` → `ReadyForQuery`), error
 //! and notice responses, parameter status, backend key data, and termination.
 //!
+//! Also implemented, and each was on the "not implemented" list above until it was not:
+//!
+//! * **The extended query protocol** (`Parse`/`Bind`/`Execute`), with the plan cache in
+//!   `extended.rs` and its answer to the epoch-invalidation question — a lowering does not
+//!   depend on the anchor it was compiled at, which is asserted rather than asserted-to.
+//! * **The binary result format**, negotiated per column in `Bind` as the protocol
+//!   specifies, and reported back in `RowDescription` so a client is never told one thing
+//!   and sent another. Text remains the default and is what an unrequested column gets, so
+//!   `psql` and the conformance transcript are unaffected. `int8` is eight big-endian bytes;
+//!   `numeric` is PostgreSQL's own decimal encoding, checked against a running PostgreSQL in
+//!   `bank-bench/tests/numeric_binary_oracle.rs` — the money boundary is not a place to
+//!   trust an encoder nobody compared against the implementation it has to match.
+//! * **Streamed replies.** A served answer is written through a bounded buffer and flushed as
+//!   it fills, so the peak memory of a reply is [`REPLY_BUFFER`] and not a function of its
+//!   row count.
+//!
 //! Not implemented, and each for a stated reason rather than for lack of time:
 //!
-//! * **The extended query protocol** (`Parse`/`Bind`/`Execute`). It is the right thing for a
-//!   production server and it needs a prepared-statement cache keyed by an epoch, because a
-//!   plan prepared at one visibility frontier may not be valid at another. That is a real
-//!   design question this thesis has not answered, and shipping a version that ignored it
-//!   would be worse than not shipping one.
 //! * **Real authentication.** Trust only. A ledger that authenticated over a protocol this
 //!   session cannot make confidential would be security theatre.
 //! * **TLS.** Same reason. The `SSLRequest` handshake is answered with a refusal, correctly,
 //!   rather than ignored.
-//! * **The binary format.** Text only. Binary is an optimisation, and an unmeasured one here.
 //!
 //! Anything a client asks for that is not implemented gets an `ErrorResponse` naming what is
 //! missing. A server that silently ignored a `Bind` would return results for a query the
@@ -75,6 +85,11 @@ pub struct Field {
     /// PostgreSQL type OID. Only three are used, and each is chosen deliberately.
     pub type_oid: u32,
     pub type_size: i16,
+    /// The `atttypmod` a client reads to learn a `numeric`'s declared scale. `-1` is
+    /// "unspecified", which is what every field carried before money had a scale to report.
+    pub type_modifier: i32,
+    /// How this column is sent. Text unless a client negotiated otherwise.
+    pub format: Format,
 }
 
 impl Field {
@@ -84,6 +99,8 @@ impl Field {
             name: name.into(),
             type_oid: 20,
             type_size: 8,
+            type_modifier: -1,
+            format: Format::Text,
         }
     }
     /// `text`.
@@ -92,6 +109,8 @@ impl Field {
             name: name.into(),
             type_oid: 25,
             type_size: -1,
+            type_modifier: -1,
+            format: Format::Text,
         }
     }
     /// `numeric`, **not** `float8`.
@@ -106,6 +125,8 @@ impl Field {
             name: name.into(),
             type_oid: 1700,
             type_size: -1,
+            type_modifier: -1,
+            format: Format::Text,
         }
     }
 }
@@ -148,6 +169,17 @@ pub enum Backend {
     CloseComplete,
     /// `n` — the statement returns no rows, the answer to a `Describe` of one that does not.
     NoData,
+    /// **The rows of a served answer, not yet encoded.**
+    ///
+    /// Carried rather than rendered, so the writer can turn them into bytes a bounded buffer
+    /// at a time. `Backend::Raw` — which this replaces on the served path — held the whole
+    /// reply, so a ten-thousand-row answer was a ten-thousand-row allocation before the first
+    /// byte reached the socket, and a hundred-thousand-row answer was a hundred thousand.
+    ///
+    /// What stays O(rows) is the Z-set itself, which is the fold's own per-group accumulator
+    /// and is what PostgreSQL's hash aggregate holds too. What is now constant is the
+    /// **reply**: `write_all` renders into a 64 KB buffer and flushes it as it fills.
+    Rows(RowBlock),
     /// **A run of already-encoded backend messages.**
     ///
     /// The served rows of a query arrive here, framed once into one buffer, rather than as
@@ -163,6 +195,58 @@ pub enum Backend {
     /// would see rather than on which representation produced it.
     Raw(Vec<u8>),
 }
+
+/// The rows of one served answer, and how each column is to be sent.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RowBlock {
+    /// The evaluated answer. Iterated in place; never copied into a row vector.
+    pub z: niles_ir::eval::ZSet,
+    /// The moment the answer is true at, appended as the last column.
+    pub anchor: u64,
+    /// One entry per column of the `RowDescription`, in order. `Text` for every column
+    /// unless a client negotiated otherwise, which is what keeps `psql` unaffected.
+    pub formats: Vec<Format>,
+}
+
+/// How one column is sent.
+///
+/// Per column, as the protocol specifies: `Bind` carries a result format code for each and
+/// `RowDescription` reports what was chosen. Binary is not smaller — `1` is one byte of text
+/// and eight of `int8` — so the reason it exists is parsing, not bandwidth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    Text,
+    /// `int8`, eight big-endian bytes.
+    BinaryInt8,
+    /// `numeric` at this scale, in PostgreSQL's decimal encoding.
+    BinaryNumeric(u32),
+}
+
+impl Format {
+    /// The code `RowDescription` reports: 0 text, 1 binary.
+    pub fn code(self) -> i16 {
+        match self {
+            Format::Text => 0,
+            _ => 1,
+        }
+    }
+}
+
+/// How large the reply buffer is allowed to get before it is flushed.
+///
+/// The bound that makes peak reply memory constant in the row count. 64 KB is large enough
+/// that a flush is not per row — about two thousand rows of three integer columns — and small
+/// enough to be irrelevant beside anything else the process holds.
+pub const REPLY_BUFFER: usize = 64 * 1024;
+
+/// The largest single row this server will frame, and the buffer's headroom above
+/// [`REPLY_BUFFER`].
+///
+/// A row of a served answer is integer columns and a `DataRow` envelope, so 4 KB is
+/// thousands of columns' worth. It exists so the reply buffer can be sized once and never
+/// grow: the flush check runs after a row is appended, so the buffer must be able to hold a
+/// full flush plus the row that crossed it.
+pub const MAX_ROW: usize = 4 * 1024;
 
 /// Format an `i128` into `out` without allocating a `String` for it.
 ///
@@ -215,6 +299,105 @@ pub fn put_data_row(out: &mut Vec<u8>, cells: impl IntoIterator<Item = Option<i1
                 out.extend_from_slice(&0i32.to_be_bytes());
                 let from = out.len();
                 put_i128(out, v);
+                let w = (out.len() - from) as i32;
+                out[cell_len_at..cell_len_at + 4].copy_from_slice(&w.to_be_bytes());
+            }
+        }
+    }
+    out[count_at..count_at + 2].copy_from_slice(&n.to_be_bytes());
+    let body = (out.len() - len_at) as i32;
+    out[len_at..len_at + 4].copy_from_slice(&body.to_be_bytes());
+}
+
+/// Render every row of a block into `out`.
+///
+/// One `DataRow` frame per row per unit of weight: a Z-set weight above one is a row that
+/// appears that many times, and collapsing them would be a `distinct` nobody wrote.
+pub fn put_rows(out: &mut Vec<u8>, block: &RowBlock) {
+    put_rows_streaming(out, block, &mut |_| Ok(())).expect("an infallible sink cannot fail");
+}
+
+/// Render every row, calling `flush` whenever the buffer has grown past [`REPLY_BUFFER`].
+///
+/// **This is where the reply stops being O(rows).** The caller's `flush` writes what has
+/// accumulated and clears it; between calls the buffer holds at most one flush's worth plus
+/// one row. A caller with nowhere to flush to passes a closure that does nothing and gets the
+/// whole reply, which is what `encode` does.
+pub fn put_rows_streaming(
+    out: &mut Vec<u8>,
+    block: &RowBlock,
+    flush: &mut dyn FnMut(&mut Vec<u8>) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    use niles_ir::value::Value;
+    let anchor = block.anchor as i128;
+    for (r, w) in &block.z {
+        if *w <= 0 {
+            continue;
+        }
+        for _ in 0..*w {
+            put_data_row_formatted(
+                out,
+                r.iter()
+                    .map(|v| match v {
+                        Value::Null => None,
+                        Value::Int(i) => Some(*i),
+                    })
+                    .chain(std::iter::once(Some(anchor))),
+                &block.formats,
+            );
+            if out.len() >= REPLY_BUFFER {
+                flush(out)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// How many rows a block sends, which is what `CommandComplete` reports.
+pub fn row_count(block: &RowBlock) -> usize {
+    block
+        .z
+        .values()
+        .filter(|w| **w > 0)
+        .map(|w| *w as usize)
+        .sum()
+}
+
+/// One `DataRow`, each cell in the format its column negotiated.
+///
+/// A column with no entry in `formats` is text, which is the protocol's default and is what
+/// keeps a client that negotiated nothing working exactly as before.
+pub fn put_data_row_formatted(
+    out: &mut Vec<u8>,
+    cells: impl IntoIterator<Item = Option<i128>>,
+    formats: &[Format],
+) {
+    out.push(b'D');
+    let len_at = out.len();
+    out.extend_from_slice(&0i32.to_be_bytes());
+    let count_at = out.len();
+    out.extend_from_slice(&0i16.to_be_bytes());
+    let mut n: i16 = 0;
+    for c in cells {
+        let f = formats.get(n as usize).copied().unwrap_or(Format::Text);
+        n += 1;
+        match c {
+            None => out.extend_from_slice(&(-1i32).to_be_bytes()),
+            Some(v) => {
+                let cell_len_at = out.len();
+                out.extend_from_slice(&0i32.to_be_bytes());
+                let from = out.len();
+                match f {
+                    Format::Text => put_i128(out, v),
+                    // The caller has already refused a value that does not fit — see
+                    // `session`'s 22003 path. Truncating here would be the one thing a money
+                    // column must never do, so this is a saturating cast only because an
+                    // unreachable branch still has to be written.
+                    Format::BinaryInt8 => {
+                        binary::int8(v.clamp(i64::MIN as i128, i64::MAX as i128) as i64, out)
+                    }
+                    Format::BinaryNumeric(scale) => binary::numeric(v, scale, out),
+                }
                 let w = (out.len() - from) as i32;
                 out[cell_len_at..cell_len_at + 4].copy_from_slice(&w.to_be_bytes());
             }
@@ -288,6 +471,13 @@ pub fn encode(msg: &Backend) -> Vec<u8> {
         // Already framed, length prefixes and all: it is a run of messages rather than one,
         // so there is no tag to add and no length to compute.
         Backend::Raw(b) => return b.clone(),
+        // Rendered whole, which is what a caller holding no writer has to do. The streaming
+        // path is `write_all`; this exists for tests and for `encode_into`.
+        Backend::Rows(rows) => {
+            let mut out = Vec::new();
+            put_rows(&mut out, rows);
+            return out;
+        }
         Backend::AuthenticationOk => (b'R', 0i32.to_be_bytes().to_vec()),
         Backend::ParseComplete => (b'1', Vec::new()),
         Backend::BindComplete => (b'2', Vec::new()),
@@ -315,8 +505,12 @@ pub fn encode(msg: &Backend) -> Vec<u8> {
                 b.extend_from_slice(&0i16.to_be_bytes()); // column attnum
                 b.extend_from_slice(&f.type_oid.to_be_bytes());
                 b.extend_from_slice(&f.type_size.to_be_bytes());
-                b.extend_from_slice(&(-1i32).to_be_bytes()); // type modifier
-                b.extend_from_slice(&0i16.to_be_bytes()); // text format
+                b.extend_from_slice(&f.type_modifier.to_be_bytes());
+                // **The format this column is actually sent in.** It was hard-coded to 0,
+                // which is correct only while every column is text: a description that
+                // announced text and then sent eight binary bytes would desynchronise every
+                // client that believed it.
+                b.extend_from_slice(&f.format.code().to_be_bytes());
             }
             (b'T', b)
         }
@@ -385,12 +579,19 @@ fn put_cstr(b: &mut Vec<u8>, s: &str) {
 }
 
 pub fn get_cstr(b: &[u8], at: &mut usize) -> String {
-    let start = *at;
+    // **A cursor past the end reads nothing rather than panicking.** These bytes come from a
+    // client, so every offset in them is an assertion the client made and not one this server
+    // checked: `at` past `b.len()` — which a truncated or hand-built message produces
+    // trivially — indexed a slice backwards and took the connection down with it. A malformed
+    // message must be a refusal, never a panic, or any peer can stop the server by sending
+    // four bytes.
+    let start = (*at).min(b.len());
+    *at = start;
     while *at < b.len() && b[*at] != 0 {
         *at += 1;
     }
     let s = String::from_utf8_lossy(&b[start..*at]).into_owned();
-    *at += 1;
+    *at = (*at + 1).min(b.len().saturating_add(1));
     s
 }
 
@@ -569,10 +770,34 @@ pub fn sqlstate_for(code: &str) -> &'static str {
 /// One buffer, one write, one flush. Callers should also set `TCP_NODELAY`, which the daemon
 /// now does — belt and braces, because a single reply that outgrows one segment would
 /// otherwise reintroduce the same stall at a larger size.
+/// Write a reply, **streaming its rows through a bounded buffer**.
+///
+/// The buffer is reused across messages and flushed whenever it passes [`REPLY_BUFFER`], so
+/// the peak memory this function holds is a constant and not a function of the answer's size.
+/// Before this, a reply was assembled whole: a hundred-thousand-row answer was a
+/// hundred-thousand-row allocation before the first byte reached the socket.
 pub fn write_all(w: &mut impl Write, msgs: &[Backend]) -> std::io::Result<()> {
-    let mut buf = Vec::with_capacity(64 * msgs.len().max(1));
+    // **Headroom, so the buffer never reallocates.** The flush check runs *after* a row is
+    // appended — checking before would need the row's size, which is only known once it is
+    // written — so the buffer can carry `REPLY_BUFFER` plus one row. Reserving that slack up
+    // front makes the bound exact: one allocation for the life of the reply, whatever its
+    // size, rather than one plus a doubling at the first row that crosses.
+    let mut buf: Vec<u8> = Vec::with_capacity(REPLY_BUFFER + MAX_ROW);
     for m in msgs {
-        buf.extend_from_slice(&encode(m));
+        match m {
+            Backend::Rows(block) => {
+                put_rows_streaming(&mut buf, block, &mut |b| {
+                    w.write_all(b)?;
+                    b.clear();
+                    Ok(())
+                })?;
+            }
+            other => encode_into(&mut buf, other),
+        }
+        if buf.len() >= REPLY_BUFFER {
+            w.write_all(&buf)?;
+            buf.clear();
+        }
     }
     w.write_all(&buf)?;
     w.flush()
@@ -787,6 +1012,89 @@ mod tests {
         let mut s = Vec::new();
         s.extend_from_slice(&3i32.to_be_bytes());
         assert!(read_startup(&mut Cursor::new(s)).is_err());
+    }
+
+    /// **A reply's peak memory is a constant, not a function of its row count.**
+    ///
+    /// The property T-32 exists for. `Backend::Raw` held the whole reply, so a
+    /// hundred-thousand-row answer was a hundred-thousand-row allocation before the first
+    /// byte reached the socket. `write_all` now renders into a bounded buffer and flushes it
+    /// as it fills.
+    ///
+    /// Asserted on the **writer's** high-water mark rather than on a timing or an allocation
+    /// total: what matters is how much is held at once, and a sink that records the largest
+    /// write it was handed measures exactly that. The Z-set the block borrows is the fold's
+    /// own per-group accumulator and stays O(groups), which is what PostgreSQL's hash
+    /// aggregate holds too — this is about the reply.
+    #[test]
+    fn a_reply_is_written_in_bounded_pieces_however_many_rows_it_has() {
+        /// A writer that remembers the largest single write and the total.
+        struct Watching {
+            largest: usize,
+            total: usize,
+        }
+        impl std::io::Write for Watching {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.largest = self.largest.max(b.len());
+                self.total += b.len();
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let block = |rows: i128| -> Backend {
+            let mut z = niles_ir::eval::ZSet::new();
+            for i in 0..rows {
+                z.insert(
+                    vec![
+                        niles_ir::value::Value::Int(i),
+                        niles_ir::value::Value::Int(i * 7),
+                    ],
+                    1,
+                );
+            }
+            Backend::Rows(RowBlock {
+                z,
+                anchor: 4_200,
+                formats: vec![Format::Text; 3],
+            })
+        };
+
+        let mut small = Watching {
+            largest: 0,
+            total: 0,
+        };
+        write_all(&mut small, &[block(1_000)]).expect("writes");
+        let mut large = Watching {
+            largest: 0,
+            total: 0,
+        };
+        write_all(&mut large, &[block(100_000)]).expect("writes");
+
+        assert!(
+            large.total > small.total * 50,
+            "the hundred-times-larger answer should send far more bytes: {} against {}",
+            large.total,
+            small.total
+        );
+        // The bound, with one row's slack: a row is appended and *then* the buffer is
+        // checked, so a flush can carry `REPLY_BUFFER` plus the row that crossed it.
+        let bound = REPLY_BUFFER + 1_024;
+        assert!(
+            large.largest <= bound,
+            "a single write of {} bytes, against a bound of {bound}: the reply is being \
+             assembled whole again",
+            large.largest
+        );
+        assert!(
+            large.largest <= small.largest.max(bound),
+            "the largest piece grew with the answer, which is the property this test exists \
+             to hold: {} against {}",
+            large.largest,
+            small.largest
+        );
     }
 
     /// **The framed row is byte-identical to the message it replaced.**

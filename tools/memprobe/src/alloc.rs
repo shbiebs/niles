@@ -225,6 +225,15 @@ pub fn budget(scenario: &str) -> Option<f64> {
         // own postings and the reply — not the base. The plan is borrowed from the circuit
         // rather than cloned out of it, which was four of these on its own.
         "served_point" => 13.0,
+        // **Writing a reply, at two sizes an order of magnitude apart.** The budget is the
+        // same number for both, and that is the assertion: a reply is written through a
+        // bounded buffer and flushed as it fills, so its cost does not follow its row count.
+        // Before T-32 the whole reply was assembled first, and a hundred-thousand-row answer
+        // was a hundred-thousand-row allocation before the first byte reached the socket.
+        // One allocation each: the buffer, sized once with headroom for the row that
+        // crosses the flush point, and never grown. Ten times the answer, the same cost.
+        "wire_reply_10k" => 1.2,
+        "wire_reply_100k" => 1.2,
         // **The same question, twice more, and both used to scan the whole base.**
         //
         // `where acct = 4242 and cur = 0` gave up on the `and`; `group by acct having
@@ -261,6 +270,8 @@ pub const SCENARIOS: &[&str] = &[
     "served_top_ten",
     "served_sum_negative",
     "served_point",
+    "wire_reply_10k",
+    "wire_reply_100k",
     "served_point_conjunct",
     "served_having_on_key",
     "rev_read_hit",

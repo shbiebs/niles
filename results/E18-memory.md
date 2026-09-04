@@ -17,6 +17,8 @@ The tool lives outside the workspace. `GlobalAlloc` cannot be implemented withou
 | `served_top_ten` | query | 3 | 37884 | 12628.0 | 14536794 | 4845598 | 0 | 2841312 |
 | `served_sum_negative` | query | 3 | 36 | 12.0 | 5568 | 1856 | 0 | 1728 |
 | `served_point` | query | 200 | 2400 | 12.0 | 190800 | 954 | 0 | 826 |
+| `wire_reply_10k` | reply | 5 | 5 | 1.0 | 348160 | 69632 | 0 | 69632 |
+| `wire_reply_100k` | reply | 5 | 5 | 1.0 | 348160 | 69632 | 0 | 69632 |
 | `served_point_conjunct` | query | 200 | 3000 | 15.0 | 427600 | 2138 | 0 | 1792 |
 | `served_having_on_key` | query | 200 | 4200 | 21.0 | 635600 | 3178 | 0 | 1856 |
 | `rev_read_hit` | read | 1000 | 2000 | 2.0 | 32000 | 32 | 0 | 16 |
@@ -35,6 +37,8 @@ Allocations per operation, asserted exactly — an allocation count is not a tol
 | `served_top_ten` | 14100.0 | 12628.0 | 10% |
 | `served_sum_negative` | 14.0 | 12.0 | 14% |
 | `served_point` | 13.0 | 12.0 | 8% |
+| `wire_reply_10k` | 1.2 | 1.0 | 17% |
+| `wire_reply_100k` | 1.2 | 1.0 | 17% |
 | `served_point_conjunct` | 17.0 | 15.0 | 12% |
 | `served_having_on_key` | 24.0 | 21.0 | 12% |
 | `rev_read_hit` | 2.2 | 2.0 | 9% |

@@ -158,6 +158,24 @@ Two environment traps that have each already cost a cycle:
 - The lock histogram reports **bucket boundaries, not interpolated values**. `p99 ≤ 2048µs` is
   honest; `p99 = 1873µs` would not be.
 
+**Run the preflight first, in whatever container you audit from, and paste its output at the top of
+your work order.** It is committed at `docs/audit/cycle-7/preflight.sh`, and Astra runs the
+*identical* script, so the author can lay your two environment manifests side by side when
+reconciling. It reports the host and the **cgroup-granted** core count (not `nproc`), the filesystem
+and mount options under the tree, a 4 KiB + `fdatasync` barrier probe with a verdict, the toolchain,
+PostgreSQL, egress, both tree hashes, and an admissibility table to fill in:
+
+```
+bash niles/docs/audit/cycle-7/preflight.sh /path/to/niles /path/to/gbs
+```
+
+Two things it will tell you that are easy to get wrong. **`nproc` is not your core count** — read
+`/sys/fs/cgroup/cpu.max` and divide quota by period. And **a barrier above ~100,000/s is a mount
+option, not a device**: cycle 6's other auditor measured ~1,000,000/s on an overlay mounted
+`fsync=volatile`, which voided every durability number taken there. `make fsync-proof` passes on
+such a mount too — it checks the syscall reaches the kernel, not that the kernel honours it — so the
+two checks are necessary together and neither is sufficient alone.
+
 **Before you write a probe, check whether cycle 6 built it.** Your own `durabled`, `wireprobe`,
 `lockprobe` and `fs.c` are largely subsumed: `nilestreamd --durable <segment>` exists,
 `bench --run --scaling-only --nls-only` exists, `select nilestream_sealer` exposes the sealer and
@@ -474,6 +492,8 @@ New, from cycle 6 — raise, do not answer alone:
 
 A single work order containing:
 
+0. **The preflight output, verbatim, with its admissibility table filled in** (§3). Every number
+   later in the document is read against it.
 1. **An executive judgement** — where the three artefacts stand against the three efficiency goals,
    with the arithmetic for any reachability claim spelled out.
 2. **Findings**, each with a class (wrong-measurement, correctness, liveness, guarantee-bounded,

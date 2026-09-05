@@ -81,6 +81,67 @@ A reasoned refusal is a finding.
 
 ## 2. Access
 
+### 2.0 Your own cloud container — where most of this audit happens
+
+**Work primarily from a clone in your own container.** It is faster than the bridge, it has a
+toolchain, and nothing you do there can touch the author's files. The Mac is for the two things a
+container cannot give you (§2.2). Nothing in this project needs the network at build time — **both
+trees have zero external dependencies**, so `cargo test --offline --workspace` succeeds against a
+bare toolchain with no registry cache and no vendoring.
+
+**Run the preflight before anything else, and paste its entire output at the top of your work
+order.** It is committed at `docs/audit/cycle-7/preflight.sh` in the `niles` tree, so you and Fable
+run the *identical* script and your two environment manifests can be laid side by side when the
+author reconciles the work orders:
+
+```
+git clone https://github.com/shbiebs/niles.git
+git clone https://github.com/shbiebs/gbs.git
+bash niles/docs/audit/cycle-7/preflight.sh "$PWD/niles" "$PWD/gbs"
+```
+
+It takes seconds, writes nothing outside its own scratch directory, and answers the one question
+that decides what every later number means: **what may a measurement taken in this container be used
+to claim?** It reports the host and the *cgroup-granted* core count (which is not always `nproc`),
+the filesystem and mount options under the tree, a 4 KiB-write + `fdatasync` barrier probe with a
+verdict, the toolchain, PostgreSQL, egress, both tree hashes, and an admissibility table for you to
+fill in.
+
+**Why this exists, in one paragraph.** Your cycle-6 container was an overlay mounted
+`fsync=volatile`. It reported a barrier of **~1,000,000/s** — median 1,033,047, spread
+576,243–1,460,600 — and that is not a storage measurement at all: the mount option makes the call a
+no-op. Every durability conclusion drawn there was void, and the reason your group-commit ratio came
+out 4.1× against Fable's 8.2× is that on a volatile overlay the serialised arm is *mutex-bound
+rather than fsync-bound*, so batching has less to amortise. **That was a genuine finding, and it was
+only legible because the mount option was recorded.** The probe now prints the verdict for you:
+
+- **> 100,000 barriers/s** → `*** NOT STORAGE EVIDENCE ***`. This container cannot produce any
+  durability number. Say so in your work order and route those measurements to Host C.
+- **20,000–100,000/s** → suspicious; verify the mount before publishing anything durable.
+- **below that** → plausible for *this* container, and still host-shaped: within-host ratios only.
+
+Note also that `make fsync-proof` passes on a volatile overlay — it checks that the syscall reaches
+the kernel, not that the kernel does anything with it. **The two checks are necessary together and
+neither is sufficient alone.**
+
+Three further container-specific traps the preflight will surface:
+
+1. **`nproc` is not your core count.** Read `/sys/fs/cgroup/cpu.max`; if it is not `max`, the quota
+   divided by the period is what you actually have. A concurrency curve plotted against a core count
+   you do not own is a curve about nothing.
+2. **A newer `stable` toolchain can turn the gate red for reasons unrelated to the code.**
+   `rust-toolchain.toml` pins `channel = "stable"` with `rust-version = 1.95.0`, and says why: the
+   machine it was built on had no egress to `static.rust-lang.org`, so rustup could not install a
+   channel named by version (`BLOCKED-T-01-toolchain` in `docs/BUILD-LOG.md`). If your `stable` is
+   newer and `clippy -- -D warnings` goes red, **that is a finding about the pin, not about the
+   code** — report it as one, and consider whether "anyone with network access should set the
+   version" is a task worth writing.
+3. **`numeric_binary_oracle` needs a running PostgreSQL** with a `bench` role and `PGPORT` set.
+   Without it the tree reads red for a missing service. Do not report that as a failing test; the
+   preflight prints the two ways to provision one.
+
+Everything in §6 except §6.4's second-architecture check can be done in your container.
+
 ### 2.1 GitHub
 
 Both repositories are private, owned by **`shbiebs`**:
@@ -165,7 +226,7 @@ Two traps that have each cost a cycle:
 | **A** | 2-core Linux container, ext4 on virtio, `fdatasync` 4,961–5,825/s | counters, within-host ratios |
 | **B** | the desktop bridge: 4-core aarch64 Linux VM, FUSE mount, no toolchain | reading, counting; **no storage or build evidence** |
 | **C** | the Mac itself, Apple M4, 10 cores, APFS, `F_FULLFSYNC` 255/s | wide concurrency, real barrier, the second-architecture run |
-| **D** | your container, if on overlayfs `fsync=volatile` | **nothing about durability** — a ~1,000,000/s "fsync" is a mount option, and this is your own cycle-6 finding |
+| **D** | **your own container** — establish it with `preflight.sh`, do not assume it | whatever the preflight's admissibility table says, and nothing beyond it. Cycle 6's D was an overlay mounted `fsync=volatile` reporting ~1,000,000 barriers/s: **nothing about durability**, and that was your own finding |
 
 Deterministic counters (instructions, allocations, visited entries, `max_batch`, txns/fsync, lock
 buckets, **compiler verdicts**) gate first and need one run. Wall clock needs two warm-ups and ≥5
@@ -468,6 +529,9 @@ New, from cycle 6 — raise, do not answer alone:
 
 A single work order containing:
 
+0. **The preflight output, verbatim, with its admissibility table filled in** (§2.0). Every number
+   later in the document is read against it, and an unstated environment is how cycle 6 nearly
+   published a durability figure measured on a mount option.
 1. **An executive judgement** — where the three artefacts stand against the three efficiency goals,
    with the arithmetic for any reachability claim spelled out, and **your definitions from §1**.
 2. **Findings**, each with a class (wrong-measurement, correctness, liveness, guarantee-bounded,

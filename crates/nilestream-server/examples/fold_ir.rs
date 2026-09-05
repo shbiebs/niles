@@ -48,7 +48,7 @@ fn main() {
         .nth(2)
         .and_then(|r| r.parse().ok())
         .unwrap_or(ROUNDS);
-    let mut e = RevEngine::seeded(
+    let e = RevEngine::seeded(
         ACCOUNTS,
         rounds,
         BUDGET,

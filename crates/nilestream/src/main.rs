@@ -243,13 +243,13 @@ fn run(path: &str, view: &str, cfg: Config) -> Result<Stats, String> {
             Err(_) => continue,
         };
 
-        rt.advance(&mut base, sealed);
+        rt.advance(&base, sealed);
 
         if e % read_every == 0 {
             let k: Key = vec![reads.sample() as i64, 0];
             let anchor = base.frontier();
             let v = rt.view_mut(view).expect("installed above");
-            let a: Anchored = v.read(&mut base, &k, anchor);
+            let a: Anchored = v.read(&base, &k, anchor);
             std::hint::black_box(a);
         }
     }

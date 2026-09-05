@@ -223,10 +223,10 @@ impl PartialView {
         // Miss: reconstruct at the requested anchor.
         self.stats.misses += 1;
         self.stats.upqueries += 1;
-        let before = ledger.rows_touched;
+        let before = ledger.rows_touched();
         let v = ledger.reconstruct_balance(acct, cur, anchor);
-        let cost = (ledger.rows_touched - before) as f64;
-        self.stats.rows_touched += ledger.rows_touched - before;
+        let cost = (ledger.rows_touched() - before) as f64;
+        self.stats.rows_touched += ledger.rows_touched() - before;
 
         // Delayed hits: while a reconstruction is in flight, further requests for the same
         // key queue behind it. The aggregate-delay objective charges for those, which is

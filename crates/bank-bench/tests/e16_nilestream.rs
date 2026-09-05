@@ -26,7 +26,7 @@ use nilestream_server::rev_engine::RevEngine;
 use nilestream_server::session::Serving;
 use proto_engine::{EvictionPolicy, ViewMode};
 use std::net::TcpListener;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Host the daemon on a thread and return the port it is listening on.
@@ -34,19 +34,19 @@ use std::time::{Duration, Instant};
 /// Port 0 asks the kernel for a free one, which matters more than it looks: a fixed port makes
 /// a test fail when a previous run's server is still holding it, and — worse — makes it *pass*
 /// against that stale server, measuring an older build without saying so.
-type Hosted = (u16, u64, Arc<Mutex<RevEngine>>);
+type Hosted = (u16, u64, Arc<RevEngine>);
 
 fn host(accounts: i64, rounds: u32, budget: usize) -> Hosted {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind an ephemeral port");
     let port = listener.local_addr().expect("addr").port();
-    let engine = Arc::new(Mutex::new(RevEngine::seeded(
+    let engine = Arc::new(RevEngine::seeded(
         accounts,
         rounds,
         budget,
         ViewMode::Demand,
         EvictionPolicy::Lru,
-    )));
-    let frontier = engine.lock().unwrap().frontier();
+    ));
+    let frontier = engine.frontier();
     let schema = daemon::DEFAULT_SCHEMA.to_string();
     let observer = Arc::clone(&engine);
     std::thread::spawn(move || daemon::accept_loop(listener, schema, engine));
@@ -178,11 +178,9 @@ struct Reads {
     resident: usize,
 }
 
-fn read_stats(
-    engine: &std::sync::Arc<std::sync::Mutex<nilestream_server::rev_engine::RevEngine>>,
-) -> Reads {
+fn read_stats(engine: &std::sync::Arc<nilestream_server::rev_engine::RevEngine>) -> Reads {
     use nilestream_server::session::Serving;
-    let (reads, _hits, misses, rows_touched, resident) = engine.lock().unwrap().read_stats();
+    let (reads, _hits, misses, rows_touched, resident) = engine.read_stats();
     Reads {
         reads,
         misses,

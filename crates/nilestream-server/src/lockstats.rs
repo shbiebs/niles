@@ -122,7 +122,15 @@ impl Default for LockStats {
     }
 }
 
-/// One per process, because there is one engine mutex per process.
+/// One per process, because there is one base per process.
+///
+/// **What this counts changed with the reader-writer split, and the name did not.** It used
+/// to be the daemon's single engine mutex, taken once around the whole of `Session::handle`.
+/// It is now the lock over the *base* — taken shared by every read and exclusively by every
+/// append — which is the same question asked of the structure that replaced it: how long is
+/// the base held, and how long does a connection wait for it. A shared acquisition that
+/// waits for nothing records a zero wait, which is the shape a working reader-writer lock
+/// produces and the shape a mutex cannot.
 pub static ENGINE_LOCK: LockStats = LockStats::new();
 
 /// Acquire, timing both the wait and the hold, and record on drop.
@@ -171,6 +179,89 @@ impl<T> Drop for Timed<'_, T> {
         let held = self.since.elapsed().as_nanos() as u64;
         // Release before recording, so the counter update is not itself inside the section
         // it measures.
+        drop(self.guard.take());
+        self.stats.record(self.waited_ns, held);
+    }
+}
+
+/// A shared acquisition of a reader-writer lock, timed like [`Timed`].
+///
+/// Separate from `Timed` rather than generic over the guard, because the two guards have no
+/// common trait in `std` and a hand-rolled one would be more machinery than the two structs.
+pub struct TimedRead<'a, T> {
+    guard: Option<std::sync::RwLockReadGuard<'a, T>>,
+    since: Instant,
+    waited_ns: u64,
+    stats: &'static LockStats,
+}
+
+impl<'a, T> TimedRead<'a, T> {
+    pub fn acquire(l: &'a std::sync::RwLock<T>, stats: &'static LockStats) -> TimedRead<'a, T> {
+        let asked = Instant::now();
+        let guard = l.read().expect("the base lock is not poisoned");
+        let waited = asked.elapsed();
+        TimedRead {
+            guard: Some(guard),
+            since: Instant::now(),
+            waited_ns: waited.as_nanos() as u64,
+            stats,
+        }
+    }
+}
+
+impl<T> std::ops::Deref for TimedRead<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        self.guard.as_ref().expect("held")
+    }
+}
+
+impl<T> Drop for TimedRead<'_, T> {
+    fn drop(&mut self) {
+        let held = self.since.elapsed().as_nanos() as u64;
+        drop(self.guard.take());
+        self.stats.record(self.waited_ns, held);
+    }
+}
+
+/// An exclusive acquisition of a reader-writer lock, timed like [`Timed`].
+pub struct TimedWrite<'a, T> {
+    guard: Option<std::sync::RwLockWriteGuard<'a, T>>,
+    since: Instant,
+    waited_ns: u64,
+    stats: &'static LockStats,
+}
+
+impl<'a, T> TimedWrite<'a, T> {
+    pub fn acquire(l: &'a std::sync::RwLock<T>, stats: &'static LockStats) -> TimedWrite<'a, T> {
+        let asked = Instant::now();
+        let guard = l.write().expect("the base lock is not poisoned");
+        let waited = asked.elapsed();
+        TimedWrite {
+            guard: Some(guard),
+            since: Instant::now(),
+            waited_ns: waited.as_nanos() as u64,
+            stats,
+        }
+    }
+}
+
+impl<T> std::ops::Deref for TimedWrite<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        self.guard.as_ref().expect("held")
+    }
+}
+
+impl<T> std::ops::DerefMut for TimedWrite<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        self.guard.as_mut().expect("held")
+    }
+}
+
+impl<T> Drop for TimedWrite<'_, T> {
+    fn drop(&mut self) {
+        let held = self.since.elapsed().as_nanos() as u64;
         drop(self.guard.take());
         self.stats.record(self.waited_ns, held);
     }

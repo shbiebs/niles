@@ -541,10 +541,10 @@ fn run(args: &Args) -> i32 {
                         return 1;
                     }
                 };
-                let engine = std::sync::Arc::new(std::sync::Mutex::new(base));
+                let engine = std::sync::Arc::new(std::sync::RwLock::new(base));
                 {
                     use nilestream_server::session::Serving;
-                    eprintln!("  ledger frontier #{}", engine.lock().unwrap().frontier());
+                    eprintln!("  ledger frontier #{}", engine.read().unwrap().frontier());
                 }
                 hosted = Some(Hosted {
                     engine: std::sync::Arc::clone(&engine),
@@ -599,7 +599,7 @@ fn run(args: &Args) -> i32 {
                              {} accounts x {} rounds, view fully materialised",
                             args.accounts, args.rounds
                         );
-                        let engine = std::sync::Arc::new(std::sync::Mutex::new(e));
+                        let engine = std::sync::Arc::new(std::sync::RwLock::new(e));
                         hosted_report = Some(Hosted {
                             engine: std::sync::Arc::clone(&engine),
                             seg,
@@ -940,7 +940,7 @@ fn run(args: &Args) -> i32 {
 
 /// A hosted daemon, and the pieces needed to put its engine back the way it started.
 struct Hosted {
-    engine: std::sync::Arc<std::sync::Mutex<nilestream_server::rev_engine::RevEngine>>,
+    engine: std::sync::Arc<std::sync::RwLock<nilestream_server::rev_engine::RevEngine>>,
     seg: std::path::PathBuf,
     accounts: i64,
     rounds: u32,
@@ -954,7 +954,7 @@ impl Hosted {
     /// size would be measuring one size three times.
     fn reseed_at(&self, accounts: i64, rounds: u32) -> Result<(), String> {
         use nilestream_server::rev_engine::RevEngine;
-        let mut guard = self.engine.lock().map_err(|e| e.to_string())?;
+        let mut guard = self.engine.write().map_err(|e| e.to_string())?;
         // The tiny engine first, so the old one's durable sink releases the segment before
         // it is removed — two sequencers over one path recover each other's history.
         *guard = RevEngine::seeded(
@@ -980,7 +980,7 @@ impl Hosted {
     /// Replace the engine with a freshly seeded one on a fresh segment.
     fn reseed(&self) -> Result<(), String> {
         use nilestream_server::rev_engine::RevEngine;
-        let mut guard = self.engine.lock().map_err(|e| e.to_string())?;
+        let mut guard = self.engine.write().map_err(|e| e.to_string())?;
         // Drop the old engine — and with it the file its durable sink holds — *before*
         // removing the segment and opening a new one. Two sequencers over one path would
         // recover each other's records and the second run would start from the first's
@@ -1760,7 +1760,7 @@ fn run_scaling(
             // must not look alike.
             let have_pg = match pg.as_deref_mut() {
                 None => {
-                    for w in ["point", "durable"] {
+                    for w in ["point", "fold", "durable"] {
                         out.push(workloads::scaling_skipped(
                             w,
                             "postgres",
@@ -1775,7 +1775,7 @@ fn run_scaling(
                 Some(p) => match p.prepare(args.accounts, args.rounds) {
                     Err(e) => {
                         let why = format!("PostgreSQL could not be prepared for the level: {e}");
-                        for w in ["point", "durable"] {
+                        for w in ["point", "fold", "durable"] {
                             out.push(workloads::scaling_skipped(
                                 w,
                                 "postgres",
@@ -1815,6 +1815,34 @@ fn run_scaling(
                 &|thread, i| {
                     let k = scaling_key(seed, thread, i, args.accounts);
                     format!("select acct, sum(amt) from postings where acct = {k} group by acct")
+                },
+            );
+            report_scaling(&s);
+            out.push(s);
+            // **The scan-shaped read, which is the one the audit found lock-bound.**
+            //
+            // An unkeyed `group by acct` over the whole base — the control arm for the
+            // Nilestream row of the same name, running the identical statement against a
+            // database with no maintained state, which is what it has to do.
+            //
+            // Far fewer operations per connection than the point workload, because one of
+            // these folds twenty thousand postings into ten thousand groups and costs
+            // milliseconds rather than microseconds.
+            let s = workloads::concurrent(
+                workloads::Level {
+                    workload: "fold",
+                    target: "postgres",
+                    connections: conns,
+                    run: run_no,
+                    per_connection: (args.operations / 40).max(25),
+                    durable: false,
+                },
+                &open_pg,
+                &|_thread, _i| {
+                    workloads::REPORT_STATEMENT
+                        .nls
+                        .expect("expressible")
+                        .to_string()
                 },
             );
             report_scaling(&s);
@@ -1890,7 +1918,7 @@ fn run_nilestream_level(
             if let Some(h) = hosted {
                 if let Err(e) = h.reseed() {
                     let why = format!("the hosted engine could not be re-seeded: {e}");
-                    for w in ["point", "durable"] {
+                    for w in ["point", "fold", "durable"] {
                         out.push(workloads::scaling_skipped(
                             w,
                             "nilestream",
@@ -1918,6 +1946,38 @@ fn run_nilestream_level(
                 &|thread, i| {
                     let k = scaling_key(seed, thread, i, args.accounts);
                     format!("select acct, sum(amt) from postings where acct = {k} group by acct")
+                },
+            );
+            report_scaling(&s);
+            out.push(s);
+            // **The scan-shaped read, which is the one the audit found lock-bound.**
+            //
+            // An unkeyed `group by acct` over the whole base. On this hosted engine the
+            // balance view is `Demand` with a budget below the key count, so `is_full()` is
+            // false and `report_from_view` refuses it: this row is the *fold*, every time,
+            // which is what makes it the right instrument here. The audit called this
+            // workload `report`; it is named `fold` in this table because the contract
+            // table's `report` row is the opposite — a row that is `NOT RUN` unless the
+            // server answers it from the maintained view without touching a base row.
+            //
+            // Far fewer operations per connection than the point workload, because one of
+            // these folds twenty thousand postings into ten thousand groups and costs
+            // milliseconds rather than microseconds.
+            let s = workloads::concurrent(
+                workloads::Level {
+                    workload: "fold",
+                    target: "nilestream",
+                    connections: conns,
+                    run: run_no,
+                    per_connection: (args.operations / 40).max(25),
+                    durable: false,
+                },
+                &open_nls,
+                &|_thread, _i| {
+                    workloads::REPORT_STATEMENT
+                        .nls
+                        .expect("expressible")
+                        .to_string()
                 },
             );
             report_scaling(&s);

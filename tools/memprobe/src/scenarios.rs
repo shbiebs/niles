@@ -139,7 +139,7 @@ pub fn zset_base_at() -> Row {
 
 /// One served statement, over the wire path's own `Serving::query`.
 fn served(scenario: &'static str, sql: &str, queries: u64) -> Row {
-    let mut e = engine();
+    let e = engine();
     let c = circuit(sql);
     let anchor = e.frontier();
     // Warm: the first query of a process pays for whatever the compiler and the allocator
@@ -309,16 +309,16 @@ pub fn rev_read_hit() -> Row {
         fn frontier(&self) -> u64 {
             self.ledger.head()
         }
-        fn reconstruct(&mut self, key: &Key, anchor: u64) -> (Value, u64) {
-            let before = self.ledger.rows_touched;
+        fn reconstruct(&self, key: &Key, anchor: u64) -> (Value, u64) {
+            let before = self.ledger.rows_touched();
             let v = self.ledger.reconstruct_balance(
                 key[0] as u64,
                 key.get(1).copied().unwrap_or(0) as u32,
                 anchor,
             );
-            (v, self.ledger.rows_touched - before)
+            (v, self.ledger.rows_touched() - before)
         }
-        fn deltas_at(&mut self, e: u64) -> Vec<(Key, Value)> {
+        fn deltas_at(&self, e: u64) -> Vec<(Key, Value)> {
             let Some(rec) = self.ledger.epochs.get(e as usize) else {
                 return Vec::new();
             };
@@ -359,21 +359,21 @@ pub fn rev_read_hit() -> Row {
             );
         }
     }
-    let mut base = LedgerBase { ledger };
+    let base = LedgerBase { ledger };
     let c = circuit("select acct, cur, sum(amt) from postings group by acct, cur");
     let mut rt = Runtime::install(c, Some(BUDGET as u64), Policy::Lru)
         .unwrap_or_else(|u| panic!("the keyed fragment must install: {}", u.explain()));
     let head = base.frontier();
     for e in 0..=head {
-        rt.advance(&mut base, e);
+        rt.advance(&base, e);
     }
     let view = rt.view_mut("__wire_result").expect("the installed view");
     let key = vec![4242i64, 0];
-    let _ = view.read(&mut base, &key, head);
+    let _ = view.read(&base, &key, head);
     let reads = 1_000u64;
     let (_, counted) = count(|| {
         for _ in 0..reads {
-            std::hint::black_box(view.read(&mut base, &key, head));
+            std::hint::black_box(view.read(&base, &key, head));
         }
     });
     Row {
@@ -387,7 +387,7 @@ pub fn rev_read_hit() -> Row {
 /// **An in-memory append of one conserved two-leg transaction.** The write path without the
 /// `fsync`, so the allocation cost is separable from the durability cost.
 pub fn append_in_memory() -> Row {
-    let mut e = engine();
+    let e = engine();
     let appends = 500u64;
     let mut n = 0u64;
     let _ = e.append(

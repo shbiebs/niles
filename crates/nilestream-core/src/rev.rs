@@ -70,11 +70,11 @@ pub trait Base {
     ///
     /// Returns the value **and** the number of base rows it had to read, because the row
     /// count is the measurement.
-    fn reconstruct(&mut self, key: &Key, anchor: Epoch) -> (Value, u64);
+    fn reconstruct(&self, key: &Key, anchor: Epoch) -> (Value, u64);
 
     /// The per-key deltas sealed in epoch `e`. Empty for most keys in most epochs, which
     /// is exactly why partial materialization can pay.
-    fn deltas_at(&mut self, e: Epoch) -> Vec<(Key, Value)>;
+    fn deltas_at(&self, e: Epoch) -> Vec<(Key, Value)>;
 }
 
 /// Eviction policy. `CostAware` is the adaptive one; the other two are the baselines it is
@@ -190,7 +190,7 @@ impl Rev {
     /// a hit; anything else reconstructs. `Bottom` reconstructs too — a key never seen is
     /// not a key with no postings, and answering it with the aggregate's identity would be
     /// the money-from-memory-pressure bug the lattice exists to prevent.
-    pub fn read(&mut self, base: &mut dyn Base, key: &Key, anchor: Epoch) -> Anchored {
+    pub fn read(&mut self, base: &dyn Base, key: &Key, anchor: Epoch) -> Anchored {
         self.stats.reads += 1;
         self.clock += 1;
         self.last_read.insert(key.clone(), self.clock);
@@ -300,7 +300,7 @@ impl Rev {
     ///
     /// This is where a consistency rung's cost actually falls, which was itself a measured
     /// finding: instrumenting only the read path showed no difference between rungs at all.
-    pub fn apply_epoch(&mut self, base: &mut dyn Base, e: Epoch) {
+    pub fn apply_epoch(&mut self, base: &dyn Base, e: Epoch) {
         for (key, delta) in base.deltas_at(e) {
             // An entry pinned to a historical anchor is missing the deltas between that
             // anchor and now; folding this one in would compound the gap rather than
@@ -566,7 +566,7 @@ impl Runtime {
     /// it is invisible on the read path — which is why an earlier version of this
     /// experiment, instrumented only on reads, measured no difference between rungs at all
     /// and reported a null.
-    pub fn advance(&mut self, base: &mut dyn Base, e: Epoch) {
+    pub fn advance(&mut self, base: &dyn Base, e: Epoch) {
         self.epoch = e;
         for v in &mut self.views {
             let stride = match v.rung {
@@ -671,7 +671,7 @@ mod tests {
         fn frontier(&self) -> Epoch {
             self.head
         }
-        fn reconstruct(&mut self, key: &Key, anchor: Epoch) -> (Value, u64) {
+        fn reconstruct(&self, key: &Key, anchor: Epoch) -> (Value, u64) {
             let (mut acc, mut from) = (0i128, 0u64);
             if let Some(cps) = self.checkpoints.get(key) {
                 if let Some((e, v)) = cps.iter().rev().find(|(e, _)| *e <= anchor) {
@@ -688,7 +688,7 @@ mod tests {
             }
             (acc, rows)
         }
-        fn deltas_at(&mut self, e: Epoch) -> Vec<(Key, Value)> {
+        fn deltas_at(&self, e: Epoch) -> Vec<(Key, Value)> {
             self.rows
                 .iter()
                 .filter(|(re, _, _)| *re == e)
@@ -747,7 +747,7 @@ mod tests {
 
         let mut first = BTreeMap::new();
         for k in 0..5i64 {
-            first.insert(k, v.read(&mut base, &vec![k], anchor).value);
+            first.insert(k, v.read(&base, &vec![k], anchor).value);
         }
         // With a budget of 2 and 5 keys, the sweep above already evicted three of them.
         assert!(
@@ -756,7 +756,7 @@ mod tests {
             v.stats
         );
         for k in 0..5i64 {
-            let again = v.read(&mut base, &vec![k], anchor).value;
+            let again = v.read(&base, &vec![k], anchor).value;
             assert_eq!(again, first[&k], "key {k} changed across an eviction");
         }
     }
@@ -773,11 +773,11 @@ mod tests {
         .unwrap();
         let anchor = base.frontier();
         let v = rt.view_mut("balance").unwrap();
-        assert_eq!(v.read(&mut base, &vec![7], anchor).value, 500);
+        assert_eq!(v.read(&base, &vec![7], anchor).value, 500);
         // Force it out.
         base.seal(vec![8], 900);
         let head = base.frontier();
-        v.read(&mut base, &vec![8], head);
+        v.read(&base, &vec![8], head);
         assert!(
             matches!(v.slot(&vec![7]), Slot::Hole(_)),
             "must be a hole, not gone: {}",
@@ -785,7 +785,7 @@ mod tests {
         );
         // And reading it back reconstructs the real value, not the aggregate's identity.
         let head = base.frontier();
-        assert_eq!(v.read(&mut base, &vec![7], head).value, 500);
+        assert_eq!(v.read(&base, &vec![7], head).value, 500);
     }
 
     #[test]
@@ -800,8 +800,8 @@ mod tests {
         )
         .unwrap();
         let v = rt.view_mut("balance").unwrap();
-        let a = v.read(&mut base, &vec![1], 1);
-        let b = v.read(&mut base, &vec![1], 2);
+        let a = v.read(&base, &vec![1], 1);
+        let b = v.read(&base, &vec![1], 2);
         assert_eq!(
             (a.value, a.anchor),
             (10, 1),
@@ -824,10 +824,10 @@ mod tests {
         .unwrap();
         {
             let v = rt.view_mut("balance").unwrap();
-            v.read(&mut base, &vec![0], 1);
+            v.read(&base, &vec![0], 1);
         }
         for e in 1..=20 {
-            rt.advance(&mut base, e);
+            rt.advance(&base, e);
         }
         let s = rt.stats();
         assert!(
@@ -853,7 +853,7 @@ mod tests {
         let anchor = base.frontier();
         let v = rt.view_mut("balance").unwrap();
         for k in 0..10i64 {
-            v.read(&mut base, &vec![k], anchor);
+            v.read(&base, &vec![k], anchor);
         }
         assert_eq!(
             v.stats.evictions, 0,
@@ -895,11 +895,11 @@ mod tests {
             {
                 let v = rt.view_mut("balance").unwrap();
                 for k in 0..4i64 {
-                    v.read(&mut base, &vec![k], 1);
+                    v.read(&base, &vec![k], 1);
                 }
             }
             for e in 1..=200 {
-                rt.advance(&mut base, e);
+                rt.advance(&base, e);
             }
             runs.push(rt.stats());
         }
@@ -946,15 +946,15 @@ mod tests {
             Policy::Lru,
         )
         .unwrap();
-        rt.advance(&mut base, 1);
-        rt.advance(&mut base, 2);
+        rt.advance(&base, 1);
+        rt.advance(&base, 2);
         let v = rt.view_mut("balance").unwrap();
 
-        let historical = v.read(&mut base, &vec![1], 1);
+        let historical = v.read(&base, &vec![1], 1);
         assert_eq!(historical.value, truth(&base, &vec![1], 1));
         assert_eq!(historical.anchor, 1);
 
-        let current = v.read(&mut base, &vec![1], 2);
+        let current = v.read(&base, &vec![1], 2);
         assert_eq!(
             current.value,
             truth(&base, &vec![1], 2),
@@ -979,13 +979,13 @@ mod tests {
         .unwrap();
         {
             let v = rt.view_mut("balance").unwrap();
-            let ahead = v.read(&mut base, &vec![1], 2);
+            let ahead = v.read(&base, &vec![1], 2);
             assert_eq!(ahead.value, truth(&base, &vec![1], 2));
         }
-        rt.advance(&mut base, 1);
-        rt.advance(&mut base, 2);
+        rt.advance(&base, 1);
+        rt.advance(&base, 2);
         let v = rt.view_mut("balance").unwrap();
-        let after = v.read(&mut base, &vec![1], 2);
+        let after = v.read(&base, &vec![1], 2);
         assert_eq!(
             after.value,
             truth(&base, &vec![1], 2),
@@ -1016,13 +1016,13 @@ mod tests {
         .unwrap();
         {
             let v = rt.view_mut("balance").unwrap();
-            v.read(&mut base, &vec![1], 0);
+            v.read(&base, &vec![1], 0);
         }
         for e in 1..=16 {
-            rt.advance(&mut base, e);
+            rt.advance(&base, e);
         }
         let v = rt.view_mut("balance").unwrap();
-        let got = v.read(&mut base, &vec![1], 16);
+        let got = v.read(&base, &vec![1], 16);
         assert_eq!(
             got.value,
             truth(&base, &vec![1], 16),
@@ -1061,13 +1061,13 @@ mod tests {
                         .unwrap();
                 let mut checked = 0u64;
                 for e in 1..=120u64 {
-                    rt.advance(&mut base, e);
+                    rt.advance(&base, e);
                     let v = rt.view_mut("balance").unwrap();
                     for _ in 0..3 {
                         let k = vec![next().rem_euclid(6)];
                         // Anchors anywhere in the retained history, not only at the head.
                         let anchor = (next().rem_euclid(e as i64 + 1)) as Epoch;
-                        let got = v.read(&mut base, &k, anchor);
+                        let got = v.read(&base, &k, anchor);
                         assert!(
                             got.anchor >= anchor,
                             "an answer must not be older than the anchor it was asked for"
@@ -1109,23 +1109,23 @@ mod tests {
             let mut rt = mk();
             {
                 let v = rt.view_mut("balance").unwrap();
-                v.read(&mut base, &vec![1], 4);
+                v.read(&base, &vec![1], 4);
             }
             for e in 1..=4 {
-                rt.advance(&mut base, e);
+                rt.advance(&base, e);
             }
             let v = rt.view_mut("balance").unwrap();
-            assert_eq!(v.read(&mut base, &vec![1], 4).value, 20);
+            assert_eq!(v.read(&base, &vec![1], 4).value, 20);
         }
         // 2. Skipped deltas — reconstruction is anchored, so a delta at or below the
         //    anchor is included whether or not the resident state ever saw it.
         {
             let mut rt = mk();
             for e in 1..=4 {
-                rt.advance(&mut base, e);
+                rt.advance(&base, e);
             }
             let v = rt.view_mut("balance").unwrap();
-            assert_eq!(v.read(&mut base, &vec![1], 4).value, 20);
+            assert_eq!(v.read(&base, &vec![1], 4).value, 20);
         }
         // 3. Upquery races — two reconstructions at different anchors are mutually
         //    consistent: each answer is exact at the anchor it is *returned* with, and
@@ -1141,11 +1141,11 @@ mod tests {
         {
             let mut rt = mk();
             let v = rt.view_mut("balance").unwrap();
-            let lo = v.read(&mut base, &vec![1], 2);
-            let hi = v.read(&mut base, &vec![1], 4);
+            let lo = v.read(&base, &vec![1], 2);
+            let hi = v.read(&base, &vec![1], 4);
             assert_eq!((lo.anchor, lo.value), (2, 10));
             assert_eq!((hi.anchor, hi.value), (4, 20));
-            let again = v.read(&mut base, &vec![1], 2);
+            let again = v.read(&base, &vec![1], 2);
             assert!(again.anchor >= 2);
             assert_eq!(
                 again.value,
@@ -1159,24 +1159,24 @@ mod tests {
             let mut rt = mk();
             {
                 let v = rt.view_mut("balance").unwrap();
-                v.read(&mut base, &vec![1], 0);
-                v.read(&mut base, &vec![2], 0); // evicts key 1: the budget is one slot
+                v.read(&base, &vec![1], 0);
+                v.read(&base, &vec![2], 0); // evicts key 1: the budget is one slot
             }
             for e in 1..=4 {
-                rt.advance(&mut base, e);
+                rt.advance(&base, e);
             }
             let v = rt.view_mut("balance").unwrap();
             assert!(v.stats.deltas_skipped > 0, "the saving must be real");
-            assert_eq!(v.read(&mut base, &vec![1], 4).value, 20);
+            assert_eq!(v.read(&base, &vec![1], 4).value, 20);
         }
         // 5. Upquery deadlock — reconstruction is a pull over an immutable prefix and
         //    never waits on the update path, so a read during maintenance terminates.
         {
             let mut rt = mk();
             for e in 1..=4 {
-                rt.advance(&mut base, e);
+                rt.advance(&base, e);
                 let v = rt.view_mut("balance").unwrap();
-                v.read(&mut base, &vec![1], e);
+                v.read(&base, &vec![1], e);
             }
         }
     }
@@ -1199,9 +1199,9 @@ mod tests {
                 )
                 .unwrap();
                 for e in 1..=80u64 {
-                    rt.advance(&mut base, e);
+                    rt.advance(&base, e);
                     let v = rt.view_mut("balance").unwrap();
-                    v.read(&mut base, &vec![(e as i64 * 7) % 8], e);
+                    v.read(&base, &vec![(e as i64 * 7) % 8], e);
                 }
                 let v = rt.view("balance").unwrap();
                 let resident: Vec<Key> = v
@@ -1240,7 +1240,7 @@ mod tests {
             let v = rt.view_mut("balance").unwrap();
             for _ in 0..8 {
                 for k in 0..4i64 {
-                    v.read(&mut base, &vec![k], anchor);
+                    v.read(&base, &vec![k], anchor);
                 }
             }
             costs.push(v.stats.base_rows_read as f64 / v.stats.upqueries as f64);
@@ -1327,11 +1327,11 @@ mod tests {
         let anchor = base.frontier();
         let v = rt.view_mut("balance").unwrap();
         let before: Vec<Value> = (0..6i64)
-            .map(|k| v.read(&mut base, &vec![k], anchor).value)
+            .map(|k| v.read(&base, &vec![k], anchor).value)
             .collect();
         v.wipe();
         let after: Vec<Value> = (0..6i64)
-            .map(|k| v.read(&mut base, &vec![k], anchor).value)
+            .map(|k| v.read(&base, &vec![k], anchor).value)
             .collect();
         assert_eq!(
             before, after,

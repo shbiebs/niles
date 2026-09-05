@@ -57,7 +57,14 @@ impl ReadStats {
 /// `evict_all` read the other one; and nothing in the type said which of the two a caller was
 /// looking at. A test that warmed one and measured the other would have passed.
 pub struct RevEngine {
-    ledger: Ledger,
+    /// **The base, behind a reader-writer lock.**
+    ///
+    /// The base is append-only and a read of it is a fold over a frozen prefix: two folds
+    /// have nothing to say to each other, and serialising them was worth a measured factor.
+    /// What needs exclusion is the append — `submit` chains a hash and mutates five indexes
+    /// — and the write guard is also what keeps epochs contiguous, because it serialises
+    /// submitters in the order they will be assigned ids.
+    ledger: std::sync::RwLock<Ledger>,
     /// The currency index every wire query uses. The demo schema declares one currency, and a
     /// server that silently answered in whichever currency it found first would be making the
     /// per-currency conservation rule invisible from the outside.
@@ -65,7 +72,7 @@ pub struct RevEngine {
     views: Vec<(String, u32)>,
     /// Counted work spent evaluating circuits, so the scan surface's cost is reported
     /// rather than hidden inside a latency number.
-    scan_work: u64,
+    scan_work: std::sync::atomic::AtomicU64,
     /// Queries served by evaluating a circuit, and base rows materialised for them.
     ///
     /// **Every one of these is a reconstruction.** The served path evaluates the compiled
@@ -73,8 +80,14 @@ pub struct RevEngine {
     /// there is no resident entry to hit. The counters are reported as what they are rather
     /// than as a hit/miss ratio over a view nothing reads — which is what the CSV's
     /// `miss_rate` column would otherwise be silently reporting.
-    served: u64,
-    served_rows: u64,
+    ///
+    /// **Atomics, for the same reason `Ledger::rows_touched` is one.** These three counters
+    /// were the only things the scan path wrote, and a `&mut self` taken to increment a
+    /// counter is a `&mut self` taken over the whole engine — which is how a fold of twenty
+    /// thousand postings came to exclude every other fold. Counting through relaxed atomics
+    /// costs an add and buys `&self` on the read path.
+    served: std::sync::atomic::AtomicU64,
+    served_rows: std::sync::atomic::AtomicU64,
     /// **The incremental REV runtime, over the compiled circuit for a balance.**
     ///
     /// This is the mechanism the thesis is about — partial materialisation under a budget,
@@ -85,13 +98,19 @@ pub struct RevEngine {
     ///
     /// `None` when the view could not be installed, which is a refusal rather than a
     /// fallback: the fold answers, and the counters say the runtime served nothing.
-    runtime: Option<nilestream_core::rev::Runtime>,
+    /// **Behind a mutex, because a read of the view is a write to it.** A miss reconstructs
+    /// and installs, and an install may evict: partial materialisation mutates on read by
+    /// construction, and no lock discipline makes that untrue. What the mutex buys is that
+    /// the mutation is scoped to the *view* rather than to the engine — a keyed read holds
+    /// it for microseconds, while a fold, which never touches the view at all, holds
+    /// nothing and runs concurrently with every other fold.
+    runtime: Option<std::sync::Mutex<nilestream_core::rev::Runtime>>,
     /// Currencies the base holds. The installed view is keyed `(account, currency)` and a
     /// wire query asking for one account's balance names no currency, so the runtime can
     /// answer only while there is exactly one to name. More than one and the fold answers —
     /// because picking a currency for the caller is how a per-currency conservation rule
     /// becomes invisible from outside.
-    currencies: std::collections::BTreeSet<u32>,
+    currencies: std::sync::RwLock<std::collections::BTreeSet<u32>>,
     /// The durable sink, when the daemon was started with one. `None` for the in-memory
     /// engine the tests and the benchmark's warm-up use.
     ///
@@ -118,7 +137,7 @@ pub struct RevEngine {
     /// Epochs applied to the base whose barrier has not yet returned.
     ///
     /// Drained by the daemon after it releases the lock; see [`Serving::take_pending`].
-    pending: Vec<Pending>,
+    pending: std::sync::Mutex<Vec<Pending>>,
 }
 
 /// An applied-but-not-yet-durable epoch, and what makes it visible.
@@ -289,22 +308,22 @@ impl RevEngine {
                 ledger.frontier()
             };
             for e in 0..=head {
-                rt.advance(&mut ledger, e);
+                rt.advance(&ledger, e);
             }
         }
 
         RevEngine {
-            ledger,
+            ledger: std::sync::RwLock::new(ledger),
             currency: 0,
             views: vec![("__wire_result".to_string(), 2)],
-            scan_work: 0,
-            served: 0,
-            served_rows: 0,
-            runtime,
-            currencies: std::collections::BTreeSet::from([0]),
+            scan_work: std::sync::atomic::AtomicU64::new(0),
+            served: std::sync::atomic::AtomicU64::new(0),
+            served_rows: std::sync::atomic::AtomicU64::new(0),
+            runtime: runtime.map(std::sync::Mutex::new),
+            currencies: std::sync::RwLock::new(std::collections::BTreeSet::from([0])),
             durable: None,
             visible: None,
-            pending: Vec::new(),
+            pending: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -318,17 +337,43 @@ impl RevEngine {
     /// test could evict, observe a rising miss rate, and be measuring a cache no query
     /// consulted.
     pub fn evict_all(&mut self) {
-        if let Some(v) = self
-            .runtime
-            .as_mut()
-            .and_then(|rt| rt.view_mut(BALANCE_VIEW))
-        {
-            v.wipe();
+        if let Some(rt) = self.runtime.as_mut() {
+            if let Some(v) = rt
+                .get_mut()
+                .expect("the view lock is not poisoned")
+                .view_mut(BALANCE_VIEW)
+            {
+                v.wipe();
+            }
         }
     }
 
     pub fn head(&self) -> u64 {
-        self.ledger.head()
+        self.base().head()
+    }
+
+    /// How many currencies the base holds.
+    fn currency_count(&self) -> usize {
+        self.currencies
+            .read()
+            .expect("the currency set is not poisoned")
+            .len()
+    }
+
+    /// The one currency in the base, or `None` where there is not exactly one.
+    fn sole_currency(&self) -> Option<u32> {
+        let c = self
+            .currencies
+            .read()
+            .expect("the currency set is not poisoned");
+        (c.len() == 1).then(|| *c.iter().next().expect("one currency"))
+    }
+
+    /// A shared borrow of the base. Every read path goes through here, and every one of
+    /// them is counted, so `select nilestream_lock` describes the structure that is actually
+    /// there rather than the mutex that used to be.
+    fn base(&self) -> crate::lockstats::TimedRead<'_, Ledger> {
+        crate::lockstats::TimedRead::acquire(&self.ledger, &crate::lockstats::ENGINE_LOCK)
     }
 }
 
@@ -354,7 +399,7 @@ impl crate::session::Serving for RevEngine {
             Some(v) => v.load(std::sync::atomic::Ordering::Acquire),
             // No durable sink: nothing to be durable *before*, so the base's head is the
             // frontier and always was.
-            None => self.ledger.head(),
+            None => self.base().head(),
         }
     }
 
@@ -375,7 +420,7 @@ impl crate::session::Serving for RevEngine {
     /// `answer_from_view` below is where it is spent, and it answers through the same REV
     /// runtime the phase diagram measures rather than through a cache beside it.
     fn query(
-        &mut self,
+        &self,
         circuit: &niles_ir::circuit::Circuit,
         output: &str,
         anchor: u64,
@@ -424,7 +469,8 @@ impl crate::session::Serving for RevEngine {
         // the base at all. Refused for every shape that is not one — see `report_from_view`.
         if let Some(p) = planned.as_ref() {
             if let Some(rows) = self.report_from_view(p, circuit, output, anchor) {
-                self.served += 1;
+                self.served
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 return Ok(rows);
             }
         }
@@ -442,7 +488,8 @@ impl crate::session::Serving for RevEngine {
         }
         // Counted here rather than on entry: a query the maintained view answered is not a
         // read of the scan surface, and adding it to both totals double-counted every one.
-        self.served += 1;
+        self.served
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (z, work) = match planned {
             Some(p) if p.relation == "postings" => {
                 // **Streamed, not buffered.** Collecting the base into a `Vec` first cost
@@ -455,7 +502,8 @@ impl crate::session::Serving for RevEngine {
                     scanned += 1;
                     folder.row(&row[..]);
                 });
-                self.served_rows += scanned;
+                self.served_rows
+                    .fetch_add(scanned, std::sync::atomic::Ordering::Relaxed);
                 let (folded, w) = folder.finish();
                 // **When the aggregate *is* the output, the fold has already answered.**
                 //
@@ -492,12 +540,16 @@ impl crate::session::Serving for RevEngine {
                     Some(acct) => self.base_for_account(acct, anchor),
                     None => self.base_at(anchor),
                 };
-                self.served_rows += sources.values().map(|z| z.len() as u64).sum::<u64>();
+                self.served_rows.fetch_add(
+                    sources.values().map(|z| z.len() as u64).sum::<u64>(),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
                 niles_ir::eval::try_run(circuit, output, &sources)
                     .map_err(|e| crate::session::ServeError::Eval(e.to_string()))?
             }
         };
-        self.scan_work += work;
+        self.scan_work
+            .fetch_add(work, std::sync::atomic::Ordering::Relaxed);
 
         // Column names from the lowering are not available here — the circuit is the
         // contract between the two, and it carries indices rather than names — so the
@@ -529,8 +581,13 @@ impl crate::session::Serving for RevEngine {
         })
     }
 
-    fn append(&mut self, rows: Vec<Row>, txn_id: &str) -> Result<u64, crate::session::ServeError> {
-        let epoch = self.ledger.submit(txn_id, rows).map_err(|e| match e {
+    fn append(&self, rows: Vec<Row>, txn_id: &str) -> Result<u64, crate::session::ServeError> {
+        // **The write guard, taken once and held across the apply.** It serialises
+        // submitters, which is what makes the epoch ids it assigns contiguous, and it is
+        // released before the barrier is waited on — the whole of what T-05 established.
+        let mut base =
+            crate::lockstats::TimedWrite::acquire(&self.ledger, &crate::lockstats::ENGINE_LOCK);
+        let epoch = base.submit(txn_id, rows).map_err(|e| match e {
             // The two are different failures and a client acts on them differently: a
             // duplicate means the earlier attempt succeeded and the retry must stop; an
             // unbalanced set means the caller built something that does not conserve.
@@ -557,26 +614,35 @@ impl crate::session::Serving for RevEngine {
             let token = sink
                 .record_pending(txn_id, epoch.to_string().into_bytes())
                 .map_err(crate::session::ServeError::NotDurable)?;
-            self.pending.push(Pending {
-                epoch,
-                token,
-                visible: self
-                    .visible
-                    .clone()
-                    .expect("a durable sink implies a visible frontier"),
-            });
+            self.pending
+                .lock()
+                .expect("the pending list is not poisoned")
+                .push(Pending {
+                    epoch,
+                    token,
+                    visible: self
+                        .visible
+                        .clone()
+                        .expect("a durable sink implies a visible frontier"),
+                });
         }
         // The maintained view moves with the ledger, or the next read answers at an anchor
         // the base has already passed. `advance` touches only *resident* entries, which is
         // the saving partiality buys and is why this is not a per-epoch scan of the key
         // space.
-        if let Some(rt) = self.runtime.as_mut() {
-            rt.advance(&mut self.ledger, epoch);
+        if let Some(rt) = self.runtime.as_ref() {
+            rt.lock()
+                .expect("the view lock is not poisoned")
+                .advance(&*base, epoch);
         }
-        if let Some(e) = self.ledger.epochs.get(epoch as usize) {
+        if let Some(e) = base.epochs.get(epoch as usize) {
+            let mut cur = self
+                .currencies
+                .write()
+                .expect("the currency set is not poisoned");
             for r in &e.rows {
                 if let proto_engine::Row::Post(p) = r {
-                    self.currencies.insert(p.cur);
+                    cur.insert(p.cur);
                 }
             }
         }
@@ -587,8 +653,13 @@ impl crate::session::Serving for RevEngine {
         self.views.clone()
     }
 
-    fn take_pending(&mut self) -> Vec<Pending> {
-        std::mem::take(&mut self.pending)
+    fn take_pending(&self) -> Vec<Pending> {
+        std::mem::take(
+            &mut *self
+                .pending
+                .lock()
+                .expect("the pending list is not poisoned"),
+        )
     }
 
     fn sealer_stats(&self) -> Option<(u64, u64, u64, u64, u64)> {
@@ -625,21 +696,77 @@ impl crate::session::Serving for RevEngine {
         // did. A single-account read is now answered by the REV runtime, so its hits and
         // misses are the runtime's, and the scan surface's reads are added to both totals so
         // that a mixed workload's rate is over everything the server answered.
-        match self.runtime.as_ref().and_then(|rt| rt.view(BALANCE_VIEW)) {
+        let served = self.served.load(std::sync::atomic::Ordering::Relaxed);
+        let served_rows = self.served_rows.load(std::sync::atomic::Ordering::Relaxed);
+        let guard = self
+            .runtime
+            .as_ref()
+            .map(|rt| rt.lock().expect("the view lock is not poisoned"));
+        match guard.as_ref().and_then(|rt| rt.view(BALANCE_VIEW)) {
             Some(v) => {
                 let s = &v.stats;
                 (
-                    s.reads + self.served,
+                    s.reads + served,
                     s.hits,
-                    s.misses + self.served,
-                    s.base_rows_read + self.served_rows,
+                    s.misses + served,
+                    s.base_rows_read + served_rows,
                     v.resident_count() as usize,
                 )
             }
             // No runtime: the server has no partial state at all, so nothing is resident
             // and every served read is a reconstruction over the base.
-            None => (self.served, 0, self.served, self.served_rows, 0),
+            None => (served, 0, served, served_rows, 0),
         }
+    }
+}
+
+/// **A swappable engine, for a harness that measures more than one size.**
+///
+/// The daemon holds its engine behind a shared borrow and never replaces it; a benchmark
+/// sweeping the base across two decades has to. This adapter is the whole difference: it
+/// forwards every `Serving` method through a shared borrow — so reads still run
+/// concurrently — and `reseed` takes the exclusive one to put a different engine in place.
+impl crate::session::Serving for std::sync::RwLock<RevEngine> {
+    fn frontier(&self) -> u64 {
+        self.read().expect("not poisoned").frontier()
+    }
+    fn query(
+        &self,
+        circuit: &niles_ir::circuit::Circuit,
+        output: &str,
+        anchor: u64,
+    ) -> Result<crate::session::Rows, crate::session::ServeError> {
+        self.read()
+            .expect("not poisoned")
+            .query(circuit, output, anchor)
+    }
+    fn append(&self, rows: Vec<Row>, txn_id: &str) -> Result<u64, crate::session::ServeError> {
+        self.read().expect("not poisoned").append(rows, txn_id)
+    }
+    fn views(&self) -> Vec<(String, u32)> {
+        self.read().expect("not poisoned").views()
+    }
+    fn durability(&self) -> &'static str {
+        self.read().expect("not poisoned").durability()
+    }
+    fn read_stats(&self) -> (u64, u64, u64, u64, usize) {
+        self.read().expect("not poisoned").read_stats()
+    }
+    fn sealer_stats(&self) -> Option<(u64, u64, u64, u64, u64)> {
+        self.read().expect("not poisoned").sealer_stats()
+    }
+    fn take_pending(&self) -> Vec<Pending> {
+        self.read().expect("not poisoned").take_pending()
+    }
+    fn serve_path_now(
+        &self,
+        circuit: &niles_ir::circuit::Circuit,
+        output: &str,
+        anchor: u64,
+    ) -> &'static str {
+        self.read()
+            .expect("not poisoned")
+            .serve_path_now(circuit, output, anchor)
     }
 }
 
@@ -651,9 +778,8 @@ impl RevEngine {
         // The base already holds its seeded epochs and they were never written to a sink, so
         // the visible frontier starts where the base is. Everything appended from here earns
         // its visibility by being fsynced.
-        self.visible = Some(std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
-            self.ledger.head(),
-        )));
+        let head = self.base().head();
+        self.visible = Some(std::sync::Arc::new(std::sync::atomic::AtomicU64::new(head)));
         Ok(self)
     }
 
@@ -688,10 +814,15 @@ impl RevEngine {
             [ACCT, CUR] => true,
             _ => return None,
         };
-        if !with_currency && self.currencies.len() != 1 {
+        if !with_currency && self.currency_count() != 1 {
             return None;
         }
-        let view = self.runtime.as_ref()?.view(BALANCE_VIEW)?;
+        let rt = self
+            .runtime
+            .as_ref()?
+            .lock()
+            .expect("the view lock is not poisoned");
+        let view = rt.view(BALANCE_VIEW)?;
         if !view.is_full() || view.applied_through() != anchor {
             return None;
         }
@@ -745,7 +876,7 @@ impl RevEngine {
     /// * **The anchor must be the one the view is true at.** A report is a set of rows true
     ///   at one moment; serving it at another would answer as of a moment nobody asked about.
     fn report_from_view(
-        &mut self,
+        &self,
         p: &crate::scan_fold::FoldPlan,
         circuit: &niles_ir::circuit::Circuit,
         output: &str,
@@ -754,7 +885,11 @@ impl RevEngine {
         use niles_ir::value::Value;
 
         let with_currency = self.report_shape(p, circuit, output, anchor)?;
-        let rt = self.runtime.as_ref()?;
+        let rt = self
+            .runtime
+            .as_ref()?
+            .lock()
+            .expect("the view lock is not poisoned");
         let view = rt.view(BALANCE_VIEW)?;
 
         let mut columns: Vec<String> = (0..p.width()).map(|i| format!("c{i}")).collect();
@@ -803,7 +938,7 @@ impl RevEngine {
     ///   conservation rule invisible from outside. With two currencies the fold answers,
     ///   correctly and more slowly, which is the right way round.
     fn answer_from_view(
-        &mut self,
+        &self,
         p: &crate::scan_fold::FoldPlan,
         circuit: &niles_ir::circuit::Circuit,
         output: &str,
@@ -829,13 +964,21 @@ impl RevEngine {
             [ACCT, CUR] => true,
             _ => return None,
         };
-        if self.currencies.len() != 1 {
+        if self.currency_count() != 1 {
             return None;
         }
-        let cur = *self.currencies.iter().next()?;
-        let rt = self.runtime.as_mut()?;
+        let cur = self.sole_currency()?;
+        let mut rt = self
+            .runtime
+            .as_ref()?
+            .lock()
+            .expect("the view lock is not poisoned");
         let view = rt.view_mut(BALANCE_VIEW)?;
-        let answered = view.read(&mut self.ledger, &vec![acct as i64, cur as i64], anchor);
+        let answered = view.read(&*self.base(), &vec![acct as i64, cur as i64], anchor);
+        // The view's own lock is released here: what follows reads the base and the plan,
+        // and holding the view across it would put an unrelated fold's worth of time inside
+        // the one section a keyed read is supposed to hold for microseconds.
+        drop(rt);
 
         // **The answer must be true at the anchor that was asked for, not merely at least as
         // fresh.** A hit reports the entry's *effective* version, which can be later than the
@@ -856,11 +999,8 @@ impl RevEngine {
         // lose: a keyed read answers with a number for a key nothing has ever touched, and a
         // group that does not exist must produce no row at all — which is what the fold and
         // the reference evaluator both do, and what this must agree with.
-        if self
-            .ledger
-            .key_update_count(acct, anchor.min(self.ledger.head()))
-            == 0
-        {
+        let base = self.base();
+        if base.key_update_count(acct, anchor.min(base.head())) == 0 {
             return Some(crate::session::Rows {
                 columns,
                 rows: crate::session::RowSource::Evaluated {
@@ -897,7 +1037,8 @@ impl RevEngine {
     /// rules already handle.
     fn scan(&self, acct: Option<u64>, anchor: u64, mut f: impl FnMut([niles_ir::value::Value; 5])) {
         use niles_ir::value::Value;
-        let upto = anchor.min(self.ledger.head());
+        let base = self.base();
+        let upto = anchor.min(base.head());
         let row = |p: &Posting| {
             [
                 Value::Int(p.txn as i128),
@@ -911,12 +1052,12 @@ impl RevEngine {
             // Through the anchor index: the cost is that account's own postings rather than
             // the length of history, which is the mechanism §9.4.1 measures.
             Some(a) => {
-                for p in self.ledger.postings_for(a, upto) {
+                for p in base.postings_for(a, upto) {
                     f(row(&p));
                 }
             }
             None => {
-                for e in &self.ledger.epochs {
+                for e in &base.epochs {
                     if e.id > upto {
                         break;
                     }
@@ -941,9 +1082,10 @@ impl RevEngine {
     fn base_at(&self, anchor: u64) -> std::collections::BTreeMap<String, niles_ir::eval::ZSet> {
         use niles_ir::value::Value;
         let mut z: niles_ir::eval::ZSet = Default::default();
-        let head = self.ledger.head();
+        let base = self.base();
+        let head = base.head();
         let upto = anchor.min(head);
-        for e in &self.ledger.epochs {
+        for e in &base.epochs {
             if e.id > upto {
                 break;
             }
@@ -973,10 +1115,8 @@ impl RevEngine {
     ) -> std::collections::BTreeMap<String, niles_ir::eval::ZSet> {
         use niles_ir::value::Value;
         let mut z: niles_ir::eval::ZSet = Default::default();
-        for p in self
-            .ledger
-            .postings_for(acct, anchor.min(self.ledger.head()))
-        {
+        let base = self.base();
+        for p in base.postings_for(acct, anchor.min(base.head())) {
             niles_ir::eval::add(
                 &mut z,
                 vec![
@@ -1279,7 +1419,7 @@ mod tests {
         use crate::session::Serving;
         // Small enough to be a unit test, seeded densely enough that groups, filters and
         // limits all have something to do.
-        let mut e = RevEngine::seeded(60, 3, 20, ViewMode::Demand, EvictionPolicy::Lru);
+        let e = RevEngine::seeded(60, 3, 20, ViewMode::Demand, EvictionPolicy::Lru);
         let anchor = e.frontier();
 
         let folded = [
@@ -1359,7 +1499,7 @@ mod tests {
     #[test]
     fn the_scalar_key_fold_agrees_with_the_reference_on_the_cases_it_specialises() {
         use crate::session::Serving;
-        let mut e = RevEngine::seeded(40, 2, 15, ViewMode::Demand, EvictionPolicy::Lru);
+        let e = RevEngine::seeded(40, 2, 15, ViewMode::Demand, EvictionPolicy::Lru);
         let anchor = e.frontier();
 
         for sql in [
@@ -1438,7 +1578,7 @@ mod tests {
     #[test]
     fn a_restricted_scan_and_the_full_one_answer_the_same_question() {
         use crate::session::Serving;
-        let mut e = RevEngine::seeded(60, 3, 20, ViewMode::Demand, EvictionPolicy::Lru);
+        let e = RevEngine::seeded(60, 3, 20, ViewMode::Demand, EvictionPolicy::Lru);
         let anchor = e.frontier();
 
         for sql in [
@@ -1542,7 +1682,7 @@ mod tests {
         use crate::session::Serving;
         let accounts = 200i64;
         let rows_for = |sql: &str| -> u64 {
-            let mut e = RevEngine::seeded(accounts, 2, 50, ViewMode::Demand, EvictionPolicy::Lru);
+            let e = RevEngine::seeded(accounts, 2, 50, ViewMode::Demand, EvictionPolicy::Lru);
             let anchor = e.frontier();
             let lowered = compile(sql);
             let before = e.read_stats().3;
@@ -1593,7 +1733,7 @@ mod tests {
         use crate::session::Serving;
         // A budget of `usize::MAX` is the ask for a view that never evicts. Without that the
         // view is partial and a report must not come from it — see the case below.
-        let mut e = RevEngine::seeded(200, 2, usize::MAX, ViewMode::Demand, EvictionPolicy::Lru);
+        let e = RevEngine::seeded(200, 2, usize::MAX, ViewMode::Demand, EvictionPolicy::Lru);
         let anchor = e.frontier();
         let lowered = compile("select acct, sum(amt) from postings group by acct");
 
@@ -1692,7 +1832,7 @@ mod tests {
     fn a_partial_view_never_serves_a_report() {
         use crate::session::Serving;
         // A budget well below the key count, so the view evicts and is never full.
-        let mut e = RevEngine::seeded(200, 2, 20, ViewMode::Demand, EvictionPolicy::Lru);
+        let e = RevEngine::seeded(200, 2, 20, ViewMode::Demand, EvictionPolicy::Lru);
         let anchor = e.frontier();
 
         // Warm it, so it has resident entries a careless report would happily return.
@@ -1731,7 +1871,7 @@ mod tests {
     #[test]
     fn a_sum_over_no_rows_is_absent_rather_than_zero() {
         use crate::session::Serving;
-        let mut e = RevEngine::seeded(20, 2, 10, ViewMode::Demand, EvictionPolicy::Lru);
+        let e = RevEngine::seeded(20, 2, 10, ViewMode::Demand, EvictionPolicy::Lru);
         let anchor = e.frontier();
         let lowered = compile("select cur, sum(amt) from postings where amt > 100000 group by cur");
         assert!(crate::scan_fold::plan(&lowered.circuit, "__wire_result").is_some());
@@ -1776,7 +1916,7 @@ mod tests {
         use crate::session::Serving;
         // A budget of a quarter of the key space, as the benchmark configures: small enough
         // that eviction happens and the miss path is exercised.
-        let mut e = RevEngine::seeded(200, 2, 50, ViewMode::Demand, EvictionPolicy::Lru);
+        let e = RevEngine::seeded(200, 2, 50, ViewMode::Demand, EvictionPolicy::Lru);
         let anchor = e.frontier();
 
         let hot = compile("select acct, sum(amt) from postings where acct = 7 group by acct");
@@ -1841,7 +1981,7 @@ mod tests {
     #[test]
     fn an_untouched_account_has_no_balance_on_the_view_path_either() {
         use crate::session::Serving;
-        let mut e = RevEngine::seeded(20, 2, 10, ViewMode::Demand, EvictionPolicy::Lru);
+        let e = RevEngine::seeded(20, 2, 10, ViewMode::Demand, EvictionPolicy::Lru);
         let anchor = e.frontier();
         let c = compile("select acct, sum(amt) from postings where acct = 999999 group by acct");
         let got = e
@@ -1862,7 +2002,7 @@ mod tests {
     #[test]
     fn a_read_after_a_write_sees_it() {
         use crate::session::Serving;
-        let mut e = RevEngine::seeded(50, 2, 20, ViewMode::Demand, EvictionPolicy::Lru);
+        let e = RevEngine::seeded(50, 2, 20, ViewMode::Demand, EvictionPolicy::Lru);
         let c = compile("select acct, sum(amt) from postings where acct = 3 group by acct");
         let before_anchor = e.frontier();
         let before = e
@@ -1919,7 +2059,7 @@ mod tests {
         // a full scan of twenty thousand postings per query. With it, and with no
         // difference in the answer, it is back in the thousands.
         use crate::session::Serving;
-        let mut e = RevEngine::seeded(200, 3, 50, ViewMode::Demand, EvictionPolicy::Lru);
+        let e = RevEngine::seeded(200, 3, 50, ViewMode::Demand, EvictionPolicy::Lru);
         let anchor = e.frontier();
         for acct in [1i64, 7, 42, 199] {
             let sql =
@@ -2241,7 +2381,7 @@ mod tests {
     #[test]
     fn an_empty_answer_describes_its_columns() {
         use crate::session::Serving;
-        let mut e = RevEngine::seeded(50, 1, 25, ViewMode::Demand, EvictionPolicy::Lru);
+        let e = RevEngine::seeded(50, 1, 25, ViewMode::Demand, EvictionPolicy::Lru);
         let anchor = e.frontier();
         let full = compile("select acct, sum(amt) from postings where acct = 7 group by acct");
         let empty =
@@ -2382,7 +2522,7 @@ mod sealer_stats_tests {
         let seg = dir.join("counters.seg");
         let _ = std::fs::remove_file(&seg);
 
-        let mut e = tiny().with_durable(&seg).expect("durable sink");
+        let e = tiny().with_durable(&seg).expect("durable sink");
         assert!(
             e.sealer_stats().is_some(),
             "a durable engine must expose its sealer's counters"
@@ -2409,7 +2549,7 @@ mod sealer_stats_tests {
         // the caller applies, takes the token, releases the lock, and *then* waits — which is
         // what the daemon does between framing a reply and writing it. A test that skipped
         // the wait would be asserting on a barrier that had not happened yet.
-        let pending = crate::session::Serving::take_pending(&mut e);
+        let pending = crate::session::Serving::take_pending(&e);
         assert_eq!(pending.len(), 1, "one append, one outstanding barrier");
         for p in pending {
             p.wait().expect("the epoch reaches stable storage");
@@ -2499,7 +2639,7 @@ mod visibility_tests {
     /// observing a transaction a crash could still erase.
     #[test]
     fn an_applied_epoch_is_not_visible_until_its_barrier_returns() {
-        let (mut e, seg) = engine_at("not-visible-yet");
+        let (e, seg) = engine_at("not-visible-yet");
         let before = e.frontier();
 
         let epoch = e.append(post(1, 1), "v-1").expect("applies");
@@ -2534,7 +2674,7 @@ mod visibility_tests {
     /// other than a completed fsync.
     #[test]
     fn a_barrier_that_is_never_awaited_never_publishes_its_epoch() {
-        let (mut e, seg) = engine_at("never-awaited");
+        let (e, seg) = engine_at("never-awaited");
         let before = e.frontier();
         let epoch = e.append(post(2, 2), "v-2").expect("applies");
 
@@ -2560,7 +2700,7 @@ mod visibility_tests {
     /// published frontier could find a gap.
     #[test]
     fn the_visible_frontier_never_names_an_epoch_the_base_has_not_applied() {
-        let (mut e, seg) = engine_at("no-gap");
+        let (e, seg) = engine_at("no-gap");
         for i in 0..8u64 {
             e.append(post(100 + i, i % 4), &format!("g-{i}"))
                 .expect("applies");
@@ -2571,14 +2711,14 @@ mod visibility_tests {
         }
         let visible = e.frontier();
         assert!(
-            visible <= e.ledger.head(),
+            visible <= e.head(),
             "the visible frontier {visible} is beyond the base's head {} — it is naming an \
              epoch whose rows are not applied",
-            e.ledger.head()
+            e.head()
         );
         assert_eq!(
             visible,
-            e.ledger.head(),
+            e.head(),
             "with every barrier returned, the two must agree"
         );
         let _ = std::fs::remove_file(&seg);
@@ -2593,7 +2733,7 @@ mod visibility_tests {
     /// never exceed the base.
     #[test]
     fn waiting_out_of_order_cannot_move_the_frontier_backwards() {
-        let (mut e, seg) = engine_at("monotone");
+        let (e, seg) = engine_at("monotone");
         for i in 0..6u64 {
             e.append(post(200 + i, i), &format!("m-{i}"))
                 .expect("applies");
@@ -2609,13 +2749,13 @@ mod visibility_tests {
                 "the frontier went backwards, {seen} then {now}"
             );
             assert!(
-                now <= e.ledger.head(),
+                now <= e.head(),
                 "the frontier {now} passed the base's head {}",
-                e.ledger.head()
+                e.head()
             );
             seen = now;
         }
-        assert_eq!(seen, e.ledger.head());
+        assert_eq!(seen, e.head());
         let _ = std::fs::remove_file(&seg);
     }
 }

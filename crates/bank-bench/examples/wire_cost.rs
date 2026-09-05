@@ -216,14 +216,12 @@ impl ClientFloor {
 fn client_floor(accounts: i64, rounds: u32) -> Result<ClientFloor, String> {
     let l = std::net::TcpListener::bind(("127.0.0.1", 0)).map_err(|e| e.to_string())?;
     let port = l.local_addr().map_err(|e| e.to_string())?.port();
-    let engine = std::sync::Arc::new(std::sync::Mutex::new(
-        nilestream_server::rev_engine::RevEngine::seeded(
-            accounts,
-            1,
-            usize::MAX,
-            proto_engine::ViewMode::Demand,
-            proto_engine::EvictionPolicy::Lru,
-        ),
+    let engine = std::sync::Arc::new(nilestream_server::rev_engine::RevEngine::seeded(
+        accounts,
+        1,
+        usize::MAX,
+        proto_engine::ViewMode::Demand,
+        proto_engine::EvictionPolicy::Lru,
     ));
     let schema = nilestream_server::daemon::DEFAULT_SCHEMA.to_string();
     std::thread::spawn(move || nilestream_server::daemon::accept_loop(l, schema, engine));

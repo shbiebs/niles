@@ -315,7 +315,7 @@ mod tests {
         fn frontier(&self) -> Epoch {
             self.head
         }
-        fn reconstruct(&mut self, key: &Key, anchor: Epoch) -> (Value, u64) {
+        fn reconstruct(&self, key: &Key, anchor: Epoch) -> (Value, u64) {
             let mut acc = 0i128;
             let mut n = 0u64;
             for (e, k, v) in &self.rows {
@@ -326,7 +326,7 @@ mod tests {
             }
             (acc, n)
         }
-        fn deltas_at(&mut self, e: Epoch) -> Vec<(Key, Value)> {
+        fn deltas_at(&self, e: Epoch) -> Vec<(Key, Value)> {
             self.rows
                 .iter()
                 .filter(|(re, _, _)| *re == e)

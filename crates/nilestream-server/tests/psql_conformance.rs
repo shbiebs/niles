@@ -29,20 +29,20 @@ use nilestream_server::rev_engine::RevEngine;
 use proto_engine::{EvictionPolicy, ViewMode};
 use std::net::TcpListener;
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Start a daemon on an ephemeral port and return it.
 fn host(accounts: i64) -> u16 {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind an ephemeral port");
     let port = listener.local_addr().expect("addr").port();
-    let engine = Arc::new(Mutex::new(RevEngine::seeded(
+    let engine = Arc::new(RevEngine::seeded(
         accounts,
         2,
         1_000,
         ViewMode::Demand,
         EvictionPolicy::Lru,
-    )));
+    ));
     let schema = daemon::DEFAULT_SCHEMA.to_string();
     std::thread::spawn(move || daemon::accept_loop(listener, schema, engine));
     let deadline = Instant::now() + Duration::from_secs(30);

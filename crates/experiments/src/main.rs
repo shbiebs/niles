@@ -817,7 +817,7 @@ fn e5_history_independence(seeds: &[u64]) -> String {
                 updates_total += ledger.key_update_count(a, anchor);
                 ledger.reconstruct_balance(a, USD, anchor);
             }
-            let idx_per_read = ledger.rows_touched as f64 / n_probes as f64;
+            let idx_per_read = ledger.rows_touched() as f64 / n_probes as f64;
 
             // Ablation: the same reconstructions without the anchor index.
             let mut probe2 = Zipf::new(n_accounts, 0.9, seed ^ 0xABCD);
@@ -826,7 +826,7 @@ fn e5_history_independence(seeds: &[u64]) -> String {
                 let a = probe2.sample() as u64;
                 ledger.reconstruct_balance_scan(a, USD, anchor);
             }
-            let scan_per_read = ledger.rows_touched as f64 / n_probes.min(40) as f64;
+            let scan_per_read = ledger.rows_touched() as f64 / n_probes.min(40) as f64;
 
             indexed.push(idx_per_read);
             scanned.push(scan_per_read);
@@ -1176,7 +1176,7 @@ fn e9_history_refined(seeds: &[u64]) -> String {
                 updates += ledger.key_update_count(a, anchor);
                 ledger.reconstruct_balance(a, USD, anchor);
             }
-            let rpr = ledger.rows_touched as f64 / n_probes as f64;
+            let rpr = ledger.rows_touched() as f64 / n_probes as f64;
             let ku = updates as f64 / n_probes as f64;
             per_read.push(rpr);
             per_key.push(ku);
@@ -1250,7 +1250,7 @@ fn e10_checkpoints(seeds: &[u64]) -> String {
                     let a = probe.sample() as u64;
                     ledger.reconstruct_balance(a, USD, anchor);
                 }
-                let rpr = ledger.rows_touched as f64 / n_probes as f64;
+                let rpr = ledger.rows_touched() as f64 / n_probes as f64;
                 per_read.push(rpr);
                 writeln!(csv, "{n_writes},{c},{seed},{rpr:.2}").ok();
             }

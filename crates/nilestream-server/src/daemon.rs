@@ -32,12 +32,11 @@ schema bank {
 ";
 
 use crate::pg_wire::{self, Frontend};
-use crate::rev_engine::RevEngine;
 use crate::session::Session;
 use crate::tls;
 use std::io::BufReader;
 use std::net::{TcpListener, TcpStream};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// Accept connections until the listener is dropped, serving each on its own thread.
 ///
@@ -45,7 +44,11 @@ use std::sync::{Arc, Mutex};
 /// than defended: the write path is serialised through a single sealer anyway, so
 /// connection-level concurrency is about *reads*, and reads over an immutable base need no
 /// coordination at all.
-pub fn accept_loop(listener: TcpListener, schema: String, engine: Arc<Mutex<RevEngine>>) {
+pub fn accept_loop(
+    listener: TcpListener,
+    schema: String,
+    engine: Arc<dyn crate::session::Serving + Send + Sync>,
+) {
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
         let schema = schema.clone();
@@ -59,7 +62,7 @@ pub fn accept_loop(listener: TcpListener, schema: String, engine: Arc<Mutex<RevE
 pub fn serve(
     stream: TcpStream,
     schema: String,
-    engine: Arc<Mutex<RevEngine>>,
+    engine: Arc<dyn crate::session::Serving + Send + Sync>,
 ) -> std::io::Result<()> {
     let peer = stream
         .peer_addr()
@@ -124,24 +127,21 @@ pub fn serve(
         if msg == Frontend::Terminate {
             break;
         }
-        // **The lock, and then the barrier — in that order, and not together.**
+        // **No lock here at all, and that is the second half of the repair.**
         //
-        // `Session::handle` runs with the engine locked: parse, plan, execute, frame. A write
-        // applies its rows to the base and hands back a token for the barrier it has
-        // submitted. The lock is released here, and *then* the token is waited on — so the
-        // acknowledgement still follows the fsync, while the fsync no longer holds every
-        // other connection up behind it.
+        // This used to take one mutex around the whole of `Session::handle` — parse, plan,
+        // execute, frame — and, before T-05, around the `fsync` inside it. The mutex is
+        // gone: the engine takes the lock it needs, where it needs it, for as long as the
+        // thing it protects is being touched. A fold takes the base **shared**, so folds run
+        // concurrently with each other; an append takes it exclusively for the apply alone;
+        // a keyed read takes the view's own lock for microseconds. `select nilestream_lock`
+        // reports the base lock, which is now the only one a connection can queue on.
         //
-        // Waiting inside the lock is what kept the sealer's queue empty: a second submitter
-        // could not reach it, so group commit never formed a batch and `max_batch` was 1 at
-        // every connection count. `select nilestream_lock` measures the section that remains;
-        // `select nilestream_sealer` measures whether batches now form.
-        let (replies, pending) = {
-            let mut e = crate::lockstats::Timed::acquire(&engine, &crate::lockstats::ENGINE_LOCK);
-            let replies = session.handle(msg, &mut *e);
-            let pending = crate::session::Serving::take_pending(&mut *e);
-            (replies, pending)
-        };
+        // The barrier is still waited on out here, before the reply is written, exactly as
+        // T-05 left it: the acknowledgement follows the fsync, and nothing about releasing
+        // the read side changes that.
+        let replies = session.handle(msg, &*engine);
+        let pending = crate::session::Serving::take_pending(&*engine);
 
         // **A failed barrier must not be acknowledged as a commit.**
         //
@@ -240,26 +240,94 @@ mod ordering_guard {
         );
     }
 
-    /// The lock must not still span the barrier — which is the thing T-05 moved.
+    /// The barrier must not be awaited under any lock — and after T-06 `serve` holds none.
+    ///
+    /// The T-05 form of this guard asserted that `.wait()` came *after* the locked block
+    /// closed. There is no locked block in `serve` any more: the engine takes the lock it
+    /// needs where it needs it, so the property to hold is the stronger one — this function
+    /// acquires nothing, and therefore cannot be holding anything when it waits.
     #[test]
-    fn the_barrier_is_awaited_outside_the_engine_lock() {
+    fn serve_holds_no_lock_of_its_own() {
         let src = include_str!("daemon.rs");
         let serve = src.split("pub fn serve(").nth(1).expect("`serve`");
-        // The locked section is a block that ends before the wait; if `.wait()` appeared
-        // inside it, the fsync would be back inside the critical section and the sealer's
-        // queue would be empty again.
-        let acquire = serve.find("Timed::acquire").expect("the timed lock");
-        let close = serve[acquire..]
-            .find("\n        };")
-            .expect("the locked block closes")
-            + acquire;
-        let waits = serve.find(".wait()").expect("the wait");
+        let loop_start = serve
+            .find("while let Ok(msg) = pg_wire::read_message")
+            .expect("`serve` must have a message loop");
+        let body = &serve[loop_start..];
+        for taken in [
+            "Timed::acquire",
+            "TimedWrite::acquire",
+            "engine.lock(",
+            "engine.write(",
+        ] {
+            assert!(
+                !body.contains(taken),
+                "`serve` acquires `{taken}`. The message loop must hold nothing: a lock taken \
+                 here spans parse, plan, execute and frame for every connection, which is the \
+                 defect T-05 and T-06 removed in two halves. The engine locks what it \
+                 touches, for as long as it touches it."
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod read_concurrency_guard {
+    //! **A read of the base must take it shared, and that is a source-level property.**
+    //!
+    //! Two folds over an append-only prefix have nothing to say to each other, and until
+    //! T-06 they ran one at a time: the read path took `&mut` on the engine because
+    //! `Base::reconstruct` took `&mut self` to increment a counter. Turning the read path
+    //! shared changes no answer — the prefix is frozen, the filters are the same, the
+    //! reference evaluator is the same — so **nothing in the behavioural suite moves if this
+    //! is reverted**, and every fold serialises again. That is what a source-level guard is
+    //! for.
+    //!
+    //! The measurement is in `results/E19-scaling/`: the `fold` workload, which is an
+    //! unkeyed `group by acct` the maintained view refuses, at 1/2/4/8 connections.
+
+    #[test]
+    fn the_read_path_takes_the_base_shared_and_the_append_takes_it_exclusively() {
+        let src = include_str!("rev_engine.rs");
+
+        let base = src
+            .split("fn base(&self)")
+            .nth(1)
+            .expect("the read path's borrow of the base is `RevEngine::base`");
+        let body = &base[..base.find("\n    }").expect("the accessor closes")];
         assert!(
-            waits > close,
-            "`.wait()` is inside the locked block. That is the defect T-05 removed: waiting \
-             for the barrier under the engine lock makes every other connection queue behind \
-             one fsync, and stops a second submitter reaching the sealer at all, so group \
-             commit never forms a batch."
+            body.contains("TimedRead::acquire"),
+            "`RevEngine::base` must take the base **shared**. An exclusive borrow here puts \
+             every fold back in a queue behind every other fold, which no behavioural test \
+             can see because every answer stays correct."
+        );
+
+        let append = src
+            .split("fn append(&self, rows: Vec<Row>")
+            .nth(1)
+            .expect("`append` is where the exclusive borrow belongs");
+        assert!(
+            append[..append.find("\n    }").unwrap_or(append.len())]
+                .contains("TimedWrite::acquire"),
+            "`append` must take the base exclusively: `submit` chains a hash and mutates five \
+             indexes, and the write guard is also what makes the epoch ids it assigns \
+             contiguous."
+        );
+    }
+
+    /// The counter that used to force the exclusive borrow must stay shared-writable.
+    #[test]
+    fn reconstruction_counts_through_a_shared_borrow() {
+        let ledger = include_str!("../../proto-engine/src/ledger.rs");
+        assert!(
+            ledger.contains("fn reconstruct(&self, key: &nilestream_core::rev::Key"),
+            "`Base::reconstruct` must take `&self`. It took `&mut self` for one counter, and \
+             a `&mut self` taken for a counter is a `&mut self` taken over the whole base."
+        );
+        assert!(
+            ledger.contains("fn count_rows(&self, n: u64)"),
+            "the row counter must be writable through a shared borrow, or `reconstruct` \
+             cannot be."
         );
     }
 }

@@ -62,7 +62,7 @@ mod tls;
 use rev_engine::RevEngine;
 use session::Serving;
 use std::net::TcpListener;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -155,7 +155,7 @@ fn main() {
             }
         },
     };
-    let engine = Arc::new(Mutex::new(base));
+    let engine = Arc::new(base);
 
     let listener = match TcpListener::bind(("127.0.0.1", port)) {
         Ok(l) => l,
@@ -172,12 +172,11 @@ fn main() {
         cat.relations.len()
     );
     {
-        let e = engine.lock().unwrap();
         eprintln!(
             "  read path: partial view ({:?}, budget {budget}) over a hash-chained ledger, \
              frontier #{}",
             mode,
-            e.frontier()
+            engine.frontier()
         );
     }
     if durable.is_none() {

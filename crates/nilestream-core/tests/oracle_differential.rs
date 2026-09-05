@@ -44,7 +44,7 @@ impl Base for History {
     fn frontier(&self) -> Epoch {
         self.head
     }
-    fn reconstruct(&mut self, key: &Key, anchor: Epoch) -> (Value, u64) {
+    fn reconstruct(&self, key: &Key, anchor: Epoch) -> (Value, u64) {
         let mut total = 0;
         let mut rows = 0;
         for (e, k, d) in &self.rows {
@@ -55,7 +55,7 @@ impl Base for History {
         }
         (total, rows)
     }
-    fn deltas_at(&mut self, e: Epoch) -> Vec<(Key, Value)> {
+    fn deltas_at(&self, e: Epoch) -> Vec<(Key, Value)> {
         let mut acc: BTreeMap<Key, Value> = BTreeMap::new();
         for (ep, k, d) in &self.rows {
             if *ep == e {
@@ -127,7 +127,7 @@ impl Sut {
                 }
                 self.base.seal(d);
                 let head = self.base.frontier();
-                self.rt.advance(&mut self.base, head);
+                self.rt.advance(&self.base, head);
             }
             Op::Submit { from, to, amt, .. } => {
                 self.base.seal(vec![
@@ -135,7 +135,7 @@ impl Sut {
                     (vec![to.0 as i64], *amt as Value),
                 ]);
                 let head = self.base.frontier();
-                self.rt.advance(&mut self.base, head);
+                self.rt.advance(&self.base, head);
             }
             // A duplicate never reaches the base: admission refuses it upstream, and the
             // runtime has no admission path of its own.
@@ -157,7 +157,7 @@ impl Observable for Sut {
             .rt
             .view_mut("balance")
             .unwrap()
-            .read(&mut self.base, &key, anchor);
+            .read(&self.base, &key, anchor);
         Ok(Answer {
             value: a.value,
             anchor: a.anchor,

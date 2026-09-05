@@ -104,7 +104,14 @@ pub struct Ledger {
     posting_seen: HashMap<(Acct, Cur), usize>,
     running: HashMap<(Acct, Cur), Minor>,
     /// Instrumentation: base rows touched by reconstruction since last reset.
-    pub rows_touched: u64,
+    ///
+    /// **An atomic, and that is the point.** This counter was the only thing reconstruction
+    /// mutated, and a `&mut self` taken for a counter is a `&mut self` taken for the whole
+    /// ledger: it made `Base::reconstruct` exclusive, which made every read of the base
+    /// exclusive, which made a fold of twenty thousand postings serialise against every
+    /// other fold. Counting through an atomic costs one relaxed add per reconstruction and
+    /// buys `&self` on the read path. Read it with [`Ledger::rows_touched`].
+    rows_touched: std::sync::atomic::AtomicU64,
 }
 
 impl Ledger {
@@ -289,7 +296,7 @@ impl Ledger {
     /// account* up to the anchor — a workload property — not to the length of history.
     /// `rows_touched` is incremented by exactly the number of base rows read, which is the
     /// machine-independent cost unit the experiments report.
-    pub fn reconstruct_balance(&mut self, acct: Acct, cur: Cur, anchor: Epoch) -> Minor {
+    pub fn reconstruct_balance(&self, acct: Acct, cur: Cur, anchor: Epoch) -> Minor {
         let refs = match self.by_account.get(&acct) {
             Some(v) => v,
             None => return 0,
@@ -324,13 +331,13 @@ impl Ledger {
                 }
             }
         }
-        self.rows_touched += touched;
+        self.count_rows(touched);
         total
     }
 
     /// Unindexed reconstruction: fold the whole prefix. Used only as the *ablation* that
     /// shows what the anchor index buys (E5), never on the serving path.
-    pub fn reconstruct_balance_scan(&mut self, acct: Acct, cur: Cur, anchor: Epoch) -> Minor {
+    pub fn reconstruct_balance_scan(&self, acct: Acct, cur: Cur, anchor: Epoch) -> Minor {
         let mut total: Minor = 0;
         let mut touched = 0u64;
         for e in self.epochs.iter().take(anchor as usize + 1) {
@@ -343,12 +350,12 @@ impl Ledger {
                 }
             }
         }
-        self.rows_touched += touched;
+        self.count_rows(touched);
         total
     }
 
     /// Unresolved holds on an account as of an anchor (the available-balance leg).
-    pub fn unresolved_holds(&mut self, acct: Acct, cur: Cur, anchor: Epoch) -> Minor {
+    pub fn unresolved_holds(&self, acct: Acct, cur: Cur, anchor: Epoch) -> Minor {
         let refs = match self.holds_by_account.get(&acct) {
             Some(v) => v,
             None => return 0,
@@ -371,7 +378,7 @@ impl Ledger {
                 }
             }
         }
-        self.rows_touched += end as u64;
+        self.count_rows(end as u64);
         total
     }
 
@@ -442,7 +449,24 @@ impl Ledger {
     }
 
     pub fn reset_counters(&mut self) {
-        self.rows_touched = 0;
+        self.rows_touched
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Base rows touched by reconstruction since the last [`Ledger::reset_counters`].
+    pub fn rows_touched(&self) -> u64 {
+        self.rows_touched.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Add to the reconstruction counter from a shared borrow.
+    ///
+    /// `Relaxed` because nothing orders anything by this value: it is read after the work
+    /// it counts has finished, by a caller that has already synchronised with the readers
+    /// through the lock it holds. A stronger ordering would buy a guarantee no reader of
+    /// this number uses.
+    fn count_rows(&self, n: u64) {
+        self.rows_touched
+            .fetch_add(n, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -467,16 +491,16 @@ impl nilestream_core::rev::Base for Ledger {
         self.head()
     }
 
-    fn reconstruct(&mut self, key: &nilestream_core::rev::Key, anchor: Epoch) -> (i128, u64) {
+    fn reconstruct(&self, key: &nilestream_core::rev::Key, anchor: Epoch) -> (i128, u64) {
         let (Some(acct), Some(cur)) = (key.first(), key.get(1)) else {
             return (0, 0);
         };
-        let before = self.rows_touched;
+        let before = self.rows_touched();
         let v = self.reconstruct_balance(*acct as Acct, *cur as Cur, anchor);
-        (v, self.rows_touched - before)
+        (v, self.rows_touched() - before)
     }
 
-    fn deltas_at(&mut self, e: Epoch) -> Vec<(nilestream_core::rev::Key, i128)> {
+    fn deltas_at(&self, e: Epoch) -> Vec<(nilestream_core::rev::Key, i128)> {
         // Indexed rather than searched: an epoch's id is its position, assigned by `submit`.
         let Some(rec) = self.epochs.get(e as usize).filter(|r| r.id == e) else {
             return Vec::new();
@@ -599,7 +623,7 @@ mod checkpoint_tests {
                     .expect("balanced");
             }
             let head = l.head();
-            let before = l.rows_touched;
+            let before = l.rows_touched();
             let mut reads = 0u64;
             let mut lcg = 12345u64;
             for i in 0..400u64 {
@@ -610,7 +634,7 @@ mod checkpoint_tests {
                 l.reconstruct_balance(i % 4, USD, anchor);
                 reads += 1;
             }
-            let mean = (l.rows_touched - before) as f64 / reads as f64;
+            let mean = (l.rows_touched() - before) as f64 / reads as f64;
             let bound = interval as f64 / 2.0 + 1.0;
             assert!(
                 mean < bound + 1.0,

@@ -108,12 +108,54 @@ wire figure is converging on rather than exceeding.
 
 E19 measures the end of that chain: durable appends rise from 3,850 ops/s at one connection to
 **22,049 at sixteen — 5.73×** on a two-core host. That is short of the 6× this repair was
-aimed at, and the shortfall is reported rather than rounded: the remaining serialisation is
-the single engine mutex the read path still shares, which is a separate repair and not this
-one's.
+aimed at, and the shortfall is reported rather than rounded: the remaining serialisation was
+the single engine mutex the read path still shared, which the next paragraph removes. With
+that mutex gone, the durable arm measured on its own at eight connections over five runs
+reads **14,451 ops/s against 12,380** — the same repair helping a workload it was not aimed
+at, because an append no longer waits behind a reader.
 
 So the OLTP row is no longer bounded by one transaction per barrier, and on no host measured
-so far is it bounded by the storage. What bounds it now is the engine lock itself.
+so far is it bounded by the storage.
+
+**The third factor was the engine lock, and it is gone.** The daemon took one mutex around
+the whole of `Session::handle` — parse, plan, execute, frame — so a *read* excluded every
+other read: two folds over a frozen prefix, which have nothing to say to each other, ran one
+at a time. The cause was small and structural. `Base::reconstruct` took `&mut self` to
+increment a row counter; that made every read of the base exclusive; that made
+`Serving::query` exclusive; that made the mutex the only place to put it. The counter is now
+an atomic, the base is behind a reader-writer lock taken **shared** by every read and
+exclusively by every append, the read model has its own lock because a read of a partial view
+installs into it, and `serve` acquires nothing at all.
+
+Measured on the Linux container (two cores), medians of three runs, `bench --scaling-only
+--nls-only`:
+
+| workload | 1 conn | 2 | 4 | 8 |
+|---|--:|--:|--:|--:|
+| `fold` before | 164 (1.00×) | 270 (1.65×) | 227 (1.38×) | 209 (1.27×) |
+| `fold` after | 165 (1.00×) | 278 (1.68×) | **259 (1.57×)** | **244 (1.48×)** |
+| `point` before | 15,122 (1.00×) | 39,493 (2.61×) | 29,545 (1.95×) | 31,920 (2.11×) |
+| `point` after | 15,857 (1.00×) | **79,814 (5.03×)** | **79,668 (5.02×)** | **57,479 (3.62×)** |
+
+`fold` is an unkeyed `group by acct` the maintained view refuses — `is_full()` is false under
+a budget below the key count — so it is the scan path every time, which is what makes it the
+instrument for this. Two cores put the ceiling for a CPU-bound fold at about 2.0×, and 1.68×
+at two connections is 84% of it; the figures at four and eight are the same two cores shared
+more ways, not a fourth and eighth core doing nothing. **A two-core host cannot answer what
+this change is worth on a wide one**, and the numbers above are not extrapolated to one.
+
+The host-independent evidence is the lock counter. Four connections folding continuously,
+`select nilestream_sealer`'s lock columns:
+
+| | acquisitions | wait p50 | wait p99 | wait max | hold p50 |
+|---|--:|--:|--:|--:|--:|
+| before | 1,600 | ≤1 µs | ≤1,024 µs | 6,309 µs | ≤256 µs |
+| after | 1,761 | ≤1 µs | **≤1 µs** | **2 µs** | ≤256 µs |
+
+The hold is unchanged — the fold costs what it costs — and the wait fell by three orders of
+magnitude, which is the whole claim: the folds were queueing, and they are not any more.
+Waiting is now under one percent of counted request time, which closes the chunked-storage
+question by measurement rather than by argument.
 
 **The ratio is the contract, and it is only a ratio when both sides pay the same barrier.**
 PostgreSQL's `wal_sync_method` is recorded beside every run and pre-registered: on macOS its

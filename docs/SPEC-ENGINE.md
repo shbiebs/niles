@@ -157,6 +157,18 @@ magnitude, which is the whole claim: the folds were queueing, and they are not a
 Waiting is now under one percent of counted request time, which closes the chunked-storage
 question by measurement rather than by argument.
 
+**Two locks means an order, and the first version of this had two.** A keyed read took the
+read model and reached for the base underneath it; an append took the base and reached for the
+read model underneath *that*. A point query and a concurrent insert could therefore each hold
+what the other was waiting for. Nothing in the suite saw it, because every concurrency test in
+the workspace drives one workload at a time — and no answer is ever wrong on the way into a
+deadlock, so there is nothing for a correctness test to catch. The order is now stated and
+tested: **base, then pending barriers, then read model, then currency set**, with every path
+taking a subsequence of it. `rev_engine::lock_order_tests` holds it three ways — the source
+order on both paths, the base acquired exactly once per read (an `RwLock` is not reentrant),
+and four readers against a continuous appender under a deadline. On the inverted order that
+last test hangs: two of five threads finish in thirty seconds.
+
 **The ratio is the contract, and it is only a ratio when both sides pay the same barrier.**
 PostgreSQL's `wal_sync_method` is recorded beside every run and pre-registered: on macOS its
 default is `fsync`, which APFS does not turn into a drive-cache flush, so a comparison there

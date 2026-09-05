@@ -968,13 +968,31 @@ impl RevEngine {
             return None;
         }
         let cur = self.sole_currency()?;
+
+        // **The base, and then the view — in that order, because `append` takes them in that
+        // order and there is only one safe answer to which comes first.**
+        //
+        // This read used to take the view lock and reach for the base underneath it, while
+        // `append` took the base exclusively and reached for the view underneath *that*. Two
+        // locks, two paths, opposite orders: a point read holding the view and waiting for
+        // the base, against an append holding the base and waiting for the view, is a
+        // deadlock, and it was reachable in the shipped daemon the moment a client read
+        // while another client wrote. No test saw it, because every concurrency test in this
+        // workspace drives one workload at a time.
+        //
+        // One guard is taken for the whole function rather than one per use. `RwLock` is not
+        // reentrant: a second `read()` on the same thread deadlocks against a writer that
+        // arrived in between, so two guards would trade one hang for a rarer one. Holding it
+        // across the keyed read is cheap — the read is microseconds — and it buys the base
+        // and the view being read at one instant instead of two.
+        let base = self.base();
         let mut rt = self
             .runtime
             .as_ref()?
             .lock()
             .expect("the view lock is not poisoned");
         let view = rt.view_mut(BALANCE_VIEW)?;
-        let answered = view.read(&*self.base(), &vec![acct as i64, cur as i64], anchor);
+        let answered = view.read(&*base, &vec![acct as i64, cur as i64], anchor);
         // The view's own lock is released here: what follows reads the base and the plan,
         // and holding the view across it would put an unrelated fold's worth of time inside
         // the one section a keyed read is supposed to hold for microseconds.
@@ -983,10 +1001,14 @@ impl RevEngine {
         // **The answer must be true at the anchor that was asked for, not merely at least as
         // fresh.** A hit reports the entry's *effective* version, which can be later than the
         // requested anchor — a value that includes writes the caller's snapshot excludes.
-        // In this server the write path holds the engine's lock, so the frontier cannot move
-        // between `observe` and here and the two are always equal; that is a property of the
-        // current concurrency and not of the read, so it is checked rather than relied on. A
-        // difference falls back to the fold, which reconstructs at the anchor exactly.
+        //
+        // This used to say the two were always equal, because the write path held the engine
+        // lock and the frontier could not move between `observe` and here. That reasoning
+        // died with the engine lock: an append now runs concurrently with this read, so the
+        // mismatch is a normal event and not a defensive check against an impossible one.
+        // The response is unchanged and still correct — fall back to the fold, which
+        // reconstructs at the requested anchor exactly — but it is now a *cost*, and how
+        // often it is paid is not counted anywhere. See `BLOCKED-fallback-rate`.
         if answered.anchor != anchor {
             return None;
         }
@@ -999,7 +1021,6 @@ impl RevEngine {
         // lose: a keyed read answers with a number for a key nothing has ever touched, and a
         // group that does not exist must produce no row at all — which is what the fold and
         // the reference evaluator both do, and what this must agree with.
-        let base = self.base();
         if base.key_update_count(acct, anchor.min(base.head())) == 0 {
             return Some(crate::session::Rows {
                 columns,
@@ -1363,7 +1384,7 @@ pub const BALANCE_VIEW: &str = "__balance";
 mod tests {
 
     /// Compile a wire statement against the daemon's schema, exactly as a session does.
-    fn compile(sql: &str) -> niles_lang::lower::Lowered {
+    pub(super) fn compile(sql: &str) -> niles_lang::lower::Lowered {
         let program = format!(
             "{}\nview __wire_result = sql {{ {sql} }} serve {{ consistency: snapshot, materialize: auto }};\n",
             crate::daemon::DEFAULT_SCHEMA
@@ -2585,6 +2606,173 @@ mod sealer_stats_tests {
             None,
             "an engine with no durable sink has no sealer, and must not report one idling"
         );
+    }
+}
+
+#[cfg(test)]
+mod lock_order_tests {
+    //! **One order for the two locks, and a test that hangs if it is two.**
+    //!
+    //! `RevEngine` holds four things behind locks. In the order a thread may acquire them:
+    //!
+    //! | | what | taken by |
+    //! |---|---|---|
+    //! | **B** | the base, `RwLock<Ledger>` | shared by every read, exclusively by `append` |
+    //! | **P** | the pending barriers, `Mutex<Vec<Pending>>` | `append`, `take_pending` |
+    //! | **V** | the read model, `Mutex<Runtime>` | `append`, and every read of the view |
+    //! | **C** | the currency set, `RwLock<BTreeSet<u32>>` | `append`; read paths take and release it before V |
+    //!
+    //! **B < P < V < C**, and every path takes a subsequence of that. The one that did not
+    //! was `answer_from_view`, which took V and then reached for B underneath it while
+    //! `append` took B and then reached for V — an AB–BA inversion between a point read and
+    //! a concurrent append, reachable in the shipped daemon, and invisible to every test in
+    //! this workspace because they all drive one workload at a time.
+    //!
+    //! Two guards, because neither alone is enough. The behavioural one only deadlocks when
+    //! the interleaving happens, so it can pass on a lucky run; the source-level one holds
+    //! whether or not the scheduler cooperates, and it is the one that will still be here
+    //! when someone adds a fifth lock.
+
+    use super::*;
+    use crate::session::Serving;
+
+    /// The order is a property of the source, and reading it there is not a weaker test —
+    /// it is the only one that cannot pass by luck.
+    #[test]
+    fn the_base_is_acquired_before_the_view_on_every_path_that_takes_both() {
+        let src = include_str!("rev_engine.rs");
+        for (name, marker) in [
+            ("answer_from_view", "fn answer_from_view("),
+            ("append", "fn append(&self, rows: Vec<Row>"),
+        ] {
+            let body = src.split(marker).nth(1).unwrap_or_else(|| panic!("{name}"));
+            let body = &body[..body.find("\n    }").unwrap_or(body.len())];
+            let base = body
+                .find("self.base()")
+                .or_else(|| body.find("TimedWrite::acquire"))
+                .unwrap_or_else(|| panic!("`{name}` must take the base"));
+            let view = body
+                .find(".lock()")
+                .unwrap_or_else(|| panic!("`{name}` must take the view"));
+            assert!(
+                base < view,
+                "`{name}` takes the view at {view} and the base at {base}. Both paths must \
+                 take the base first: a read holding the view while it waits for the base, \
+                 against an append holding the base while it waits for the view, is a \
+                 deadlock and no answer is ever wrong on the way into it."
+            );
+        }
+    }
+
+    /// A keyed read is not permitted to take the base twice.
+    ///
+    /// `RwLock` is not reentrant. A second `read()` on the same thread blocks behind a
+    /// writer that arrived in between, so the fix for the inversion must be one guard held
+    /// across the function and not two taken in the right order.
+    #[test]
+    fn a_keyed_read_takes_the_base_exactly_once() {
+        let src = include_str!("rev_engine.rs");
+        let body = src
+            .split("fn answer_from_view(")
+            .nth(1)
+            .expect("the function");
+        let body = &body[..body.find("\n    }").unwrap_or(body.len())];
+        assert_eq!(
+            body.matches("self.base()").count(),
+            1,
+            "`answer_from_view` acquires the base more than once. `RwLock` is not reentrant: \
+             a writer arriving between the two makes the second acquisition block on a lock \
+             this thread already holds."
+        );
+    }
+
+    /// **The interleaving itself, under a deadline.**
+    ///
+    /// Readers whose budget guarantees misses — so the view's read path reaches the base —
+    /// against a writer appending continuously. On the inverted order this hangs; here it
+    /// finishes. The deadline is what turns a hang into a failure, because a test that hangs
+    /// is a test nobody can read the output of.
+    #[test]
+    fn a_keyed_read_and_a_concurrent_append_do_not_deadlock() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{mpsc, Arc};
+
+        // A budget far below the key count, so nearly every keyed read misses and
+        // reconstructs — which is the path that reaches the base from under the view.
+        let engine = Arc::new(RevEngine::seeded(
+            256,
+            2,
+            4,
+            proto_engine::ViewMode::Demand,
+            proto_engine::EvictionPolicy::Lru,
+        ));
+        let done = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = mpsc::channel();
+
+        let mut threads = Vec::new();
+        for t in 0..4u64 {
+            let e = Arc::clone(&engine);
+            let tx = tx.clone();
+            threads.push(std::thread::spawn(move || {
+                let lowered = tests::compile(
+                    "select acct, sum(amt) from postings where acct = 7 group by acct",
+                );
+                for i in 0..400u64 {
+                    let anchor = e.frontier();
+                    let _ = e.query(&lowered.circuit, "__wire_result", anchor);
+                    let _ = (t, i);
+                }
+                let _ = tx.send(());
+            }));
+        }
+        {
+            let e = Arc::clone(&engine);
+            let done = Arc::clone(&done);
+            let tx = tx.clone();
+            threads.push(std::thread::spawn(move || {
+                let mut n = 0u64;
+                while !done.load(Ordering::Relaxed) && n < 2_000 {
+                    n += 1;
+                    let rows = vec![
+                        proto_engine::Row::Post(proto_engine::Posting {
+                            txn: 900_000 + n,
+                            acct: 7,
+                            cur: 0,
+                            amt: 5,
+                            valid: 0,
+                        }),
+                        proto_engine::Row::Post(proto_engine::Posting {
+                            txn: 900_000 + n,
+                            acct: 8,
+                            cur: 0,
+                            amt: -5,
+                            valid: 0,
+                        }),
+                    ];
+                    let _ = e.append(rows, &format!("deadlock-probe-{n}"));
+                }
+                let _ = tx.send(());
+            }));
+        }
+        drop(tx);
+
+        // Five threads must each report in. Thirty seconds is far more than the work needs
+        // and far less than a hung suite costs.
+        let deadline = std::time::Duration::from_secs(30);
+        for i in 0..5 {
+            if rx.recv_timeout(deadline).is_err() {
+                done.store(true, Ordering::Relaxed);
+                panic!(
+                    "only {i} of 5 threads finished within {deadline:?}. A keyed read and a \
+                     concurrent append are deadlocked: one holds the view and wants the \
+                     base, the other holds the base and wants the view."
+                );
+            }
+        }
+        done.store(true, Ordering::Relaxed);
+        for t in threads {
+            let _ = t.join();
+        }
     }
 }
 

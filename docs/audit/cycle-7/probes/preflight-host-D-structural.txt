@@ -1,0 +1,115 @@
+cycle-7 audit preflight — 2026-09-05T15:01:52Z
+
+=== A. host
+uname            : Linux 6.18.44-fc-v24 x86_64 GNU/Linux
+cores (nproc)    : 2
+cpu model        : Intel(R) Xeon(R) Processor @ 2.80GHz
+memtotal         : 7.8 GiB
+cgroup cpu.max   : n/a
+cgroup mem.max   : n/a
+NOTE: nproc can exceed what the cgroup actually grants. If cpu.max is not 'max',
+      divide the quota by the period — that, not nproc, is your core count.
+
+=== B. filesystem under the tree — THE decisive section
+path             : /home/claude/work/niles
+mount            : /dev/vda ext4   rw,relatime,resv_strict,resuid=65534,resgid=65534
+free space       : 19G avail of 252G
+
+-- the barrier probe: 4 KiB write + fdatasync, 7 times, median reported
+barrier          : fdatasync
+median           : 109.6 us  ->  9,125 barriers/s
+spread           : 95.0-747.9 us
+VERDICT          : plausible as a real barrier for THIS container. Still a
+                   host-shaped number: usable for within-host ratios only.
+
+reminder: `make fsync-proof` checks the syscall REACHES THE KERNEL. It passes on a
+volatile overlay too. The two checks are necessary together; neither is sufficient.
+
+=== C. toolchain
+rustc            : rustc 1.95.0 (59807616e 2026-04-14)
+cargo            : cargo 1.95.0 (f2d3ce0bd 2026-03-21)
+host triple      : x86_64-unknown-linux-gnu
+rustfmt          : rustfmt 1.9.0-stable (59807616e1 2026-04-14)
+clippy           : clippy 0.1.95 (59807616e1 2026-04-14)
+valgrind         : valgrind-3.22.0
+python3          : Python 3.11.15
+git              : git version 2.43.0
+strace           : present
+CARGO_TARGET_DIR : <unset, which is correct>
+
+the tree pins `channel = "stable"` with `rust-version = 1.95.0`, because the machine
+it was built on had no egress to static.rust-lang.org and could not name a version.
+Your `stable` is 1.95.0. If that is NEWER than 1.95.0, a new lint can turn
+`clippy -- -D warnings` red for reasons unrelated to this code. **A red gate from a
+newer toolchain is a finding about the pin, not about the code** — report it that way.
+
+=== D. PostgreSQL
+psql             : psql (PostgreSQL) 16.13 (Ubuntu 16.13-0ubuntu0.24.04.1)
+postgres         : PostgreSQL 16.13 (Ubuntu 16.13-0ubuntu0.24.04.1)
+pg_isready       : /var/run/postgresql:5432 - no response
+
+`numeric_binary_oracle` needs a running server with a `bench` role and PGPORT set.
+Without it the tree reads RED for a missing service, not a defect — do not report that
+as a failing test. Start one with `pg_ctlcluster 16 main start` or a private cluster:
+  initdb -D <pgdata outside the repo> -U bench --auth=trust
+  pg_ctl -D <pgdata> -o '-p 5433 -c listen_addresses=127.0.0.1' start
+  createdb -h 127.0.0.1 -p 5433 -O bench bench
+Record fsync / synchronous_commit / full_page_writes / wal_level / shared_buffers /
+work_mem / max_wal_size AND **wal_sync_method** beside any comparison.
+
+=== E. network egress
+https://github.com          : 400
+https://crates.io           : 403
+https://static.rust-lang.org: 000FAIL
+
+Egress here is YOURS, not the executing agent's. **No task you write may require
+network access at execution time**: Opus's container has no egress to crates.io or
+static.rust-lang.org, and no task may install anything. Both trees have **zero external
+dependencies**, so a bare toolchain builds them offline — verify that with
+`cargo test --offline --workspace` rather than assuming it.
+
+=== F. trees
+/home/claude/work/niles
+  HEAD           : d9149a8 Cycle 7: the structural brief reassigned to Fable after GPT 6 Astra's refusal
+  branch         : c6/audit-cycle-7
+  dirty          : 0 entries
+/home/claude/work/gbs
+  HEAD           : e803b7d T-07: proving a hold is open cost the whole system's history of voids
+  branch         : c6/07-hold-index
+  dirty          : 0 entries
+
+EXPECTED at the start of cycle 7:
+  niles  d9c8699  c6/06a-lock-order   (or 474f153 c6/audit-cycle-7, which adds only docs)
+  gbs    e803b7d  c6/07-hold-index
+If you are on the author's Mac, the FOUR untracked files in `niles` are his and must
+never be edited, staged, deleted, moved or bundled: .DS_Store, AGENTS.md,
+thesis/.DS_Store, thesis/Niles-Thesis.pdf. Anything else untracked is yours to explain.
+
+=== G. gate — run these yourself and record the result
+  cargo fmt --all -- --check
+  cargo clippy --offline --all-targets -- -D warnings
+  cargo test --offline --workspace          # niles: 801 test fns; gbs: 506 declared
+  make reproduce                            # must exit 0 with a clean diff
+  make fsync-proof                          # needs strace
+A red row here is a RESULT. Record it; never fix it by deletion.
+
+=== H. admissibility — fill this in and put it in your work order
+  cores actually granted        : ____   (cgroup quota, not nproc)
+  barrier + median + rate       : ____
+  storage evidence?             : yes / NO (volatile mount)
+  may publish durability rows?  : ____
+  may publish >3-core curves?   : ____   (needs the cgroup answer above)
+  toolchain newer than 1.95.0?  : ____
+  valgrind attribution possible : ____
+  PostgreSQL comparison possible: ____   (and under which wal_sync_method)
+
+Rules this table decides:
+  * No absolute wall-clock, throughput or fsync figure beside another host's without a
+    host column.
+  * Deterministic counters (instructions, allocations, visited entries, max_batch,
+    txns/fsync, lock buckets, compiler verdicts) gate first and need ONE run.
+  * Wall clock needs 2 warm-ups and >=5 measured runs, arms interleaved, median/MAD/
+    range; a gate fires only on >=10% AND >=3x the pooled MAD, else 'noise-limited'.
+  * 'unsupported', 'blocked', 'not run', 'noise-limited' are RESULTS. Omission is not.
+
+preflight complete.

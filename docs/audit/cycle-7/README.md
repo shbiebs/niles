@@ -8,7 +8,7 @@ called the consolidated work order.
 |---|---|---|---|
 | [`fable.md`](fable.md) | Fable | the empirical half — concurrency, memory, locks, storage, allocation, latency, and the harnesses that produce them | **done** — [`fable-work-order.md`](fable-work-order.md), probes under [`probes/`](probes/) |
 | [`gpt-astra.md`](gpt-astra.md) | GPT 6 Astra | the structural half — claims versus code, the type system, the thesis text, GBS layering, the bootstrap | **withdrawn** — refused by the model's content classifier before any work |
-| [`fable-structural.md`](fable-structural.md) | Fable, second pass | the structural half, reassigned; folds in every finding of the first pass and treats them as claims to verify from the source | ready |
+| [`fable-structural.md`](fable-structural.md) | Fable, second pass | the structural half, reassigned; folds in every finding of the first pass and treats them as claims to verify from the source | **done** — [`fable-structural-work-order.md`](fable-structural-work-order.md) |
 
 The split was designed for two models. With the structural half now also Fable's, independence is
 weaker than planned and the second brief says so: it treats the first pass's work order as a set of
@@ -36,3 +36,9 @@ Neither auditor writes production code. The deliverable is instructions for Clau
 
 The state both briefs are written against is Niles `d9c8699` (`c6/06a-lock-order`) and GBS
 `e803b7d` (`c6/07-hold-index`).
+
+**Reconciliation.** The two work orders integrate rather than compete: the structural pass confirmed
+every empirical finding it could check from the source, overturned one thing both briefs repeated
+(the hash chain is SHA-256, not a placeholder — the README is what is stale), and inserted T-00 and
+T-01b ahead of and beside the empirical T-01…T-04a. Read the structural order's §3 for the merged
+task list; its cut line is after T-04a.

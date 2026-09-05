@@ -37,6 +37,7 @@
 pub mod audit;
 pub mod daemon;
 pub mod extended;
+pub mod lockstats;
 pub mod mysql_wire;
 pub mod native_proto;
 pub mod observability;

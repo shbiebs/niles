@@ -34,6 +34,11 @@
 
 #[path = "daemon.rs"]
 mod daemon;
+// The engine-mutex instrument. `daemon` times every acquisition through it; the binary
+// itself never calls it, which is why it needs the allow.
+#[allow(dead_code)]
+#[path = "lockstats.rs"]
+mod lockstats;
 // The extended query protocol's plan cache. Reachable from the session as of this
 // change; before it, the module existed and no listener referred to it.
 mod extended;
@@ -67,6 +72,7 @@ fn main() {
     let mut rounds = 3u32;
     let mut budget = 100_000usize;
     let mut full = false;
+    let mut durable: Option<String> = None;
     let mut i = 1;
     while i + 1 < args.len() {
         match args[i].as_str() {
@@ -76,6 +82,7 @@ fn main() {
             "--rounds" => rounds = args[i + 1].parse().unwrap_or(rounds),
             "--budget" => budget = args[i + 1].parse().unwrap_or(budget),
             "--mode" => full = args[i + 1] == "full",
+            "--durable" => durable = Some(args[i + 1].clone()),
             _ => {}
         }
         i += 2;
@@ -114,13 +121,41 @@ fn main() {
     } else {
         proto_engine::ViewMode::Demand
     };
-    let engine = Arc::new(Mutex::new(RevEngine::seeded(
+    // **`--durable <segment>` makes the shipped binary what the benchmark has been hosting.**
+    //
+    // Until this flag existed, `nilestreamd` could not attach a durable sink at all — the
+    // only durable engine in the project was the one `bank-bench` builds in-process, and it
+    // refuses to run without a PostgreSQL to compare against. So the shipped server's
+    // durable throughput was undefined, and "how does Nilestream scale with connections"
+    // could not be asked on a machine without PostgreSQL 16. Both of those are instrument
+    // gaps rather than engine defects, and this is half of closing them.
+    //
+    // `SyncPolicy::Always` is the only policy `DurableSink::open` accepts, so there is no
+    // flag here that quietly buys throughput by weakening the guarantee.
+    let base = RevEngine::seeded(
         accounts,
         rounds,
         budget,
         mode,
         proto_engine::EvictionPolicy::Lru,
-    )));
+    );
+    let base = match &durable {
+        None => base,
+        Some(path) => match base.with_durable(path) {
+            Ok(e) => {
+                eprintln!("  durable sink at {path} — SyncPolicy::Always, fsync before publish");
+                e
+            }
+            // Refuse rather than fall back to a volatile engine. A server that was asked for
+            // durability and silently served without it is the single most direct way to
+            // fabricate a durability number.
+            Err(e) => {
+                eprintln!("nilestreamd: cannot open a durable sink at {path}: {e}");
+                std::process::exit(2);
+            }
+        },
+    };
+    let engine = Arc::new(Mutex::new(base));
 
     let listener = match TcpListener::bind(("127.0.0.1", port)) {
         Ok(l) => l,
@@ -145,9 +180,19 @@ fn main() {
             e.frontier()
         );
     }
-    eprintln!("  NOTE: the read side is in-memory and single-threaded, with no durability and");
-    eprintln!("        no consensus. It serves the real REV mechanism -- partial state, honest");
-    eprintln!("        absence, anchored reconstruction -- and it is not a production database.");
+    if durable.is_none() {
+        eprintln!("  NOTE: the read side is in-memory and single-threaded, with no durability and");
+        eprintln!(
+            "        no consensus. It serves the real REV mechanism -- partial state, honest"
+        );
+        eprintln!(
+            "        absence, anchored reconstruction -- and it is not a production database."
+        );
+    } else {
+        eprintln!("  NOTE: appends are durable; the read side is in-memory and serialises on one");
+        eprintln!("        engine mutex, and there is no consensus. `select nilestream_sealer`");
+        eprintln!("        reports what that costs.");
+    }
     eprintln!("  try:  psql -h 127.0.0.1 -p {port} -U anyone bank");
 
     daemon::accept_loop(listener, schema, engine);

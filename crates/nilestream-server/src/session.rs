@@ -62,6 +62,20 @@ pub trait Serving {
     /// the target has no partial state.
     fn read_stats(&self) -> (u64, u64, u64, u64, usize);
 
+    /// What the sealer beneath this server has done, when there is one.
+    ///
+    /// `(epochs_sealed, txns_committed, fsyncs, duplicates_absorbed, max_batch)`. `None` for
+    /// a server with no durable sink, which is not the same as all zeroes: a server that
+    /// cannot batch and one that has not yet batched are different facts, and a benchmark
+    /// reading `max_batch = 0` should be able to tell them apart.
+    ///
+    /// Exists because `max_batch` is the one number that says whether group commit is
+    /// reaching the wire, the sealer has maintained it since it was written, and no surface
+    /// could read it.
+    fn sealer_stats(&self) -> Option<(u64, u64, u64, u64, u64)> {
+        None
+    }
+
     /// **What this server would do with this circuit, right now**, as one short class name.
     ///
     /// On the trait rather than as a free function over the circuit, because one of the
@@ -715,6 +729,67 @@ impl Session {
                     Some(misses.to_string()),
                     Some(rows.to_string()),
                     Some(resident.to_string()),
+                ]),
+                Backend::CommandComplete("SELECT 1".into()),
+            ];
+        }
+        // **The sealer's own counters, and the engine mutex's.**
+        //
+        // `max_batch` is the diagnosis in one number: the sequencer batches to 4,096 and is
+        // tested at sixteen concurrent submitters, but the daemon holds one mutex across
+        // this whole method, so submitters reach `submit` one at a time and the drain loop
+        // always finds an empty queue. A `max_batch` of 1 under load means group commit is
+        // built and unreachable; `txns_per_fsync` is the same fact as a ratio.
+        //
+        // The lock columns are the other half. `hold_p50` on a durable workload should sit
+        // in the device's `fsync` band, because the fsync happens inside the section; if it
+        // does, the write path's ceiling is one transaction per barrier and no amount of
+        // concurrency will move it.
+        if lower.starts_with("select") && lower.contains("nilestream_sealer") {
+            let (epochs, txns, fsyncs, dups, max_batch) =
+                engine.sealer_stats().unwrap_or((0, 0, 0, 0, 0));
+            let durable = engine.sealer_stats().is_some();
+            let (acq, wp50, wp99, wmax, hp50, hp99, hmax, htotal) =
+                crate::lockstats::ENGINE_LOCK.snapshot();
+            let per_fsync = if fsyncs == 0 {
+                0.0
+            } else {
+                txns as f64 / fsyncs as f64
+            };
+            return vec![
+                Backend::RowDescription(vec![
+                    Field::text("durable"),
+                    Field::int8("epochs_sealed"),
+                    Field::int8("txns_committed"),
+                    Field::int8("fsyncs"),
+                    Field::int8("duplicates_absorbed"),
+                    Field::int8("max_batch"),
+                    Field::text("txns_per_fsync"),
+                    Field::int8("lock_acquisitions"),
+                    Field::int8("lock_wait_p50_us"),
+                    Field::int8("lock_wait_p99_us"),
+                    Field::int8("lock_wait_max_us"),
+                    Field::int8("lock_hold_p50_us"),
+                    Field::int8("lock_hold_p99_us"),
+                    Field::int8("lock_hold_max_us"),
+                    Field::int8("lock_hold_total_us"),
+                ]),
+                Backend::DataRow(vec![
+                    Some(if durable { "yes" } else { "no" }.to_string()),
+                    Some(epochs.to_string()),
+                    Some(txns.to_string()),
+                    Some(fsyncs.to_string()),
+                    Some(dups.to_string()),
+                    Some(max_batch.to_string()),
+                    Some(format!("{per_fsync:.2}")),
+                    Some(acq.to_string()),
+                    Some(wp50.to_string()),
+                    Some(wp99.to_string()),
+                    Some(wmax.to_string()),
+                    Some(hp50.to_string()),
+                    Some(hp99.to_string()),
+                    Some(hmax.to_string()),
+                    Some(htotal.to_string()),
                 ]),
                 Backend::CommandComplete("SELECT 1".into()),
             ];

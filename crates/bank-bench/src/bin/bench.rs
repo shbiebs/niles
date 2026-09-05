@@ -118,6 +118,16 @@ struct Args {
     /// is never reached, so `results/E16-wallclock.md` cannot be touched however `--publish`
     /// is passed.
     scaling_only: bool,
+    /// Run the Nilestream arm without a PostgreSQL to compare against.
+    ///
+    /// The harness refuses to substitute anything for a real PostgreSQL, and that is right
+    /// for a *comparison*. But "does the engine's throughput rise with connections" is a
+    /// question about one engine, and it was unanswerable on any machine without a
+    /// PostgreSQL 16 server — including the author's own, where the shape of the read curve
+    /// is the open question. The PostgreSQL rows are recorded `NOT RUN` with this reason
+    /// rather than omitted, so a reader of the CSV cannot mistake a one-armed run for a
+    /// comparison.
+    nls_only: bool,
     /// Overwrite the **committed** `results/E16-wallclock.md`.
     ///
     /// Off by default, and that is the repair. `write_all` wrote the committed document on
@@ -177,6 +187,7 @@ impl Args {
             nls_budget: 2_500,
             connections: Vec::new(),
             scaling_only: false,
+            nls_only: false,
             publish: false,
         };
         let mut i = 1;
@@ -260,6 +271,7 @@ impl Args {
                 }
                 "--host-nls" => a.host_nls = true,
                 "--scaling-only" => a.scaling_only = true,
+                "--nls-only" => a.nls_only = true,
                 "--publish" => a.publish = true,
                 "--rounds" | "--nls-rounds" => {
                     a.rounds = argv[i + 1].parse().unwrap_or(a.rounds);
@@ -424,11 +436,35 @@ fn calibrate(args: &Args, pg: &mut PgTarget) -> bool {
 }
 
 fn run(args: &Args) -> i32 {
-    let Some(mut pg) = connect_pg(args) else {
-        return 3;
+    // **One arm, and it says so.** `--nls-only` is only meaningful with `--scaling-only`:
+    // the contract table *is* the comparison, so a one-armed E16 would be a table of
+    // unlabelled absolute numbers, which is the shape this harness exists to refuse.
+    // **One arm, and it says so.** `--nls-only` is only meaningful with `--scaling-only`:
+    // the contract table *is* the comparison, so a one-armed E16 would be a table of
+    // unlabelled absolute numbers, which is the shape this harness exists to refuse.
+    if args.nls_only && !args.scaling_only {
+        eprintln!(
+            "bench: --nls-only measures one engine, so it needs --scaling-only. The contract \
+             table is a comparison; there is nothing to put in it with one arm."
+        );
+        return 2;
+    }
+    let mut pg: Option<PgTarget> = if args.nls_only {
+        eprintln!("== Nilestream only ==");
+        eprintln!("  No PostgreSQL arm, and no calibration against its device: the question");
+        eprintln!("  `does this engine's throughput rise with connections` is about one");
+        eprintln!("  engine. PostgreSQL rows are recorded NOT RUN rather than omitted.");
+        None
+    } else {
+        match connect_pg(args) {
+            Some(p) => Some(p),
+            None => return 3,
+        }
     };
-    if !calibrate(args, &mut pg) {
-        return 4;
+    if let Some(p) = pg.as_mut() {
+        if !calibrate(args, p) {
+            return 4;
+        }
     }
     if args.calibrate && !args.run {
         return 0;
@@ -436,7 +472,9 @@ fn run(args: &Args) -> i32 {
 
     let mut samples: Vec<Sample> = Vec::new();
     let mut config: Vec<(String, Vec<(String, String)>)> = Vec::new();
-    config.push(("postgres".into(), pg.configuration()));
+    if let Some(p) = pg.as_mut() {
+        config.push(("postgres".into(), p.configuration()));
+    }
 
     // The base each run starts from, per target. Compared against that target's first run and
     // **fatal on a difference**: a target carrying the previous run's writes into the next
@@ -592,7 +630,7 @@ fn run(args: &Args) -> i32 {
     // reported as a fraction of it. That fraction is the part that is about the engine.
     let ceiling = std::env::var("BENCH_FSYNC_DIR")
         .ok()
-        .or_else(|| pg.data_directory())
+        .or_else(|| pg.as_mut().and_then(|p| p.data_directory()))
         .and_then(|d| bank_bench::storage::ceiling(&d, 7, 200).ok());
     if let Some(c) = &ceiling {
         eprintln!(
@@ -622,6 +660,13 @@ fn run(args: &Args) -> i32 {
         args.runs
     };
     for run_no in 1..=contract_runs {
+        // **The contract table is a comparison, so this loop needs both arms.**
+        // `contract_runs` is 0 under `--scaling-only`, which `--nls-only` requires, so this
+        // cannot be reached without a PostgreSQL — stated as an expectation rather than
+        // threaded as an `Option` through two hundred lines that all assume two targets.
+        let pg = pg
+            .as_mut()
+            .expect("the contract loop compares two targets; --nls-only forces 0 runs of it");
         // The base the first arm of this run's report row started from. Reset per run,
         // because each run re-prepares both targets.
         let mut report_base: Option<u64> = None;
@@ -633,14 +678,14 @@ fn run(args: &Args) -> i32 {
             eprintln!("bench: prepare failed on run {run_no}: {e}");
             return 5;
         }
-        if let Err(why) = same_base(&mut pg, &mut base_of, run_no) {
+        if let Err(why) = same_base(pg, &mut base_of, run_no) {
             eprintln!("bench: {why}");
             return 9;
         }
         if let Some(n) = pg.base_rows() {
             base_size.insert("postgres".into(), n);
         }
-        for s in run_all(&mut pg, args, run_no) {
+        for s in run_all(pg, args, run_no) {
             report(&s);
             samples.push(s);
         }
@@ -660,7 +705,7 @@ fn run(args: &Args) -> i32 {
             let s = match pg.prepare(args.accounts, args.rounds) {
                 Ok(()) => {
                     let open = move || bank_bench::wire::Client::connect(&host, port, &user, &db);
-                    report_row(&mut pg, args, run_no, &open, &mut report_base)
+                    report_row(pg, args, run_no, &open, &mut report_base)
                 }
                 Err(e) => workloads::skipped(
                     "report",
@@ -801,7 +846,7 @@ fn run(args: &Args) -> i32 {
     // concurrency qualifier; a 4-connection figure must not be able to reach it. Nothing
     // above this line reads `args.connections`, and `scaling` returns a different type.
     if !args.connections.is_empty() {
-        let scaling = run_scaling(args, &mut pg, &hosted);
+        let scaling = run_scaling(args, pg.as_mut(), &hosted);
         if let Err(e) = write_scaling(args, &scaling) {
             eprintln!("bench: writing the scaling results failed: {e}");
             return 6;
@@ -814,14 +859,22 @@ fn run(args: &Args) -> i32 {
     // cannot ask, at a different shape, and a slope must not be able to reach a row that
     // states a ratio at one size.
     if args.e23_only {
-        let pts = run_e23(args, &mut pg, &hosted, &hosted_report);
+        let pts = run_e23(
+            args,
+            pg.as_mut()
+                .expect("E23 compares two targets and is not reachable under --nls-only"),
+            &hosted,
+            &hosted_report,
+        );
         if let Err(e) = write_e23(args, &pts) {
             eprintln!("bench: writing E23 failed: {e}");
             return 6;
         }
     }
 
-    let _ = pg.teardown();
+    if let Some(p) = pg.as_mut() {
+        let _ = p.teardown();
+    }
     if !args.scaling_only && !args.e23_only {
         if let Err(e) = write_all(args, &samples, &config, ceiling) {
             eprintln!("bench: writing results failed: {e}");
@@ -1645,40 +1698,59 @@ fn fit_cell(f: &Result<bank_bench::fit::Fit, bank_bench::fit::NoFit>) -> String 
     }
 }
 
-fn run_scaling(args: &Args, pg: &mut PgTarget, hosted: &Option<Hosted>) -> Vec<ScalingSample> {
+fn run_scaling(
+    args: &Args,
+    mut pg: Option<&mut PgTarget>,
+    hosted: &Option<Hosted>,
+) -> Vec<ScalingSample> {
     let mut out: Vec<ScalingSample> = Vec::new();
     // Far from the contract loop's identity ranges (1–3 million), so the two experiments
     // cannot collide even if a future change stops re-seeding between them.
-    let txn_base = |run: u32, level: usize, thread: u32, i: u64| -> i64 {
-        900_000_000
-            + (run as i64) * 10_000_000
-            + (level as i64) * 1_000_000
-            + (thread as i64) * 100_000
-            + i as i64
-    };
-    // A key drawn without shared state, so a thread needs no `&mut` and the draw is still
-    // reproducible from `(seed, thread, i)`.
-    let key = |seed: u64, thread: u32, i: u64, accounts: i64| -> i64 {
-        workloads::Rng::seeded(seed ^ ((thread as u64) << 40) ^ i.wrapping_mul(0x9E37_79B9))
-            .skewed_key(accounts, 0.9)
-    };
 
     for run_no in 1..=args.runs {
         for (level, &conns) in args.connections.iter().enumerate() {
             let seed = 0xE19 ^ ((run_no as u64) << 8) ^ (conns as u64);
 
             // ---- PostgreSQL ----
-            if let Err(e) = pg.prepare(args.accounts, args.rounds) {
-                let why = format!("PostgreSQL could not be prepared for the level: {e}");
-                for w in ["point", "durable"] {
-                    out.push(workloads::scaling_skipped(
-                        w,
-                        "postgres",
-                        conns,
-                        run_no,
-                        why.clone(),
-                    ));
+            //
+            // Absent under `--nls-only`, and recorded as `NOT RUN` with the reason rather
+            // than omitted: a CSV missing its comparison arm and a CSV that never had one
+            // must not look alike.
+            let have_pg = match pg.as_deref_mut() {
+                None => {
+                    for w in ["point", "durable"] {
+                        out.push(workloads::scaling_skipped(
+                            w,
+                            "postgres",
+                            conns,
+                            run_no,
+                            "--nls-only: no PostgreSQL arm was run, so this is not a comparison"
+                                .to_string(),
+                        ));
+                    }
+                    false
                 }
+                Some(p) => match p.prepare(args.accounts, args.rounds) {
+                    Err(e) => {
+                        let why = format!("PostgreSQL could not be prepared for the level: {e}");
+                        for w in ["point", "durable"] {
+                            out.push(workloads::scaling_skipped(
+                                w,
+                                "postgres",
+                                conns,
+                                run_no,
+                                why.clone(),
+                            ));
+                        }
+                        false
+                    }
+                    Ok(()) => true,
+                },
+            };
+            if !have_pg {
+                // Fall through to the Nilestream arm rather than `continue`, which would
+                // have skipped it too.
+                run_nilestream_level(args, hosted, &mut out, conns, run_no, level, seed);
                 continue;
             }
             let (host, port, user, db) = (
@@ -1699,7 +1771,7 @@ fn run_scaling(args: &Args, pg: &mut PgTarget, hosted: &Option<Hosted>) -> Vec<S
                 },
                 &open_pg,
                 &|thread, i| {
-                    let k = key(seed, thread, i, args.accounts);
+                    let k = scaling_key(seed, thread, i, args.accounts);
                     format!("select acct, sum(amt) from postings where acct = {k} group by acct")
                 },
             );
@@ -1716,7 +1788,7 @@ fn run_scaling(args: &Args, pg: &mut PgTarget, hosted: &Option<Hosted>) -> Vec<S
                 },
                 &open_pg,
                 &|thread, i| {
-                    let acct = key(seed, thread, i, args.accounts);
+                    let acct = scaling_key(seed, thread, i, args.accounts);
                     let id = txn_base(run_no, level, thread, i);
                     format!(
                         "insert into postings (txn, acct, cur, amt, epoch) values \
@@ -1728,6 +1800,51 @@ fn run_scaling(args: &Args, pg: &mut PgTarget, hosted: &Option<Hosted>) -> Vec<S
             out.push(s);
 
             // ---- Nilestream ----
+            run_nilestream_level(args, hosted, &mut out, conns, run_no, level, seed);
+        }
+    }
+    out
+}
+
+/// The account a scaling thread touches at iteration `i`, drawn without shared state.
+///
+/// A free function rather than a captured closure: the workload driver hands this to threads,
+/// so anything it closes over must be `Sync`, and the draw is reproducible from
+/// `(seed, thread, i)` alone.
+fn scaling_key(seed: u64, thread: u32, i: u64, accounts: i64) -> i64 {
+    workloads::Rng::seeded(seed ^ ((thread as u64) << 40) ^ i.wrapping_mul(0x9E37_79B9))
+        .skewed_key(accounts, 0.9)
+}
+
+/// A transaction identity that is unique across run, level, thread and iteration.
+///
+/// The ledger refuses a duplicate, which is the idempotency guarantee working; a scaling
+/// sweep that reused identities would report that guarantee as a failed workload.
+fn txn_base(run: u32, level: usize, thread: u32, i: u64) -> i64 {
+    900_000_000
+        + (run as i64) * 10_000_000
+        + (level as i64) * 1_000_000
+        + (thread as i64) * 100_000
+        + i as i64
+}
+
+/// The Nilestream arm of one connection level.
+///
+/// Lifted out of `run_scaling` so `--nls-only` runs exactly the same code the comparison
+/// does. A one-armed run that measured a *different* path would be a worse instrument than
+/// no run at all.
+#[allow(clippy::too_many_arguments)]
+fn run_nilestream_level(
+    args: &Args,
+    hosted: &Option<Hosted>,
+    out: &mut Vec<ScalingSample>,
+    conns: u32,
+    run_no: u32,
+    level: usize,
+    seed: u64,
+) {
+    {
+        {
             if let Some(h) = hosted {
                 if let Err(e) = h.reseed() {
                     let why = format!("the hosted engine could not be re-seeded: {e}");
@@ -1740,7 +1857,7 @@ fn run_scaling(args: &Args, pg: &mut PgTarget, hosted: &Option<Hosted>) -> Vec<S
                             why.clone(),
                         ));
                     }
-                    continue;
+                    return;
                 }
             }
             let nls_port = args.nls_port;
@@ -1757,7 +1874,7 @@ fn run_scaling(args: &Args, pg: &mut PgTarget, hosted: &Option<Hosted>) -> Vec<S
                 },
                 &open_nls,
                 &|thread, i| {
-                    let k = key(seed, thread, i, args.accounts);
+                    let k = scaling_key(seed, thread, i, args.accounts);
                     format!("select acct, sum(amt) from postings where acct = {k} group by acct")
                 },
             );
@@ -1774,7 +1891,7 @@ fn run_scaling(args: &Args, pg: &mut PgTarget, hosted: &Option<Hosted>) -> Vec<S
                 },
                 &open_nls,
                 &|thread, i| {
-                    let acct = key(seed, thread, i, args.accounts);
+                    let acct = scaling_key(seed, thread, i, args.accounts);
                     let id = txn_base(run_no, level, thread, i);
                     format!("insert into postings values ({id}, {acct}, 0, 0)")
                 },
@@ -1783,7 +1900,6 @@ fn run_scaling(args: &Args, pg: &mut PgTarget, hosted: &Option<Hosted>) -> Vec<S
             out.push(s);
         }
     }
-    out
 }
 
 fn report_scaling(s: &ScalingSample) {

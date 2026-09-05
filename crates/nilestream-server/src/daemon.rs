@@ -125,7 +125,12 @@ pub fn serve(
             break;
         }
         let replies = {
-            let mut e = engine.lock().unwrap();
+            // **Timed, because this is the critical section the whole engine serialises on.**
+            // One mutex around parse, plan, execute and frame — and, on a write, around the
+            // `fsync` inside `RevEngine::append`, since the sequencer does not reply until
+            // the epoch is durable. `select nilestream_lock` reports what that costs; see
+            // `crate::lockstats`.
+            let mut e = crate::lockstats::Timed::acquire(&engine, &crate::lockstats::ENGINE_LOCK);
             session.handle(msg, &mut *e)
         };
         if replies.is_empty() {

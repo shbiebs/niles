@@ -112,6 +112,19 @@ pub struct DurableSink {
 }
 
 impl DurableSink {
+    /// What the sealer beneath this sink has done: epochs, transactions, `fsync`s, and the
+    /// **largest batch it has ever formed**.
+    ///
+    /// Plumbed because the counter that decides whether group commit is reaching the wire
+    /// existed and nothing could read it. `Sequencer` has batched to 4,096 since it was
+    /// written and is tested at sixteen concurrent submitters; the daemon holds one mutex
+    /// across `Session::handle`, so submitters reach `submit` one at a time, the sealer's
+    /// drain loop always finds an empty queue, and `max_batch` is 1 for the life of the
+    /// process. That is a one-number diagnosis and no surface reported the number.
+    pub fn stats(&self) -> nilestream_ledger::sequencer::SequencerStats {
+        self.seq.stats()
+    }
+
     /// Open a durable sink at `path`. Refuses any policy but `Always`, which the sequencer
     /// itself also refuses — stated twice on purpose, because the daemon is the layer a
     /// deployment configures and a server that quietly accepted `Never` would be a server
@@ -464,6 +477,17 @@ impl crate::session::Serving for RevEngine {
 
     fn views(&self) -> Vec<(String, u32)> {
         self.views.clone()
+    }
+
+    fn sealer_stats(&self) -> Option<(u64, u64, u64, u64, u64)> {
+        let s = self.durable.as_ref()?.stats();
+        Some((
+            s.epochs_sealed,
+            s.txns_committed,
+            s.fsyncs,
+            s.duplicates_absorbed,
+            s.max_batch,
+        ))
     }
 
     fn durability(&self) -> &'static str {
@@ -2196,5 +2220,92 @@ mod tests {
                 "`{sql}`"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod sealer_stats_tests {
+    //! **The counter that decides whether group commit reaches the wire.**
+    //!
+    //! `Sequencer` batches to 4,096 and is tested at sixteen concurrent submitters. The
+    //! daemon holds one mutex across `Session::handle`, and `append` blocks inside that
+    //! section until the sealer has fsynced — so submitters arrive at `submit` one at a
+    //! time, the drain loop always finds an empty queue, and `max_batch` is 1 however many
+    //! connections are open.
+    //!
+    //! Measured through the wire with this instrument, at 1/2/4/8 connections against a
+    //! `--durable` daemon: 3,600 transactions, **3,600 fsyncs, `max_batch` 1, 1.00
+    //! transactions per fsync at every level**, lock wait p50 256µs rising to a p99 of 16ms,
+    //! and 2.33 seconds of the run spent with the engine locked. The sealer alone, driven
+    //! directly, reaches `max_batch` 16 at 9.65 transactions per fsync on the same host.
+    //!
+    //! This module pins the instrument, not the defect: T-05 releases the lock and the
+    //! scaling gate then requires `max_batch >= 8`. What must not happen in between is the
+    //! counter silently going away.
+
+    use super::*;
+    use crate::session::Serving;
+
+    fn tiny() -> RevEngine {
+        RevEngine::seeded(
+            8,
+            1,
+            4,
+            proto_engine::ViewMode::Demand,
+            proto_engine::EvictionPolicy::Lru,
+        )
+    }
+
+    /// The guard: remove the durable sink's stats plumbing and this fails.
+    #[test]
+    fn a_durable_engine_reports_the_sealers_counters_after_an_append() {
+        let dir = std::env::temp_dir().join("nilestream-sealer-stats-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let seg = dir.join("counters.seg");
+        let _ = std::fs::remove_file(&seg);
+
+        let mut e = tiny().with_durable(&seg).expect("durable sink");
+        assert!(
+            e.sealer_stats().is_some(),
+            "a durable engine must expose its sealer's counters"
+        );
+
+        let before = e.sealer_stats().expect("durable").2;
+        e.append(
+            vec![proto_engine::Row::Post(proto_engine::Posting {
+                txn: 77,
+                acct: 1,
+                cur: 0,
+                amt: 0,
+                valid: 0,
+            })],
+            "sealer-stats-1",
+        )
+        .expect("appends");
+        let (epochs, txns, fsyncs, _dups, max_batch) = e.sealer_stats().expect("durable");
+
+        assert!(
+            fsyncs > before,
+            "an append under SyncPolicy::Always must have fsynced: {fsyncs} <= {before}"
+        );
+        assert!(epochs >= 1 && txns >= 1, "{epochs} epochs, {txns} txns");
+        assert!(
+            max_batch >= 1,
+            "a batch of at least one transaction was sealed"
+        );
+        let _ = std::fs::remove_file(&seg);
+    }
+
+    /// **`None` and all-zeroes are different facts.**
+    ///
+    /// A server that cannot batch and one that has not yet batched are not the same, and a
+    /// benchmark reading `max_batch = 0` must be able to tell which it is looking at.
+    #[test]
+    fn a_volatile_engine_reports_no_sealer_rather_than_a_sealer_that_did_nothing() {
+        assert_eq!(
+            tiny().sealer_stats(),
+            None,
+            "an engine with no durable sink has no sealer, and must not report one idling"
+        );
     }
 }

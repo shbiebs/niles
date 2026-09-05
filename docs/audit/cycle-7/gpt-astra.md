@@ -1,3 +1,7 @@
+> **Withdrawn.** This brief was refused by GPT 6 Astra's content classifier before any work was
+> done. Its territory was reassigned to a second Fable pass — see [`fable-structural.md`](fable-structural.md),
+> which also folds in everything the first Fable pass found. Kept for the record.
+
 # Cycle 7 audit brief — **GPT 6 Astra**
 
 **You are auditing, not building.** Your single deliverable is a **work order**: a prioritised,

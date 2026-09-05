@@ -4,10 +4,15 @@ Two auditors read the same two repositories **independently**, from different br
 produces a work order. The author reconciles the two afterwards; that reconciliation is what cycle 6
 called the consolidated work order.
 
-| brief | auditor | territory |
-|---|---|---|
-| [`fable.md`](fable.md) | Fable | the empirical half — concurrency, memory, locks, storage, allocation, latency, and the harnesses that produce them |
-| [`gpt-astra.md`](gpt-astra.md) | GPT 6 Astra | the structural half — claims versus code, the type system, the thesis text, GBS layering, the bootstrap |
+| brief | auditor | territory | status |
+|---|---|---|---|
+| [`fable.md`](fable.md) | Fable | the empirical half — concurrency, memory, locks, storage, allocation, latency, and the harnesses that produce them | **done** — [`fable-work-order.md`](fable-work-order.md), probes under [`probes/`](probes/) |
+| [`gpt-astra.md`](gpt-astra.md) | GPT 6 Astra | the structural half — claims versus code, the type system, the thesis text, GBS layering, the bootstrap | **withdrawn** — refused by the model's content classifier before any work |
+| [`fable-structural.md`](fable-structural.md) | Fable, second pass | the structural half, reassigned; folds in every finding of the first pass and treats them as claims to verify from the source | ready |
+
+The split was designed for two models. With the structural half now also Fable's, independence is
+weaker than planned and the second brief says so: it treats the first pass's work order as a set of
+claims to verify from the source, not as facts to build on.
 
 The split is deliberate and the overlap is too. §8 of each brief names four things **both** must
 check independently: cycle 6's trust in F-12, F-13 and F-14 came from two audits finding them

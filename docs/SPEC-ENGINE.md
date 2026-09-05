@@ -80,16 +80,40 @@ ceiling measured there says nothing about durability. `make fsync-proof` checks 
 record barrier reaches the kernel, which that row would also pass — the two checks are
 necessary together and neither is sufficient alone.
 
-**The second factor is a property of the engine, and today it is 1.** The sealer group-commits
-to 4,096 and is tested at sixteen concurrent submitters; the daemon holds one mutex across
-`Session::handle`, so submitters reach `submit` one at a time and `select nilestream_sealer`
-reports `max_batch = 1` and 1.00 transactions per barrier at every connection count. Against
-the committed 4,519 ops/s PostgreSQL baseline, 5× requires 22,595 ops/s, which needs **4.1
-transactions per barrier** at 5,500/s, **6.5** at a conservative 3,476/s, and **89** at the
-macOS figure. The sealer driven directly reaches 9.65–14.68 per barrier depending on host.
+**The second factor is a property of the engine, and it was 1 because of where one lock
+ended.** The sealer group-commits to 4,096 and is tested at sixteen concurrent submitters, but
+the daemon held its engine mutex across `Session::handle` *and* the fsync, so submitters
+reached `submit` one at a time and `select nilestream_sealer` reported `max_batch = 1` and
+1.00 transactions per barrier at every connection count. The write path now applies the rows
+under the lock, submits the record **without waiting**, releases the lock, and only then waits
+on the barrier before writing the reply — so the acknowledgement still follows the fsync while
+the fsync no longer holds the next connection up. `rev_engine::visibility_tests` holds the
+other half: an applied epoch is not visible to any reader until its barrier has returned.
 
-So the OLTP row is not bounded by the storage on any host measured so far. It is bounded by
-one transaction per barrier, which is a lock placement.
+Measured through the wire on the Linux container, sixteen `psql` clients appending 300
+transactions each against one appending the same:
+
+| connections | `max_batch` | txns per barrier | lock hold p50 |
+|--:|--:|--:|--:|
+| 1 | 1 | 1.00 | 16 µs |
+| 16 | 15 | **6.02** | 4 µs |
+
+The one-connection row is a definition and not a result: a single submitter has nothing to
+batch with. Against the committed 4,519 ops/s PostgreSQL baseline, 5× requires 22,595 ops/s,
+which needs **4.1** transactions per barrier at 5,500/s, **6.5** at a conservative 3,476/s,
+and **89** at the macOS figure. So 6.02 clears the first, is just short of the second, and is
+nowhere near the third — the macOS row remains storage-bound whatever the engine does. The
+sealer driven directly reaches 9.65–14.68 per barrier depending on host, which is what the
+wire figure is converging on rather than exceeding.
+
+E19 measures the end of that chain: durable appends rise from 3,850 ops/s at one connection to
+**22,049 at sixteen — 5.73×** on a two-core host. That is short of the 6× this repair was
+aimed at, and the shortfall is reported rather than rounded: the remaining serialisation is
+the single engine mutex the read path still shares, which is a separate repair and not this
+one's.
+
+So the OLTP row is no longer bounded by one transaction per barrier, and on no host measured
+so far is it bounded by the storage. What bounds it now is the engine lock itself.
 
 **The ratio is the contract, and it is only a ratio when both sides pay the same barrier.**
 PostgreSQL's `wal_sync_method` is recorded beside every run and pre-registered: on macOS its

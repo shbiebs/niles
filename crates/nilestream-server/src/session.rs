@@ -76,6 +76,17 @@ pub trait Serving {
         None
     }
 
+    /// **Epochs applied to the base whose barrier has not yet returned.**
+    ///
+    /// Taken by the caller *after* it releases the engine's lock, waited on there, and only
+    /// then is the reply written. That ordering is the whole of what moved: the
+    /// acknowledgement still follows the barrier, and the lock no longer spans it.
+    ///
+    /// Empty for a server with no durable sink, where there is no barrier to be after.
+    fn take_pending(&mut self) -> Vec<crate::rev_engine::Pending> {
+        Vec::new()
+    }
+
     /// **What this server would do with this circuit, right now**, as one short class name.
     ///
     /// On the trait rather than as a free function over the circuit, because one of the

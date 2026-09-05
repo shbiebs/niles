@@ -98,6 +98,55 @@ pub struct RevEngine {
     /// Its presence is the difference between "an epoch was assigned" and "an epoch is on
     /// stable storage", and `append` does not return until the second is true.
     durable: Option<DurableSink>,
+    /// **The highest epoch whose record is on stable storage.**
+    ///
+    /// The ledger's own [`Frontier`](nilestream_ledger::frontiers::Frontier) has carried this
+    /// distinction — `sealed` versus `visible` — since it was written, and the engine did not.
+    /// It did not need to: `append` blocked on the barrier while holding the engine's lock,
+    /// so no reader could observe the gap between an epoch existing and being durable,
+    /// because no reader could run at all.
+    ///
+    /// Moving the barrier out of the lock creates that gap, and this is what closes it.
+    /// Rows are applied to the base under the lock — in lock order, so epochs stay totally
+    /// ordered and contiguous — and become **visible** only when their record has been
+    /// fsynced. A read anchors at [`frontier`](Self::frontier), which reports this rather
+    /// than the base's head, so durable-before-visible holds for exactly the same reason it
+    /// held before: not by luck, and now not by exclusion either.
+    ///
+    /// `None` when there is no durable sink, where head and visible are the same thing.
+    visible: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+    /// Epochs applied to the base whose barrier has not yet returned.
+    ///
+    /// Drained by the daemon after it releases the lock; see [`Serving::take_pending`].
+    pending: Vec<Pending>,
+}
+
+/// An applied-but-not-yet-durable epoch, and what makes it visible.
+pub struct Pending {
+    epoch: u64,
+    token: PendingDurable,
+    visible: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl Pending {
+    /// Wait for the barrier, then publish.
+    ///
+    /// **Publication is `fetch_max`, and that it is monotone is not an accident.** Epochs are
+    /// assigned under the engine's lock and submitted in the same order, and the sealer
+    /// completes batches in order — so a later epoch's barrier cannot return before an
+    /// earlier one's, and taking the maximum can never expose a gap. The alternative, a
+    /// counter that assumes it is always advancing by one, would be wrong the first time two
+    /// transactions shared a batch.
+    pub fn wait(self) -> Result<u64, String> {
+        let outcome = self
+            .token
+            .recv()
+            .map_err(|_| "the sealer stopped before the epoch was durable".to_string())?;
+        let e = DurableSink::interpret(outcome)?;
+        self.visible
+            .fetch_max(self.epoch, std::sync::atomic::Ordering::AcqRel);
+        Ok(e)
+    }
 }
 
 /// A write-ahead sink that does not acknowledge until `fsync` has returned.
@@ -150,16 +199,40 @@ impl DurableSink {
     }
 
     fn record(&mut self, txn_id: &str, payload: Vec<u8>) -> Result<u64, String> {
-        match self.seq.submit(nilestream_ledger::sequencer::Txn {
-            idem_key: txn_id.to_string(),
-            payload,
-        }) {
+        Self::interpret(
+            self.record_pending(txn_id, payload)?
+                .recv()
+                .map_err(|_| "the sealer stopped before answering".to_string())?,
+        )
+    }
+
+    /// Hand the record to the sealer without waiting for the barrier.
+    ///
+    /// The caller holds the engine's lock; the wait must not happen there. See
+    /// [`Sequencer::submit_pending`](nilestream_ledger::sequencer::Sequencer::submit_pending).
+    fn record_pending(&self, txn_id: &str, payload: Vec<u8>) -> Result<PendingDurable, String> {
+        self.seq
+            .submit_pending(nilestream_ledger::sequencer::Txn {
+                idem_key: txn_id.to_string(),
+                payload,
+            })
+            .map_err(|e| format!("{e:?}"))
+    }
+
+    /// A duplicate is not an error: the caller retried, and the correct answer is the epoch
+    /// the original committed at.
+    fn interpret(r: Result<u64, nilestream_ledger::sequencer::Rejected>) -> Result<u64, String> {
+        match r {
             Ok(e) => Ok(e),
             Err(nilestream_ledger::sequencer::Rejected::Duplicate { at_epoch }) => Ok(at_epoch),
             Err(e) => Err(format!("{e:?}")),
         }
     }
 }
+
+/// A submitted transaction whose barrier has not yet returned.
+type PendingDurable =
+    std::sync::mpsc::Receiver<Result<u64, nilestream_ledger::sequencer::Rejected>>;
 
 impl RevEngine {
     /// Build an engine holding `accounts` accounts, each seeded with `postings_per_account`
@@ -230,6 +303,8 @@ impl RevEngine {
             runtime,
             currencies: std::collections::BTreeSet::from([0]),
             durable: None,
+            visible: None,
+            pending: Vec::new(),
         }
     }
 
@@ -267,8 +342,20 @@ impl crate::session::Serving for RevEngine {
         self.serve_path_at(circuit, output, anchor).as_str()
     }
 
+    /// **The frontier a read anchors at, which is the durable one.**
+    ///
+    /// Not `ledger.head()`. The base may hold an epoch whose barrier has not returned; that
+    /// epoch is sealed and not yet visible, and answering a read at it would let a client
+    /// observe a transaction a crash could still erase. In a ledger an observation that is
+    /// later erased is not a stale read — it is a transaction a customer saw succeed and
+    /// that no longer exists.
     fn frontier(&self) -> u64 {
-        self.ledger.head()
+        match &self.visible {
+            Some(v) => v.load(std::sync::atomic::Ordering::Acquire),
+            // No durable sink: nothing to be durable *before*, so the base's head is the
+            // frontier and always was.
+            None => self.ledger.head(),
+        }
     }
 
     /// **Evaluate the circuit the client's query compiled to.**
@@ -452,11 +539,32 @@ impl crate::session::Serving for RevEngine {
             }
             other => crate::session::ServeError::Rejected(format!("{other:?}")),
         })?;
-        // The durable sink, if one is attached, is what makes the returned epoch mean
-        // something: it does not return until `fsync` has. See `DurableSink`.
-        if let Some(sink) = self.durable.as_mut() {
-            sink.record(txn_id, epoch.to_string().into_bytes())
+        // **The barrier is submitted here and waited for somewhere else.**
+        //
+        // This used to be `sink.record(...)`, which blocks until the epoch is on stable
+        // storage — inside the engine's lock, because `append` is called with the engine
+        // locked. Two things followed. Every other connection, reads included, waited behind
+        // one disk barrier; and no *second* submitter could reach the sealer, so its drain
+        // loop always found an empty queue and group commit — built, and tested at sixteen
+        // concurrent submitters — never formed a batch. `select nilestream_sealer` reported
+        // `max_batch` 1 and 1.00 transactions per fsync at every connection count.
+        //
+        // The submission is non-blocking; the token goes to `pending`, and the daemon waits
+        // on it *after* releasing the lock and before writing the reply. So the
+        // acknowledgement still follows the barrier — the client is told "committed" only
+        // once it is — while the lock is held for the apply alone.
+        if let Some(sink) = self.durable.as_ref() {
+            let token = sink
+                .record_pending(txn_id, epoch.to_string().into_bytes())
                 .map_err(crate::session::ServeError::NotDurable)?;
+            self.pending.push(Pending {
+                epoch,
+                token,
+                visible: self
+                    .visible
+                    .clone()
+                    .expect("a durable sink implies a visible frontier"),
+            });
         }
         // The maintained view moves with the ledger, or the next read answers at an anchor
         // the base has already passed. `advance` touches only *resident* entries, which is
@@ -477,6 +585,10 @@ impl crate::session::Serving for RevEngine {
 
     fn views(&self) -> Vec<(String, u32)> {
         self.views.clone()
+    }
+
+    fn take_pending(&mut self) -> Vec<Pending> {
+        std::mem::take(&mut self.pending)
     }
 
     fn sealer_stats(&self) -> Option<(u64, u64, u64, u64, u64)> {
@@ -536,6 +648,12 @@ impl RevEngine {
     /// acknowledged. Refuses any policy but `Always`, which the sequencer also refuses.
     pub fn with_durable(mut self, path: impl AsRef<std::path::Path>) -> std::io::Result<Self> {
         self.durable = Some(DurableSink::open(path)?);
+        // The base already holds its seeded epochs and they were never written to a sink, so
+        // the visible frontier starts where the base is. Everything appended from here earns
+        // its visibility by being fsynced.
+        self.visible = Some(std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
+            self.ledger.head(),
+        )));
         Ok(self)
     }
 
@@ -2271,17 +2389,37 @@ mod sealer_stats_tests {
         );
 
         let before = e.sealer_stats().expect("durable").2;
-        e.append(
-            vec![proto_engine::Row::Post(proto_engine::Posting {
-                txn: 77,
-                acct: 1,
-                cur: 0,
-                amt: 0,
-                valid: 0,
-            })],
-            "sealer-stats-1",
-        )
-        .expect("appends");
+        let epoch = e
+            .append(
+                vec![proto_engine::Row::Post(proto_engine::Posting {
+                    txn: 77,
+                    acct: 1,
+                    cur: 0,
+                    amt: 0,
+                    valid: 0,
+                })],
+                "sealer-stats-1",
+            )
+            .expect("appends");
+
+        // **`append` no longer waits for the barrier, so this must.**
+        //
+        // Before T-05 the fsync happened inside `append`, inside the engine's lock, and this
+        // test could read `fsyncs` straight afterwards. That is the protocol that changed:
+        // the caller applies, takes the token, releases the lock, and *then* waits — which is
+        // what the daemon does between framing a reply and writing it. A test that skipped
+        // the wait would be asserting on a barrier that had not happened yet.
+        let pending = crate::session::Serving::take_pending(&mut e);
+        assert_eq!(pending.len(), 1, "one append, one outstanding barrier");
+        for p in pending {
+            p.wait().expect("the epoch reaches stable storage");
+        }
+        assert_eq!(
+            e.frontier(),
+            epoch,
+            "the visible frontier advances to the epoch once, and only once, it is durable"
+        );
+
         let (epochs, txns, fsyncs, _dups, max_batch) = e.sealer_stats().expect("durable");
 
         assert!(
@@ -2307,5 +2445,177 @@ mod sealer_stats_tests {
             None,
             "an engine with no durable sink has no sealer, and must not report one idling"
         );
+    }
+}
+
+#[cfg(test)]
+mod visibility_tests {
+    //! **Durable before visible, now that the two can differ.**
+    //!
+    //! Before T-05 the barrier happened inside `append`, inside the engine's lock, so an
+    //! epoch could not be observed between existing and being durable — no reader could run
+    //! at all. That made the guarantee true by exclusion, and moving the barrier out of the
+    //! lock removes the exclusion. What replaces it is the split the ledger's own `Frontier`
+    //! has always modelled: rows are applied to the base under the lock, in lock order, and
+    //! become *visible* only when their record has been fsynced.
+    //!
+    //! These tests are the difference between that being a design and being a property.
+
+    use super::*;
+    use crate::session::Serving;
+
+    fn engine_at(name: &str) -> (RevEngine, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join("nilestream-visibility-tests");
+        let _ = std::fs::create_dir_all(&dir);
+        let seg = dir.join(format!("{name}.seg"));
+        let _ = std::fs::remove_file(&seg);
+        let e = RevEngine::seeded(
+            8,
+            1,
+            4,
+            proto_engine::ViewMode::Demand,
+            proto_engine::EvictionPolicy::Lru,
+        )
+        .with_durable(&seg)
+        .expect("durable sink");
+        (e, seg)
+    }
+
+    fn post(txn: u64, acct: u64) -> Vec<proto_engine::Row> {
+        vec![proto_engine::Row::Post(proto_engine::Posting {
+            txn,
+            acct,
+            cur: 0,
+            amt: 0,
+            valid: 0,
+        })]
+    }
+
+    /// **The gap the old design could not have: applied, and not yet visible.**
+    ///
+    /// This is the whole of what T-05 changed, asserted directly. Between `append` returning
+    /// and the token being waited on, the rows are in the base and the frontier has not moved
+    /// — so a read anchored at the frontier cannot see them, which is what stops a client
+    /// observing a transaction a crash could still erase.
+    #[test]
+    fn an_applied_epoch_is_not_visible_until_its_barrier_returns() {
+        let (mut e, seg) = engine_at("not-visible-yet");
+        let before = e.frontier();
+
+        let epoch = e.append(post(1, 1), "v-1").expect("applies");
+        assert!(
+            epoch > before,
+            "the base advanced: epoch {epoch} follows {before}"
+        );
+        assert_eq!(
+            e.frontier(),
+            before,
+            "and the frontier did NOT: an epoch whose barrier has not returned is sealed, \
+             not visible. If this reads {epoch}, durable-before-visible has been lost and a \
+             client can observe a transaction a crash would erase."
+        );
+
+        for p in e.take_pending() {
+            p.wait().expect("durable");
+        }
+        assert_eq!(
+            e.frontier(),
+            epoch,
+            "and only now, after the barrier, is it visible"
+        );
+        let _ = std::fs::remove_file(&seg);
+    }
+
+    /// **A barrier that never returns must not move the frontier.**
+    ///
+    /// The failure injected between apply and publish. Dropping the token without waiting is
+    /// what a crashed or shut-down sealer looks like to the caller: the rows are in the base,
+    /// and the epoch must stay invisible forever rather than being published by anything
+    /// other than a completed fsync.
+    #[test]
+    fn a_barrier_that_is_never_awaited_never_publishes_its_epoch() {
+        let (mut e, seg) = engine_at("never-awaited");
+        let before = e.frontier();
+        let epoch = e.append(post(2, 2), "v-2").expect("applies");
+
+        // The injection: take the tokens and drop them unread.
+        let pending = e.take_pending();
+        assert_eq!(pending.len(), 1);
+        drop(pending);
+
+        assert_eq!(
+            e.frontier(),
+            before,
+            "no wait, no publication — the frontier cannot advance to {epoch} without a \
+             barrier having returned"
+        );
+        let _ = std::fs::remove_file(&seg);
+    }
+
+    /// **Every epoch at or below the visible frontier is in the base.**
+    ///
+    /// The other half of the ordering, and the one a naive publication scheme gets wrong.
+    /// Rows are applied under the lock before their token is created, so the frontier can
+    /// never name an epoch whose rows are missing — there is no window in which a read at the
+    /// published frontier could find a gap.
+    #[test]
+    fn the_visible_frontier_never_names_an_epoch_the_base_has_not_applied() {
+        let (mut e, seg) = engine_at("no-gap");
+        for i in 0..8u64 {
+            e.append(post(100 + i, i % 4), &format!("g-{i}"))
+                .expect("applies");
+        }
+        // Wait in submission order, as the daemon does.
+        for p in e.take_pending() {
+            p.wait().expect("durable");
+        }
+        let visible = e.frontier();
+        assert!(
+            visible <= e.ledger.head(),
+            "the visible frontier {visible} is beyond the base's head {} — it is naming an \
+             epoch whose rows are not applied",
+            e.ledger.head()
+        );
+        assert_eq!(
+            visible,
+            e.ledger.head(),
+            "with every barrier returned, the two must agree"
+        );
+        let _ = std::fs::remove_file(&seg);
+    }
+
+    /// **Publication is monotone even when barriers return for a batch at once.**
+    ///
+    /// `Pending::wait` publishes with `fetch_max`, and the argument that this is safe is that
+    /// epochs are assigned under the engine's lock and submitted in the same order, so a
+    /// later epoch's barrier cannot return before an earlier one's. Waiting out of order
+    /// here is the adversarial case: even then the frontier must never go backwards, and must
+    /// never exceed the base.
+    #[test]
+    fn waiting_out_of_order_cannot_move_the_frontier_backwards() {
+        let (mut e, seg) = engine_at("monotone");
+        for i in 0..6u64 {
+            e.append(post(200 + i, i), &format!("m-{i}"))
+                .expect("applies");
+        }
+        let mut pending = e.take_pending();
+        pending.reverse(); // newest first: the order the argument does not rely on
+        let mut seen = e.frontier();
+        for p in pending {
+            p.wait().expect("durable");
+            let now = e.frontier();
+            assert!(
+                now >= seen,
+                "the frontier went backwards, {seen} then {now}"
+            );
+            assert!(
+                now <= e.ledger.head(),
+                "the frontier {now} passed the base's head {}",
+                e.ledger.head()
+            );
+            seen = now;
+        }
+        assert_eq!(seen, e.ledger.head());
+        let _ = std::fs::remove_file(&seg);
     }
 }

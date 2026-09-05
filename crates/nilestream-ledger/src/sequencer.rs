@@ -327,13 +327,34 @@ impl Sequencer {
 
     /// Submit and wait for the transaction to be durable and visible.
     pub fn submit(&self, txn: Txn) -> Result<u64, Rejected> {
+        self.submit_pending(txn)?
+            .recv()
+            .map_err(|_| Rejected::ShuttingDown)?
+    }
+
+    /// **Hand the transaction to the sealer and return without waiting for the barrier.**
+    ///
+    /// The waiting is the whole problem this exists to move. A caller that blocks in
+    /// [`submit`](Self::submit) while holding a lock makes every other thread wait behind one
+    /// `fsync` — and, worse, makes it impossible for a *second* submitter to arrive, so the
+    /// sealer's drain loop finds an empty queue and group commit, which is built and tested
+    /// at sixteen concurrent submitters, never forms a batch. Measured through the daemon
+    /// before this existed: `max_batch` 1 and 1.00 transactions per fsync at every connection
+    /// count, against 9.65 for the same sealer driven directly.
+    ///
+    /// The returned receiver yields exactly what `submit` would have: the epoch once the
+    /// record is on stable storage and the frontier has been published, or the rejection. A
+    /// caller that never reads it has still committed the transaction — the ordering
+    /// guarantee is the sealer's, not the caller's — so the receiver is a *notification*,
+    /// not a handle to uncommitted work.
+    pub fn submit_pending(&self, txn: Txn) -> Result<Receiver<Result<u64, Rejected>>, Rejected> {
         let (reply, rx) = channel();
         let Some(tx) = &self.tx else {
             return Err(Rejected::ShuttingDown);
         };
         tx.send(Request { txn, reply })
             .map_err(|_| Rejected::ShuttingDown)?;
-        rx.recv().map_err(|_| Rejected::ShuttingDown)?
+        Ok(rx)
     }
 
     pub fn frontier(&self) -> &Arc<Frontier> {

@@ -632,11 +632,53 @@ fn run(args: &Args) -> i32 {
         .ok()
         .or_else(|| pg.as_mut().and_then(|p| p.data_directory()))
         .and_then(|d| bank_bench::storage::ceiling(&d, 7, 200).ok());
+    // **Do the two systems mean the same thing by "durable"?**
+    //
+    // `fsync=on` says PostgreSQL calls something before acknowledging; `wal_sync_method` says
+    // what. Rust's `sync_data`, which the ledger and this probe both use, issues the barrier
+    // named in `storage::BARRIER`. Where those differ in *strength* the comparison is between
+    // two different guarantees, and the ratio is meaningless in a way no amount of repetition
+    // fixes.
+    //
+    // The case this exists for is macOS: PostgreSQL defaults to `fsync`, which APFS does not
+    // turn into a drive-cache flush, against `F_FULLFSYNC` on the Nilestream side. Measured
+    // on the author's machine, PostgreSQL committed 13,458 durable transactions per second
+    // against a 324/s barrier — 41× its own storage — while reporting `fsync=on`.
+    if let Some(p) = pg.as_mut() {
+        let method = p
+            .configuration()
+            .into_iter()
+            .find(|(k, _)| k == "wal_sync_method")
+            .map(|(_, v)| v)
+            .unwrap_or_default();
+        eprintln!(
+            "  barriers: nilestream `{}`, postgres `wal_sync_method = {}`",
+            bank_bench::storage::BARRIER,
+            if method.is_empty() {
+                "unknown"
+            } else {
+                &method
+            }
+        );
+        if bank_bench::storage::BARRIER == "F_FULLFSYNC" && method != "fsync_writethrough" {
+            eprintln!();
+            eprintln!(
+                "  REFUSED: this platform's `sync_data` is F_FULLFSYNC, which flushes the \
+                 drive cache, and PostgreSQL is using `{method}`, which on APFS does not. \
+                 The two systems would be durable against different failures and the ratio \
+                 would not be a comparison."
+            );
+            eprintln!("  Set `wal_sync_method = fsync_writethrough` and restart the server.");
+            return 6;
+        }
+    }
+
     if let Some(c) = &ceiling {
         eprintln!(
-            "  device: {:.0} durable commits/s median over {} probes, spread {:.2}x{}",
+            "  device: {:.0} durable commits/s median over {} probes via {}, spread {:.2}x{}",
             c.median,
             c.probes,
+            c.barrier,
             c.spread(),
             if c.steady() {
                 ""

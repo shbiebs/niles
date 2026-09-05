@@ -77,6 +77,34 @@ bootstrap:
 # E21 (`--example wire_cost`) is excluded for the same reason: it is wall-clock, it times two
 # write paths against each other over a socket, and its ratios move a few percent between
 # runs on the same machine. Re-run it when the reply path changes.
+# **Prove the barrier reaches the kernel, not merely that a counter went up.**
+#
+# Counting `fsync`s inside the process proves the code called `sync_data`. This proves the
+# call became a syscall, which is a different claim and the one durability rests on.
+#
+# It matters more here than the cost does. On this host `fdatasync` and `fsync` measure the
+# same — 4,961-5,825/s either way — so a wrongly configured barrier cannot be detected by
+# rate. It can be detected by which syscall appears, and by whether any appears at all: an
+# overlay mounted `fsync=volatile` accepts the call and returns in a microsecond. This is
+# therefore necessary and **not sufficient**; `bench`'s ceiling probe is the other half.
+#
+# The trace shows two different calls and they are not interchangeable. `fdatasync` on the
+# segment's own descriptor is the record barrier — what `storage::BARRIER` names on Linux,
+# and what `Segment::append` issues through `sync_data`. `fsync` on a second descriptor is
+# the directory sync. Asserting "some barrier happened" would pass on the directory alone,
+# so the check names the one that carries the epoch.
+fsync-proof:
+	cargo test --release --offline -p nilestream-ledger \
+	  a_commit_returns_only_once_it_is_durable_and_visible --no-run 2>/dev/null
+	strace -f -e trace=fsync,fdatasync -o $(CURDIR)/target/fsync-proof.trace \
+	  $$(ls -t target/release/deps/nilestream_ledger-* | grep -v '\.d$$' | head -1) \
+	  --exact sequencer::tests::a_commit_returns_only_once_it_is_durable_and_visible \
+	  --test-threads=1 >/dev/null
+	@cat $(CURDIR)/target/fsync-proof.trace
+	@grep -qE '\bfdatasync\([0-9]+\) *= *0' $(CURDIR)/target/fsync-proof.trace \
+	  || { echo "FAILED: a durable commit issued no fdatasync — the record barrier named by storage::BARRIER never reached the kernel"; exit 1; }
+	@echo "fsync-proof: the record barrier (fdatasync) reached the kernel and returned 0."
+
 reproduce:
 	python3 thesis/gen-appendix-d.py map > thesis/appendix-d-map.md
 	python3 thesis/gen-appendix-d.py api > thesis/appendix-d-api.md

@@ -169,6 +169,13 @@ impl Target for PgTarget {
             "max_wal_size",
             "wal_level",
             "full_page_writes",
+            // **Which barrier PostgreSQL actually issues.** `fsync=on` says it calls
+            // *something*; this says what. On macOS the default is `fsync`, which APFS does
+            // not turn into a drive-cache flush, while Rust's `sync_data` issues
+            // `F_FULLFSYNC`, which does — so a comparison there can have the two systems
+            // durable against different failures while both report `fsync=on`. Recorded so
+            // the header carries it and `bench` can refuse a mismatched pairing.
+            "wal_sync_method",
         ] {
             if let Ok(r) = self.client.simple(&format!("show {setting}")) {
                 if let Some(Some(v)) = r.rows.first().and_then(|row| row.first()) {

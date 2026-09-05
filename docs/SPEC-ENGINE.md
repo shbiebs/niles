@@ -55,6 +55,50 @@ strictly-serializable OLTP, MUST meet or exceed 10× on scan-heavy analytical wo
 clause is the one that keeps the specification honest: a system that wins the first two by
 losing the third has not replaced PostgreSQL.
 
+### What bounds the OLTP row, stated as arithmetic
+
+A durable commit is a barrier, so:
+
+> **durable throughput ≤ (barriers per second the device sustains) × (transactions per
+> barrier)**
+
+Both factors are measured, neither is a constant, and the row cannot be read without them.
+
+**The first factor is a property of the storage *and of which barrier was asked for*, and it
+moves by four orders of magnitude across hosts this project has run on.** The same probe —
+a 4 KiB write followed by `sync_data`, seven times, median reported — measured:
+
+| host | filesystem | barrier | barriers/s | µs each |
+|---|---|---|--:|--:|
+| Linux container | ext4 on a virtio disk | `fdatasync` | 4,961–5,825 | 172–202 |
+| Linux VM on a Mac | ext4 on NVMe | `fdatasync` | 500–959 | 1,043–2,001 |
+| macOS | APFS on NVMe | **`F_FULLFSYNC`** | **255** | **3,917** |
+| Linux container on overlayfs | overlay, `fsync=volatile` | `fsync` | ~1,000,000 | ~1 |
+
+The last row is **not storage evidence**: the mount option makes the call a no-op, and a
+ceiling measured there says nothing about durability. `make fsync-proof` checks that the
+record barrier reaches the kernel, which that row would also pass — the two checks are
+necessary together and neither is sufficient alone.
+
+**The second factor is a property of the engine, and today it is 1.** The sealer group-commits
+to 4,096 and is tested at sixteen concurrent submitters; the daemon holds one mutex across
+`Session::handle`, so submitters reach `submit` one at a time and `select nilestream_sealer`
+reports `max_batch = 1` and 1.00 transactions per barrier at every connection count. Against
+the committed 4,519 ops/s PostgreSQL baseline, 5× requires 22,595 ops/s, which needs **4.1
+transactions per barrier** at 5,500/s, **6.5** at a conservative 3,476/s, and **89** at the
+macOS figure. The sealer driven directly reaches 9.65–14.68 per barrier depending on host.
+
+So the OLTP row is not bounded by the storage on any host measured so far. It is bounded by
+one transaction per barrier, which is a lock placement.
+
+**The ratio is the contract, and it is only a ratio when both sides pay the same barrier.**
+PostgreSQL's `wal_sync_method` is recorded beside every run and pre-registered: on macOS its
+default is `fsync`, which APFS does not turn into a drive-cache flush, so a comparison there
+must set `fsync_writethrough` or `bench` refuses it. Measured once without that check,
+PostgreSQL reported 13,458 durable commits per second against a 324/s barrier — 41× its own
+storage — while reporting `fsync=on`. Two systems durable against different failures do not
+produce a comparison, however carefully the timing is done.
+
 ### The analytical contract, re-shaped: two asymptotic rows (DM-03)
 
 The 10–12× figure above is a *geomean over ClickBench*, and it was carried into a harness

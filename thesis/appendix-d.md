@@ -20,7 +20,7 @@ component is for is not derivable from its source.
 
 | Crate | Role | public items |
 |---|---|--:|
-| `bank-bench` | NilesBank generator, wall-clock harness, thesis drift tests | 59 |
+| `bank-bench` | NilesBank generator, wall-clock harness, thesis drift tests | 60 |
 | `conservation-suite` | Reference oracle and the conservation property tests | 23 |
 | `experiments` | The E-series measurement harness | 0 |
 | `niles-interp` | The imperative-subset interpreter `nilesc run` drives, and the ledger it posts to | 16 |
@@ -32,7 +32,7 @@ component is for is not derivable from its source.
 | `nilestream-core` | REV runtime: resident maps, anchor indices, apply loop, upqueries, contracts | 19 |
 | `nilestream-ledger` | Epoch segments, sequencer, hash chain, durability, admission and commit rules | 32 |
 | `nilestream-optimizer` | Plan-time mode selection and the eviction policies (the adaptive optimizer of §4.6 is specified and not built) | 37 |
-| `nilestream-server` | Daemon: sessions, PostgreSQL wire surface, conformance | 76 |
+| `nilestream-server` | Daemon: sessions, PostgreSQL wire surface, conformance | 78 |
 | `proto-engine` | The research prototype the counted-work experiments run on | 20 |
 
 <!-- END:appendix-d-map -->

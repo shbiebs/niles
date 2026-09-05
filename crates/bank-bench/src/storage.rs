@@ -126,6 +126,33 @@ pub fn fsync_cost(dir: &str, calls: u32) -> std::io::Result<FsyncCost> {
 /// that actually means something — each target's rate as a **fraction of what the device
 /// could do**. That last one is machine-independent: "we get 55% of the fsyncs this storage
 /// can deliver" is a statement about the engine, and it survives being run somewhere else.
+/// **Which durability barrier `File::sync_data` actually issues here.**
+///
+/// A ceiling is meaningless without it, and the difference is not a detail: the same probe
+/// measured **5,300–6,000/s on Linux ext4**, **500–960/s on ext4 inside a VM**, and **255/s on
+/// APFS** — and about a million per second on an overlay mounted `fsync=volatile`, which is
+/// not storage evidence at all. Two of those numbers differ by 20× because the *disks*
+/// differ; one differs by four orders of magnitude because the barrier was not a barrier.
+///
+/// The macOS case is the one that has bitten this project. `fsync(2)` on APFS does not flush
+/// the drive's write cache; `fcntl(F_FULLFSYNC)` does, and Rust's `sync_data` issues the
+/// latter. PostgreSQL's *default* `wal_sync_method` on macOS is the former — so on the
+/// author's own machine PostgreSQL committed 13,458 durable transactions per second against
+/// a 324/s barrier while reporting `fsync=on`, and the two systems were durable against
+/// different failures. See [`crate::storage::BARRIER`] and the `wal_sync_method`
+/// pre-registration in `bench`.
+pub const BARRIER: &str = if cfg!(target_os = "linux") {
+    // `sync_data` is `fdatasync(2)`: the data and any metadata needed to read it back.
+    "fdatasync"
+} else if cfg!(target_vendor = "apple") {
+    // `sync_data` falls back to `sync_all`, which is `fcntl(F_FULLFSYNC)` — the real barrier.
+    "F_FULLFSYNC"
+} else if cfg!(target_os = "windows") {
+    "FlushFileBuffers"
+} else {
+    "fsync"
+};
+
 #[derive(Debug, Clone, Copy)]
 pub struct Ceiling {
     /// Median durable commits per second the device can sustain, per connection.
@@ -135,6 +162,9 @@ pub struct Ceiling {
     pub lowest: f64,
     pub highest: f64,
     pub probes: u32,
+    /// The barrier the probe issued. Carried on the value rather than looked up at print
+    /// time so a ceiling cannot be reported beside the wrong one.
+    pub barrier: &'static str,
 }
 
 impl Ceiling {
@@ -189,6 +219,7 @@ pub fn ceiling(dir: &str, probes: u32, calls: u32) -> std::io::Result<Ceiling> {
         lowest: v[0],
         highest: v[v.len() - 1],
         probes: v.len() as u32,
+        barrier: BARRIER,
     })
 }
 
@@ -340,6 +371,7 @@ mod tests {
             lowest: 9_800.0,
             highest: 10_200.0,
             probes: 7,
+            barrier: BARRIER,
         };
         assert!((steady.spread() - 1.0408).abs() < 0.001);
         assert!(steady.steady(), "a 4% spread is a device holding still");
@@ -350,6 +382,7 @@ mod tests {
             lowest: 7_794.0,
             highest: 12_761.0,
             probes: 7,
+            barrier: BARRIER,
         };
         assert!((moving.spread() - 1.637).abs() < 0.01);
         assert!(
@@ -370,6 +403,7 @@ mod tests {
             lowest: 20_000.0,
             highest: 20_000.0,
             probes: 3,
+            barrier: BARRIER,
         };
         let slow = Ceiling {
             median: 10_000.0,
@@ -377,6 +411,7 @@ mod tests {
             lowest: 10_000.0,
             highest: 10_000.0,
             probes: 3,
+            barrier: BARRIER,
         };
         assert!((fast.efficiency(9_400.0) - slow.efficiency(4_700.0)).abs() < 1e-9);
         assert_eq!(
@@ -411,5 +446,46 @@ mod tests {
             c.spread() >= 1.0,
             "the spread is a multiple, never below one"
         );
+    }
+}
+
+#[cfg(test)]
+mod barrier_tests {
+    //! **A ceiling without its barrier is not a number.**
+    //!
+    //! The same probe measures 4,961–5,825/s on this container's ext4, 500–959/s on ext4
+    //! inside a VM, 255/s on APFS through `F_FULLFSYNC`, and about a million per second on
+    //! an overlay mounted `fsync=volatile`. Three of those are storage; the fourth is a
+    //! mount option. Carrying the barrier on the `Ceiling` value rather than looking it up
+    //! when printing is what stops a ceiling being reported beside the wrong one.
+
+    use super::*;
+
+    #[test]
+    fn a_ceiling_carries_the_barrier_the_probe_actually_issued() {
+        let dir = std::env::temp_dir().join("niles-barrier-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let c = ceiling(dir.to_str().expect("utf-8"), 2, 8).expect("probe");
+        assert_eq!(
+            c.barrier, BARRIER,
+            "the ceiling must name the barrier this platform's `sync_data` issues"
+        );
+        assert!(!c.barrier.is_empty());
+    }
+
+    /// The constant must match the platform, because it is the label the contract is read
+    /// against. `make fsync-proof` checks the other half — that the named call reaches the
+    /// kernel — and the two together are what make a durable figure interpretable.
+    #[test]
+    fn the_barrier_name_matches_the_platform() {
+        if cfg!(target_os = "linux") {
+            assert_eq!(BARRIER, "fdatasync", "`sync_data` is fdatasync(2) on Linux");
+        } else if cfg!(target_vendor = "apple") {
+            assert_eq!(
+                BARRIER, "F_FULLFSYNC",
+                "`sync_data` falls back to `sync_all`, which is fcntl(F_FULLFSYNC), on Apple \
+                 platforms — plain fsync(2) does not flush the drive cache on APFS"
+            );
+        }
     }
 }

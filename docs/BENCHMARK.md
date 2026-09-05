@@ -200,6 +200,28 @@ Nilestream number is quoted as an engine result.
 which is the point of having the list. A gap with no named cause is a result nobody can act
 on; a gap attributed to "it is a prototype" is not attributed at all.
 
+0. **The `fsync` ceiling, per host and per barrier.** Every `durable` figure is bounded by
+   `barriers/s × transactions per barrier` (`SPEC-ENGINE.md` Part 0), and the first factor is
+   a property of the storage *and* of which barrier was requested. Measured with the same
+   probe across the hosts this project has run on:
+
+   | host | filesystem | barrier | barriers/s | µs each |
+   |---|---|---|--:|--:|
+   | Linux container | ext4 on virtio | `fdatasync` | 4,961–5,825 | 172–202 |
+   | Linux VM on a Mac | ext4 on NVMe | `fdatasync` | 500–959 | 1,043–2,001 |
+   | macOS | APFS on NVMe | `F_FULLFSYNC` | 255 | 3,917 |
+   | overlayfs, `fsync=volatile` | overlay | `fsync` | ~1,000,000 | ~1 |
+
+   **The last row is not storage evidence.** The mount option makes the barrier a no-op, and
+   a ceiling measured there is a measurement of the mount option. A number quoted from that
+   host cannot be compared with any other, and a work order that inherits it will conclude
+   that the storage is not the constraint for reasons that have nothing to do with storage.
+
+   Two checks, neither sufficient alone: `make fsync-proof` shows the record barrier reaches
+   the kernel as a syscall (the volatile-overlay row passes this), and `bench`'s ceiling
+   probe shows it costs what a barrier costs (a wrongly-named barrier passes this on a host
+   where `fsync` and `fdatasync` are the same call, which this container is).
+
 1. **One mutex over the whole engine.** `daemon::accept_loop` hands every connection an
    `Arc<Mutex<RevEngine>>`, so reads serialise against each other and against writes. The
    benchmark drives one connection, so this does not affect these numbers — and it is the

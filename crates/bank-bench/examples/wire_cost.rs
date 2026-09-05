@@ -390,11 +390,19 @@ fn main() {
         Ok(c) => {
             s.push_str(&format!(
                 "The `durable` row of E16 is an `fsync` rate, so it is bounded by the storage \
-                 underneath it. Probed {} times during this run:\n\n\
-                 | Median | MAD | Lowest | Highest | Spread |\n\
-                 |--:|--:|--:|--:|--:|\n\
-                 | {:.0}/s | {:.0} ({:.1}%) | {:.0}/s | {:.0}/s | {:.2}× |\n\n",
+                 underneath it — **and by which barrier the storage was asked for**. This run \
+                 issued `{}` ({} probes):\n\n\
+                 | Barrier | Median | MAD | Lowest | Highest | Spread |\n\
+                 |---|--:|--:|--:|--:|--:|\n\
+                 | `{}` | {:.0}/s | {:.0} ({:.1}%) | {:.0}/s | {:.0}/s | {:.2}× |\n\n\
+                 The barrier is named because it is not a detail. The same probe measures \
+                 5,300–6,000/s on Linux ext4, 500–960/s on ext4 inside a VM, and 255/s on \
+                 APFS through `F_FULLFSYNC` — and about a million per second on an overlay \
+                 mounted `fsync=volatile`, which is not storage evidence at all. A durable \
+                 rate quoted without its barrier cannot be compared with anything.\n\n",
+                c.barrier,
                 c.probes,
+                c.barrier,
                 c.median,
                 c.mad,
                 100.0 * c.mad / c.median.max(1.0),

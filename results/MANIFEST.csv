@@ -45,6 +45,7 @@ E19-scaling.md,machine-dependent,cargo run --release -p bank-bench --bin bench -
 E19-scaling/E19-scaling.md,machine-dependent,cargo run --release -p bank-bench --bin bench -- --run --scaling-only --connections 1,2,4 --publish
 E19-scaling/point.csv,machine-dependent,cargo run --release -p bank-bench --bin bench -- --run --scaling-only --connections 1,2,4 --publish
 E19-scaling/durable.csv,machine-dependent,cargo run --release -p bank-bench --bin bench -- --run --scaling-only --connections 1,2,4 --publish
+E19-scaling/mixed.csv,machine-dependent,cargo run --release -p bank-bench --bin bench -- --run --scaling-only --connections 1,2,4 --publish
 E21-wire-cost.md,machine-dependent,cargo run --release -p bank-bench --example wire_cost
 E13-durability.md,machine-dependent,cargo run --release -p nilestream-ledger --bin durability-bench > results/E13-durability.md
 e2_duality.csv,byte-deterministic,cargo run --release -p experiments -- e2

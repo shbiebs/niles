@@ -533,10 +533,203 @@ fn median_scaling_ops(rows: &[&ScalingSample]) -> Option<f64> {
     median_of(&v)
 }
 
+/// **The E19 mixed table, which refuses a row it cannot vouch for.**
+///
+/// A `mixed` row exists to carry one number: the share of keyed reads that consulted the
+/// maintained view and fell back to the fold. Readers alone measure 0.0% of it whatever the
+/// engine does — the anchor mismatch is a concurrency phenomenon — so a mixed row *without*
+/// that column is not a weaker result, it is the same table E19 already had, published under a
+/// name that claims otherwise.
+///
+/// So a sample whose `fallback_rate` is `None` is rendered as **REFUSED** with its reason, and
+/// its throughput figures are not printed at all. Printing them beside an `n/a` would invite
+/// exactly the reading the column exists to prevent: that the row was measured and the
+/// mechanism was fine. `mixed_table_refusals` is the count, and the caller writes it into the
+/// document so a refusal cannot be scrolled past.
+pub fn mixed_table(samples: &[crate::workloads::MixedSample]) -> String {
+    use std::collections::BTreeMap;
+    let mut s = String::new();
+    s.push_str(
+        "| Target | Readers | Writers | Median reads/s | Read p50 | Read p99 | Median writes/s \
+         | Write p99 | Fallback | max_batch | Lock wait p99 | Base epochs |\n\
+         |---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|\n",
+    );
+    // BTreeMap so the ordering is the data's and not a hash's.
+    let mut by: BTreeMap<(String, u32, u32), Vec<&crate::workloads::MixedSample>> = BTreeMap::new();
+    for x in samples {
+        by.entry((x.target.clone(), x.readers, x.writers))
+            .or_default()
+            .push(x);
+    }
+    for ((target, readers, writers), rows) in &by {
+        let ran: Vec<&&crate::workloads::MixedSample> =
+            rows.iter().filter(|r| r.not_run.is_none()).collect();
+        if ran.is_empty() {
+            let why = rows
+                .iter()
+                .find_map(|r| r.not_run.clone())
+                .unwrap_or_else(|| "no sample".into());
+            s.push_str(&format!(
+                "| {target} | {readers} | {writers} | NOT RUN | | | | | | | | {why} |\n"
+            ));
+            continue;
+        }
+        // **The refusal.** Not a missing cell in an otherwise complete row: the whole row goes,
+        // because the throughput figures without the fallback rate are the `point` and
+        // `durable` rows again and would read as a result about the mixed workload.
+        if ran.iter().any(|r| r.fallback_rate.is_none()) {
+            s.push_str(&format!(
+                "| {target} | {readers} | {writers} | **REFUSED** | | | | | \
+                 *the server could not be asked for its fallback rate; a mixed row without it \
+                 is the `point` row under another name* | | | |\n"
+            ));
+            continue;
+        }
+        let med = |mut v: Vec<f64>| -> f64 {
+            v.sort_by(|a, b| a.partial_cmp(b).expect("no NaN in a measured rate"));
+            v[v.len() / 2]
+        };
+        let reads = med(ran.iter().map(|r| r.reads_per_second()).collect());
+        let writes = med(ran.iter().map(|r| r.writes_per_second()).collect());
+        let us = |f: &dyn Fn(&crate::workloads::MixedSample) -> std::time::Duration| -> f64 {
+            med(ran
+                .iter()
+                .map(|r| f(r).as_nanos() as f64 / 1000.0)
+                .collect())
+        };
+        // `unwrap_or(0.0)` and not `expect`, deliberately. The refusal above has already
+        // returned for any level missing a rate, so this cannot be reached — and writing it as
+        // a panic would mean that deleting the refusal produces a crash rather than a wrong
+        // row. It should produce the wrong row: **0.00% fallback beside a full set of
+        // throughput figures**, which is exactly the publishable falsehood the refusal exists
+        // to prevent, and exactly what the guard test has to be able to observe.
+        let fb = med(ran.iter().map(|r| r.fallback_rate.unwrap_or(0.0)).collect());
+        let batch = med(ran
+            .iter()
+            .map(|r| r.max_batch.unwrap_or(0) as f64)
+            .collect());
+        let wait = med(ran
+            .iter()
+            .map(|r| r.lock_wait_p99_us.unwrap_or(0) as f64)
+            .collect());
+        // **Without this column two mixed rows are not comparable.** A level's read rate falls
+        // with accumulated history — measured 23,232 -> 18,998 -> 12,208 reads/s across
+        // 6,925 -> 20,436 -> 38,466 sealed epochs, with nothing about the engine changing — so
+        // a row that omitted it would invite a comparison that is 1.9x off for reasons that
+        // have nothing to do with what is being compared.
+        let epochs = med(ran
+            .iter()
+            .map(|r| r.base_epochs.unwrap_or(0) as f64)
+            .collect());
+        s.push_str(&format!(
+            "| {target} | {readers} | {writers} | {reads:.0} | {:.0} µs | {:.0} µs | \
+             {writes:.0} | {:.0} µs | {:.2}% | {batch:.0} | {wait:.0} µs | {epochs:.0} |\n",
+            us(&|r| r.read_p50),
+            us(&|r| r.read_p99),
+            us(&|r| r.write_p99),
+            fb * 100.0,
+        ));
+    }
+    s
+}
+
+/// How many mixed levels were refused for want of a fallback rate. Zero is the only publishable
+/// value, and the caller says so in the document rather than leaving it to be noticed.
+pub fn mixed_table_refusals(samples: &[crate::workloads::MixedSample]) -> usize {
+    use std::collections::BTreeSet;
+    let mut refused = BTreeSet::new();
+    for x in samples {
+        if x.not_run.is_none() && x.fallback_rate.is_none() {
+            refused.insert((x.target.clone(), x.readers, x.writers));
+        }
+    }
+    refused.len()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    /// **A mixed row without its fallback rate does not publish.**
+    ///
+    /// The column is the row's whole reason for existing: readers alone measure 0.0% of the
+    /// anchor-mismatch fallback whatever the engine does, so a mixed row that cannot report it
+    /// is the `point` row with a different label. Rendering the throughput figures beside an
+    /// `n/a` would invite precisely the reading the column exists to prevent — that the level
+    /// ran and the mechanism was fine.
+    #[test]
+    fn a_mixed_row_without_a_fallback_rate_is_refused_rather_than_rendered() {
+        use crate::workloads::MixedSample;
+        use std::time::Duration;
+
+        let sample = |fallback: Option<f64>| MixedSample {
+            target: "nilestream".into(),
+            run: 1,
+            readers: 4,
+            writers: 2,
+            reads: 400_000,
+            writes: 2_000,
+            wall: Duration::from_secs(4),
+            read_p50: Duration::from_micros(27),
+            read_p99: Duration::from_micros(180),
+            write_p50: Duration::from_micros(7990),
+            write_p99: Duration::from_micros(9003),
+            fallback_rate: fallback,
+            max_batch: Some(3),
+            lock_wait_p99_us: Some(1),
+            base_epochs: Some(6_925),
+            duplicates: 0,
+            errors: 0,
+            not_run: None,
+        };
+
+        let measured = mixed_table(&[sample(Some(0.002))]);
+        assert!(
+            measured.contains("0.20%"),
+            "a measured level must report its rate: {measured}"
+        );
+        assert!(
+            measured.contains("100000"),
+            "and its throughput: {measured}"
+        );
+        assert_eq!(mixed_table_refusals(&[sample(Some(0.002))]), 0);
+
+        let unmeasured = mixed_table(&[sample(None)]);
+        assert!(
+            unmeasured.contains("REFUSED"),
+            "a level with no fallback rate must be refused by name: {unmeasured}"
+        );
+        assert!(
+            !unmeasured.contains("100000"),
+            "and its throughput must not be printed — a reader who sees reads/s beside a \
+             missing rate will take the level as measured and the mechanism as healthy, which \
+             is the one conclusion this column exists to block: {unmeasured}"
+        );
+        assert_eq!(
+            mixed_table_refusals(&[sample(None)]),
+            1,
+            "and the refusal must be counted, so the document can state it rather than leave \
+             it to be noticed"
+        );
+    }
+
+    /// A level that did not run at all is a third thing, distinct from both: it reports its
+    /// reason and is not counted as a refusal, because nothing was measured to refuse.
+    #[test]
+    fn a_level_that_did_not_run_says_so_and_is_not_a_refusal() {
+        let skipped = crate::workloads::mixed_skipped(
+            "nilestream",
+            4,
+            2,
+            1,
+            "--nls-only: no PostgreSQL arm".into(),
+        );
+        let t = mixed_table(std::slice::from_ref(&skipped));
+        assert!(t.contains("NOT RUN"), "{t}");
+        assert!(t.contains("no PostgreSQL arm"), "{t}");
+        assert_eq!(mixed_table_refusals(&[skipped]), 0);
+    }
 
     fn sample(workload: &str, target: &str, ops: f64, p99_us: u64) -> Sample {
         Sample {

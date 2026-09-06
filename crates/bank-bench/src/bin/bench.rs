@@ -95,6 +95,12 @@ struct Args {
     e23_only: bool,
     accounts: i64,
     operations: u64,
+    /// Seconds the E19 `mixed` level runs its readers and writers together.
+    ///
+    /// A duration and not an operation count, because the two roles run at rates three orders
+    /// of magnitude apart: a fixed count per thread would end the readers' share in the first
+    /// second and spend the rest of the level measuring the writers alone.
+    mixed_seconds: u64,
     runs: u32,
     /// Host Nilestream's listener on a thread of this process.
     host_nls: bool,
@@ -175,6 +181,7 @@ impl Args {
             e23_only: false,
             accounts: 10_000,
             operations: 2_000,
+            mixed_seconds: 4,
             runs: 10,
             host_nls: false,
             rounds: 1,
@@ -263,6 +270,10 @@ impl Args {
                 }
                 "--operations" => {
                     a.operations = argv[i + 1].parse().unwrap_or(a.operations);
+                    i += 1;
+                }
+                "--mixed-seconds" => {
+                    a.mixed_seconds = argv[i + 1].parse().unwrap_or(a.mixed_seconds);
                     i += 1;
                 }
                 "--runs" => {
@@ -889,7 +900,7 @@ fn run(args: &Args) -> i32 {
     // above this line reads `args.connections`, and `scaling` returns a different type.
     if !args.connections.is_empty() {
         let scaling = run_scaling(args, pg.as_mut(), &hosted);
-        if let Err(e) = write_scaling(args, &scaling) {
+        if let Err(e) = write_scaling(args, &scaling.scaling, &scaling.mixed) {
             eprintln!("bench: writing the scaling results failed: {e}");
             return 6;
         }
@@ -1740,12 +1751,20 @@ fn fit_cell(f: &Result<bank_bench::fit::Fit, bank_bench::fit::NoFit>) -> String 
     }
 }
 
-fn run_scaling(
-    args: &Args,
-    mut pg: Option<&mut PgTarget>,
-    hosted: &Option<Hosted>,
-) -> Vec<ScalingSample> {
+/// Both halves of one E19 run: the per-workload scaling rows, and the mixed rows.
+///
+/// Two vectors rather than one, because a `MixedSample` is not a `ScalingSample` with extra
+/// fields — it has two roles and therefore two latency distributions, and flattening them into
+/// the scaling shape would mean a row whose `p99` silently means "reads" in some rows and
+/// "writes" in others.
+pub struct ScalingRun {
+    pub scaling: Vec<ScalingSample>,
+    pub mixed: Vec<workloads::MixedSample>,
+}
+
+fn run_scaling(args: &Args, mut pg: Option<&mut PgTarget>, hosted: &Option<Hosted>) -> ScalingRun {
     let mut out: Vec<ScalingSample> = Vec::new();
+    let mut out_mixed: Vec<workloads::MixedSample> = Vec::new();
     // Far from the contract loop's identity ranges (1–3 million), so the two experiments
     // cannot collide even if a future change stops re-seeding between them.
 
@@ -1792,7 +1811,16 @@ fn run_scaling(
             if !have_pg {
                 // Fall through to the Nilestream arm rather than `continue`, which would
                 // have skipped it too.
-                run_nilestream_level(args, hosted, &mut out, conns, run_no, level, seed);
+                run_nilestream_level(
+                    args,
+                    hosted,
+                    &mut out,
+                    &mut out_mixed,
+                    conns,
+                    run_no,
+                    level,
+                    seed,
+                );
                 continue;
             }
             let (host, port, user, db) = (
@@ -1870,10 +1898,22 @@ fn run_scaling(
             out.push(s);
 
             // ---- Nilestream ----
-            run_nilestream_level(args, hosted, &mut out, conns, run_no, level, seed);
+            run_nilestream_level(
+                args,
+                hosted,
+                &mut out,
+                &mut out_mixed,
+                conns,
+                run_no,
+                level,
+                seed,
+            );
         }
     }
-    out
+    ScalingRun {
+        scaling: out,
+        mixed: out_mixed,
+    }
 }
 
 /// The account a scaling thread touches at iteration `i`, drawn without shared state.
@@ -1908,6 +1948,7 @@ fn run_nilestream_level(
     args: &Args,
     hosted: &Option<Hosted>,
     out: &mut Vec<ScalingSample>,
+    out_mixed: &mut Vec<workloads::MixedSample>,
     conns: u32,
     run_no: u32,
     level: usize,
@@ -2005,7 +2046,102 @@ fn run_nilestream_level(
             );
             report_scaling(&s);
             out.push(s);
+
+            // **The third phase, which is the one E19 never had.**
+            //
+            // `point` above is readers alone and `durable` is writers alone; both halves of the
+            // mixed workload have been measured for cycles, in isolation, and the isolated
+            // measurements are exactly the ones that cannot see the anchor-mismatch fallback —
+            // it needs a writer moving the frontier under a reader. So the audit built
+            // `probes/mixed` outside the repository to ask, which is what a question the
+            // results tables cannot answer looks like.
+            //
+            // Writers are ⌈readers/2⌉, so the level carries both roles at a ratio the write
+            // path can actually sustain: a durable append costs a barrier, and matching the
+            // reader count one-for-one would measure a queue at the sealer rather than
+            // contention at the base.
+            let writers = conns.div_ceil(2);
+            let before = nls_view_counters(nls_port);
+            let mut m = workloads::mixed(
+                workloads::MixedLevel {
+                    target: "nilestream",
+                    readers: conns,
+                    writers,
+                    run: run_no,
+                    seconds: args.mixed_seconds,
+                },
+                &open_nls,
+                &|thread, i| {
+                    let k = scaling_key(seed ^ 0x5EED, thread, i, args.accounts);
+                    format!("select acct, sum(amt) from postings where acct = {k} group by acct")
+                },
+                &|thread, i| {
+                    let acct = scaling_key(seed, thread, i, args.accounts);
+                    // Offset the identity space so a mixed writer cannot collide with the
+                    // `durable` level's, which would be refused as a duplicate and read as a
+                    // throughput collapse rather than as the commit rule working.
+                    let id = txn_base(run_no, level, thread, i) + 500_000_000;
+                    format!("insert into postings values ({id}, {acct}, 0, 0)")
+                },
+            );
+            m.fallback_rate = fallback_rate_between(before, nls_view_counters(nls_port));
+            let (batch, wait) = nls_sealer_counters(nls_port);
+            m.max_batch = batch;
+            m.lock_wait_p99_us = wait;
+            m.base_epochs = nls_frontier(nls_port);
+            report_mixed(&m);
+            out_mixed.push(m);
         }
+    }
+}
+
+/// `(max_batch, lock_wait_p99_us)` from `select nilestream_sealer`, by name.
+///
+/// By name for the reason the view counters are: the reply has fourteen columns and reading
+/// the eleventh is correct exactly until someone adds one.
+fn nls_sealer_counters(port: u16) -> (Option<u64>, Option<u64>) {
+    let Ok(mut c) = bank_bench::wire::Client::connect("127.0.0.1", port, "bench", "bank") else {
+        return (None, None);
+    };
+    let Ok(r) = c.simple("select nilestream_sealer") else {
+        return (None, None);
+    };
+    let at = |name: &str| -> Option<u64> {
+        let i = r.columns.iter().position(|c| c == name)?;
+        r.rows.first()?.get(i)?.as_ref()?.trim().parse().ok()
+    };
+    (at("max_batch"), at("lock_wait_p99_us"))
+}
+
+/// The ledger's frontier, so a mixed row can say how much history it was measured against.
+fn nls_frontier(port: u16) -> Option<u64> {
+    let mut c = bank_bench::wire::Client::connect("127.0.0.1", port, "bench", "bank").ok()?;
+    let r = c.simple("select nilestream_frontier").ok()?;
+    let i = r.columns.iter().position(|c| c == "frontier")?;
+    r.rows.first()?.get(i)?.as_ref()?.trim().parse().ok()
+}
+
+fn report_mixed(m: &workloads::MixedSample) {
+    match &m.not_run {
+        Some(why) => eprintln!(
+            "  E19 mixed {} {}r/{}w run {} — NOT RUN: {why}",
+            m.target, m.readers, m.writers, m.run
+        ),
+        None => eprintln!(
+            "  E19 mixed {} {}r/{}w run {} — {:.0} reads/s (p50 {:.0}µs), {:.0} writes/s \
+             (p99 {:.0}µs), fallback {}",
+            m.target,
+            m.readers,
+            m.writers,
+            m.run,
+            m.reads_per_second(),
+            m.read_p50.as_nanos() as f64 / 1000.0,
+            m.writes_per_second(),
+            m.write_p99.as_nanos() as f64 / 1000.0,
+            m.fallback_rate
+                .map(|r| format!("{:.2}%", r * 100.0))
+                .unwrap_or_else(|| "REFUSED (not measured)".into())
+        ),
     }
 }
 
@@ -2084,7 +2220,11 @@ fn write_e23(args: &Args, pts: &[E23]) -> std::io::Result<()> {
     Ok(())
 }
 
-fn write_scaling(args: &Args, samples: &[ScalingSample]) -> std::io::Result<()> {
+fn write_scaling(
+    args: &Args,
+    samples: &[ScalingSample],
+    mixed: &[workloads::MixedSample],
+) -> std::io::Result<()> {
     let dir = bank_bench::publish::scaling_dir(std::path::Path::new(&args.out));
     std::fs::create_dir_all(&dir)?;
     let mut by_file: BTreeMap<&str, Vec<&ScalingSample>> = BTreeMap::new();
@@ -2098,7 +2238,17 @@ fn write_scaling(args: &Args, samples: &[ScalingSample]) -> std::io::Result<()> 
             writeln!(f, "{}", s.to_csv())?;
         }
     }
-    let doc = scaling_document(samples, args);
+    // Its own file and its own header: a mixed row has two roles and therefore two latency
+    // distributions, and forcing it into the scaling schema would give a `p99` column that
+    // means reads in some rows and writes in others.
+    if !mixed.is_empty() {
+        let mut f = std::fs::File::create(dir.join("mixed.csv"))?;
+        writeln!(f, "{}", workloads::MIXED_CSV_HEADER)?;
+        for m in mixed {
+            writeln!(f, "{}", m.to_csv())?;
+        }
+    }
+    let doc = scaling_document(samples, mixed, args);
     let where_to = bank_bench::publish::scaling_destinations(&dir, args.publish);
     for path in &where_to {
         std::fs::write(path, &doc)?;
@@ -2115,7 +2265,11 @@ fn write_scaling(args: &Args, samples: &[ScalingSample]) -> std::io::Result<()> 
     Ok(())
 }
 
-fn scaling_document(samples: &[ScalingSample], args: &Args) -> String {
+fn scaling_document(
+    samples: &[ScalingSample],
+    mixed: &[workloads::MixedSample],
+    args: &Args,
+) -> String {
     let mut s = String::new();
     s.push_str("# E19 — Throughput against connection count\n\n");
     s.push_str(
@@ -2137,6 +2291,29 @@ fn scaling_document(samples: &[ScalingSample], args: &Args) -> String {
     s.push_str(&render::scaling_table(samples));
     s.push_str("\n### The top step\n\n");
     s.push_str(&render::scaling_verdicts(samples));
+    if !mixed.is_empty() {
+        s.push_str("\n## Readers and writers at the same time\n\n");
+        s.push_str(&format!(
+            "The `point` rows above are readers alone and `durable` is writers alone. Both \
+             halves of this workload have been measured for cycles **in isolation**, and \
+             isolation is exactly what hides the anchor-mismatch fallback: a keyed read is \
+             discarded when a writer has moved the view's frontier past the reader's anchor, \
+             so with no writer the rate is 0.0% whatever the engine does. It read ~46% under \
+             writers before T-02.\n\n\
+             Readers are the connection count; writers are ⌈readers/2⌉, because a durable \
+             append costs a barrier and matching them one-for-one would measure a queue at \
+             the sealer rather than contention at the base. {} s per level.\n\n",
+            args.mixed_seconds
+        ));
+        s.push_str(&render::mixed_table(mixed));
+        let refused = render::mixed_table_refusals(mixed);
+        s.push_str(&format!(
+            "\n**Levels refused for want of a fallback rate: {refused}.** A mixed row exists to \
+             carry that column; without it the throughput figures are the `point` and `durable` \
+             rows again, published under a name that claims more. Any number above zero here \
+             means this section measured less than it says.\n"
+        ));
+    }
     s.push_str("\n## How it was run\n\n");
     s.push_str(&format!(
         "* Connection levels: {}\n\

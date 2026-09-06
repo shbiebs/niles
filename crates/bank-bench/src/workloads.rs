@@ -1072,3 +1072,286 @@ mod tests {
         );
     }
 }
+
+/// **One level of the mixed read/write workload: readers and writers at the same time.**
+///
+/// E19 already measures each half of this in isolation. `point` is readers alone and `durable`
+/// is writers alone — the two phases the `probes/mixed` scratch harness calls by those names —
+/// and neither can show what happens when a reader and a writer contend for the same base. The
+/// audit had to build a probe outside the repository to ask, which is the definition of a
+/// question the results tables cannot answer.
+///
+/// The row this produces is the third phase, and it is the one that carries the fallback rate:
+/// a keyed read whose entry is stamped past its anchor is a *concurrency* phenomenon, invisible
+/// with readers alone, and it read 0.0% in every isolated measurement this project has taken
+/// while running at ~46% under writers.
+#[derive(Debug, Clone)]
+pub struct MixedSample {
+    pub target: String,
+    pub run: u32,
+    pub readers: u32,
+    pub writers: u32,
+    pub reads: u64,
+    pub writes: u64,
+    pub wall: Duration,
+    pub read_p50: Duration,
+    pub read_p99: Duration,
+    pub write_p50: Duration,
+    pub write_p99: Duration,
+    /// Reads that consulted the maintained view and fell back to the fold. **`None` means the
+    /// server could not be asked, and the renderer refuses the row** — a mixed row whose whole
+    /// reason for existing is this column must not publish without it.
+    pub fallback_rate: Option<f64>,
+    /// Largest group the sealer committed in one barrier, over this level.
+    pub max_batch: Option<u64>,
+    /// p99 wait for the base guard, in microseconds: the number that says whether readers and
+    /// writers are actually contending or merely coexisting.
+    pub lock_wait_p99_us: Option<u64>,
+    /// **The ledger's frontier when the level ended, without which two mixed rows cannot be
+    /// compared.**
+    ///
+    /// A mixed level's read rate is a function of accumulated history and not only of
+    /// contention: a reconstruction folds an account's postings, and the writers in this very
+    /// level are lengthening them as it runs. Measured on this host against the same engine at
+    /// the same reader and writer counts, only the phase length varying:
+    ///
+    /// | epochs sealed | mixed reads/s | read p50 |
+    /// |--:|--:|--:|
+    /// | 6,925 | 23,232 | 143 µs |
+    /// | 20,436 | 18,998 | 177 µs |
+    /// | 38,466 | 12,208 | 288 µs |
+    ///
+    /// A 1.9× spread in read throughput with nothing about the *engine* changed. So a row that
+    /// did not carry this number would invite comparisons between levels that were never
+    /// comparable — which is exactly what happened when the E19 row was first checked against
+    /// `probes/mixed` and read 38% faster, for no reason but a shorter run beforehand.
+    pub base_epochs: Option<u64>,
+    pub duplicates: u64,
+    pub errors: u64,
+    pub not_run: Option<String>,
+}
+
+pub const MIXED_CSV_HEADER: &str = "target,run,readers,writers,reads,writes,wall_ms,reads_per_second,writes_per_second,read_p50_us,read_p99_us,write_p50_us,write_p99_us,fallback_rate,max_batch,lock_wait_p99_us,base_epochs,duplicates,errors,not_run";
+
+impl MixedSample {
+    pub fn reads_per_second(&self) -> f64 {
+        if self.wall.as_secs_f64() <= 0.0 {
+            return 0.0;
+        }
+        self.reads as f64 / self.wall.as_secs_f64()
+    }
+    pub fn writes_per_second(&self) -> f64 {
+        if self.wall.as_secs_f64() <= 0.0 {
+            return 0.0;
+        }
+        self.writes as f64 / self.wall.as_secs_f64()
+    }
+    pub fn to_csv(&self) -> String {
+        let us = |d: Duration| d.as_nanos() as f64 / 1000.0;
+        let opt = |v: Option<f64>, p: usize| {
+            v.map(|x| format!("{x:.p$}", p = p))
+                .unwrap_or_else(|| "n/a".into())
+        };
+        format!(
+            "{},{},{},{},{},{},{:.3},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{},{},{},{},{},{},{}",
+            self.target,
+            self.run,
+            self.readers,
+            self.writers,
+            self.reads,
+            self.writes,
+            self.wall.as_secs_f64() * 1000.0,
+            self.reads_per_second(),
+            self.writes_per_second(),
+            us(self.read_p50),
+            us(self.read_p99),
+            us(self.write_p50),
+            us(self.write_p99),
+            opt(self.fallback_rate, 4),
+            opt(self.max_batch.map(|v| v as f64), 0),
+            opt(self.lock_wait_p99_us.map(|v| v as f64), 0),
+            opt(self.base_epochs.map(|v| v as f64), 0),
+            self.duplicates,
+            self.errors,
+            self.not_run
+                .as_deref()
+                .unwrap_or("")
+                .replace(',', ";")
+                .replace('\n', " ")
+        )
+    }
+}
+
+pub fn mixed_skipped(
+    target: &str,
+    readers: u32,
+    writers: u32,
+    run: u32,
+    why: String,
+) -> MixedSample {
+    MixedSample {
+        target: target.into(),
+        run,
+        readers,
+        writers,
+        reads: 0,
+        writes: 0,
+        wall: Duration::ZERO,
+        read_p50: Duration::ZERO,
+        read_p99: Duration::ZERO,
+        write_p50: Duration::ZERO,
+        write_p99: Duration::ZERO,
+        fallback_rate: None,
+        max_batch: None,
+        lock_wait_p99_us: None,
+        base_epochs: None,
+        duplicates: 0,
+        errors: 0,
+        not_run: Some(why),
+    }
+}
+
+/// Which mixed level is about to be driven. A struct for the reason [`Level`] is one.
+#[derive(Debug, Clone, Copy)]
+pub struct MixedLevel<'a> {
+    pub target: &'a str,
+    pub readers: u32,
+    pub writers: u32,
+    pub run: u32,
+    /// How long both roles run together. **A duration and not an operation count**, because the
+    /// two roles run at wildly different rates — a durable append costs a barrier and a keyed
+    /// read costs microseconds — so a fixed count per thread would end the readers' phase in
+    /// the first second and measure the writers alone for the rest of it.
+    pub seconds: u64,
+}
+
+/// **Drive readers and writers together for `seconds`, and pool what each role saw.**
+///
+/// Every thread opens its connection, then waits on a barrier; the clock starts when the
+/// barrier releases, so the level is charged for its operations and not for its sockets. A
+/// stop flag ends it, and each thread finishes the statement it is inside — so the wall clock
+/// slightly exceeds `seconds` and the rates are computed against the measured wall rather than
+/// against the request.
+pub fn mixed(
+    level: MixedLevel<'_>,
+    open: &(dyn Fn() -> Result<crate::wire::Client, WireError> + Sync),
+    read_statement: &(dyn Fn(u32, u64) -> String + Sync),
+    write_statement: &(dyn Fn(u32, u64) -> String + Sync),
+) -> MixedSample {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Barrier;
+
+    let MixedLevel {
+        target,
+        readers,
+        writers,
+        run,
+        seconds,
+    } = level;
+    let stop = AtomicBool::new(false);
+    let duplicates = AtomicU64::new(0);
+    let errors = AtomicU64::new(0);
+    // `+ 1`: the main thread waits too, and takes the clock the moment the gate opens.
+    let gate = Barrier::new((readers + writers) as usize + 1);
+
+    let (per_thread, wall) = std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for thread in 0..(readers + writers) {
+            let writing = thread >= readers;
+            let (gate, stop, duplicates, errors) = (&gate, &stop, &duplicates, &errors);
+            handles.push(
+                scope.spawn(move || -> Result<(bool, Vec<Duration>), WireError> {
+                    let mut client = match open() {
+                        Ok(c) => {
+                            gate.wait();
+                            c
+                        }
+                        Err(e) => {
+                            // Release the gate regardless, or every other thread and the main
+                            // thread block forever on the failure this function exists to report.
+                            gate.wait();
+                            return Err(e);
+                        }
+                    };
+                    let mut lat = Vec::with_capacity(1 << 14);
+                    let mut i = 0u64;
+                    while !stop.load(Ordering::Relaxed) {
+                        i += 1;
+                        let sql = if writing {
+                            write_statement(thread - readers, i)
+                        } else {
+                            read_statement(thread, i)
+                        };
+                        let at = Instant::now();
+                        match client.simple(&sql) {
+                            Ok(_) => lat.push(at.elapsed()),
+                            // **A duplicate is not an error.** A writer that re-submits an
+                            // identity the ledger already holds is idempotency working; counting
+                            // it as a failure is how the audit's scratch harness once reported a
+                            // throughput collapse that was the commit rule doing its job.
+                            Err(e) if format!("{e:?}").contains("already") => {
+                                duplicates.fetch_add(1, Ordering::Relaxed);
+                            }
+                            Err(_) => {
+                                errors.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    }
+                    Ok((writing, lat))
+                }),
+            );
+        }
+        gate.wait();
+        let started = Instant::now();
+        std::thread::sleep(Duration::from_secs(seconds));
+        stop.store(true, Ordering::Relaxed);
+        let mut out = Vec::new();
+        for h in handles {
+            out.push(h.join().unwrap_or_else(|_| {
+                Err(WireError::Protocol("a connection thread panicked".into()))
+            }));
+        }
+        (out, started.elapsed())
+    });
+
+    let (mut reads, mut writes) = (Vec::new(), Vec::new());
+    for r in per_thread {
+        match r {
+            Ok((true, l)) => writes.extend(l),
+            Ok((false, l)) => reads.extend(l),
+            Err(e) => {
+                return mixed_skipped(
+                    target,
+                    readers,
+                    writers,
+                    run,
+                    format!("a connection failed part-way through the level: {e}"),
+                )
+            }
+        }
+    }
+    let (reads_n, writes_n) = (reads.len() as u64, writes.len() as u64);
+    let (read_p50, read_p99) = percentiles(reads);
+    let (write_p50, write_p99) = percentiles(writes);
+    MixedSample {
+        target: target.into(),
+        run,
+        readers,
+        writers,
+        reads: reads_n,
+        writes: writes_n,
+        wall,
+        read_p50,
+        read_p99,
+        write_p50,
+        write_p99,
+        // Filled in by the caller, which is the only place holding a connection to ask.
+        fallback_rate: None,
+        max_batch: None,
+        lock_wait_p99_us: None,
+        base_epochs: None,
+        duplicates: duplicates.load(Ordering::Relaxed),
+        errors: errors.load(Ordering::Relaxed),
+        not_run: None,
+    }
+}

@@ -42,3 +42,9 @@ every empirical finding it could check from the source, overturned one thing bot
 (the hash chain is SHA-256, not a placeholder — the README is what is stale), and inserted T-00 and
 T-01b ahead of and beside the empirical T-01…T-04a. Read the structural order's §3 for the merged
 task list; its cut line is after T-04a.
+
+**The executable order is [`work-order-7-consolidated.md`](work-order-7-consolidated.md).** It is the
+only document the executor needs: the findings register from both passes, the guarantees table, the
+integrated task list with the cut line after T-04a, branch stacks, the validation protocol, the
+open-questions ledger with LC-21 (which must be decided before T-01), and the reporting requirements
+including the verbatim checklist that F-32 asked for.

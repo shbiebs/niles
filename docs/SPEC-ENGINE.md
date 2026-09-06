@@ -512,6 +512,26 @@ subsystem, and deliberately no SMT solver and no e-graph.
 
 ---
 
+## Part III½ — The public surface, and who is downstream of it
+
+**Two traits in this workspace are implemented outside it**, so a change to either is an API
+change and needs a matching commit in the other repository recording this tree's SHA:
+
+| trait | crate | out-of-tree implementor |
+|---|---|---|
+| `nilestream_core::rev::Base` | `nilestream-core` | `gbs-nilestream::JournalBase` (GBS) |
+| `nilestream_server::session::Serving` | `nilestream-server` | none today; listed because the daemon's harness adapter and any embedder implement it |
+
+This section exists because the pair was broken for a cycle and neither gate could see it. T-06
+turned `Base::reconstruct` and `deltas_at` from `&mut self` to `&self` — the right change, for a
+measured reason — and GBS's adapter kept the old signature. This workspace never built the adapter;
+GBS's gate was not run. Both were green.
+`nilestream-core/tests/downstream_adapter.rs` now builds the adapter when a GBS checkout is
+present (`GBS_ROOT`, or a sibling directory) and **skips by name** when it is not, so a log
+distinguishes "the adapter is fine" from "nobody looked". It tells a compiler error apart from a
+cargo failure by rustc's own `error[E` marker rather than by the exit code, which is the same
+distinction T-03 drew in the verdict suites and for the same reason.
+
 ## Part IV — Concurrency and durability
 
 ### E-conc-1 Strict serializability

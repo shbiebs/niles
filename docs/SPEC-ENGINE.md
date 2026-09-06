@@ -576,6 +576,42 @@ both worth recording because they are the same shape:
   bytes by construction. Both scenarios returned to exactly their pre-T-01 figures, so the
   verified chain costs no allocation at all.
 
+### The schema's currency premise, at the wire
+
+**A currency's code is its position among the schema's `currency` declarations, counting from
+zero.** The wire carries a currency as an integer (`Cur = u32`) and the language declares one by
+name, so something has to relate the two; this is the narrowest rule that invents no syntax, and
+it is what the seeded base has always used. Order comes from the declaration's span rather than
+from `HashMap` iteration, because a currency code is written into the ledger, where it is
+permanent, and one that depended on hash order would differ between runs of the same binary on
+the same schema.
+
+Two obligations follow, and neither was discharged:
+
+- **An `insert` naming an undeclared currency is refused** with `22023`
+  (`invalid_parameter_value`), naming the currency and listing the declared codes. It used to
+  answer `INSERT 0 2` for currency 999 against a schema declaring only `usd`. A currency with no
+  declaration has no scale, so its amounts have no meaning, and `conserve per (txn, cur)` is
+  vacuous over it. A schema that does not resolve refuses too: *unknown* is not *permitted*.
+- **A `sum(amt)` that groups without `cur` over a base holding more than one currency is
+  refused** with `22000` (`data_exception`) — not folded. It used to serve 324 USD + 500 of
+  currency 999 as **"824"**, the balance of account 1. Adding two currencies is not a slow or
+  imprecise answer; it is a number that denotes nothing. Both remedies are named in the error:
+  add `cur` to the `group by`, or restrict with `cur = k`, and both still answer.
+
+The refusal asks what the **base holds**, not what the schema declares — a schema may declare
+three currencies over a base holding one, and refusing that fold would refuse the ordinary case
+for a hypothetical. It sits on the fold rather than on the view because the fold is what the view
+falls back *to*: `report_from_view` already refused this shape and fell through.
+
+`explain` reports it as `refused-cross-currency`. A serve path is a claim about what the next
+execution will do, and "it will refuse" is as much a fact as "it will fold"; promising `fold` for
+a statement about to raise `22000` is the exact drift the one-function-decides rule exists to
+prevent.
+
+This is Contribution 4 on the **data** side. The compiler discharges "cannot mismatch currencies"
+for Niles programs, and every benchmark row is data.
+
 ## Part III½ — The public surface, and who is downstream of it
 
 **Two traits in this workspace are implemented outside it**, so a change to either is an API

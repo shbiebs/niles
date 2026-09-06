@@ -218,6 +218,12 @@ pub enum ServeError {
     /// the client is told so, because a caller that wanted durability and received an `Ok`
     /// would stop keeping its own copy and find out at the worst possible moment.
     NotDurable(String),
+    /// **The query would have added two currencies together.**
+    ///
+    /// Its own variant and not a `Rejected`, because the caller's remedy is different and
+    /// specific: group by the currency, or name one. The message carries the codes the base
+    /// actually holds, so the remedy can be written without a second query.
+    CrossCurrency(Vec<u32>),
 }
 
 impl ServeError {
@@ -235,14 +241,43 @@ impl ServeError {
             ServeError::Rejected(_) => "23000", // integrity_constraint_violation
             ServeError::Duplicate(_) => "23505", // unique_violation: a repeated identity
             ServeError::NotDurable(_) => "58030", // io_error
+            // `22000` is the data exception the sum *is*: the operands are not comparable.
+            // Deliberately not `23000` — nothing about the stored data violates a constraint,
+            // and telling a client its ledger is corrupt when its query is malformed sends it
+            // looking in the wrong place.
+            ServeError::CrossCurrency(_) => "22000", // data_exception
         }
     }
-    pub fn detail(&self) -> &str {
+    /// **The `ERROR:` line a client shows before it shows anything else.**
+    ///
+    /// It was `"this query could not be evaluated"` for every failure, which is true and
+    /// tells a caller nothing: a query refused for adding two currencies and a query whose
+    /// fixpoint did not terminate are different mistakes with different remedies, and the
+    /// distinction sat in `DETAIL` where a terse client does not print it.
+    pub fn headline(&self) -> &'static str {
+        match self {
+            ServeError::Eval(_) => "this query could not be evaluated",
+            ServeError::Rejected(_) => "this query was refused by the ledger",
+            ServeError::Duplicate(_) => "this identity has already committed",
+            ServeError::NotDurable(_) => "this epoch is not on stable storage",
+            ServeError::CrossCurrency(_) => "this `sum` would add amounts in different currencies",
+        }
+    }
+
+    /// The detail line, owned because one variant composes it.
+    pub fn detail(&self) -> std::borrow::Cow<'_, str> {
         match self {
             ServeError::Eval(m)
             | ServeError::Rejected(m)
             | ServeError::Duplicate(m)
-            | ServeError::NotDurable(m) => m,
+            | ServeError::NotDurable(m) => std::borrow::Cow::Borrowed(m),
+            ServeError::CrossCurrency(held) => {
+                let list: Vec<String> = held.iter().map(|c| c.to_string()).collect();
+                std::borrow::Cow::Owned(format!(
+                    "the base holds currencies [{}] and this `sum(amt)` groups without `cur`, so it would add amounts in different currencies into one number. Add `cur` to the `group by`, or restrict with `cur = k`. `conserve per (txn, cur)` is quantified per currency exactly so this sum never has to be taken.",
+                    list.join(", ")
+                ))
+            }
         }
     }
 }
@@ -616,7 +651,7 @@ impl Session {
                         vec![pg_wire::sqlstate_error(
                             e.sqlstate(),
                             "the transaction did not commit",
-                            Some(e.detail()),
+                            Some(&e.detail()),
                         )]
                     }
                 };
@@ -887,8 +922,8 @@ impl Session {
                 self.failed = true;
                 return vec![pg_wire::sqlstate_error(
                     e.sqlstate(),
-                    "this query could not be evaluated",
-                    Some(e.detail()),
+                    e.headline(),
+                    Some(&e.detail()),
                 )];
             }
         };
@@ -1138,6 +1173,50 @@ impl Session {
         if rows.is_empty() {
             return vec![Backend::CommandComplete("INSERT 0 0".into())];
         }
+
+        // **The schema's currency premise, enforced at the wire.**
+        //
+        // Contribution 4 says a well-typed program cannot mismatch currencies, and the
+        // compiler discharges that for programs. It said nothing about *data*, and every
+        // benchmark row is data: an `insert` naming currency 999 against a schema declaring
+        // only `usd` was accepted, and `sum(amt) group by acct` then served 324 + 500 = "824"
+        // as one account's balance. A conservation rule quantified over currencies is
+        // vacuous for a currency nobody declared.
+        //
+        // Refused here rather than deeper because this is the boundary the premise enters at:
+        // the ledger's `Cur` is a `u32` and cannot be narrowed without changing the base's
+        // type, and the engine below has no schema. `22023` is `invalid_parameter_value`.
+        match declared_currency_codes(&self.schema) {
+            None => {
+                self.failed = true;
+                return vec![pg_wire::sqlstate_error(
+                    "22023",
+                    "this session's schema does not resolve, so no currency can be checked",
+                    Some(
+                        "an `insert` is refused rather than admitted while the declared currencies are unknown.",
+                    ),
+                )];
+            }
+            Some(declared) => {
+                let offending = rows.iter().find_map(|r| match r {
+                    proto_engine::Row::Post(p) if !declared.contains(&p.cur) => Some(p.cur),
+                    _ => None,
+                });
+                if let Some(cur) = offending {
+                    self.failed = true;
+                    let names: Vec<String> = declared.iter().map(|c| c.to_string()).collect();
+                    return vec![pg_wire::sqlstate_error(
+                        "22023",
+                        &format!("currency {cur} is not declared by this schema"),
+                        Some(&format!(
+                            "declared currency codes are [{}] — a currency's code is its position among the schema's `currency` declarations, counting from zero. Declare it in the schema rather than inserting it: a currency with no declaration has no scale, so its amounts have no meaning and `conserve per (txn, cur)` cannot hold over it.",
+                            names.join(", ")
+                        )),
+                    )];
+                }
+            }
+        }
+
         let n = rows.len();
         // The identity: the transaction numbers in the statement. An insert with no
         // identity would not be idempotent, and a retried insert over a wire that dropped
@@ -1177,7 +1256,7 @@ impl Session {
                 vec![pg_wire::sqlstate_error(
                     e.sqlstate(),
                     "the insert did not commit",
-                    Some(e.detail()),
+                    Some(&e.detail()),
                 )]
             }
         }
@@ -1233,6 +1312,35 @@ fn split_statements(sql: &str) -> Vec<String> {
 /// `None` for anything outside the form. Deliberately not lenient: a partly-understood
 /// insert would put rows in the ledger that do not match what was written, and the ledger is
 /// the one place in this system where that cannot be corrected by an update.
+/// **The currency codes this schema declares, in declaration order.**
+///
+/// The wire carries a currency as an integer (`Cur = u32`) and the language declares one by
+/// name (`currency usd { scale: 2 }`), so something has to relate the two. The rule is the
+/// narrowest one that invents no syntax: **a declared currency's code is its position in the
+/// schema, counting from zero.** A schema declaring only `usd` therefore admits code `0` and
+/// nothing else, which is exactly what the seeded base has always used.
+///
+/// Order comes from the declaration's span and not from `HashMap` iteration, because a code
+/// that depended on hash order would differ between runs of the same binary on the same
+/// schema — and a currency code is written into the ledger, where it is permanent.
+///
+/// Returns `None` if the schema does not resolve; the caller then refuses rather than
+/// admitting everything, because "the schema is unreadable" is not a reason to accept a
+/// currency no schema declared.
+fn declared_currency_codes(schema: &str) -> Option<std::collections::BTreeSet<u32>> {
+    let (prog, d) = niles_lang::parser::parse_program(schema);
+    if d.has_errors() {
+        return None;
+    }
+    let (cat, rd) = niles_lang::resolve::resolve_program(&prog, 0);
+    if rd.has_errors() {
+        return None;
+    }
+    let mut by_span: Vec<&niles_lang::resolve::CurrencyInfo> = cat.currencies.values().collect();
+    by_span.sort_by_key(|c| c.span.start);
+    Some((0..by_span.len() as u32).collect())
+}
+
 fn parse_insert(sql: &str) -> Option<Vec<proto_engine::Row>> {
     let lower = sql.to_ascii_lowercase();
     let into = lower.find("into")?;
@@ -1913,6 +2021,53 @@ schema bank {
                 .iter()
                 .any(|r| r[1] == Some("700".into())),
             "{read:?}"
+        );
+    }
+
+    /// **The F-41 witness at the wire: an undeclared currency is refused.**
+    ///
+    /// The schema declares one currency, so code `0` is the only one it admits, and
+    /// `INSERT … (777002, 1, 999, 500)` used to answer `INSERT 0 2`. It reached the base, and
+    /// the next `sum(amt) group by acct` added 324 USD to 500 of currency 999 and served
+    /// "824". Contribution 4 was proved for programs and undischarged for data.
+    #[test]
+    fn an_insert_naming_an_undeclared_currency_is_refused_by_name() {
+        let (mut s, e) = (session(), engine());
+        let out = s.handle(
+            Frontend::Query(
+                "insert into postings values (777002, 1, 999, 500), (777002, 2, 999, -500)".into(),
+            ),
+            &e,
+        );
+        let msg = format!("{out:?}");
+        assert!(
+            !out.iter()
+                .any(|m| matches!(m, Backend::CommandComplete(t) if t.starts_with("INSERT"))),
+            "an undeclared currency must not commit: {msg}"
+        );
+        assert!(
+            msg.contains("22023"),
+            "and must be refused with `invalid_parameter_value`, which is what the value is:              {msg}"
+        );
+        assert!(
+            msg.contains("999") && msg.contains("not declared"),
+            "and must name the currency it refused, or the caller cannot act on it: {msg}"
+        );
+    }
+
+    /// The declared currency still commits. A check that refused everything would pass the
+    /// test above and be useless.
+    #[test]
+    fn an_insert_in_the_declared_currency_still_commits() {
+        let (mut s, e) = (session(), engine());
+        let out = s.handle(
+            Frontend::Query("insert into postings values (777010, 1, 0, 500)".into()),
+            &e,
+        );
+        assert!(
+            out.iter()
+                .any(|m| matches!(m, Backend::CommandComplete(t) if t == "INSERT 0 1")),
+            "{out:?}"
         );
     }
 

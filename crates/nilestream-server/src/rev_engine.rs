@@ -383,6 +383,43 @@ impl RevEngine {
         self.base().head()
     }
 
+    /// **The currencies this fold would add together, if it would add any.**
+    ///
+    /// `Some(list)` when the plan sums `amt`, groups without the currency column, and does not
+    /// pin one in its predicate, over a base that holds more than one. `None` — meaning "serve
+    /// it" — in every other case, and each exclusion is a way the sum is well defined rather
+    /// than a way it is convenient:
+    ///
+    /// * the aggregate is not `sum(amt)` — a `count` or a `min` over mixed currencies is a
+    ///   question about rows, not about money;
+    /// * the group key contains the currency column, so each group holds one currency;
+    /// * the predicate pins `cur = k`, so the scan sees one currency whatever the key is;
+    /// * the base holds one currency, so there is nothing to mismatch.
+    ///
+    /// Note what is *not* here: the schema's declared set. This asks what the base actually
+    /// holds, because a schema may declare three currencies and a base hold one, and refusing
+    /// that fold would refuse the ordinary case for a hypothetical.
+    fn cross_currency_fold(&self, p: &crate::scan_fold::FoldPlan) -> Option<Vec<u32>> {
+        use niles_ir::operator::{Agg, Scalar};
+        const CUR: u16 = 2;
+        const AMT: u16 = 3;
+
+        if p.aggs() != [(Agg::Sum, Scalar::Column(AMT))] {
+            return None;
+        }
+        if p.group_key().contains(&CUR) {
+            return None;
+        }
+        if p.column_restriction(CUR).is_some() {
+            return None;
+        }
+        let held = self
+            .currencies
+            .read()
+            .expect("the currency set is not poisoned");
+        (held.len() > 1).then(|| held.iter().copied().collect())
+    }
+
     /// How many currencies the base holds.
     fn currency_count(&self) -> usize {
         self.currencies
@@ -485,7 +522,7 @@ impl crate::session::Serving for RevEngine {
         // pushed below the aggregate, which is two cliffs the same query used to fall off.
         let restricted = planned
             .as_ref()
-            .and_then(|p| p.account_restriction(ACCT_COL))
+            .and_then(|p| p.column_restriction(ACCT_COL))
             .or_else(|| account_predicate(circuit));
         // **The view answers only when the account is the whole of the restriction.**
         // `restricted` above is enough to narrow a *scan*, because the circuit's filters are
@@ -496,6 +533,26 @@ impl crate::session::Serving for RevEngine {
         //
         // The condition is `serve_path`'s, so `explain` and the engine cannot describe
         // different engines: one function decides, and both read it.
+        // **A sum over a base that holds more than one currency is refused, not folded.**
+        //
+        // Contribution 4 says money cannot be mismatched. The compiler discharges that for
+        // programs; this is the same obligation on data, and it was undischarged: with 324 USD
+        // and 500 of a second currency in the base, `sum(amt) group by acct` folded both into
+        // "824" and served it as an account's balance. Adding two currencies is not a slow
+        // answer or an imprecise one — it is a number that denotes nothing, and
+        // `conserve per (txn, cur)` is quantified per currency precisely so that it never has
+        // to be computed.
+        //
+        // `report_from_view` already refused this shape and fell through to here, which is why
+        // the refusal has to live on the fold rather than on the view: the fold is what the
+        // view falls back *to*. The query is answerable in two ways and both are offered by
+        // name — group by the currency, or name one in the predicate — so this narrows what
+        // the server will answer without narrowing what a caller can ask.
+        if let Some(p) = planned.as_ref() {
+            if let Some(offending) = self.cross_currency_fold(p) {
+                return Err(crate::session::ServeError::CrossCurrency(offending));
+            }
+        }
         // **A report first**, because a fully maintained view answers one without touching
         // the base at all. Refused for every shape that is not one — see `report_from_view`.
         if let Some(p) = planned.as_ref() {
@@ -956,7 +1013,12 @@ impl RevEngine {
         anchor: u64,
     ) -> ServePath {
         let planned = crate::scan_fold::plan(circuit, output);
+        // In the order `serve` takes them, so `explain` cannot describe a different engine:
+        // the refusal is checked first there and must be checked first here.
         if let Some(p) = planned.as_ref() {
+            if self.cross_currency_fold(p).is_some() {
+                return ServePath::Refused;
+            }
             if self.report_shape(p, circuit, output, anchor).is_some() {
                 return ServePath::Report;
             }
@@ -1310,6 +1372,14 @@ pub enum ServePath {
     /// The whole base materialised as a Z-set and the circuit evaluated over it: the honest
     /// cost of a shape outside the keyed-aggregate fragment.
     Materialise,
+    /// **No path: the query would add two currencies and the engine refuses it.**
+    ///
+    /// A path in this enum is a claim about what the engine will do, and "it will refuse" is
+    /// as much a fact about the next execution as "it will fold". Leaving it out meant
+    /// `explain` promised a `fold` for a statement that was about to raise `22000` — which is
+    /// the specific failure this enum exists to prevent, one function deciding and both
+    /// readers agreeing.
+    Refused,
 }
 
 impl ServePath {
@@ -1320,6 +1390,7 @@ impl ServePath {
             ServePath::IndexFold => "index-fold",
             ServePath::Fold => "fold",
             ServePath::Materialise => "materialise",
+            ServePath::Refused => "refused-cross-currency",
         }
     }
 
@@ -1359,6 +1430,9 @@ impl ServePath {
             }
             ServePath::Materialise => {
                 "the base materialised as a Z-set and the circuit evaluated over it — the shape is outside the keyed-aggregate fragment; O(base rows) with an allocation per row"
+            }
+            ServePath::Refused => {
+                "refused: this `sum(amt)` groups without `cur` over a base holding more than one currency, so it would add amounts that are not comparable. Add `cur` to the `group by`, or restrict with `cur = k`"
             }
         }
     }
@@ -1403,7 +1477,7 @@ pub fn serve_path_of(
     {
         return ServePath::View;
     }
-    if p.account_restriction(ACCT_COL).is_some() {
+    if p.column_restriction(ACCT_COL).is_some() {
         return ServePath::IndexFold;
     }
     ServePath::Fold
@@ -1761,7 +1835,7 @@ mod tests {
         let restriction = |sql: &str| -> Option<u64> {
             let lowered = compile(sql);
             let p = crate::scan_fold::plan(&lowered.circuit, "__wire_result")?;
-            p.account_restriction(ACCT_COL)
+            p.column_restriction(ACCT_COL)
         };
         for (sql, want) in [
             (
@@ -3531,6 +3605,142 @@ mod anchor_after_barrier_tests {
             "`insert` must raise the session's anchor from the visible frontier. Observing \
              the epoch `append` returned anchors the session past a barrier that may still \
              fail, and the next read then serves rows the client was told did not commit."
+        );
+    }
+}
+
+#[cfg(test)]
+mod currency_premise_tests {
+    //! **The F-41 witness, as a test.**
+    //!
+    //! Contribution 4 says a well-typed program cannot mismatch currencies. The compiler
+    //! discharges that for programs, and every benchmark row is *data*: the wire accepted an
+    //! `insert` in currency 999 against a schema declaring only `usd`, and then served
+    //! 324 USD + 500 of currency 999 as **"824"**, the balance of account 1. A conservation
+    //! rule quantified per currency is vacuous over a currency nobody declared, and a sum
+    //! across currencies is not an imprecise number — it is a number that denotes nothing.
+    //!
+    //! The two halves are checked separately because they fail separately: the ingress check
+    //! keeps an undeclared currency out of the base, and the fold refusal covers the case the
+    //! ingress check cannot — a schema that declares two currencies, both legitimately
+    //! present, summed by a query that names neither.
+
+    use super::*;
+    use crate::session::Serving;
+
+    fn engine() -> RevEngine {
+        RevEngine::seeded(20, 3, 8, ViewMode::Demand, EvictionPolicy::Lru)
+    }
+
+    fn transfer(txn: u64, cur: u32, amt: i128) -> Vec<Row> {
+        vec![
+            Row::Post(proto_engine::Posting {
+                txn,
+                acct: 1,
+                cur,
+                amt,
+                valid: 0,
+            }),
+            Row::Post(proto_engine::Posting {
+                txn,
+                acct: 2,
+                cur,
+                amt: -amt,
+                valid: 0,
+            }),
+        ]
+    }
+
+    /// The witness's second `select`: over a base holding two currencies, a `sum(amt)` that
+    /// groups without `cur` is **refused**, where it used to answer 824.
+    #[test]
+    fn a_sum_without_the_currency_is_refused_over_a_multi_currency_base() {
+        let e = engine();
+        e.append(transfer(777_003, 1, 500), "w-1")
+            .expect("balanced");
+        let lowered =
+            tests::compile("select acct, sum(amt) from postings where acct = 1 group by acct");
+        let err = e
+            .query(&lowered.circuit, "__wire_result", e.frontier())
+            .expect_err("a cross-currency sum must not answer");
+        assert!(
+            matches!(err, crate::session::ServeError::CrossCurrency(_)),
+            "and must be refused by name rather than by some generic failure: {err:?}"
+        );
+        assert_eq!(
+            err.sqlstate(),
+            "22000",
+            "a data exception: the operands are not comparable. Not `23000` — nothing about \
+             the stored data violates a constraint"
+        );
+        assert!(
+            err.detail().contains("group by") && err.detail().contains("cur = k"),
+            "the refusal must name both remedies, or it is a wall rather than an answer"
+        );
+    }
+
+    /// The two spellings that *are* answerable stay answerable. A refusal that also refused
+    /// these would have narrowed what a caller can ask rather than what the server will
+    /// silently get wrong.
+    #[test]
+    fn grouping_by_the_currency_or_naming_one_still_answers() {
+        let e = engine();
+        e.append(transfer(777_003, 1, 500), "w-1")
+            .expect("balanced");
+        let anchor = e.frontier();
+
+        let grouped = tests::compile(
+            "select acct, cur, sum(amt) from postings where acct = 1 group by acct, cur",
+        );
+        let rows = e
+            .query(&grouped.circuit, "__wire_result", anchor)
+            .expect("grouping by the currency is well defined");
+        assert_eq!(
+            rows.len(),
+            2,
+            "both currencies must be reported, each as its own row"
+        );
+
+        let pinned = tests::compile(
+            "select acct, sum(amt) from postings where acct = 1 and cur = 0 group by acct",
+        );
+        let rows = e
+            .query(&pinned.circuit, "__wire_result", anchor)
+            .expect("a query that names one currency sums within it");
+        assert_eq!(rows.len(), 1);
+    }
+
+    /// One currency in the base is the ordinary case and must be untouched — including when
+    /// the *schema* declares more than one. The check asks what the base holds.
+    #[test]
+    fn a_single_currency_base_is_unaffected() {
+        let e = engine();
+        e.append(transfer(777_005, 0, 700), "w-2")
+            .expect("balanced");
+        let lowered =
+            tests::compile("select acct, sum(amt) from postings where acct = 1 group by acct");
+        assert!(
+            e.query(&lowered.circuit, "__wire_result", e.frontier())
+                .is_ok(),
+            "with one currency in the base there is nothing to mismatch, and refusing here \
+             would refuse every ordinary balance read"
+        );
+    }
+
+    /// `explain` must report the refusal. A path is a claim about what the next execution
+    /// does, and "it will refuse" is as much a fact as "it will fold" — promising `fold` for
+    /// a statement about to raise `22000` is the exact drift `ServePath` exists to prevent.
+    #[test]
+    fn explain_reports_the_refusal_rather_than_a_fold() {
+        let e = engine();
+        e.append(transfer(777_003, 1, 500), "w-1")
+            .expect("balanced");
+        let lowered =
+            tests::compile("select acct, sum(amt) from postings where acct = 1 group by acct");
+        assert_eq!(
+            e.serve_path_at(&lowered.circuit, "__wire_result", e.frontier()),
+            ServePath::Refused,
+            "`explain` and the engine must describe the same engine"
         );
     }
 }

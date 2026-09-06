@@ -22,7 +22,7 @@ references, one Markdown file per chapter (also delivered as `thesis/Niles-Thesi
 ## Status — read this first
 
 This is a **theory project with a working instrument**. The loop from Niles source text to a
-measured result is closed end to end, and the workspace holds **814 test functions**.
+measured result is closed end to end, and the workspace holds **820 test functions**.
 
 ```
   Niles source text
@@ -72,7 +72,7 @@ cannot do (durability, concurrency, distribution, the compiler); no number there
 Reproduce everything:
 
 ```sh
-cargo test --workspace                      # 814 test functions
+cargo test --workspace                      # 820 test functions
 cargo test -p niles-interp                  # the Appendix E bootstrap gates
 
 # the compiler, on the thesis's own worked example

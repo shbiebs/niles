@@ -133,7 +133,12 @@ impl FoldPlan<'_> {
     ///
     /// Two conjuncts naming different accounts mean no row survives; the restriction is
     /// abandoned rather than guessed at, and the filters answer correctly and slowly.
-    pub fn account_restriction(&self, acct_col: ColIdx) -> Option<u64> {
+    /// Generic in the column, and named for that since T-01b: the body only ever looks for
+    /// `col = literal` among the conjuncts, so the same walk answers "which account does this
+    /// query pin" and "which currency does this query pin". The second question is what lets a
+    /// `sum(amt) group by acct` be served over a multi-currency base when — and only when — the
+    /// query names the currency itself.
+    pub fn column_restriction(&self, acct_col: ColIdx) -> Option<u64> {
         use niles_ir::operator::ScalarOp;
         // A `Map` between the source and the aggregate changes what the column indices mean,
         // so a restriction derived from them would restrict on the wrong column.
@@ -181,7 +186,7 @@ impl FoldPlan<'_> {
     }
     /// **The account this plan restricts to when it restricts to nothing else.**
     ///
-    /// The distinction between this and [`account_restriction`] is a correctness one, and it
+    /// The distinction between this and [`column_restriction`] is a correctness one, and it
     /// was found by a test rather than by reading. A *scan* may be restricted whenever
     /// `acct = k` is a necessary condition, because the filters are still applied afterwards
     /// and remove whatever else they remove. A **maintained view** may only answer when

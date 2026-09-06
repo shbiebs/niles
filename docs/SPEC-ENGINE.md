@@ -623,19 +623,42 @@ nothing new is claimed here, and that is the point.
 The read used to return `anchor: effective`: honest, and useless to its caller. `answer_from_view`
 wants an answer true at the snapshot it was asked about, an answer stamped later includes writes
 that snapshot excludes *as far as the caller can tell*, and so the engine discarded a correct
-value and folded the base instead — at roughly a hundred times the cost. Under four readers and
-two writers that was **87.4% of keyed reads over the wire** and 24.3% in-process, against 0.0% for
-readers alone. The value was right the whole time; the engine could not tell, because the read
-reported the wrong end of the interval.
+value and folded the base instead. The value was right the whole time; the engine could not tell,
+because the read reported the wrong end of the interval.
 
-| | in-process, 4r/2w | readers alone |
-|---|--:|--:|
-| before T-02 | 24.3% | 0.0% |
-| after T-02 | **0.0%** | 0.0% |
+Measured over the wire on a 10-core M4, three reader/writer shapes, 8 s per phase, durable sink,
+10,000 accounts at budget 2,500:
 
-with 5,961 of 6,000 keyed reads served from a resident entry and 39 reconstructed — the check
-that matters, because a fallback traded for a reconstruction would have moved the cost rather
-than removed it, and the ratio alone cannot tell those apart.
+| shape | fallback rate before | after | base rows folded |
+|---|--:|--:|--:|
+| 4 readers, 2 writers | 45.8% | **0.2%** | 20.6M → 7.9M (−61%) |
+| 8 readers, 4 writers | 43.7% | **0.2%** | 42.9M → 16.6M (−61%) |
+| 8 readers, 1 writer | 45.3% | **0.2%** | 20.8M → 1.7M (−92%) |
+
+The residual 0.2% is measurement slop, not fallbacks: `view_answers` equals `reads` exactly in all
+three shapes after the change.
+
+**The "before" column is derived, and the derivation is worth stating because the counter did not
+exist to take it directly.** Under the old counting a fallback incremented the view's `reads` *and*
+the scan surface's `served`, and `read_stats` added them, so the reported total exceeded the
+queries the probe actually issued by exactly the number of fallbacks. Issued is `reads/s × 8 s`
+over the two read phases. After the change the excess is 0.2% and before it is 44–46%, on three
+shapes independently — which is also a check on the derivation, since nothing forces those three
+to agree.
+
+The in-process test that gates this in CI reads 24.3% → 0.0% at 4r/2w, with 5,961 of 6,000 keyed
+reads served from a resident entry and 39 reconstructed. That last check is the one that matters:
+a fallback traded for a reconstruction would move the cost rather than remove it, and a rate alone
+cannot tell those apart.
+
+**It cost nothing in wall clock, and that is the finding rather than a disappointment.** Mixed-phase
+read throughput moved −0.4%, +3.9% and +0.3% across the three shapes; read p50 is 23 µs before and
+after. A keyed fallback folds *one account's* postings through the anchor index — about 22 rows —
+against a wire round trip of roughly 47 µs, so it was some 2% of a read's cost and 46% of the
+reads. Counted work fell by 61–92%; the wall clock could not see it. This is the counted-work
+methodology earning its place: a wire benchmark run on this host would have reported the mechanism
+as healthy while nearly half of its keyed reads bypassed it, which is precisely how F-27 survived
+three audit cycles.
 
 **The lower bound is not decoration, and it closed a correctness hazard rather than a cost one.**
 `anchor < stamp` is a read *below* the entry: a delta landed in `(anchor, stamp]` that this anchor

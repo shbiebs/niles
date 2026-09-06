@@ -58,9 +58,13 @@ pub trait Serving {
     /// single most common way a durability number is inflated.
     fn durability(&self) -> &'static str;
 
-    /// `(reads, hits, misses, rows_touched, resident)` for the read model, or zeroes where
-    /// the target has no partial state.
-    fn read_stats(&self) -> (u64, u64, u64, u64, usize);
+    /// What the read model did, or zeroes where the target has no partial state.
+    ///
+    /// A named struct and not a tuple. It was `(u64, u64, u64, u64, usize)`, which every
+    /// caller destructured positionally and one caller had already re-wrapped in a struct so
+    /// its tests would read like claims; adding the two fallback columns would have made it a
+    /// seven-tuple, and a seven-tuple of counters is a place transposition errors live.
+    fn read_stats(&self) -> crate::rev_engine::ReadStats;
 
     /// What the sealer beneath this server has done, when there is one.
     ///
@@ -760,7 +764,7 @@ impl Session {
         // real miss rate says *reconstruction* is, which is the claim the thesis makes —
         // and the CSV had `n/a` in that column because nothing could ask.
         if lower.starts_with("select") && lower.contains("nilestream_stats") {
-            let (reads, hits, misses, rows, resident) = engine.read_stats();
+            let s = engine.read_stats();
             return vec![
                 Backend::RowDescription(vec![
                     Field::int8("reads"),
@@ -768,13 +772,21 @@ impl Session {
                     Field::int8("misses"),
                     Field::int8("rows_touched"),
                     Field::int8("resident"),
+                    // **The two columns `BLOCKED-fallback-rate` was raised about.** A keyed
+                    // read that consulted the view and then discarded its answer is a cost
+                    // the server pays and could not be asked about: 87.4% of keyed reads
+                    // took it under concurrent writers, and no surface said so.
+                    Field::int8("view_answers"),
+                    Field::int8("fallbacks"),
                 ]),
                 Backend::DataRow(vec![
-                    Some(reads.to_string()),
-                    Some(hits.to_string()),
-                    Some(misses.to_string()),
-                    Some(rows.to_string()),
-                    Some(resident.to_string()),
+                    Some(s.reads.to_string()),
+                    Some(s.hits.to_string()),
+                    Some(s.misses.to_string()),
+                    Some(s.rows_touched.to_string()),
+                    Some(s.resident.to_string()),
+                    Some(s.view_answers.to_string()),
+                    Some(s.fallbacks.to_string()),
                 ]),
                 Backend::CommandComplete("SELECT 1".into()),
             ];
@@ -1482,8 +1494,8 @@ schema bank {
         fn durability(&self) -> &'static str {
             "none"
         }
-        fn read_stats(&self) -> (u64, u64, u64, u64, usize) {
-            (0, 0, 0, 0, 0)
+        fn read_stats(&self) -> crate::rev_engine::ReadStats {
+            crate::rev_engine::ReadStats::default()
         }
     }
 
@@ -2030,6 +2042,40 @@ schema bank {
     /// `INSERT … (777002, 1, 999, 500)` used to answer `INSERT 0 2`. It reached the base, and
     /// the next `sum(amt) group by acct` added 324 USD to 500 of currency 999 and served
     /// "824". Contribution 4 was proved for programs and undischarged for data.
+    /// **The columns the benchmark's reader looks up by name.**
+    ///
+    /// `bank-bench` reads `view_answers` and `fallbacks` out of this reply *by name* and
+    /// renders `n/a` when they are absent, which is the right degradation and a silent one:
+    /// deleting them here would turn every E19 fallback figure into "the question was not
+    /// asked" without failing a build. This is the other half of that chain, and it is the
+    /// half that fails loudly.
+    #[test]
+    fn nilestream_stats_names_the_columns_the_benchmark_reads() {
+        let (mut s, e) = (session(), engine());
+        let out = s.handle(Frontend::Query("select nilestream_stats".into()), &e);
+        let names: Vec<String> = out
+            .iter()
+            .find_map(|m| match m {
+                Backend::RowDescription(f) => Some(f.iter().map(|x| x.name.clone()).collect()),
+                _ => None,
+            })
+            .expect("a row description");
+        for wanted in [
+            "reads",
+            "hits",
+            "misses",
+            "rows_touched",
+            "resident",
+            "view_answers",
+            "fallbacks",
+        ] {
+            assert!(
+                names.iter().any(|n| n == wanted),
+                "`select nilestream_stats` must name `{wanted}` — the benchmark looks it up                  by name and renders `n/a` when it is missing, so dropping it here would                  quietly unmeasure the column rather than break anything. Got: {names:?}"
+            );
+        }
+    }
+
     #[test]
     fn an_insert_naming_an_undeclared_currency_is_refused_by_name() {
         let (mut s, e) = (session(), engine());

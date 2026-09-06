@@ -612,6 +612,55 @@ prevent.
 This is Contribution 4 on the **data** side. The compiler discharges "cannot mismatch currencies"
 for Niles programs, and every benchmark row is data.
 
+### The certification interval, and the answer that was thrown away
+
+**A resident entry is exact at every anchor in `[stamp, effective]`, and `Rev::read` now says
+so.** The entry holds the key's value as of `stamp` and received no delta between `stamp` and
+`effective` — that is what `effective` means — so the value is unchanged across the whole closed
+interval and is the correct answer at every anchor inside it. This is Theorem 4.1's own step (3);
+nothing new is claimed here, and that is the point.
+
+The read used to return `anchor: effective`: honest, and useless to its caller. `answer_from_view`
+wants an answer true at the snapshot it was asked about, an answer stamped later includes writes
+that snapshot excludes *as far as the caller can tell*, and so the engine discarded a correct
+value and folded the base instead — at roughly a hundred times the cost. Under four readers and
+two writers that was **87.4% of keyed reads over the wire** and 24.3% in-process, against 0.0% for
+readers alone. The value was right the whole time; the engine could not tell, because the read
+reported the wrong end of the interval.
+
+| | in-process, 4r/2w | readers alone |
+|---|--:|--:|
+| before T-02 | 24.3% | 0.0% |
+| after T-02 | **0.0%** | 0.0% |
+
+with 5,961 of 6,000 keyed reads served from a resident entry and 39 reconstructed — the check
+that matters, because a fallback traded for a reconstruction would have moved the cost rather
+than removed it, and the ratio alone cannot tell those apart.
+
+**The lower bound is not decoration, and it closed a correctness hazard rather than a cost one.**
+`anchor < stamp` is a read *below* the entry: a delta landed in `(anchor, stamp]` that this anchor
+must not see. The old condition served it — with `effective` attached — and was safe only because
+every caller compared the two anchors and threw the answer away. A caller that trusted the value
+would have been served the present at a historical anchor. `a_key_with_a_delta_after_the_anchor_still_reconstructs`
+fails on the old condition by returning 500 where 100 is right, which is the shape of the bug that
+was one careless caller away.
+
+It also made `hits` a count of *answers* rather than of answers **served**. Those two numbers had
+been reported as one since the runtime was wired to the wire path.
+
+**What is counted now.** `select nilestream_stats` gains `view_answers` and `fallbacks` — the pair,
+not a ratio, because they are counted at different places. `fallbacks` counts only the anchor
+mismatch, not the shapes the view is never asked about, which are `serve_path`'s business.
+`BLOCKED-fallback-rate` was raised against this twice: the behaviour was correct and the cost was
+invisible, so an audit had to infer it from a latency distribution.
+
+E19's `point` level is bracketed by the counters and reports a per-level rate, because the
+counters are cumulative and a cumulative rate drifts towards a constant as a run goes on — the
+opposite of what a connection sweep asks. The benchmark reads both columns **by name**; the reader
+had been counting positions (`row.first()`, `row.get(2)`), which is correct exactly until a column
+is added. A server that cannot be asked renders `n/a` and never `0.0%`: *no read fell back* and
+*the question was not asked* are different claims, and only one of them is a result.
+
 ## Part III½ — The public surface, and who is downstream of it
 
 **Two traits in this workspace are implemented outside it**, so a change to either is an API

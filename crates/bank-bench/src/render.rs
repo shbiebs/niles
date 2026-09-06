@@ -706,6 +706,7 @@ mod tests {
             p50: Duration::from_micros(100),
             p99: Duration::from_micros(400),
             durable: false,
+            fallback_rate: None,
             not_run: None,
         };
 
@@ -782,6 +783,7 @@ mod tests {
             p50: Duration::from_micros(400),
             p99: Duration::from_micros(900),
             durable: true,
+            fallback_rate: Some(0.031),
             not_run: None,
         };
         assert_eq!(

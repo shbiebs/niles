@@ -180,12 +180,12 @@ struct Reads {
 
 fn read_stats(engine: &std::sync::Arc<nilestream_server::rev_engine::RevEngine>) -> Reads {
     use nilestream_server::session::Serving;
-    let (reads, _hits, misses, rows_touched, resident) = engine.read_stats();
+    let s = engine.read_stats();
     Reads {
-        reads,
-        misses,
-        rows_touched,
-        resident,
+        reads: s.reads,
+        misses: s.misses,
+        rows_touched: s.rows_touched,
+        resident: s.resident,
     }
 }
 

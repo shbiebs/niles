@@ -38,6 +38,21 @@ pub struct ReadStats {
     /// to produce, now available alongside a wall-clock one for the same run.
     pub rows_touched: u64,
     pub resident: usize,
+    /// **Keyed reads the maintained view answered, and keyed reads whose view answer was
+    /// discarded.**
+    ///
+    /// The pair and not a ratio, because they are counted at different places and a ratio
+    /// computed from one would hide which. `fallbacks` counts only the anchor mismatch — the
+    /// view was consulted and its answer thrown away because the entry was not exact at the
+    /// anchor asked for — and not the shapes the view is never asked about, which are a
+    /// different fact belonging to `serve_path`.
+    ///
+    /// This is the number `BLOCKED-fallback-rate` was raised about, twice. It was correct
+    /// behaviour and an uncounted cost: 87.4% of keyed reads over the wire under four
+    /// readers and two writers, which an audit could only infer from a latency distribution
+    /// because no surface in the server could be asked.
+    pub view_answers: u64,
+    pub fallbacks: u64,
 }
 
 impl ReadStats {
@@ -46,6 +61,19 @@ impl ReadStats {
             return 0.0;
         }
         self.misses as f64 / self.reads as f64
+    }
+
+    /// The share of keyed reads that consulted the view and fell back to the fold.
+    ///
+    /// Over `view_answers + fallbacks` rather than over `reads`: a fold that was never a
+    /// candidate for the view is not a fallback, and dividing by every read would report a
+    /// number that improves when the workload shifts away from keyed reads.
+    pub fn fallback_rate(&self) -> f64 {
+        let keyed = self.view_answers + self.fallbacks;
+        if keyed == 0 {
+            return 0.0;
+        }
+        self.fallbacks as f64 / keyed as f64
     }
 }
 
@@ -111,6 +139,14 @@ pub struct RevEngine {
     /// because picking a currency for the caller is how a per-currency conservation rule
     /// becomes invisible from outside.
     currencies: std::sync::RwLock<std::collections::BTreeSet<u32>>,
+    /// **Keyed reads the view answered, and keyed reads whose view answer was discarded.**
+    ///
+    /// The pair, not a ratio, because the two are counted at different places and a ratio
+    /// computed from one of them would hide which. `view_fallbacks` counts only the anchor
+    /// mismatch — the view was consulted and its answer thrown away — and not the shapes the
+    /// view was never asked about, which are a different fact and belong to `serve_path`.
+    view_answers: std::sync::atomic::AtomicU64,
+    view_fallbacks: std::sync::atomic::AtomicU64,
     /// The durable sink, when the daemon was started with one. `None` for the in-memory
     /// engine the tests and the benchmark's warm-up use.
     ///
@@ -352,6 +388,8 @@ impl RevEngine {
             served_rows: std::sync::atomic::AtomicU64::new(0),
             runtime: runtime.map(std::sync::Mutex::new),
             currencies: std::sync::RwLock::new(std::collections::BTreeSet::from([0])),
+            view_answers: std::sync::atomic::AtomicU64::new(0),
+            view_fallbacks: std::sync::atomic::AtomicU64::new(0),
             durable: None,
             visible: None,
             pending: std::sync::Mutex::new(Vec::new()),
@@ -791,7 +829,7 @@ impl crate::session::Serving for RevEngine {
     /// read is an anchored reconstruction and no resident entry is consulted. Reporting the
     /// `PartialView`'s counters here would report a view the wire path does not read — they
     /// would all be zero, and a benchmark would record `n/a` and move on.
-    fn read_stats(&self) -> (u64, u64, u64, u64, usize) {
+    fn read_stats(&self) -> ReadStats {
         // **Hits are counted now, where they used to be zero by construction.**
         //
         // This returned `(served, 0, served, rows, resident)` with a paragraph explaining
@@ -806,20 +844,33 @@ impl crate::session::Serving for RevEngine {
             .runtime
             .as_ref()
             .map(|rt| rt.lock().expect("the view lock is not poisoned"));
+        let view_answers = self.view_answers.load(std::sync::atomic::Ordering::Relaxed);
+        let fallbacks = self
+            .view_fallbacks
+            .load(std::sync::atomic::Ordering::Relaxed);
         match guard.as_ref().and_then(|rt| rt.view(BALANCE_VIEW)) {
             Some(v) => {
                 let s = &v.stats;
-                (
-                    s.reads + served,
-                    s.hits,
-                    s.misses + served,
-                    s.base_rows_read + served_rows,
-                    v.resident_count() as usize,
-                )
+                ReadStats {
+                    reads: s.reads + served,
+                    hits: s.hits,
+                    misses: s.misses + served,
+                    rows_touched: s.base_rows_read + served_rows,
+                    resident: v.resident_count() as usize,
+                    view_answers,
+                    fallbacks,
+                }
             }
             // No runtime: the server has no partial state at all, so nothing is resident
             // and every served read is a reconstruction over the base.
-            None => (served, 0, served, served_rows, 0),
+            None => ReadStats {
+                reads: served,
+                misses: served,
+                rows_touched: served_rows,
+                view_answers,
+                fallbacks,
+                ..Default::default()
+            },
         }
     }
 }
@@ -853,7 +904,7 @@ impl crate::session::Serving for std::sync::RwLock<RevEngine> {
     fn durability(&self) -> &'static str {
         self.read().expect("not poisoned").durability()
     }
-    fn read_stats(&self) -> (u64, u64, u64, u64, usize) {
+    fn read_stats(&self) -> ReadStats {
         self.read().expect("not poisoned").read_stats()
     }
     fn sealer_stats(&self) -> Option<(u64, u64, u64, u64, u64)> {
@@ -1185,8 +1236,18 @@ impl RevEngine {
         // reconstructs at the requested anchor exactly — but it is now a *cost*, and how
         // often it is paid is not counted anywhere. See `BLOCKED-fallback-rate`.
         if answered.anchor != anchor {
+            // **Counted, because an uncounted cost is one nobody can be asked about.**
+            // `BLOCKED-fallback-rate` was raised against exactly this line: the response is
+            // correct — the fold reconstructs at the requested anchor — but how often the
+            // engine paid for a view lookup and then threw the answer away was not visible
+            // from any surface, and an audit measured 87.4% of keyed reads taking it under
+            // concurrent writers. `select nilestream_stats` reports it now.
+            self.view_fallbacks
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return None;
         }
+        self.view_answers
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         let mut columns: Vec<String> = (0..p.width()).map(|i| format!("c{i}")).collect();
         columns.push("anchor".into());
@@ -1893,10 +1954,10 @@ mod tests {
             let e = RevEngine::seeded(accounts, 2, 50, ViewMode::Demand, EvictionPolicy::Lru);
             let anchor = e.frontier();
             let lowered = compile(sql);
-            let before = e.read_stats().3;
+            let before = e.read_stats().rows_touched;
             e.query(&lowered.circuit, "__wire_result", anchor)
                 .expect("answers");
-            e.read_stats().3 - before
+            e.read_stats().rows_touched - before
         };
 
         // The whole base is 200 accounts x 2 rounds x 2 legs = 800 postings. A query that
@@ -1945,11 +2006,11 @@ mod tests {
         let anchor = e.frontier();
         let lowered = compile("select acct, sum(amt) from postings group by acct");
 
-        let before = e.read_stats().3;
+        let before = e.read_stats().rows_touched;
         let served = e
             .query(&lowered.circuit, "__wire_result", anchor)
             .expect("answers");
-        let touched = e.read_stats().3 - before;
+        let touched = e.read_stats().rows_touched - before;
 
         assert_eq!(
             touched, 0,
@@ -2050,11 +2111,11 @@ mod tests {
         }
 
         let lowered = compile("select acct, sum(amt) from postings group by acct");
-        let before = e.read_stats().3;
+        let before = e.read_stats().rows_touched;
         let served = e
             .query(&lowered.circuit, "__wire_result", anchor)
             .expect("answers");
-        let touched = e.read_stats().3 - before;
+        let touched = e.read_stats().rows_touched - before;
 
         assert!(
             touched > 0,
@@ -2139,7 +2200,8 @@ mod tests {
                 .expect("answers");
             assert_eq!(again.rows, first.rows, "a hit must answer what a miss did");
         }
-        let (reads, hits, misses, _rows, resident) = e.read_stats();
+        let s = e.read_stats();
+        let (reads, hits, misses, resident) = (s.reads, s.hits, s.misses, s.resident);
         assert_eq!(reads, 51, "every read reached the view");
         assert!(hits >= 50, "a warm key must hit: {hits} of {reads}");
         assert!(misses >= 1, "and the first read of it must not");
@@ -2166,7 +2228,8 @@ mod tests {
                 niles_ir::eval::try_run(&c.circuit, "__wire_result", &sources).expect("oracle");
             assert_eq!(got.text(), rendered(&oracle, anchor), "acct {acct}");
         }
-        let (reads, hits, misses, _, resident) = e.read_stats();
+        let s = e.read_stats();
+        let (reads, hits, misses, resident) = (s.reads, s.hits, s.misses, s.resident);
         assert_eq!(reads, hits + misses);
         assert!(
             misses > 51,
@@ -2395,17 +2458,12 @@ mod tests {
         r[1].as_ref().map(|v| v.parse().expect("an integer"))
     }
 
-    /// `read_stats` as a named struct, so a test reads like a claim rather than like a tuple.
+    /// `read_stats`, which **is** the named struct now: this used to re-wrap a five-tuple so
+    /// a test would read like a claim rather than like a positional destructure, and the
+    /// trait returns the struct itself since T-02.
     fn stats(e: &RevEngine) -> ReadStats {
         use crate::session::Serving;
-        let (reads, hits, misses, rows_touched, resident) = e.read_stats();
-        ReadStats {
-            reads,
-            hits,
-            misses,
-            rows_touched,
-            resident,
-        }
+        e.read_stats()
     }
 
     #[test]
@@ -3741,6 +3799,195 @@ mod currency_premise_tests {
             e.serve_path_at(&lowered.circuit, "__wire_result", e.frontier()),
             ServePath::Refused,
             "`explain` and the engine must describe the same engine"
+        );
+    }
+}
+
+#[cfg(test)]
+mod fallback_rate_tests {
+    //! **How often a keyed read consults the view and throws the answer away.**
+    //!
+    //! `answer_from_view` returns `None` when the entry it found is not exact at the anchor
+    //! that was asked for, and folds instead. That is correct — the fold reconstructs at the
+    //! requested anchor — and it costs roughly a hundred times a view read. Under concurrent
+    //! writers an audit measured **87.4%** of keyed reads taking it, against 0.0% with readers
+    //! alone, and no surface in the server could be asked, so the audit had to infer it from a
+    //! latency distribution (`probes/mixed.rs`, `FOLD_FACTOR`). `select nilestream_stats`
+    //! counts it directly now, and this is the test that holds it down.
+    //!
+    //! Four readers and two writers, because that is the shape the finding was measured in.
+    //! The number is a ratio over keyed reads that reached the view, not over all reads: a
+    //! query the view was never asked about is a different fact and belongs to `serve_path`.
+
+    use super::*;
+    use crate::session::Serving;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    const ACCOUNTS: i64 = 200;
+    const READS_PER_READER: u64 = 1_500;
+
+    /// Run four readers and two writers over one engine and return the delta in
+    /// `ReadStats` across the run.
+    fn mixed_full(readers: usize, writers: usize) -> ReadStats {
+        let engine = std::sync::Arc::new(RevEngine::seeded(
+            ACCOUNTS,
+            3,
+            usize::MAX,
+            ViewMode::Full,
+            EvictionPolicy::Lru,
+        ));
+        let before = engine.read_stats();
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let done = std::sync::Arc::new(AtomicU64::new(0));
+
+        let mut threads = Vec::new();
+        for w in 0..writers {
+            let (e, stop) = (engine.clone(), stop.clone());
+            threads.push(std::thread::spawn(move || {
+                let mut n = 0u64;
+                while !stop.load(Ordering::Relaxed) {
+                    n += 1;
+                    let txn = 900_000 + (w as u64) * 1_000_000 + n;
+                    let acct = n % ACCOUNTS as u64;
+                    let _ = e.append(
+                        vec![
+                            Row::Post(proto_engine::Posting {
+                                txn,
+                                acct,
+                                cur: 0,
+                                amt: 1,
+                                valid: 0,
+                            }),
+                            Row::Post(proto_engine::Posting {
+                                txn,
+                                acct: 999_999,
+                                cur: 0,
+                                amt: -1,
+                                valid: 0,
+                            }),
+                        ],
+                        &format!("mix-{w}-{n}"),
+                    );
+                }
+            }));
+        }
+
+        for r in 0..readers {
+            let (e, done) = (engine.clone(), done.clone());
+            threads.push(std::thread::spawn(move || {
+                let lowered = tests::compile(
+                    "select acct, sum(amt) from postings where acct = 7 group by acct",
+                );
+                for _ in 0..READS_PER_READER {
+                    // The anchor a session would hold: sampled from the frontier, then used.
+                    // The gap between the two is the whole of the window this measures, and
+                    // it is a real window — a session observes the frontier when it writes or
+                    // reads, and a concurrent writer moves it afterwards.
+                    let anchor = e.frontier();
+                    let _ = e.query(&lowered.circuit, "__wire_result", anchor);
+                }
+                done.fetch_add(r as u64, Ordering::Relaxed);
+            }));
+        }
+
+        // Readers finish on their own count; the writers run until they do.
+        let reader_handles = threads.split_off(writers);
+        for t in reader_handles {
+            t.join().expect("a reader panicked");
+        }
+        stop.store(true, Ordering::Relaxed);
+        for t in threads {
+            t.join().expect("a writer panicked");
+        }
+
+        let after = engine.read_stats();
+        ReadStats {
+            reads: after.reads - before.reads,
+            hits: after.hits - before.hits,
+            misses: after.misses - before.misses,
+            rows_touched: after.rows_touched - before.rows_touched,
+            resident: after.resident,
+            view_answers: after.view_answers - before.view_answers,
+            fallbacks: after.fallbacks - before.fallbacks,
+        }
+    }
+
+    fn mixed(readers: usize, writers: usize) -> (u64, u64) {
+        let s = mixed_full(readers, writers);
+        (s.view_answers, s.fallbacks)
+    }
+
+    /// **A fallback traded for a reconstruction would be no win at all**, and the ratio alone
+    /// cannot tell the two apart: a read that stops falling back because it now *misses* and
+    /// folds the account's history through the anchor index has moved the cost, not removed
+    /// it. So this reports the whole picture, and asserts on the part that would hide.
+    #[test]
+    fn the_reads_that_stopped_falling_back_are_served_and_not_reconstructed() {
+        let s = mixed_full(4, 2);
+        let keyed = s.view_answers + s.fallbacks;
+        assert!(keyed > 1_000, "the measurement must have reached the view");
+        eprintln!(
+            "  4r/2w: reads={} hits={} misses={} rows_touched={} view_answers={}              fallbacks={} ({:.1}%)",
+            s.reads,
+            s.hits,
+            s.misses,
+            s.rows_touched,
+            s.view_answers,
+            s.fallbacks,
+            s.fallbacks as f64 / keyed as f64 * 100.0
+        );
+        // The keyed reads are of one account, seeded with three postings and touched by the
+        // writers, so a reconstruction is cheap here in absolute terms. The claim is the
+        // ratio: the great majority of keyed reads must be answered from a resident entry
+        // rather than rebuilt from the base.
+        assert!(
+            s.hits * 4 > keyed * 3,
+            "at least three quarters of the keyed reads must be view hits, or the fallback              rate fell because reads became reconstructions: {} hits over {keyed} keyed reads",
+            s.hits
+        );
+    }
+
+    fn rate(answers: u64, fallbacks: u64) -> f64 {
+        let total = answers + fallbacks;
+        if total == 0 {
+            return 0.0;
+        }
+        fallbacks as f64 / total as f64
+    }
+
+    /// **The finding, as a bound.** 87.4% before; the entry is exact throughout its
+    /// certification interval and the read now says so, which leaves only the keys a writer
+    /// touched between the anchor and the read.
+    #[test]
+    fn the_fallback_rate_under_four_readers_and_two_writers_is_low() {
+        let (answers, fallbacks) = mixed(4, 2);
+        let r = rate(answers, fallbacks);
+        assert!(
+            answers + fallbacks > 1_000,
+            "the measurement must actually have reached the view: {answers} answered, \
+             {fallbacks} fell back"
+        );
+        assert!(
+            r <= 0.05,
+            "keyed reads fell back to the fold {:.1}% of the time ({fallbacks} of {}). The \
+             view holds a value that is exact for every anchor in [stamp, effective] and the \
+             read must serve it at the anchor it was asked for",
+            r * 100.0,
+            answers + fallbacks
+        );
+    }
+
+    /// Readers alone were already at 0.0%, and must stay there: a change that lowered the
+    /// mixed rate by loosening what counts as exact would show up here as nothing at all,
+    /// so this is a control rather than a second measurement.
+    #[test]
+    fn readers_alone_never_fall_back() {
+        let (answers, fallbacks) = mixed(4, 0);
+        assert!(answers > 1_000, "the readers must have reached the view");
+        assert_eq!(
+            fallbacks, 0,
+            "with no writer moving the frontier, every entry is exact at every anchor asked \
+             for, and a fallback here would mean the read is refusing its own state"
         );
     }
 }

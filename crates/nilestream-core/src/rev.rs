@@ -214,12 +214,32 @@ impl Rev {
             } else {
                 *e
             };
-            if effective >= anchor {
+            // **The certification interval, and the answer is exact everywhere inside it.**
+            //
+            // The entry holds this key's value as of `stamp`, and it received no delta
+            // between `stamp` and `effective` — that is what `effective` means. So the value
+            // is unchanged across the whole closed interval `[stamp, effective]`, and it is
+            // the correct answer at *every* anchor in it, not merely at `effective`. This is
+            // Theorem 4.1's own step (3), and the read now says so by returning the anchor it
+            // was asked for.
+            //
+            // It used to return `anchor: effective`, which is honest and useless: the caller
+            // wants an answer true at its snapshot, an answer stamped later includes writes
+            // that snapshot excludes *as far as the caller can tell*, and so
+            // `answer_from_view` discarded it and folded the base instead — at roughly a
+            // hundred times the cost, for 24.3% of keyed reads in-process and 87.4% over the
+            // wire under four readers and two writers. The value was right the whole time;
+            // the engine could not tell, because the read reported the wrong end of the
+            // interval.
+            //
+            // The lower bound is not decoration. `anchor < stamp` is a read *below* the
+            // entry — a delta landed in `(anchor, stamp]` that this anchor must not see — and
+            // it has to reconstruct. It used to be served, with `effective` attached, and was
+            // correct only because the caller then threw it away; counting it as a hit is
+            // what made `hits` a count of answers rather than of answers *served*.
+            if *e <= anchor && anchor <= effective {
                 self.stats.hits += 1;
-                return Anchored {
-                    value: *v,
-                    anchor: effective,
-                };
+                return Anchored { value: *v, anchor };
             }
         }
 
@@ -759,6 +779,133 @@ mod tests {
             let again = v.read(&base, &vec![k], anchor).value;
             assert_eq!(again, first[&k], "key {k} changed across an eviction");
         }
+    }
+
+    /// **The lower bound of the certification interval, which is the whole of its safety.**
+    ///
+    /// `read` serves a resident entry at the anchor it was asked for when
+    /// `stamp <= anchor <= effective`. The upper bound is the saving; the *lower* bound is
+    /// what keeps it honest, and a version of this change without it would pass every
+    /// fallback-rate measurement while serving a value from the future at a historical
+    /// anchor. Here the key receives a delta strictly after the anchor being read, so the
+    /// resident entry is stamped above it and the read must go back to the base.
+    #[test]
+    fn a_key_with_a_delta_after_the_anchor_still_reconstructs() {
+        let mut base = FoldBase::new(0);
+        base.seal(vec![7], 100);
+        let early = base.frontier();
+        let mut rt = Runtime::install(
+            circuit(Materialize::Demand, Consistency::Snapshot),
+            None,
+            Policy::Lru,
+        )
+        .unwrap();
+        let v = rt.view_mut("balance").unwrap();
+
+        // Make the entry resident and current, then move the key underneath it.
+        base.seal(vec![7], 400);
+        let late = base.frontier();
+        assert_eq!(v.read(&base, &vec![7], late).value, 500);
+        assert_eq!(v.stats.misses, 1, "the first read reconstructs");
+
+        // A read at the earlier anchor must not see the 400.
+        let before = v.stats.misses;
+        let answered = v.read(&base, &vec![7], early);
+        assert_eq!(
+            answered.value, 100,
+            "a read below the entry's stamp must reconstruct at its own anchor, not serve              the later value"
+        );
+        assert_eq!(
+            answered.anchor, early,
+            "and must report the anchor it was asked for"
+        );
+        assert_eq!(
+            v.stats.misses,
+            before + 1,
+            "it must have reconstructed rather than been counted as a hit — an answer the              caller then discards is not a hit, and counting it as one is what made `hits` a              count of answers rather than of answers served"
+        );
+    }
+
+    /// A pinned entry is one installed at an anchor *below* the frontier the view had
+    /// applied, so it never saw the deltas in between and may not inherit `applied`. Its
+    /// `effective` is its own stamp, and a read above that stamp must reconstruct — the
+    /// certification interval collapses to a point and the new upper bound must not widen it.
+    #[test]
+    fn a_pinned_entry_read_above_its_stamp_still_reconstructs() {
+        let mut base = FoldBase::new(0);
+        base.seal(vec![7], 100);
+        let early = base.frontier();
+        base.seal(vec![7], 400);
+        base.seal(vec![9], 1);
+        let late = base.frontier();
+
+        let mut rt = Runtime::install(
+            circuit(Materialize::Full, Consistency::Snapshot),
+            None,
+            Policy::Lru,
+        )
+        .unwrap();
+        // Drag the view forward, then read historically: `install` pins the entry because it
+        // is anchored below `applied`. `advance` is the runtime's, so it is called before the
+        // view is borrowed out of it.
+        rt.advance(&base, late);
+        let v = rt.view_mut("balance").unwrap();
+        assert_eq!(v.read(&base, &vec![7], early).value, 100);
+
+        let before = v.stats.misses;
+        let answered = v.read(&base, &vec![7], late);
+        assert_eq!(
+            answered.value, 500,
+            "a pinned entry has not seen the deltas between its anchor and `applied`, so a              read above its stamp must rebuild"
+        );
+        assert_eq!(
+            v.stats.misses,
+            before + 1,
+            "and must do so by reconstructing, not by inheriting a frontier it never saw"
+        );
+    }
+
+    /// The upper bound, stated on its own: an entry that received no delta since its stamp
+    /// answers every anchor between the two, and answers *at* the anchor asked for. This is
+    /// the claim the fallback rate rests on, and it is worth one test that does not involve
+    /// threads.
+    #[test]
+    fn an_entry_answers_every_anchor_in_its_certification_interval() {
+        let mut base = FoldBase::new(0);
+        base.seal(vec![7], 100);
+        let stamp = base.frontier();
+        let mut rt = Runtime::install(
+            circuit(Materialize::Full, Consistency::Snapshot),
+            None,
+            Policy::Lru,
+        )
+        .unwrap();
+        {
+            let v = rt.view_mut("balance").unwrap();
+            assert_eq!(v.read(&base, &vec![7], stamp).value, 100);
+        }
+
+        // Epochs pass in which this key receives nothing.
+        for i in 0..5 {
+            base.seal(vec![8], i);
+        }
+        rt.advance(&base, base.frontier());
+        let v = rt.view_mut("balance").unwrap();
+
+        let hits = v.stats.hits;
+        for a in stamp..=base.frontier() {
+            let answered = v.read(&base, &vec![7], a);
+            assert_eq!(answered.value, 100, "the key did not change at epoch {a}");
+            assert_eq!(
+                answered.anchor, a,
+                "and the answer must be stamped with the anchor it was asked for, or the                  caller cannot tell it apart from one that is merely fresher"
+            );
+        }
+        assert_eq!(
+            v.stats.hits - hits,
+            base.frontier() - stamp + 1,
+            "every anchor in the interval must be a hit; a reconstruction here is the 24.3%              fallback in miniature"
+        );
     }
 
     #[test]

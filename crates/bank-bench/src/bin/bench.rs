@@ -1933,7 +1933,11 @@ fn run_nilestream_level(
             let nls_port = args.nls_port;
             let open_nls =
                 move || bank_bench::wire::Client::connect("127.0.0.1", nls_port, "bench", "bank");
-            let s = workloads::concurrent(
+            // **The keyed-read level is the one the fallback rate is about**, so it is
+            // bracketed by the counters. The `fold` level never consults the view and the
+            // `durable` level is a write, so neither has a rate to report.
+            let before = nls_view_counters(nls_port);
+            let mut s = workloads::concurrent(
                 workloads::Level {
                     workload: "point",
                     target: "nilestream",
@@ -1948,6 +1952,7 @@ fn run_nilestream_level(
                     format!("select acct, sum(amt) from postings where acct = {k} group by acct")
                 },
             );
+            s.fallback_rate = fallback_rate_between(before, nls_view_counters(nls_port));
             report_scaling(&s);
             out.push(s);
             // **The scan-shaped read, which is the one the audit found lock-bound.**
@@ -2004,6 +2009,33 @@ fn run_nilestream_level(
     }
 }
 
+/// **The view counters, so a level can report the rate it actually ran at.**
+///
+/// `(view_answers, fallbacks)` read by name from `select nilestream_stats`. The counters are
+/// cumulative over the server's lifetime, so a level's own rate is a delta across it — a
+/// cumulative rate would be dominated by whatever ran first and would drift towards a
+/// constant as the run went on, which is the opposite of what a connection sweep is asking.
+///
+/// `None` when the server cannot be asked, and the level then renders `n/a` rather than
+/// `0.0%`: "no read fell back" and "the question was not asked" are different claims.
+fn nls_view_counters(port: u16) -> Option<(u64, u64)> {
+    let mut c = bank_bench::wire::Client::connect("127.0.0.1", port, "bench", "bank").ok()?;
+    let r = c.simple("select nilestream_stats").ok()?;
+    let at = |name: &str| -> Option<u64> {
+        let i = r.columns.iter().position(|c| c == name)?;
+        r.rows.first()?.get(i)?.as_ref()?.trim().parse().ok()
+    };
+    Some((at("view_answers")?, at("fallbacks")?))
+}
+
+/// The share of the keyed reads *in this level* that fell back to the fold.
+fn fallback_rate_between(before: Option<(u64, u64)>, after: Option<(u64, u64)>) -> Option<f64> {
+    let ((a0, f0), (a1, f1)) = (before?, after?);
+    let (answers, fallbacks) = (a1.saturating_sub(a0), f1.saturating_sub(f0));
+    let keyed = answers + fallbacks;
+    (keyed > 0).then(|| fallbacks as f64 / keyed as f64)
+}
+
 fn report_scaling(s: &ScalingSample) {
     match &s.not_run {
         Some(why) => eprintln!(
@@ -2011,13 +2043,16 @@ fn report_scaling(s: &ScalingSample) {
             s.workload, s.target, s.connections, s.run
         ),
         None => eprintln!(
-            "  E19 {} {} @{} conn run {} — {:.0} ops/s, p99 {:.0}µs",
+            "  E19 {} {} @{} conn run {} — {:.0} ops/s, p99 {:.0}µs, fallback {}",
             s.workload,
             s.target,
             s.connections,
             s.run,
             s.ops_per_second(),
-            s.p99.as_nanos() as f64 / 1000.0
+            s.p99.as_nanos() as f64 / 1000.0,
+            s.fallback_rate
+                .map(|r| format!("{:.1}%", r * 100.0))
+                .unwrap_or_else(|| "n/a".into())
         ),
     }
 }

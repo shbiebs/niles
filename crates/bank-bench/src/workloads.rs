@@ -727,12 +727,22 @@ pub struct ScalingSample {
     pub p50: Duration,
     pub p99: Duration,
     pub durable: bool,
+    /// **The share of keyed reads that consulted the maintained view and fell back to the
+    /// fold**, where the target can be asked.
+    ///
+    /// `None` for PostgreSQL, which has no view to fall back from, and `None` for a
+    /// Nilestream whose `nilestream_stats` does not carry the columns. The distinction is the
+    /// point: a rate that could not be read is rendered `n/a`, not `0.0%`, because "no read
+    /// fell back" and "the question was not asked" are different claims and only one of them
+    /// is a result. E19's connection sweep is where it matters — the rate is ~0 at one
+    /// connection whatever the engine does, and the finding is what happens as writers arrive.
+    pub fallback_rate: Option<f64>,
     pub not_run: Option<String>,
 }
 
 /// The scaling CSV's schema, in one place, asserted by `render`'s tests.
 pub const SCALING_CSV_HEADER: &str =
-    "workload,target,connections,run,operations,wall_ms,p50_us,p99_us,ops_per_second,durable,not_run";
+    "workload,target,connections,run,operations,wall_ms,p50_us,p99_us,ops_per_second,durable,fallback_rate,not_run";
 
 impl ScalingSample {
     pub fn ops_per_second(&self) -> f64 {
@@ -744,7 +754,7 @@ impl ScalingSample {
 
     pub fn to_csv(&self) -> String {
         format!(
-            "{},{},{},{},{},{:.3},{:.1},{:.1},{:.1},{},{}",
+            "{},{},{},{},{},{:.3},{:.1},{:.1},{:.1},{},{},{}",
             self.workload,
             self.target,
             self.connections,
@@ -755,6 +765,10 @@ impl ScalingSample {
             self.p99.as_nanos() as f64 / 1000.0,
             self.ops_per_second(),
             self.durable,
+            // `n/a` and not `0`: see the field's own note.
+            self.fallback_rate
+                .map(|r| format!("{r:.4}"))
+                .unwrap_or_else(|| "n/a".into()),
             self.not_run
                 .as_deref()
                 .unwrap_or("")
@@ -782,6 +796,7 @@ pub fn scaling_skipped(
         p50: Duration::ZERO,
         p99: Duration::ZERO,
         durable: false,
+        fallback_rate: None,
         not_run: Some(reason),
     }
 }
@@ -898,6 +913,9 @@ pub fn concurrent(
         wall,
         p50,
         p99,
+        // Filled in by the caller, which is the only place that holds a `Target` to ask.
+        // `concurrent` drives connections and knows nothing about what is on the other end.
+        fallback_rate: None,
         durable,
         not_run: None,
     }

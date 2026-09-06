@@ -115,6 +115,16 @@ pub trait Target {
     fn miss_rate(&mut self) -> Option<f64> {
         None
     }
+
+    /// The share of keyed reads that consulted the maintained view and fell back to the fold.
+    ///
+    /// `None` for PostgreSQL, which has no view to fall back from, and `None` for any server
+    /// whose `nilestream_stats` does not carry the columns — a rate that cannot be read must
+    /// not be rendered as zero, which is the difference between "no read fell back" and "the
+    /// question was not asked".
+    fn fallback_rate(&mut self) -> Option<f64> {
+        None
+    }
 }
 
 /// PostgreSQL, over its own wire protocol.
@@ -399,14 +409,36 @@ impl Target for NilestreamTarget {
 
     fn miss_rate(&mut self) -> Option<f64> {
         let r = self.client.simple("select nilestream_stats").ok()?;
-        let row = r.rows.first()?;
-        let reads: f64 = row.first()?.as_ref()?.parse().ok()?;
-        let misses: f64 = row.get(2)?.as_ref()?.parse().ok()?;
+        let reads: f64 = named(&r, "reads")?;
+        let misses: f64 = named(&r, "misses")?;
         if reads <= 0.0 {
             return None;
         }
         Some(misses / reads)
     }
+
+    fn fallback_rate(&mut self) -> Option<f64> {
+        let r = self.client.simple("select nilestream_stats").ok()?;
+        let answers: f64 = named(&r, "view_answers")?;
+        let fallbacks: f64 = named(&r, "fallbacks")?;
+        let keyed = answers + fallbacks;
+        if keyed <= 0.0 {
+            return None;
+        }
+        Some(fallbacks / keyed)
+    }
+}
+
+/// **A column by name, because this reader used to count on its fingers.**
+///
+/// `miss_rate` read `row.first()` and `row.get(2)` — reads and misses by position — which is
+/// correct exactly until someone adds a column, and T-02 adds two. Reading by name also makes
+/// the guard fall out of the design rather than being bolted onto it: delete the counter from
+/// the server and this returns `None`, and the renderer refuses the row instead of publishing
+/// a fallback rate it did not measure.
+fn named(r: &crate::wire::Rows, column: &str) -> Option<f64> {
+    let i = r.columns.iter().position(|c| c == column)?;
+    r.rows.first()?.get(i)?.as_ref()?.trim().parse().ok()
 }
 
 /// What `nilestreamd` cannot serve over the wire today, by workload.
@@ -549,5 +581,80 @@ mod tests {
             !crate::workloads::analytical_common().is_empty(),
             "an empty common set would make the analytical ratio vacuous"
         );
+    }
+
+    /// **A column that is not there must read as absent, never as zero.**
+    ///
+    /// `miss_rate` used to read `row.first()` and `row.get(2)` — reads and misses by
+    /// position — which is correct until a column is added, and T-02 adds two. Reading by
+    /// name is what makes the fallback rate refuse rather than fabricate: a server whose
+    /// `nilestream_stats` does not carry the counters renders `n/a`, and "no read fell back"
+    /// stays distinguishable from "the question was not asked".
+    #[test]
+    fn a_missing_column_reads_as_absent_rather_than_as_zero() {
+        let with = crate::wire::Rows {
+            columns: vec![
+                "reads".into(),
+                "hits".into(),
+                "misses".into(),
+                "rows_touched".into(),
+                "resident".into(),
+                "view_answers".into(),
+                "fallbacks".into(),
+            ],
+            rows: vec![vec![
+                Some("100".into()),
+                Some("97".into()),
+                Some("3".into()),
+                Some("9".into()),
+                Some("2".into()),
+                Some("96".into()),
+                Some("4".into()),
+            ]],
+            tag: String::new(),
+        };
+        assert_eq!(named(&with, "fallbacks"), Some(4.0));
+        assert_eq!(named(&with, "view_answers"), Some(96.0));
+
+        // The same reply from a server that does not carry the counters.
+        let without = crate::wire::Rows {
+            columns: with.columns[..5].to_vec(),
+            rows: vec![with.rows[0][..5].to_vec()],
+            tag: String::new(),
+        };
+        assert_eq!(
+            named(&without, "fallbacks"),
+            None,
+            "a column the server does not report must not be read as a value — `0` here              would publish a 0% fallback rate for a run that never measured one"
+        );
+        // And the columns that are still there keep working, so the degradation is partial
+        // rather than total: a run against an older server still reports its miss rate.
+        assert_eq!(named(&without, "misses"), Some(3.0));
+    }
+
+    /// Reading by name survives a column being inserted in the middle, which is the failure
+    /// the positional reader would have had: `misses` was column 2 and would have become
+    /// whatever moved into that slot.
+    #[test]
+    fn reading_by_name_survives_a_column_moving() {
+        let shuffled = crate::wire::Rows {
+            columns: vec![
+                "resident".into(),
+                "misses".into(),
+                "reads".into(),
+                "fallbacks".into(),
+                "view_answers".into(),
+            ],
+            rows: vec![vec![
+                Some("2".into()),
+                Some("3".into()),
+                Some("100".into()),
+                Some("4".into()),
+                Some("96".into()),
+            ]],
+            tag: String::new(),
+        };
+        assert_eq!(named(&shuffled, "misses"), Some(3.0));
+        assert_eq!(named(&shuffled, "fallbacks"), Some(4.0));
     }
 }

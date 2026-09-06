@@ -1157,8 +1157,19 @@ impl Session {
             return vec![Backend::CommandComplete(format!("INSERT 0 {n}"))];
         }
         match engine.append(rows, &txn) {
-            Ok(epoch) => {
-                self.observe(epoch);
+            Ok(_epoch) => {
+                // **The session does not observe the epoch it just wrote.** `append` returns
+                // the *applied* epoch, before its barrier has returned; raising the anchor to
+                // it here meant that when the barrier then failed — and `serve` correctly
+                // answered `58030` instead of a commit tag — the session was still anchored
+                // past the visible frontier, and its next read found the rows in the base and
+                // served them. Read-your-own-failed-write, on the rung the thesis names
+                // read-your-writes.
+                //
+                // The anchor is raised from `frontier()` instead, which moves only when a
+                // barrier returns. On a durable engine that is one round trip later than it
+                // used to be; on a volatile one the two are the same number.
+                self.observe(engine.frontier());
                 vec![Backend::CommandComplete(format!("INSERT 0 {n}"))]
             }
             Err(e) => {

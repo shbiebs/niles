@@ -188,9 +188,14 @@ fn main() {
             "        absence, anchored reconstruction -- and it is not a production database."
         );
     } else {
-        eprintln!("  NOTE: appends are durable; the read side is in-memory and serialises on one");
-        eprintln!("        engine mutex, and there is no consensus. `select nilestream_sealer`");
-        eprintln!("        reports what that costs.");
+        // **Two claims that were false when they were printed.** "Durable" meant the epoch
+        // number reached stable storage, not the rows, so a restart recovered nothing (T-01);
+        // and the engine mutex had been replaced by a reader-writer split two commits before
+        // (T-06). A banner is the first thing an operator reads and the last thing anyone
+        // re-checks.
+        eprintln!("  NOTE: appends are durable -- rows are recorded and replayed on reopen --");
+        eprintln!("        and reads run concurrently over the base. There is no consensus.");
+        eprintln!("        `select nilestream_sealer` reports batching and lock contention.");
     }
     eprintln!("  try:  psql -h 127.0.0.1 -p {port} -U anyone bank");
 

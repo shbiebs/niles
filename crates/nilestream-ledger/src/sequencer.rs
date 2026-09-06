@@ -151,6 +151,19 @@ impl Sequencer {
         path: impl AsRef<std::path::Path>,
         policy: SyncPolicy,
     ) -> std::io::Result<Sequencer> {
+        Ok(Self::open_recovered(path, policy)?.0)
+    }
+
+    /// `open`, and the records it recovered.
+    ///
+    /// A caller that keeps derived state over this ledger — the daemon's in-memory base is
+    /// one — has to replay those records to rebuild it, and cannot do that without seeing
+    /// them. `open` threw them away, which is why a restart recovered the idempotency window
+    /// and nothing else: the sequencer knew every committed key and the base knew no rows.
+    pub fn open_recovered(
+        path: impl AsRef<std::path::Path>,
+        policy: SyncPolicy,
+    ) -> std::io::Result<(Sequencer, Recovery)> {
         if matches!(policy, SyncPolicy::Never) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -168,7 +181,50 @@ impl Sequencer {
             frontier.seal(head + 1);
             frontier.publish(head + 1);
         }
-        Ok(Self::start_with_window(segment, frontier, policy, seen))
+        Ok((
+            Self::start_with_window(segment, frontier, policy, seen),
+            recovery,
+        ))
+    }
+
+    /// Every committed transaction, in commit order, as `(idempotency key, payload)`.
+    ///
+    /// The inverse of the sealer's batch framing, and the companion to
+    /// [`Sequencer::recover_seen`], which reads the same bytes for the keys alone.
+    ///
+    /// **One record is one batch and one batch is many transactions**, so a record's epoch is
+    /// not a transaction's index: a caller replaying these onto its own log must count
+    /// transactions, not records. That distinction is the whole reason this returns a flat
+    /// sequence rather than a per-record structure, and getting it wrong would put every
+    /// recovered row at the wrong epoch.
+    pub fn recover_txns(recovery: &Recovery) -> Vec<(String, Vec<u8>)> {
+        let mut out = Vec::new();
+        for rec in &recovery.records {
+            let p = &rec.payload;
+            let mut o = 0usize;
+            let Some(count) = read_u32(p, &mut o) else {
+                continue;
+            };
+            for _ in 0..count {
+                let Some(klen) = read_u32(p, &mut o) else {
+                    break;
+                };
+                if o + klen as usize > p.len() {
+                    break;
+                }
+                let key = String::from_utf8_lossy(&p[o..o + klen as usize]).into_owned();
+                o += klen as usize;
+                let Some(plen) = read_u32(p, &mut o) else {
+                    break;
+                };
+                if o + plen as usize > p.len() {
+                    break;
+                }
+                out.push((key, p[o..o + plen as usize].to_vec()));
+                o += plen as usize;
+            }
+        }
+        out
     }
 
     pub fn start(segment: Segment, frontier: Arc<Frontier>, policy: SyncPolicy) -> Sequencer {
@@ -312,6 +368,21 @@ impl Sequencer {
                         for r in fresh {
                             let _ = r.reply.send(Err(Rejected::Io(e.to_string())));
                         }
+                        // **Fail-stop (LC-21).** The sealer stops. It used to answer `Io` and
+                        // take the next batch, which left epoch *n* applied to every reader's
+                        // base with no record on disk while epoch *n+1* committed and
+                        // published — and the frontier publishes with `fetch_max` over
+                        // contiguous epochs, so publishing *n+1* makes *n* visible. A failed
+                        // epoch masked by the next success is a hole in the middle of a
+                        // chain: on replay it is either a gap or a record that fails its
+                        // checksum, and recovery stops there, losing every acknowledged epoch
+                        // after it.
+                        //
+                        // Refusing everything from here is the trade a ledger should make:
+                        // availability under a storage fault, for a prefix that is whole.
+                        // Every later submitter gets `ShuttingDown` because the channel's
+                        // sender is dropped with this loop.
+                        break;
                     }
                 }
             }

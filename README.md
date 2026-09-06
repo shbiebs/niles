@@ -22,7 +22,7 @@ references, one Markdown file per chapter (also delivered as `thesis/Niles-Thesi
 ## Status — read this first
 
 This is a **theory project with a working instrument**. The loop from Niles source text to a
-measured result is closed end to end, and the workspace holds **802 test functions**.
+measured result is closed end to end, and the workspace holds **814 test functions**.
 
 ```
   Niles source text
@@ -52,7 +52,7 @@ measured result is closed end to end, and the workspace holds **802 test functio
 | Reference oracle (Appendix F) — the program that *defines* correctness | **Built**, 17 tests |
 | Optimizer cost rules (Appendix I), IR contract types | **Built**, 14 tests |
 | Research prototype + experiment harness (E1–E10) | **Built and run**; `results/` |
-| Hash chaining | Built with a **placeholder hasher** (ADR 0002); API is drop-in |
+| Hash chaining | **Built on FIPS 180-4 SHA-256** (ADR 0003, superseding the placeholder of ADR 0002), no dependency, NIST vectors as tests. The link is over the epoch's rows and the epoch number, so a replay *verifies* a record rather than rebuilding one |
 | **Materialization planner** (`nilestream-optimizer::offline`) | **Built**, 18 tests |
 | **PostgreSQL wire protocol** + `nilestreamd` (`nilestream-server`) | **Built**, 21 tests |
 | **Replicated ledger groups** (`nilestream-consensus`) | **Built**, 9 tests, deterministic sim |
@@ -72,7 +72,7 @@ cannot do (durability, concurrency, distribution, the compiler); no number there
 Reproduce everything:
 
 ```sh
-cargo test --workspace                      # 802 test functions
+cargo test --workspace                      # 814 test functions
 cargo test -p niles-interp                  # the Appendix E bootstrap gates
 
 # the compiler, on the thesis's own worked example

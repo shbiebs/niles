@@ -512,6 +512,70 @@ subsystem, and deliberately no SMT solver and no e-graph.
 
 ---
 
+### Durability, and what the record contains
+
+**A durable append records its rows.** The payload is `parent ‖ hash ‖ canon(rows)` — the epoch's
+rows in a canonical encoding, and the ledger's own chain link over them. `with_durable` replays
+every recovered transaction through `Ledger::submit` in commit order and **verifies** the
+recomputed link against the one the record carries, refusing to open at the first disagreement.
+
+Three things this fixes, each of which was true of every `durable` figure this project has
+published:
+
+- The payload was `epoch.to_string()`. A restart recovered the idempotency window and **no rows**:
+  eight writers, 25,416 acknowledged inserts, `SIGKILL`, reopen — the frontier was back at the seed
+  and every account had no balance. A record that cannot reconstruct the base is a receipt.
+- The ledger's chain and the segment's were two hashes over two different things. They now share
+  one formula, `H(parent ‖ epoch ‖ canon(rows))`, and one byte string, so a replay can compare
+  rather than rebuild. **A chain rebuilt on replay and compared to nothing protects nothing.**
+- A record is a **batch** and a batch is many transactions, so a record's epoch is not a
+  transaction's index. The k-th recovered transaction is ledger epoch `seed_epochs + k`; counting
+  records would place every recovered row at the wrong epoch under group commit — which is to say
+  under every workload the sealer exists for.
+
+**A barrier failure is fail-stop** (LC-21). The sealer stops, every later submit is refused with
+`ShuttingDown`, and the daemon serves no further appends until it is reopened and recovered. It
+used to answer `Io` and take the next batch, which left epoch *n* applied to every reader's base
+with no record on disk while *n+1* committed — and the visible frontier publishes with `fetch_max`
+over contiguous epochs, so publishing *n+1* made *n* visible. On replay that hole is either a gap
+or a failed checksum, and recovery stops there, losing every acknowledged epoch after it. The trade
+is availability under a storage fault, for a prefix that is whole.
+
+**A session does not observe the epoch it just wrote.** `append` returns the *applied* epoch,
+before its barrier; the anchor is raised from `frontier()`, which moves only when a barrier
+returns. Otherwise a failed barrier — correctly answered `58030` — left the session anchored past
+the visible frontier, and its next read found the rows in the base and served them.
+
+Measured on the executing host, same session, 16 connections × 300 transactions:
+
+| | fsyncs | txns per barrier | wall |
+|---|--:|--:|--:|
+| before T-01 (`2afb56e`) | 972 | 4.94 | 0.434 s |
+| after T-01 | 640 | **7.50** | 0.362 s |
+
+The larger record did not cost throughput; it batches better, because a payload that takes longer
+to hand over leaves a wider drain window for the next submitter to join.
+
+**Two things the first cut of this got wrong**, both found by gates rather than by review, and
+both worth recording because they are the same shape:
+
+- *The epoch number was read off the ledger's length rather than passed in.* That is correct in
+  `submit` — the epoch about to be pushed sits at the current length — and wrong in
+  `verify_chain`, which walks a finished ledger where the length is the total count. Every link
+  recomputed to a different digest, so E1's chain column read `FAIL` on all five seeds while the
+  workspace stayed green: `verify_chain` had **no unit test**, and the only thing exercising it
+  was a ten-minute experiment reporting through a generated table. `chain` now takes the epoch as
+  an argument, and `ledger::chain_tests` checks an honest ledger at every length from one to six,
+  a row altered after sealing, and two sealed epochs swapped. *A hash only its writer can
+  reproduce verifies nothing.*
+- *The chain built a `Vec` it did not need.* `canon(rows)` was materialised and handed to the
+  hasher, at two allocations and ~132 B per epoch — enough to put `ledger_seeded` and
+  `append_in_memory` over their E18 budgets the moment the chain became row-shaped. The rows now
+  stream into the hasher through `write_rows`, and `encode_rows` — which the record genuinely
+  needs — is written in terms of it, so the payload's bytes and the digest's bytes are the same
+  bytes by construction. Both scenarios returned to exactly their pre-T-01 figures, so the
+  verified chain costs no allocation at all.
+
 ## Part III½ — The public surface, and who is downstream of it
 
 **Two traits in this workspace are implemented outside it**, so a change to either is an API

@@ -198,11 +198,18 @@ impl DurableSink {
     /// deployment configures and a server that quietly accepted `Never` would be a server
     /// whose durability claim depended on a flag nobody read.
     pub fn open(path: impl AsRef<std::path::Path>) -> std::io::Result<DurableSink> {
-        let seq = nilestream_ledger::sequencer::Sequencer::open(
+        Ok(Self::open_recovered(path)?.0)
+    }
+
+    /// `open`, and the records the segment held, so the base can be rebuilt from them.
+    pub fn open_recovered(
+        path: impl AsRef<std::path::Path>,
+    ) -> std::io::Result<(DurableSink, nilestream_ledger::segment::Recovery)> {
+        let (seq, recovery) = nilestream_ledger::sequencer::Sequencer::open_recovered(
             path,
             nilestream_ledger::segment::SyncPolicy::Always,
         )?;
-        Ok(DurableSink { seq })
+        Ok((DurableSink { seq }, recovery))
     }
 
     /// Seal the transaction and return only once `fsync` has.
@@ -243,7 +250,18 @@ impl DurableSink {
     fn interpret(r: Result<u64, nilestream_ledger::sequencer::Rejected>) -> Result<u64, String> {
         match r {
             Ok(e) => Ok(e),
-            Err(nilestream_ledger::sequencer::Rejected::Duplicate { at_epoch }) => Ok(at_epoch),
+            // **A duplicate at the sink is not a commit here.** The sequencer's window says
+            // "this key committed at epoch *e*"; the in-memory base has its own window and
+            // has already accepted these rows as fresh, so returning `Ok` let the same
+            // transaction be applied twice — once now, once when the original was applied —
+            // and after a restart, when the sink's window survived and the base's did not,
+            // the two disagreed on every retried key. The base's window is the one `append`
+            // consults before it gets here; if it said fresh and the sink says duplicate, the
+            // two are out of step and that is the fact to report.
+            Err(nilestream_ledger::sequencer::Rejected::Duplicate { at_epoch }) => Err(format!(
+                "the sink has already committed this idempotency key at epoch {at_epoch}, \
+                 while the base accepted it as new. The two idempotency windows disagree."
+            )),
             Err(e) => Err(format!("{e:?}")),
         }
     }
@@ -252,6 +270,19 @@ impl DurableSink {
 /// A submitted transaction whose barrier has not yet returned.
 type PendingDurable =
     std::sync::mpsc::Receiver<Result<u64, nilestream_ledger::sequencer::Rejected>>;
+
+/// `parent ‖ hash ‖ canon(rows)` — the inverse of what `append` writes.
+///
+/// Strict: anything shorter than the two links, or whose row bytes are not exactly
+/// `encode_rows`'s output, is `None` and stops recovery. A decoder that guessed would rebuild
+/// a ledger nobody wrote, and the hash check downstream would then be comparing two things
+/// this process had invented.
+fn decode_record(p: &[u8]) -> Option<([u8; 32], [u8; 32], Vec<proto_engine::Row>)> {
+    let parent: [u8; 32] = p.get(..32)?.try_into().ok()?;
+    let hash: [u8; 32] = p.get(32..64)?.try_into().ok()?;
+    let rows = proto_engine::ledger::decode_rows(p.get(64..)?)?;
+    Some((parent, hash, rows))
+}
 
 impl RevEngine {
     /// Build an engine holding `accounts` accounts, each seeded with `postings_per_account`
@@ -611,8 +642,24 @@ impl crate::session::Serving for RevEngine {
         // acknowledgement still follows the barrier — the client is told "committed" only
         // once it is — while the lock is held for the apply alone.
         if let Some(sink) = self.durable.as_ref() {
+            // **The payload is the epoch, not its number.** `parent ‖ hash ‖ canon(rows)`:
+            // the rows, so a restart can rebuild the base, and the ledger's own chain link,
+            // so a restart can *verify* what it rebuilt rather than take it on trust. The
+            // segment's chain protects these bytes; the bytes carry the ledger's chain; both
+            // are the same hash over the same canonical encoding.
+            //
+            // It used to be `epoch.to_string()`. A restart recovered the idempotency window
+            // and not one row.
+            let link = base
+                .epochs
+                .get(epoch as usize)
+                .expect("the epoch just submitted is the last one");
+            let mut payload = Vec::with_capacity(64 + link.rows.len() * 48);
+            payload.extend_from_slice(&link.parent);
+            payload.extend_from_slice(&link.hash);
+            payload.extend_from_slice(&proto_engine::ledger::encode_rows(&link.rows));
             let token = sink
-                .record_pending(txn_id, epoch.to_string().into_bytes())
+                .record_pending(txn_id, payload)
                 .map_err(crate::session::ServeError::NotDurable)?;
             self.pending
                 .lock()
@@ -774,11 +821,77 @@ impl RevEngine {
     /// Attach a durable sink, so every append reaches stable storage before it is
     /// acknowledged. Refuses any policy but `Always`, which the sequencer also refuses.
     pub fn with_durable(mut self, path: impl AsRef<std::path::Path>) -> std::io::Result<Self> {
-        self.durable = Some(DurableSink::open(path)?);
-        // The base already holds its seeded epochs and they were never written to a sink, so
-        // the visible frontier starts where the base is. Everything appended from here earns
-        // its visibility by being fsynced.
+        // **The seeded prefix, before anything is replayed.** Seeding is not durable and is
+        // not meant to be: it is a deterministic function of `(accounts, rounds)` that both
+        // the original process and this one ran. Every recovered transaction lands on top of
+        // it, in order, so the k-th recovered transaction is ledger epoch `seed_epochs + k`,
+        // where `seed_epochs` is how many the seeded prefix has — not its head, which is one
+        // less.
+        //
+        // **A record is a batch and a batch is many transactions**, so a record's own epoch is
+        // not that index. Counting records here would place every recovered row at the wrong
+        // epoch under group commit — which is to say, under every workload the sealer exists
+        // for.
+        let seed_epochs = self.base().epochs.len() as u64;
+        let (sink, recovery) = DurableSink::open_recovered(path)?;
+        let txns = nilestream_ledger::sequencer::Sequencer::recover_txns(&recovery);
+
+        {
+            let mut base = self.ledger.write().expect("the base lock is not poisoned");
+            for (k, (idem_key, payload)) in txns.iter().enumerate() {
+                let expect = seed_epochs + k as u64;
+                let Some((parent, hash, rows)) = decode_record(payload) else {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "recovered transaction {k} (`{idem_key}`) is not a decodable epoch \
+                             record. Recovery stops here rather than continuing past a record \
+                             it cannot read: replaying a suffix onto a prefix missing an epoch \
+                             rebuilds a ledger nobody wrote."
+                        ),
+                    ));
+                };
+                let got = base.submit(idem_key, rows).map_err(|e| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("recovered transaction {k} (`{idem_key}`) was refused: {e:?}"),
+                    )
+                })?;
+                if got != expect {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "recovered transaction {k} landed at epoch {got}, not {expect} = \
+                             seed_epochs({seed_epochs}) + {k}. The seeded prefix this process \
+                             built is not the one these records were written against."
+                        ),
+                    ));
+                }
+                // **Verified, not merely rebuilt.** `submit` recomputed the chain link from
+                // the rows and the prefix; the record says what that link was when the epoch
+                // was committed. Equality means every earlier epoch is also as it was, because
+                // the link is taken over the parent. A chain rebuilt on replay and compared to
+                // nothing protects nothing.
+                let rec = base.epochs.get(got as usize).expect("just submitted");
+                if rec.parent != parent || rec.hash != hash {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "the chain does not verify at recovered epoch {got} (`{idem_key}`): \
+                             the record commits to a different link than this prefix computes. \
+                             The segment, the seeded prefix, or a row has changed since it was \
+                             written."
+                        ),
+                    ));
+                }
+            }
+        }
+
+        // The visible frontier starts at the recovered head: everything replayed above was
+        // acknowledged before the restart, so it is durable by definition. Everything
+        // appended from here earns its visibility by being fsynced.
         let head = self.base().head();
+        self.durable = Some(sink);
         self.visible = Some(std::sync::Arc::new(std::sync::atomic::AtomicU64::new(head)));
         Ok(self)
     }
@@ -2945,5 +3058,479 @@ mod visibility_tests {
         }
         assert_eq!(seen, e.head());
         let _ = std::fs::remove_file(&seg);
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    //! **Durable means the rows come back.**
+    //!
+    //! Before T-01 the durable record carried `epoch.to_string()` — the epoch *number*. An
+    //! audit ran eight writers against `nilestreamd --durable`, killed it with `SIGKILL` after
+    //! two seconds, and restarted it on the same segment: 25,416 acknowledged inserts were
+    //! gone, the frontier was back at the seed, every writer's account had no balance, and a
+    //! retry of an acknowledged transaction was accepted as new. Every `durable` row this
+    //! project has ever published measured the cost of a barrier on a record that could not
+    //! reconstruct the ledger.
+    //!
+    //! The segment layer underneath was never the problem: it recovers payloads correctly and
+    //! is tested for it. The server handed it a number.
+    //!
+    //! These tests are the in-process form of that protocol. `probes/crash.rs` in
+    //! `docs/audit/cycle-7/probes/` is the out-of-process one, and the two agree.
+
+    use super::*;
+    use crate::session::Serving;
+
+    fn seg(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join("nilestream-recovery-tests");
+        let _ = std::fs::create_dir_all(&dir);
+        let p = dir.join(format!("{name}.seg"));
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    fn engine(seg: &std::path::Path) -> RevEngine {
+        RevEngine::seeded(
+            8,
+            1,
+            4,
+            proto_engine::ViewMode::Demand,
+            proto_engine::EvictionPolicy::Lru,
+        )
+        .with_durable(seg)
+        .expect("durable sink")
+    }
+
+    /// A conserved pair on `acct`, so the commit rule admits it.
+    fn pair(txn: u64, acct: u64, amt: i128) -> Vec<proto_engine::Row> {
+        vec![
+            proto_engine::Row::Post(proto_engine::Posting {
+                txn,
+                acct,
+                cur: 0,
+                amt,
+                valid: 0,
+            }),
+            proto_engine::Row::Post(proto_engine::Posting {
+                txn,
+                acct: 999,
+                cur: 0,
+                amt: -amt,
+                valid: 0,
+            }),
+        ]
+    }
+
+    /// The account's balance now, seed included; the tests compare deltas across a reopen.
+    fn balance(e: &RevEngine, acct: u64) -> i128 {
+        let base = e.base();
+        let head = base.head();
+        base.postings_for(acct, head)
+            .into_iter()
+            .map(|p| p.amt)
+            .sum()
+    }
+
+    /// **The whole of T-01, in one assertion.** Acknowledge, drop the process, reopen.
+    #[test]
+    fn every_acknowledged_row_is_there_after_a_reopen() {
+        let path = seg("rows-come-back");
+        let mut acked = 0i128;
+        let seeded;
+        {
+            let e = engine(&path);
+            seeded = balance(&e, 3);
+            for i in 1..=40u64 {
+                let epoch = e
+                    .append(pair(700_000 + i, 3, 7), &format!("t-{i}"))
+                    .unwrap();
+                // The barrier, waited on exactly as `serve` waits on it.
+                for p in e.take_pending() {
+                    p.wait().expect("durable");
+                }
+                acked += 7;
+                assert!(epoch > 0);
+            }
+            assert_eq!(balance(&e, 3) - seeded, acked, "before the reopen");
+        }
+
+        let after = engine(&path);
+        assert_eq!(
+            balance(&after, 3) - seeded,
+            acked,
+            "after the reopen. Every one of these was acknowledged to a client; a `durable` \
+             row that does not survive the process is a receipt, not a log."
+        );
+        assert!(
+            after.frontier() >= 40,
+            "the visible frontier must cover the recovered epochs, not restart at the seed"
+        );
+    }
+
+    /// A retry of an acknowledged transaction is refused **by the daemon**, not accepted.
+    #[test]
+    fn a_retry_of_an_acknowledged_transaction_is_refused_after_a_reopen() {
+        let path = seg("retry-refused");
+        {
+            let e = engine(&path);
+            e.append(pair(700_001, 4, 5), "t-1").unwrap();
+            for p in e.take_pending() {
+                p.wait().expect("durable");
+            }
+        }
+        let after = engine(&path);
+        let before = balance(&after, 4);
+        let again = after.append(pair(700_001, 4, 5), "t-1");
+        assert!(
+            matches!(again, Err(crate::session::ServeError::Duplicate(_))),
+            "a retried transaction must be refused as a duplicate after a restart, not taken \
+             again: {again:?}"
+        );
+        assert_eq!(balance(&after, 4), before, "and nothing moved");
+    }
+
+    /// **The chain is verified on replay, not rebuilt and trusted.**
+    #[test]
+    fn a_tampered_record_stops_recovery_rather_than_being_replayed() {
+        let path = seg("tamper");
+        let seeded;
+        {
+            let e = engine(&path);
+            seeded = balance(&e, 5);
+            for i in 1..=3u64 {
+                e.append(pair(700_100 + i, 5, 11), &format!("t-{i}"))
+                    .unwrap();
+                for p in e.take_pending() {
+                    p.wait().expect("durable");
+                }
+            }
+        }
+        // Flip one byte of the last record's row bytes. The segment's own CRC covers the
+        // body, so this is caught there first — which is the outer of the two checks and
+        // exactly as good. What matters is that recovery *stops* rather than replaying a
+        // ledger nobody wrote.
+        let mut bytes = std::fs::read(&path).unwrap();
+        let n = bytes.len();
+        bytes[n - 12] ^= 0xff;
+        std::fs::write(&path, &bytes).unwrap();
+
+        let after = RevEngine::seeded(
+            8,
+            1,
+            4,
+            proto_engine::ViewMode::Demand,
+            proto_engine::EvictionPolicy::Lru,
+        )
+        .with_durable(&path);
+        match after {
+            Err(e) => {
+                let m = e.to_string();
+                assert!(
+                    m.contains("chain does not verify")
+                        || m.contains("not a decodable")
+                        || m.contains("was refused"),
+                    "recovery must refuse, naming why: {m}"
+                );
+            }
+            Ok(engine) => {
+                // Truncated at the damaged record is also correct — the prefix before it is
+                // whole, and that is what recovery is for. What is forbidden is replaying
+                // past the damage.
+                let replayed = balance(&engine, 5) - seeded;
+                assert!(
+                    replayed < 33,
+                    "a damaged record must not be replayed as though it were intact: {replayed} \
+                     of 33 came back, so all three records were taken"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod chain_verification_tests {
+    //! **A chain that is rebuilt and compared to nothing protects nothing.**
+    //!
+    //! The segment's CRC catches a *corrupt* record — a flipped byte, a torn write — and
+    //! truncates there. That is the outer of two checks and it is why the crash tests pass
+    //! whether or not the ledger's link is verified. It is not what the hash chain is for.
+    //!
+    //! The chain is for a record that is internally consistent and *wrong*: one whose CRC and
+    //! whose own segment hash both check out, but whose rows are not the rows the epoch
+    //! committed. That is the difference between a checksum and tamper-evidence, and until
+    //! T-01 the daemon had only the first, because the two chains were hashes of two
+    //! different things and nothing ever compared them.
+
+    use super::*;
+    use crate::session::Serving;
+
+    fn seg(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join("nilestream-chain-tests");
+        let _ = std::fs::create_dir_all(&dir);
+        let p = dir.join(format!("{name}.seg"));
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    fn engine(seg: &std::path::Path) -> std::io::Result<RevEngine> {
+        RevEngine::seeded(
+            8,
+            1,
+            4,
+            proto_engine::ViewMode::Demand,
+            proto_engine::EvictionPolicy::Lru,
+        )
+        .with_durable(seg)
+    }
+
+    /// Rebuild a sealed batch envelope with account 6's postings redirected to account 7,
+    /// leaving every key, every amount and the framing itself intact. Returns `None` if the
+    /// envelope does not parse or holds nothing to redirect, so a malformed record is skipped
+    /// rather than silently counted as forged.
+    fn redirect_postings_in_envelope(env: &[u8], altered: &mut usize) -> Option<Vec<u8>> {
+        fn u32_at(b: &[u8], o: &mut usize) -> Option<usize> {
+            let raw = b.get(*o..*o + 4)?;
+            *o += 4;
+            Some(u32::from_le_bytes(raw.try_into().ok()?) as usize)
+        }
+
+        let mut o = 0usize;
+        let count = u32_at(env, &mut o)?;
+        let mut out = Vec::with_capacity(env.len());
+        out.extend_from_slice(&(count as u32).to_le_bytes());
+        let mut touched = false;
+        for _ in 0..count {
+            let klen = u32_at(env, &mut o)?;
+            let key = env.get(o..o + klen)?.to_vec();
+            o += klen;
+            let plen = u32_at(env, &mut o)?;
+            let payload = env.get(o..o + plen)?;
+            o += plen;
+
+            // Inside one transaction's payload: parent(32) ‖ hash(32) ‖ encode_rows(rows).
+            let forged = if payload.len() >= 64 {
+                match proto_engine::ledger::decode_rows(&payload[64..]) {
+                    Some(mut rows) => {
+                        for row in &mut rows {
+                            if let proto_engine::Row::Post(p) = row {
+                                if p.acct == 6 {
+                                    p.acct = 7;
+                                    touched = true;
+                                    *altered += 1;
+                                }
+                            }
+                        }
+                        let mut v = payload[..64].to_vec();
+                        v.extend_from_slice(&proto_engine::ledger::encode_rows(&rows));
+                        v
+                    }
+                    None => payload.to_vec(),
+                }
+            } else {
+                payload.to_vec()
+            };
+
+            out.extend_from_slice(&(klen as u32).to_le_bytes());
+            out.extend_from_slice(&key);
+            out.extend_from_slice(&(forged.len() as u32).to_le_bytes());
+            out.extend_from_slice(&forged);
+        }
+        touched.then_some(out)
+    }
+
+    /// Re-seal a segment record with altered rows, so every checksum the storage layer knows
+    /// about is correct and only the ledger's link disagrees. This is the adversary the chain
+    /// exists for, and it is trivial for anyone who can write the file.
+    #[test]
+    fn a_resealed_record_with_different_rows_is_refused_by_the_chain() {
+        let path = seg("resealed");
+        {
+            let e = engine(&path).expect("durable sink");
+            for i in 1..=3u64 {
+                e.append(
+                    vec![
+                        proto_engine::Row::Post(proto_engine::Posting {
+                            txn: 800_000 + i,
+                            acct: 6,
+                            cur: 0,
+                            amt: 100,
+                            valid: 0,
+                        }),
+                        proto_engine::Row::Post(proto_engine::Posting {
+                            txn: 800_000 + i,
+                            acct: 999,
+                            cur: 0,
+                            amt: -100,
+                            valid: 0,
+                        }),
+                    ],
+                    &format!("t-{i}"),
+                )
+                .unwrap();
+                for p in e.take_pending() {
+                    p.wait().expect("durable");
+                }
+            }
+        }
+
+        // **Redirect the credit leg to a different account, and leave every amount alone.**
+        //
+        // The choice of forgery matters, and the first one tried here was wrong: rewriting an
+        // amount makes the transaction unbalanced, so `interpret` refuses it on the
+        // double-entry invariant and the test passes with the chain check deleted. That is a
+        // real refusal, but it is the *ledger's* refusal, and it proves nothing about the
+        // link. Moving money between two accounts keeps the sum at zero, keeps both currencies
+        // and both transaction ids, and is accepted by every check the ledger makes — which is
+        // precisely the theft the hash chain is the only defence against.
+        //
+        // The rows are decoded and re-encoded rather than byte-patched, so the forgery is
+        // exact: the record still carries the parent and hash the honest epoch committed, and
+        // only the rows underneath them have moved.
+        //
+        // A segment record is not one transaction's payload — it is the *batch envelope* the
+        // sequencer seals, `count | (key_len, key, payload_len, payload)*`, because one fsync
+        // covers many transactions and recovery has to recover each one's idempotency key as
+        // well as its rows. So the forgery unwraps the envelope, redirects the posting inside
+        // each transaction's payload, and re-frames. Patching the record bytes directly was
+        // the second wrong turn here: at offset 64 of the *envelope* there are no rows at all.
+        let (mut recovered, _) = nilestream_ledger::segment::Segment::open(
+            &path,
+            nilestream_ledger::segment::SyncPolicy::Always,
+        )
+        .map(|(s, r)| (r, s))
+        .expect("reopen to read records");
+        let mut altered = 0usize;
+        for rec in &mut recovered.records {
+            let Some(forged) = redirect_postings_in_envelope(&rec.payload, &mut altered) else {
+                continue;
+            };
+            rec.payload = forged;
+        }
+        assert!(
+            altered > 0,
+            "the probe must have found a posting to redirect"
+        );
+        let _ = std::fs::remove_file(&path);
+        {
+            let (mut fresh, _) = nilestream_ledger::segment::Segment::open(
+                &path,
+                nilestream_ledger::segment::SyncPolicy::Always,
+            )
+            .expect("a fresh segment");
+            for rec in recovered.records {
+                // `append` re-seals: it computes the record's own hash and CRC from the bytes
+                // it is given, so the forged record is indistinguishable from an honest one
+                // to every check the storage layer makes.
+                fresh.append(rec.payload).expect("re-seal");
+            }
+            fresh.sync().expect("flush");
+        }
+
+        let reopened = engine(&path);
+        let err = reopened
+            .err()
+            .expect("a re-sealed record with different rows must not open");
+        let m = err.to_string();
+        assert!(
+            m.contains("chain does not verify"),
+            "recovery must refuse on the ledger's chain, not on a checksum — the storage \
+             layer's own checks all pass here, which is the point. Got: {m}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod anchor_after_barrier_tests {
+    //! **A session may not observe an epoch whose barrier has not returned.**
+    //!
+    //! `append` returns the *applied* epoch. Raising the session's anchor to it meant that
+    //! when the barrier then failed — and `serve` correctly answered `58030` rather than a
+    //! commit tag — the session was still anchored past the visible frontier, and its next
+    //! read found the rows in the base and served them. Read-your-own-failed-write, on the
+    //! rung the thesis names read-your-writes.
+    //!
+    //! The window is small and the test does not need a storage fault to close it: between
+    //! `append` returning and the barrier being waited on, the applied epoch and the visible
+    //! frontier differ *by construction*, and that is exactly the interval in which the
+    //! session must not have moved.
+
+    use super::*;
+    use crate::session::Serving;
+
+    #[test]
+    fn the_visible_frontier_lags_the_applied_epoch_until_the_barrier_returns() {
+        let dir = std::env::temp_dir().join("nilestream-anchor-tests");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("lag.seg");
+        let _ = std::fs::remove_file(&path);
+        let e = RevEngine::seeded(
+            8,
+            1,
+            4,
+            proto_engine::ViewMode::Demand,
+            proto_engine::EvictionPolicy::Lru,
+        )
+        .with_durable(&path)
+        .expect("durable sink");
+
+        let applied = e
+            .append(
+                vec![
+                    proto_engine::Row::Post(proto_engine::Posting {
+                        txn: 900_001,
+                        acct: 2,
+                        cur: 0,
+                        amt: 50,
+                        valid: 0,
+                    }),
+                    proto_engine::Row::Post(proto_engine::Posting {
+                        txn: 900_001,
+                        acct: 999,
+                        cur: 0,
+                        amt: -50,
+                        valid: 0,
+                    }),
+                ],
+                "anchor-lag",
+            )
+            .expect("applied");
+
+        // The barrier has not been waited on. This is the interval the session's anchor must
+        // not cross: `frontier()` is what `insert` now observes, and it is behind.
+        assert!(
+            e.frontier() < applied,
+            "the visible frontier ({}) must lag the applied epoch ({applied}) until the \
+             barrier returns — otherwise there is no interval in which a failed barrier can \
+             be caught, and `insert` observing the applied epoch would be harmless only by \
+             accident",
+            e.frontier()
+        );
+
+        for p in e.take_pending() {
+            p.wait().expect("durable");
+        }
+        assert_eq!(
+            e.frontier(),
+            applied,
+            "and it catches up exactly when the barrier returns"
+        );
+    }
+
+    /// The source-level half: `insert` must not pass `append`'s epoch to `observe`.
+    #[test]
+    fn insert_observes_the_frontier_and_not_the_epoch_it_just_applied() {
+        let src = include_str!("session.rs");
+        let body = src
+            .split("fn insert(&mut self, sql: &str, engine: &dyn Serving)")
+            .nth(1)
+            .expect("`insert` is where the anchor is raised");
+        let body = &body[..body.find("\n    }").unwrap_or(body.len())];
+        assert!(
+            body.contains("self.observe(engine.frontier())"),
+            "`insert` must raise the session's anchor from the visible frontier. Observing \
+             the epoch `append` returned anchors the session past a barrier that may still \
+             fail, and the next read then serves rows the client was told did not commit."
+        );
     }
 }

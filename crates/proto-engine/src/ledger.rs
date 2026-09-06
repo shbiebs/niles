@@ -114,6 +114,130 @@ pub struct Ledger {
     rows_touched: std::sync::atomic::AtomicU64,
 }
 
+/// A destination for the canonical row encoding: a buffer when the bytes are wanted, a
+/// hasher when only their digest is.
+pub trait ByteSink {
+    fn put(&mut self, bytes: &[u8]);
+}
+
+impl ByteSink for Vec<u8> {
+    fn put(&mut self, bytes: &[u8]) {
+        self.extend_from_slice(bytes);
+    }
+}
+
+impl ByteSink for Hasher256 {
+    fn put(&mut self, bytes: &[u8]) {
+        self.update(bytes);
+    }
+}
+
+/// Write the canonical encoding of `rows` into `sink`, one field at a time.
+///
+/// **The buffer is the thing worth not building.** [`encode_rows`] exists because the durable
+/// record genuinely carries these bytes; `chain` only ever hands them to a hash, and building
+/// a `Vec` to do that cost two allocations and ~132 B per epoch — enough to put `ledger_seeded`
+/// and `append_in_memory` over their E18 budgets the moment T-01 made the chain row-shaped.
+/// Streaming to a sink costs neither, and because both callers go through this one function
+/// the digest and the payload cannot drift apart. `encode_rows_matches_the_streamed_form`
+/// holds them to that.
+pub fn write_rows(rows: &[Row], sink: &mut impl ByteSink) {
+    sink.put(&(rows.len() as u32).to_le_bytes());
+    for r in rows {
+        match r {
+            Row::Post(p) => {
+                sink.put(b"P");
+                sink.put(&p.txn.to_le_bytes());
+                sink.put(&p.acct.to_le_bytes());
+                sink.put(&p.cur.to_le_bytes());
+                sink.put(&p.amt.to_le_bytes());
+                sink.put(&p.valid.to_le_bytes());
+            }
+            Row::Hold(h) => {
+                sink.put(b"H");
+                sink.put(&h.id.to_le_bytes());
+                sink.put(&h.acct.to_le_bytes());
+                sink.put(&h.cur.to_le_bytes());
+                sink.put(&h.amount.to_le_bytes());
+            }
+            Row::Resolve { hold, outcome } => {
+                sink.put(b"R");
+                sink.put(&hold.to_le_bytes());
+                match outcome {
+                    Outcome::Post(a) => {
+                        sink.put(b"p");
+                        sink.put(&a.to_le_bytes());
+                    }
+                    Outcome::Void => sink.put(b"v"),
+                    Outcome::Expire => sink.put(b"e"),
+                }
+            }
+        }
+    }
+}
+
+/// **The canonical byte string for an epoch's rows.**
+///
+/// One row set, one encoding, on every machine and every run: fixed little-endian widths, a
+/// one-byte tag per variant, a `u32` count first. It is the *same* field order and the same
+/// tags the hash chain has always used — `chain` now hashes exactly these bytes, so a chain
+/// over an encoding and a chain over the rows cannot disagree, which they could while the two
+/// were written out separately.
+///
+/// It exists because durability needed it. Until T-01 the durable record carried
+/// `epoch.to_string()` — the epoch *number* — so a restart recovered the idempotency window
+/// and nothing else, and every acknowledged row was gone. A record that cannot reconstruct
+/// the base is a receipt, not a log.
+pub fn encode_rows(rows: &[Row]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(8 + rows.len() * 40);
+    write_rows(rows, &mut out);
+    out
+}
+
+/// The inverse of [`encode_rows`]. `None` for anything that is not exactly its output.
+///
+/// Strict on purpose: a trailing byte, a short field or an unknown tag is a corrupt record,
+/// and a decoder that guessed would replay a ledger nobody wrote.
+pub fn decode_rows(b: &[u8]) -> Option<Vec<Row>> {
+    let mut o = 0usize;
+    let take = |o: &mut usize, n: usize| -> Option<&[u8]> {
+        let s = b.get(*o..*o + n)?;
+        *o += n;
+        Some(s)
+    };
+    let count = u32::from_le_bytes(take(&mut o, 4)?.try_into().ok()?) as usize;
+    let mut rows = Vec::with_capacity(count.min(1 << 16));
+    for _ in 0..count {
+        match take(&mut o, 1)?[0] {
+            b'P' => rows.push(Row::Post(Posting {
+                txn: u64::from_le_bytes(take(&mut o, 8)?.try_into().ok()?),
+                acct: Acct::from_le_bytes(take(&mut o, 8)?.try_into().ok()?),
+                cur: Cur::from_le_bytes(take(&mut o, 4)?.try_into().ok()?),
+                amt: Minor::from_le_bytes(take(&mut o, 16)?.try_into().ok()?),
+                valid: i64::from_le_bytes(take(&mut o, 8)?.try_into().ok()?),
+            })),
+            b'H' => rows.push(Row::Hold(Hold {
+                id: u64::from_le_bytes(take(&mut o, 8)?.try_into().ok()?),
+                acct: Acct::from_le_bytes(take(&mut o, 8)?.try_into().ok()?),
+                cur: Cur::from_le_bytes(take(&mut o, 4)?.try_into().ok()?),
+                amount: Minor::from_le_bytes(take(&mut o, 16)?.try_into().ok()?),
+            })),
+            b'R' => {
+                let hold = u64::from_le_bytes(take(&mut o, 8)?.try_into().ok()?);
+                let outcome = match take(&mut o, 1)?[0] {
+                    b'p' => Outcome::Post(Minor::from_le_bytes(take(&mut o, 16)?.try_into().ok()?)),
+                    b'v' => Outcome::Void,
+                    b'e' => Outcome::Expire,
+                    _ => return None,
+                };
+                rows.push(Row::Resolve { hold, outcome });
+            }
+            _ => return None,
+        }
+    }
+    (o == b.len()).then_some(rows)
+}
+
 impl Ledger {
     pub fn new() -> Self {
         Self {
@@ -137,47 +261,30 @@ impl Ledger {
         }
     }
 
-    fn chain(&self, parent: &[u8; 32], rows: &[Row]) -> [u8; 32] {
+    /// The link for the epoch that will sit at index `epoch`.
+    ///
+    /// **The epoch number is an argument and not `self.epochs.len()`.** It was the length when
+    /// T-01 put the epoch into the digest, which is correct at seal time — the epoch about to
+    /// be pushed sits at the current length — and wrong everywhere else. `verify_chain` walks
+    /// a *finished* ledger, where the length is the total count rather than the position of
+    /// the epoch under test, so every link recomputed to a different digest and E1's chain
+    /// column went to FAIL for all five seeds. A hash that only its writer can reproduce
+    /// verifies nothing, and the failure was loud only because E1 checks the chain
+    /// independently of the code that writes it.
+    fn chain(&self, epoch: u64, parent: &[u8; 32], rows: &[Row]) -> [u8; 32] {
         if !self.chaining {
             return [0; 32];
         }
+        // `H(parent ‖ epoch ‖ canon(rows))` — the segment's own formula
+        // (`nilestream_ledger::segment::Record::seal`), over the same canonical bytes the
+        // durable payload carries. The two chains were separate hashes of separate things:
+        // this one over rows, the segment's over whatever it was handed, which until T-01 was
+        // the epoch number. Sharing the formula and the bytes is what lets a replay *verify*
+        // an epoch rather than merely rebuild it.
         let mut h = Hasher256::new();
         h.update(parent);
-        for r in rows {
-            match r {
-                Row::Post(p) => {
-                    h.update(b"P");
-                    h.update(&p.txn.to_le_bytes());
-                    h.update(&p.acct.to_le_bytes());
-                    h.update(&p.cur.to_le_bytes());
-                    h.update(&p.amt.to_le_bytes());
-                    h.update(&p.valid.to_le_bytes());
-                }
-                Row::Hold(hd) => {
-                    h.update(b"H");
-                    h.update(&hd.id.to_le_bytes());
-                    h.update(&hd.acct.to_le_bytes());
-                    h.update(&hd.cur.to_le_bytes());
-                    h.update(&hd.amount.to_le_bytes());
-                }
-                Row::Resolve { hold, outcome } => {
-                    h.update(b"R");
-                    h.update(&hold.to_le_bytes());
-                    match outcome {
-                        Outcome::Post(a) => {
-                            h.update(b"p");
-                            h.update(&a.to_le_bytes());
-                        }
-                        Outcome::Void => {
-                            h.update(b"v");
-                        }
-                        Outcome::Expire => {
-                            h.update(b"e");
-                        }
-                    }
-                }
-            }
-        }
+        h.update(&epoch.to_le_bytes());
+        write_rows(rows, &mut h);
         h.finalize()
     }
 
@@ -213,7 +320,7 @@ impl Ledger {
         }
 
         let parent = self.epochs.last().map(|e| e.hash).unwrap_or([0; 32]);
-        let hash = self.chain(&parent, &rows);
+        let hash = self.chain(self.epochs.len() as u64, &parent, &rows);
         let id = self.epochs.len() as Epoch;
 
         // Definition 3.9: a checkpoint is `(e, V*(e)[k])` — the key's value at the *end*
@@ -439,8 +546,8 @@ impl Ledger {
             return true;
         }
         let mut parent = [0u8; 32];
-        for e in &self.epochs {
-            if e.parent != parent || e.hash != self.chain(&parent, &e.rows) {
+        for (i, e) in self.epochs.iter().enumerate() {
+            if e.parent != parent || e.hash != self.chain(i as u64, &parent, &e.rows) {
                 return false;
             }
             parent = e.hash;
@@ -642,5 +749,184 @@ mod checkpoint_tests {
                  bound of {bound:.1}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod row_encoding_tests {
+    //! **One encoding, two consumers.**
+    //!
+    //! The durable record carries `encode_rows`; the chain hashes `write_rows`. They are the
+    //! same bytes today because the first is written in terms of the second, and this module
+    //! is what will notice if that ever stops being true — a divergence would not fail a
+    //! build, it would make every replayed epoch refuse to verify against a record that is
+    //! perfectly honest, which is the worst shape a durability bug can take.
+
+    use super::*;
+
+    fn sample() -> Vec<Row> {
+        vec![
+            Row::Post(Posting {
+                txn: 7,
+                acct: 3,
+                cur: 1,
+                amt: -250,
+                valid: 42,
+            }),
+            Row::Hold(Hold {
+                id: 9,
+                acct: 4,
+                cur: 0,
+                amount: 1_000,
+            }),
+            Row::Resolve {
+                hold: 9,
+                outcome: Outcome::Post(600),
+            },
+            Row::Resolve {
+                hold: 11,
+                outcome: Outcome::Void,
+            },
+            Row::Resolve {
+                hold: 12,
+                outcome: Outcome::Expire,
+            },
+        ]
+    }
+
+    #[test]
+    fn encode_rows_matches_the_streamed_form() {
+        let rows = sample();
+        let buffered = encode_rows(&rows);
+        let mut streamed = Vec::new();
+        write_rows(&rows, &mut streamed);
+        assert_eq!(
+            buffered, streamed,
+            "the payload's bytes and the chain's bytes must be the same bytes"
+        );
+    }
+
+    #[test]
+    fn the_hash_is_the_hash_of_those_bytes() {
+        let rows = sample();
+        let mut direct = Hasher256::new();
+        direct.update(&encode_rows(&rows));
+        let mut streamed = Hasher256::new();
+        write_rows(&rows, &mut streamed);
+        assert_eq!(
+            direct.finalize(),
+            streamed.finalize(),
+            "streaming into the hasher must not change the digest — if it did, every ledger \
+             written before this change would stop verifying"
+        );
+    }
+
+    #[test]
+    fn every_variant_round_trips() {
+        let rows = sample();
+        let bytes = encode_rows(&rows);
+        let back = decode_rows(&bytes).expect("the decoder must accept what the encoder writes");
+        // Compared through the encoding rather than through `PartialEq`, which `Row` does not
+        // have: re-encoding equal bytes is the property the chain actually depends on, since
+        // what a replay compares is the digest and not the values.
+        assert_eq!(
+            encode_rows(&back),
+            bytes,
+            "a decoded row must re-encode to the bytes it came from, for every variant"
+        );
+        assert_eq!(back.len(), rows.len(), "and must not lose or invent a row");
+    }
+}
+
+#[cfg(test)]
+mod chain_tests {
+    //! **`verify_chain` had no unit test, and that is how it broke.**
+    //!
+    //! The chain was checked by E1 — which is a ten-minute experiment run, is not part of
+    //! `cargo test`, and reports through a generated table nobody re-reads on every commit.
+    //! So when T-01 put the epoch number into the digest and `chain` took it from
+    //! `self.epochs.len()`, the seal path stayed correct and the verify path silently stopped
+    //! agreeing with it, for every epoch, on every seed. The workspace was green.
+    //!
+    //! These tests are the cheap version of that check: a few epochs, in-process, on the two
+    //! properties the chain has to have — an honest ledger verifies, and a ledger whose rows
+    //! were changed afterwards does not.
+
+    use super::*;
+
+    fn transfer(txn: u64, from: Acct, to: Acct, amt: Minor) -> Vec<Row> {
+        vec![
+            Row::Post(Posting {
+                txn,
+                acct: from,
+                cur: 0,
+                amt: -amt,
+                valid: 0,
+            }),
+            Row::Post(Posting {
+                txn,
+                acct: to,
+                cur: 0,
+                amt,
+                valid: 0,
+            }),
+        ]
+    }
+
+    fn built(n: u64) -> Ledger {
+        let mut l = Ledger {
+            chaining: true,
+            ..Default::default()
+        };
+        for i in 1..=n {
+            l.submit(&format!("k-{i}"), transfer(i, 1, 2, 10))
+                .expect("balanced");
+        }
+        l
+    }
+
+    #[test]
+    fn an_honestly_built_ledger_verifies_at_every_length() {
+        // Every length, because the defect this pins is an off-by-position: a formula that
+        // reads the ledger's *current* length agrees with itself at exactly one epoch, and a
+        // single-epoch ledger is the one place it cannot be caught.
+        for n in 1..=6 {
+            let l = built(n);
+            assert!(
+                l.verify_chain(),
+                "a ledger of {n} epoch(s), built by this code and verified by this code, must \
+                 verify — if it does not, the seal and the check are computing different \
+                 hashes and neither is authoritative"
+            );
+        }
+    }
+
+    #[test]
+    fn changing_a_row_after_the_fact_breaks_the_chain() {
+        let mut l = built(4);
+        assert!(l.verify_chain());
+        match &mut l.epochs[1].rows[0] {
+            Row::Post(p) => p.amt += 1,
+            _ => unreachable!("the first row of a transfer is a posting"),
+        }
+        assert!(
+            !l.verify_chain(),
+            "a row altered after its epoch was sealed must break the link — this is the whole \
+             claim the hash chain makes"
+        );
+    }
+
+    #[test]
+    fn moving_an_epoch_breaks_the_chain() {
+        // The epoch number is in the digest so that two epochs with identical rows are not
+        // interchangeable. Swapping them keeps every row, every parent field and every hash
+        // field intact, so nothing but the position has changed.
+        let mut l = built(4);
+        l.epochs.swap(1, 2);
+        assert!(
+            !l.verify_chain(),
+            "reordering sealed epochs must break the chain, or the ledger's order is not \
+             part of what it commits to"
+        );
     }
 }

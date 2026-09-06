@@ -33,7 +33,7 @@ component is for is not derivable from its source.
 | `nilestream-ledger` | Epoch segments, sequencer, hash chain, durability, admission and commit rules | 32 |
 | `nilestream-optimizer` | Plan-time mode selection and the eviction policies (the adaptive optimizer of §4.6 is specified and not built) | 37 |
 | `nilestream-server` | Daemon: sessions, PostgreSQL wire surface, conformance | 81 |
-| `proto-engine` | The research prototype the counted-work experiments run on | 20 |
+| `proto-engine` | The research prototype the counted-work experiments run on | 24 |
 
 <!-- END:appendix-d-map -->
 

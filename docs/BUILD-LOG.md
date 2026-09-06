@@ -558,6 +558,14 @@ identical test counts on both sides of it, and both reformat commits are listed 
 
 ### [T-01] 2026-09-02T01:20Z BLOCKED-T-01-toolchain The version pin cannot be installed here
 
+> **Answered and closed in T-04a (cycle 7).** The author chose the version pin and set it from a
+> machine with egress; both files now read `channel = "1.95.0"` and this entry's paragraph is
+> deleted from them. The environment constraint below is unchanged and still true — a container
+> without egress to `static.rust-lang.org` builds with `RUSTUP_TOOLCHAIN=stable`, which overrides
+> the file and selects the same compiler by version. The question was worth asking and the answer
+> was worth waiting for: the gate was red on rustc 1.97.1 for two lints 1.95.0 does not emit, so
+> until the pin the gate was a function of the day it ran on.
+
 **Question for the author.** `rust-toolchain.toml` should read `channel = "1.95.0"`, and
 does not. Which do you want: the version pin, which is correct for a stranger and makes
 Appendix C.6's "pinned toolchains" true but leaves both repositories unbuildable in the
@@ -2003,7 +2011,15 @@ Nine, across both build logs. Each is quoted where it was raised; the identifier
 
 * `BLOCKED-T-01-toolchain` (niles/gbs, T-01) — the pinned toolchain could not be installed in
   this environment; the pin is in `rust-toolchain.toml` and the build runs on what is present,
-  with the deviation recorded.
+  with the deviation recorded. **Now closed** (T-04a): both files read `channel = "1.95.0"` and
+  the explanatory paragraph is gone, as it asked. The author set it from a machine with egress;
+  the constraint that raised this is unchanged, so a container without egress to
+  `static.rust-lang.org` builds with `RUSTUP_TOOLCHAIN=stable`, which overrides the file and is
+  the same compiler by version. The pin was worth having anyway: the gate was red on rustc
+  1.97.1 for two lints 1.95.0 does not emit (F-33), so which day the gate ran on decided whether
+  it passed. Both lints are fixed rather than pinned away — `niles-ir/src/verify.rs` bound a
+  field to `_` beside a `..` that already matched it, and `schedule.rs` iterated a map's values
+  through its pairs — because a pin that hides a lint is a pin that hides the next real one.
 * `BLOCKED-T-09-lifecycle` (gbs, T-09) — lifecycle transitions are not ledger events, so a
   transition's history is not reconstructible from the segment alone. Named, not worked around.
 * `BLOCKED-T-17-remainder` (niles, T-17 partial) — the nine outputs of T-17 left undone at that

@@ -375,11 +375,11 @@ fn confidential_use(c: &Circuit) -> Vec<Violation> {
         };
 
         let here: Vec<bool> = match &n.op {
-            Op::Source {
-                confidential,
-                anchor_key: _,
-                ..
-            } => {
+            // `anchor_key` is not named here: `..` already matches it, and clippy 1.97's
+            // `unneeded_wildcard_pattern` says so. Binding it to `_` beside a `..` reads as
+            // "this field is deliberately ignored, unlike the others", which was never the
+            // intent — every field but `confidential` is irrelevant to this arm.
+            Op::Source { confidential, .. } => {
                 let width = confidential
                     .iter()
                     .map(|i| *i as usize + 1)

@@ -2,11 +2,8 @@
 # Pinned so that `cargo clippy -- -D warnings` is a stable gate: an unpinned channel
 # turns every new Rust release into a build break for reasons unrelated to this code.
 #
-# INTENDED VALUE: channel = "1.95.0". It is not set here because the environment this
-# was built in has no egress to static.rust-lang.org, so rustup cannot install a channel
-# named by version, and `rustup toolchain link` refuses a custom name that looks like a
-# dist version. `stable` on that machine IS 1.95.0 (rustc 1.95.0 (59807616e 2026-04-14)).
-# See BLOCKED-T-01-toolchain in docs/BUILD-LOG.md. Anyone with network access should set
-# the version and delete this paragraph; it is a one-line change.
-channel = "stable"
+# An environment with no egress to static.rust-lang.org cannot install a channel named by
+# version and will fail here; build it with RUSTUP_TOOLCHAIN=stable, which overrides this file
+# and selects the same compiler wherever `stable` is 1.95.0. Check with `cargo --version`.
+channel = "1.95.0"
 components = ["rustfmt", "clippy"]

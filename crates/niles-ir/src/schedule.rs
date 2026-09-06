@@ -602,7 +602,7 @@ fn rewire_consumers(circuit: &mut Circuit, from: NodeId, to: NodeId) {
             }
         }
     }
-    for (_, target) in circuit.outputs.iter_mut() {
+    for target in circuit.outputs.values_mut() {
         if *target == from {
             *target = to;
         }

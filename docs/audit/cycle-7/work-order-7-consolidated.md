@@ -136,7 +136,8 @@ one emits is fixed rather than pinned away (F-33).**
 
 Dependency order. **Cut line after T-04a.** Every task: guard proved failing on the reverted change
 in a disposable worktree, transcript in the report. Baselines measured on the executing host in the
-same session; targets are ratios against them. **LC-21 must be decided before T-01 starts.**
+same session; targets are ratios against them. **LC-21 is decided: fail-stop (2026-09-06, the
+author).** T-01 is not gated.
 
 ### T-00 — GBS builds against Niles again, and a check exists — closes F-47
 
@@ -166,7 +167,7 @@ mismatch; **(c)** `with_durable` replays every recovered record through `Ledger:
 and sets `visible` to the recovered head; **(d)** the invariant `record.epoch == ledger_epoch −
 seed_head` is stated and asserted on replay; **(e)** the session observes only after `wait()`
 succeeds; **(f)** a barrier failure is **fail-stop** — the sealer stops, later submits get
-`ShuttingDown`, the daemon refuses appends until reopened (per LC-21); **(g)** `interpret` never
+`ShuttingDown`, the daemon refuses appends until reopened (LC-21, decided); **(g)** `interpret` never
 turns a sequencer `Duplicate` into a commit the ledger has not seen.
 *Acceptance:* the crash protocol as a `#[test]` (spawn the binary, SIGKILL, restart, verify); the
 visibility, recovery and idempotency suites green; `make fsync-proof` green.
@@ -311,11 +312,11 @@ Variance, concurrency and host policies are cycle 6's, unchanged.
 Settled, not reopened: LC-01, 02, 04, 08, 09, 10, 11, 12, 14, **17** (closed by T-02's algebra
 verdict), **18** (no starvation at 8:1 on C; Linux 16:1 re-check once T-03 exists).
 
-- **LC-21 (new, gates T-01) — fail-stop on barrier failure?** Accepted: (A) fail-stop — the sealer
-  stops, the daemon refuses appends until reopened; simplest, and what a ledger should do; costs
-  availability under a storage fault. (B) a marked-void epoch with a tombstone record in the segment
-  and `visible` skipping it; keeps serving; costs a second kind of record and a non-contiguous
-  visibility rule. *Recommended: A.* Reversal cost: the sealer's error arm and one test.
+- **LC-21 — decided: (A) fail-stop.** On a barrier failure the sealer stops, later submits get
+  `ShuttingDown`, and the daemon refuses appends until reopened and recovered. The alternative — a
+  tombstoned epoch that `visible` skips — was declined for its second record kind and non-contiguous
+  visibility rule. Decided by the author, 2026-09-06. Reversal cost: the sealer's error arm and one
+  test.
 - **LC-15** — sharpened by F-29: a same-session A/B against a named baseline commit on the executing
   host; C is the reference.
 - **LC-16** — moot until T-01; then durable by default with `--volatile` for benchmarks.

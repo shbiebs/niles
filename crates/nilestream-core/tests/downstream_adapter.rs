@@ -68,8 +68,20 @@ fn the_downstream_adapter_still_compiles_against_this_trees_public_traits() {
     // failure T-03 removed from the verdict suites.
     let manifest = gbs.join("crates/gbs-nilestream/Cargo.toml");
     let target = gbs.join("crates/gbs-nilestream/target");
+    // **`--all-targets`, because the library was never the whole downstream surface.**
+    //
+    // This check built the adapter crate's *library* and reported it green while GBS's own
+    // gate was red: `tests/over_the_wire.rs` wrapped the engine in a `Mutex`, which T-06 had
+    // replaced with an `RwLock`, and a test target is as much a consumer of these traits as
+    // the library is. A downstream integration test is in fact the *more* likely place for a
+    // break, because it is where the daemon is assembled rather than merely linked against.
+    //
+    // `build --all-targets` compiles tests and benches without running them, which is the
+    // right amount: this check answers "does the API still fit", and running GBS's suite here
+    // would answer a question GBS's own gate already asks, slowly, with its own fixtures.
     let out = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
         .arg("build")
+        .arg("--all-targets")
         .arg("--offline")
         .arg("--manifest-path")
         .arg(&manifest)

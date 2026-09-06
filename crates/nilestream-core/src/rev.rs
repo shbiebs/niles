@@ -186,10 +186,25 @@ impl Rev {
 
     /// Read a key at the given anchor.
     ///
-    /// The four cases are the absence lattice: a `Present` entry at or after the anchor is
-    /// a hit; anything else reconstructs. `Bottom` reconstructs too — a key never seen is
-    /// not a key with no postings, and answering it with the aggregate's identity would be
-    /// the money-from-memory-pressure bug the lattice exists to prevent.
+    /// The four cases are the absence lattice: a `Present` entry whose certification interval
+    /// contains the anchor is a hit; anything else reconstructs. `Bottom` reconstructs too — a
+    /// key never seen is not a key with no postings, and answering it with the aggregate's
+    /// identity would be the money-from-memory-pressure bug the lattice exists to prevent.
+    ///
+    /// # The postcondition
+    ///
+    /// **The returned `Anchored` always carries the anchor that was asked for.** Both paths
+    /// establish it: a hit only fires inside `[stamp, effective]`, where the value is
+    /// unchanged and so is the value at `anchor`; a miss reconstructs over the prefix ending
+    /// at `anchor`. Held by `every_answer_is_stamped_with_the_anchor_it_was_asked_for`.
+    ///
+    /// This was not true before T-02 — a hit reported `effective`, which can be later — and
+    /// every caller in this project independently wrote the same compensating branch:
+    /// *if the anchor came back different, throw the answer away and rebuild*. The daemon
+    /// paid it on 87.4% of keyed reads under concurrent writers; GBS's ledger adapter counted
+    /// it as `as_of_reconstructions`. Those branches are now unreachable, which is the
+    /// intended outcome: a caller should not have to check that an engine answered the
+    /// question it was asked.
     pub fn read(&mut self, base: &dyn Base, key: &Key, anchor: Epoch) -> Anchored {
         self.stats.reads += 1;
         self.clock += 1;
@@ -905,6 +920,57 @@ mod tests {
             v.stats.hits - hits,
             base.frontier() - stamp + 1,
             "every anchor in the interval must be a hit; a reconstruction here is the 24.3%              fallback in miniature"
+        );
+    }
+
+    /// **The postcondition, over every shape that reaches `read`.**
+    ///
+    /// A hit, a miss, an eviction, a pinned historical entry, a key never seen: whatever
+    /// happens inside, the answer is stamped with the anchor that was asked for. This is the
+    /// property that lets a caller use the value without checking, and its absence is what
+    /// made every caller in this project write the same compensating branch.
+    #[test]
+    fn every_answer_is_stamped_with_the_anchor_it_was_asked_for() {
+        let mut base = FoldBase::new(0);
+        for i in 0..40 {
+            base.seal(vec![i % 6], 10 + i as i128);
+        }
+        let mut rt = Runtime::install(
+            // A budget below the key count, so eviction bites; each key is read twice in a row,
+            // so the second read is a hit on the entry the first installed. Without the repeat the
+            // budget evicts every entry before it is asked again and the sweep exercises the miss
+            // path alone — asserting the postcondition over one branch while looking thorough.
+            circuit(Materialize::Demand, Consistency::Snapshot),
+            Some(4),
+            Policy::Lru,
+        )
+        .unwrap();
+        let head = base.frontier();
+
+        // Interleave maintenance with reads at every anchor, so entries are variously fresh,
+        // stale, pinned and evicted when they are asked.
+        for a in 0..=head {
+            if a.is_multiple_of(3) {
+                rt.advance(&base, a);
+            }
+            let v = rt.view_mut("balance").unwrap();
+            for k in 0..7i64 {
+                // Key 6 is never sealed: the unknown-key path reaches `reconstruct` too.
+                for _ in 0..2 {
+                    let answered = v.read(&base, &vec![k], a);
+                    assert_eq!(
+                        answered.anchor, a,
+                        "key {k} at anchor {a} came back stamped {} — a caller cannot use an                      answer about a moment it did not ask about, and every one of them ends                      up writing the same branch to throw it away",
+                        answered.anchor
+                    );
+                }
+            }
+        }
+        let v = rt.view_mut("balance").unwrap();
+        assert!(
+            v.stats.hits > 0 && v.stats.misses > 0 && v.stats.evictions > 0,
+            "the sweep must actually have exercised hits, misses and evictions, or it is              asserting the postcondition over one path: {:?}",
+            v.stats
         );
     }
 

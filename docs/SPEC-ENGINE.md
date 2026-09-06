@@ -49,6 +49,16 @@ time, partition-local workloads. Strict serializability, durability, retention a
 compatibility are all in the requirements, so Silo's ceiling is not available and quoting it
 would be dishonest.
 
+**Every ratio in this table is a same-session A/B on one instance, and is normative only as
+that.** The `report` row read 2.68× MET on one instance of host class A and 2.17× NOT MET on
+another; the three engine versions measured on the second instance were within 8% of each other,
+and PostgreSQL itself ran 35% slower there. Both arms moved with the machine. A threshold sitting
+inside the cross-instance variance of one host class is not a contract, so a figure quoted without
+its host, instance, session, barrier and commit is not a claim this specification makes. **Host C**
+is the reference (Apple M4, APFS on NVMe, `F_FULLFSYNC` at ~255 barriers/s); `docs/BENCHMARK.md`
+gives the two-arm invocation, and every generated E16 document carries the header that makes the
+comparison checkable.
+
 **E-2 is therefore normative as:** the engine MUST meet or exceed 5× PostgreSQL on durable
 strictly-serializable OLTP, MUST meet or exceed 10× on scan-heavy analytical work, and
 **MUST NOT regress below parity on point lookups and selective indexed access.** The last

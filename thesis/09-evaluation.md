@@ -683,6 +683,20 @@ Every measurement in §§9.1–9.4 and §9.13 reported *counted work* inside the
 
 The last row is the one this thesis is about. `analytical` is a **cold reconstruction** — the fold runs over the whole base for every query — and `report` is the other end of the same statement: an answer read out of a view the write path is keeping current, while a second connection appends to the base throughout, so that "warm" means *maintained* rather than *stale*. Both ends stay in the table. A results chapter that published only the warm end would be hiding the trade this thesis exists to characterise, and §9.14.5 takes that row along two axes to the point where it becomes an asymptotic statement rather than a ratio at one size.
 
+**A ratio in this table is a same-session A/B, and it may not be compared with one from another machine.** The rule is stated here because breaking it produced a result that was not there. E16 was re-measured on a second instance of the same host class, five runs, PostgreSQL 16.13 under `fdatasync`, at three engine versions:
+
+| row | committed (cycle 5, an A instance) | before T-05 (`05eeef7`) | after T-05 (`15425b5`) | after T-06a |
+|---|--:|--:|--:|--:|
+| oltp | 1.07× NOT MET | 1.02× | 1.15× | 1.10× |
+| analytical | 1.93× NOT MET | 2.04× | 2.13× | 2.04× |
+| **report** | **2.68× MET** | **2.30× NOT MET** | 2.12× | **2.17× NOT MET** |
+
+The `report` row reads 2.68× MET on the first instance and 2.17× NOT MET on the second, which looks like a regression and is not one: the three engine versions measured *on the second instance* are within 8% of each other with median absolute deviations at or below 4%. PostgreSQL itself runs 35% slower there — oltp 4,519 → 2,706 ops/s, report 149 → 98 — so both arms of the ratio moved, and the ratio moved with the machine rather than with the code. **A 2.6× threshold sitting inside the cross-instance variance of one host class is not a contract; it is a coin.**
+
+Two things follow, and both are enforced rather than recommended. Every generated E16 document now carries a header naming its host, its instance, its session, the barrier rate of its device and the commit that produced the binary — stamped at build time, not read from the working tree, since a benchmark built at one commit and run after a checkout would otherwise label itself with code it does not contain. And the reference host for contract figures is **Host C** (Apple M4, 10 cores, APFS on NVMe, `F_FULLFSYNC` at ~255 barriers/s), the only machine this project has measured that is stable across sessions; its script is `run4.sh`, and figures from any other host are reported as that host's, never as the contract's.
+
+The absolute figures below are therefore *one instance's*, and the honest reading of them is a direction and a shape rather than a number to quote. What survives across instances is the ordering of the rows and the sign of each gap; what does not survive is the second decimal place, or a verdict that turns on it.
+
 <!-- BEGIN:E16-contract results/E16-wallclock.md#contract -->
 
 *Generated from `results/E16-wallclock.md`. Do not edit by hand.*

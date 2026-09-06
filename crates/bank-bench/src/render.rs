@@ -646,11 +646,234 @@ pub fn mixed_table_refusals(samples: &[crate::workloads::MixedSample]) -> usize 
     refused.len()
 }
 
+/// **Where a number came from, so two of them are never compared by accident.**
+///
+/// F-29 is what this exists for. E16's `report` row read 2.68× MET on one instance of host class
+/// A and 2.17× NOT MET on another, and the three arms measured *on one instance* were within 8%
+/// of each other with MADs ≤4%: the change did not move the row, the instance did. A 2.6×
+/// threshold sitting inside cross-instance variance of one host class is not a contract, it is a
+/// coin — and nothing in the document said which coin had been tossed.
+///
+/// Every field here is one a reader needs to know whether two tables may be compared:
+///
+/// * **host and instance** — the same host *class* is not the same machine. PostgreSQL itself ran
+///   35% slower on the second A instance (oltp 4,519 → 2,706 ops/s), which is most of F-29.
+/// * **session** — both arms of a ratio must come from one invocation. Across sessions the
+///   machine may be differently loaded, and the ratio inherits that rather than the engine.
+/// * **barrier** — the durable row is an fsync rate, and the same probe measured 255/s to
+///   5,825/s across this project's hosts. A durable ratio without it says nothing.
+/// * **commit** — which code produced the numbers, stamped at build time (see `build.rs`).
+/// * **baseline commit** — what it is being compared *against*, when the caller names one.
+pub struct Provenance {
+    host: String,
+    instance: String,
+    session: String,
+    commit: &'static str,
+    dirty: bool,
+    baseline: Option<String>,
+}
+
+impl Provenance {
+    pub fn gather(baseline: Option<String>) -> Provenance {
+        let read = |p: &str| {
+            std::fs::read_to_string(p)
+                .ok()
+                .map(|s| s.trim().to_string())
+        };
+        // The boot id distinguishes two instances of one host class, which hostname does not:
+        // the two A instances in F-29 answered to the same name.
+        let instance = read("/proc/sys/kernel/random/boot_id")
+            .map(|b| b.chars().take(8).collect::<String>())
+            .or_else(|| read("/etc/machine-id").map(|m| m.chars().take(8).collect()))
+            .unwrap_or_else(|| "unknown".into());
+        let host = read("/etc/hostname")
+            .or_else(|| std::env::var("HOSTNAME").ok())
+            .unwrap_or_else(|| "unknown".into());
+        // One id per invocation, from the clock. It does not need to be unique across the
+        // world, only to differ between two runs whose tables might be laid side by side.
+        let session = format!(
+            "{:x}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+        );
+        Provenance {
+            host,
+            instance,
+            session,
+            commit: env!("NILES_COMMIT"),
+            dirty: env!("NILES_DIRTY") == "true",
+            baseline,
+        }
+    }
+
+    pub fn render(&self, ceiling: Option<crate::storage::Ceiling>) -> String {
+        let mut s = String::new();
+        s.push_str(
+            "## Where these numbers came from
+
+",
+        );
+        s.push_str(
+            "**A ratio in this table may be compared only with another taken in the same              session on the same instance.** E16's `report` row once read 2.68× MET on one              instance of host class A and 2.17× NOT MET on another, and the three engine              versions measured on one instance were within 8% of each other — the code did not              move the row, the machine did. PostgreSQL itself ran 35% slower on the second              instance. A threshold sitting inside cross-instance variance is not a contract.
+
+",
+        );
+        s.push_str(
+            "| | |
+|---|---|
+",
+        );
+        s.push_str(&format!(
+            "| Host | `{}` |
+",
+            self.host
+        ));
+        s.push_str(&format!(
+            "| Instance | `{}` — *not* the host class; two instances of one class differ by              more than this experiment's thresholds |
+",
+            self.instance
+        ));
+        s.push_str(&format!(
+            "| Session | `{}` — both arms of every ratio below come from this one invocation |
+",
+            self.session
+        ));
+        s.push_str(&format!(
+            "| Engine commit | `{}`{} |
+",
+            self.commit,
+            if self.dirty {
+                " — **the tree was dirty; this hash does not identify the code that ran**"
+            } else {
+                ""
+            }
+        ));
+        s.push_str(&format!(
+            "| Baseline commit | {} |
+",
+            match &self.baseline {
+                Some(b) => format!("`{b}` — the A/B this run is one arm of"),
+                None =>
+                    "*none named*: this run is an absolute measurement, not an A/B. Pass                      `--baseline <commit>` when comparing two engine versions, and measure both                      arms in one session on one instance"
+                        .to_string(),
+            }
+        ));
+        match ceiling {
+            Some(c) => s.push_str(&format!(
+                "| Barrier | **{:.0}** durable commits/s per connection at the median (MAD                  {:.0}) — the `durable` row is an fsync rate, and this project has measured the                  same probe from 255/s to 5,825/s across hosts |
+",
+                c.median, c.mad
+            )),
+            None => s.push_str(
+                "| Barrier | *not probed in this run* — read no durable row here as a                  device-independent figure |
+",
+            ),
+        }
+        s.push('\n');
+        s
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Duration;
 
+    /// **And the document actually renders it.** `Provenance::render` producing the right block
+    /// is half the claim; the other half is that E16's builder calls it, and that builder lives
+    /// in the binary where a unit test cannot reach it. Asserted at the source, which is exactly
+    /// as strong here — there is no behaviour to observe if the call is not there, which is the
+    /// failure being guarded against.
+    #[test]
+    fn the_e16_document_renders_the_provenance_block_under_its_title() {
+        let src = include_str!("bin/bench.rs");
+        let title = src
+            .find(r##""# E16 — The performance contract, measured"##)
+            .expect("E16's title");
+        let after = &src[title..title + 400];
+        assert!(
+            after.contains("Provenance::gather"),
+            "the provenance block must be rendered immediately under E16's title. Anywhere \
+             later and a reader has already read the ratios; not at all and the table is the \
+             instance-fragile one F-29 was raised about. Got: {after}"
+        );
+    }
+    /// **The E16 header names the commit that produced it — the guard F-29 asked for.**
+    ///
+    /// The finding was not that a number was wrong. It was that `report` read 2.68× MET on one
+    /// instance of host class A and 2.17× NOT MET on another, the three engine versions measured
+    /// on one instance agreed within 8%, and nothing in the document let a reader see that the
+    /// two tables were about different machines. A contract ratio without a host, a session and
+    /// a commit beside it is a coin toss with a threshold drawn on it.
+    #[test]
+    fn the_contract_header_names_its_host_session_and_commit() {
+        let p = Provenance::gather(None);
+        let block = p.render(None);
+        for wanted in [
+            "Host",
+            "Instance",
+            "Session",
+            "Engine commit",
+            "Baseline commit",
+        ] {
+            assert!(
+                block.contains(wanted),
+                "the E16 header must name `{wanted}`, or two tables from different machines \
+                 look comparable: {block}"
+            );
+        }
+        assert!(
+            block.contains(env!("NILES_COMMIT")),
+            "and must carry the commit stamped into this binary at build time: {block}"
+        );
+        assert!(
+            block.contains("not probed in this run"),
+            "a run with no barrier probe must say so beside the durable row rather than leave \
+             the reader to assume a device: {block}"
+        );
+    }
+
+    /// Naming a baseline says which A/B the table belongs to; not naming one says the opposite,
+    /// out loud. The second half matters more: an absolute measurement read as an A/B is exactly
+    /// how a 2.68× from one instance came to be compared with a 2.17× from another.
+    #[test]
+    fn a_run_with_no_baseline_says_it_is_not_an_ab() {
+        let named = Provenance::gather(Some("15425b5".into())).render(None);
+        assert!(named.contains("15425b5"), "{named}");
+        assert!(named.contains("the A/B this run is one arm of"), "{named}");
+
+        let bare = Provenance::gather(None).render(None);
+        assert!(
+            bare.contains("none named") && bare.contains("not an A/B"),
+            "a run with no baseline must say it is an absolute measurement: {bare}"
+        );
+    }
+
+    /// A verdict needs both arms. `judge` returns `NOT RUN` rather than a `MET` computed against
+    /// a baseline that is not there — the structural half of the same-session rule, since both
+    /// arms of every ratio are drawn from one invocation's samples.
+    #[test]
+    fn no_verdict_without_a_baseline_arm() {
+        let row = ContractRow {
+            workload: "report",
+            target: "2.6x PostgreSQL",
+            factor: Some(2.6),
+        };
+        assert!(matches!(
+            judge(&row, Some(1000.0), None, None),
+            Verdict::NotRun(_)
+        ));
+        assert!(matches!(
+            judge(&row, Some(1000.0), Some(0.0), None),
+            Verdict::NotRun(_)
+        ));
+        assert!(matches!(
+            judge(&row, Some(1000.0), Some(100.0), None),
+            Verdict::Met
+        ));
+    }
     /// **A mixed row without its fallback rate does not publish.**
     ///
     /// The column is the row's whole reason for existing: readers alone measure 0.0% of the

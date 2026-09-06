@@ -104,6 +104,47 @@ So the gate calibrates against **the device**, measured moments before each run
 
 Both bounds are machine-independent, which is exactly what the published number was not.
 
+## The reference host, and why a ratio does not travel
+
+**Host C is the reference.** Apple M4, 10 cores, 16 GiB, APFS on NVMe — so every barrier is
+`F_FULLFSYNC` at ~255/s, the slowest storage this project measures on and the one where the
+durable row is bounded by arithmetic rather than by the engine. Its script is
+`~/Documents/niles-hostc/run4.sh`. It is the reference for one reason: it is the only machine here
+that gives the same answer twice.
+
+**A contract ratio is a same-session A/B and does not travel between machines.** E16's `report` row
+read 2.68× MET on one instance of host class A and 2.17× NOT MET on another, while the three engine
+versions measured on the second instance sat within 8% of each other. PostgreSQL itself ran 35%
+slower there, so both arms moved together. A threshold inside the cross-instance variance of one
+host class is a coin toss with a number drawn on it.
+
+So every generated E16 document carries a header naming host, instance, session, barrier rate and
+the commit that produced the binary. The commit is stamped at **build** time (`build.rs`): reading
+`git rev-parse` at run time would label a benchmark with whatever the tree is checked out at when
+it is invoked, which is the same error as a stale worktree measuring the wrong commit. A dirty tree
+is flagged, because then the hash does not identify the code.
+
+### Running the A/B
+
+Two arms, one session, one instance. The harness records which comparison a run belongs to; it does
+not check out commits, because that is a script's job and a flag that silently rebuilt the tree
+would be worse than no flag.
+
+```sh
+# arm A — the baseline
+git checkout <baseline-commit>
+cargo run --release -p bank-bench --bin bench -- --run --out /tmp/ab/before
+
+# arm B — the change, naming what it is against
+git checkout <change-commit>
+cargo run --release -p bank-bench --bin bench -- --run --baseline <baseline-commit> --out /tmp/ab/after
+```
+
+Compare the two `E16-wallclock.md` files. Their headers must agree on host, instance and barrier;
+if they do not, the comparison is between machines and the ratio is not about the change. A run
+with no `--baseline` says in its header that it is an absolute measurement rather than an A/B —
+which is the case E16 was quoted as for two cycles.
+
 ## The machine these results came from
 
 Recorded because a benchmark without its machine is a number without units.

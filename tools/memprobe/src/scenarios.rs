@@ -35,8 +35,15 @@ fn engine() -> RevEngine {
 /// Through the real compiler rather than a hand-built circuit: a memory figure for a query
 /// the server would not have produced is a figure for a different query.
 fn circuit(sql: &str) -> niles_ir::circuit::Circuit {
+    circuit_as(sql, "auto")
+}
+
+/// The same, with the serve contract's materialization named. `full` is what makes
+/// maintenance *install* a key it has not seen, which is the difference between a view that
+/// holds everything and one that holds what somebody read.
+fn circuit_as(sql: &str, materialize: &str) -> niles_ir::circuit::Circuit {
     let program = format!(
-        "{}\nview __wire_result = sql {{ {sql} }} serve {{ consistency: snapshot, materialize: auto }};\n",
+        "{}\nview __wire_result = sql {{ {sql} }} serve {{ consistency: snapshot, materialize: {materialize} }};\n",
         nilestream_server::daemon::DEFAULT_SCHEMA
     );
     let (prog, mut d) = niles_lang::parser::parse_program(&program);
@@ -614,6 +621,103 @@ pub fn idem_window_sealer() -> Row {
     }
 }
 
+/// **Metadata per resident key, isolated — the T-05.2 figure.**
+///
+/// A full view is advanced through every epoch first, so every key already has a `Present`
+/// slot and nothing about the slot map changes during the measured region. Then each key is
+/// read once. Every read *hits*: no reconstruction, no install, no slot allocated. What is
+/// left is exactly the per-key policy metadata a read creates — the read count for the
+/// cost-aware policy and the clock for LRU — and `bytes/op` is therefore the metadata cost
+/// of one resident key, measured in place rather than on a synthetic map.
+pub fn rev_metadata_per_key() -> Row {
+    use nilestream_core::rev::{Base, Key, Policy, Runtime, Value};
+    struct LedgerBase {
+        ledger: Ledger,
+    }
+    impl Base for LedgerBase {
+        fn frontier(&self) -> u64 {
+            self.ledger.head()
+        }
+        fn reconstruct(&self, key: &Key, anchor: u64) -> (Value, u64) {
+            let before = self.ledger.rows_touched();
+            let v = self.ledger.reconstruct_balance(
+                key[0] as u64,
+                key.get(1).copied().unwrap_or(0) as u32,
+                anchor,
+            );
+            (v, self.ledger.rows_touched() - before)
+        }
+        fn deltas_at(&self, e: u64) -> Vec<(Key, Value)> {
+            let Some(rec) = self.ledger.epochs.get(e as usize) else {
+                return Vec::new();
+            };
+            rec.rows
+                .iter()
+                .filter_map(|r| match r {
+                    LedgerRow::Post(p) => Some((vec![p.acct as i64, p.cur as i64], p.amt)),
+                    _ => None,
+                })
+                .collect()
+        }
+    }
+
+    let keys = BUDGET as u64;
+    let mut ledger = Ledger::new();
+    for a in 1..=keys {
+        let amt = 100 + (a as i128 % 13);
+        let _ = ledger.submit(
+            &format!("perkey-{a}"),
+            vec![
+                LedgerRow::Post(Posting {
+                    txn: a,
+                    acct: a,
+                    cur: 0,
+                    amt,
+                    valid: 0,
+                }),
+                LedgerRow::Post(Posting {
+                    txn: a,
+                    acct: 0,
+                    cur: 0,
+                    amt: -amt,
+                    valid: 0,
+                }),
+            ],
+        );
+    }
+    let base = LedgerBase { ledger };
+    let c = circuit_as(
+        "select acct, cur, sum(amt) from postings group by acct, cur",
+        "full",
+    );
+    // No budget and `Materialize::Full`: every key is installed by maintenance, so the
+    // measured region below allocates no slot and evicts nothing.
+    let mut rt = Runtime::install(c, None, Policy::Lru)
+        .unwrap_or_else(|u| panic!("the keyed fragment must install: {}", u.explain()));
+    let head = base.frontier();
+    for e in 0..=head {
+        rt.advance(&base, e);
+    }
+    let view = rt.view_mut("__wire_result").expect("the installed view");
+    let resident_before = view.resident_count();
+    let (_, counted) = count(|| {
+        for a in 1..=keys {
+            std::hint::black_box(view.read(&base, &vec![a as i64, 0], head));
+        }
+    });
+    assert_eq!(
+        view.resident_count(),
+        resident_before,
+        "every read must hit: an install would put a slot in this row and it measures metadata"
+    );
+    Row {
+        scenario: "rev_metadata_per_key",
+        unit: "resident key",
+        operations: keys,
+        counted,
+    }
+}
+
 pub fn all() -> Vec<Row> {
     vec![
         ledger_seeded(),
@@ -630,6 +734,7 @@ pub fn all() -> Vec<Row> {
         rev_read_hit(),
         append_in_memory(),
         rev_metadata_2x_budget(),
+        rev_metadata_per_key(),
         idem_admission_index(),
         idem_window_sealer(),
     ]

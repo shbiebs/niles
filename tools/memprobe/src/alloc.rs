@@ -180,7 +180,10 @@ pub fn budget(scenario: &str) -> Option<f64> {
         // misses reconstructs and installs, and the two policy maps take an entry each. The
         // budget bounds the values; until T-05 it bounded neither map, so this row is the
         // one that says whether a long-lived view is Theta(budget) or Theta(history).
-        "rev_metadata_2x_budget" => 26.0,
+        "rev_metadata_2x_budget" => 5.0,
+        // Metadata per resident key, isolated: every read in the measured region hits, so
+        // the only allocations are the policy maps' own. One entry per map, per key.
+        "rev_metadata_per_key" => 2.4,
         // The two idempotency windows, by the structure each is. Held per identity, forever,
         // by both: a `HashSet<String>` for admission and a `BTreeMap<String, u64>` for the
         // epoch a duplicate is told it committed at. One string clone and one node each.
@@ -261,9 +264,11 @@ pub fn budget(scenario: &str) -> Option<f64> {
         // the one group that survives. Nine allocations for a query, against seventy-six
         // thousand.
         "served_having_on_key" => 24.0,
-        // The REV runtime's hit path: the key is cloned into the recency map, and the answer
-        // is a `Copy` struct.
-        "rev_read_hit" => 2.2,
+        // The REV runtime's hit path: the key is cloned into the policy map, and the answer
+        // is a `Copy` struct. **One clone, not two** — T-05 merged the read count and the
+        // clock into one map, so the hottest path in the engine allocates once per read
+        // instead of twice. The budget is tightened with the win, or nothing holds it.
+        "rev_read_hit" => 1.2,
         // An in-memory append: the row vector, the idempotency key, the index push, and the
         // three the maintained view costs. See `ledger_seeded`.
         "append_in_memory" => 7.7,
@@ -287,6 +292,7 @@ pub const SCENARIOS: &[&str] = &[
     "rev_read_hit",
     "append_in_memory",
     "rev_metadata_2x_budget",
+    "rev_metadata_per_key",
     "idem_admission_index",
     "idem_window_sealer",
 ];

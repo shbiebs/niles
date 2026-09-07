@@ -139,6 +139,15 @@ impl Stats {
     }
 }
 
+/// Per-key eviction-policy metadata: the read count `CostAware` ranks by, and the clock
+/// `Lru` ranks by. Sixteen bytes beside the key, rather than two maps each holding their own
+/// copy of it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Meta {
+    reads: u64,
+    last_read: u64,
+}
+
 /// One reconstructible epoch-anchored view.
 pub struct Rev {
     pub node: NodeId,
@@ -167,11 +176,29 @@ pub struct Rev {
     /// it — it is missing earlier ones, and adding a later one would compound the error
     /// rather than correct it.
     pinned: BTreeSet<Key>,
-    /// Per-key read counts, for the cost-aware policy.
-    reads_of: BTreeMap<Key, u64>,
-    /// Per-key last-read clock, for LRU.
+    /// Per-key policy metadata, **bounded by the budget and evicted with the entry**.
+    ///
+    /// One map, not two. It was `reads_of: BTreeMap<Key, u64>` beside
+    /// `last_read: BTreeMap<Key, u64>`, which held two copies of every key — and a `Key` is
+    /// a heap-allocated `Vec<i64>`, so the second copy was most of the second map. Merging
+    /// them took the metadata of a resident key from 159 B to 80 B, measured by E18's
+    /// `rev_metadata_per_key`.
+    ///
+    /// **It is removed when the entry is evicted**, which is the property the budget is
+    /// supposed to give and did not. Both maps took an entry for every key *ever read* and
+    /// gave it back to nobody: at twice the residency budget the view held 284 B per key
+    /// read against a budget bounding 2,500 values, and in a long-lived view the term is
+    /// linear in history rather than in the budget. Honest absence is unaffected — the
+    /// *slot* keeps the version, which is what a miss needs; what goes is the read count and
+    /// the clock of a key that is no longer resident, neither of which any answer depends
+    /// on: `choose_victim` reads them only for keys that are.
+    ///
+    /// What it gives up: a key evicted and read again starts its count at one, so under
+    /// `CostAware` a returning hot key is briefly as evictable as a cold one. The
+    /// alternative is a counter that outlives every entry it describes, which is the
+    /// unbounded term this replaces.
+    meta: BTreeMap<Key, Meta>,
     clock: u64,
-    last_read: BTreeMap<Key, u64>,
     /// The rung this view promises, and the mode it was planned in. Both are read from the
     /// circuit's checked fields, so an engine that ignored them fails the IR audit.
     pub rung: Consistency,
@@ -182,6 +209,16 @@ pub struct Rev {
 impl Rev {
     pub fn resident_count(&self) -> u64 {
         self.resident
+    }
+
+    /// How many keys the per-key policy metadata holds an entry for.
+    ///
+    /// **The number the eviction budget is supposed to bound and did not.** Exposed so a
+    /// test can assert it rather than infer it from a memory figure, and reported over the
+    /// wire as `view_metadata_keys`: a view whose metadata is linear in history rather than
+    /// in its budget is a view that does not fit, and nothing said so before.
+    pub fn metadata_len(&self) -> usize {
+        self.meta.len()
     }
 
     /// Read a key at the given anchor.
@@ -208,8 +245,10 @@ impl Rev {
     pub fn read(&mut self, base: &dyn Base, key: &Key, anchor: Epoch) -> Anchored {
         self.stats.reads += 1;
         self.clock += 1;
-        self.last_read.insert(key.clone(), self.clock);
-        *self.reads_of.entry(key.clone()).or_insert(0) += 1;
+        let now = self.clock;
+        let m = self.meta.entry(key.clone()).or_default();
+        m.reads += 1;
+        m.last_read = now;
 
         // The effective version of a resident entry is the later of its own stamp and the
         // view-wide applied epoch: an entry that received no delta in an epoch is still
@@ -305,6 +344,10 @@ impl Rev {
                     self.resident -= 1;
                     self.stats.evictions += 1;
                     self.pinned.remove(&victim);
+                    // The metadata goes with the value. The version stays in the slot, which
+                    // is what honest absence requires; the read count and the clock describe
+                    // an entry that no longer exists and are read only for resident keys.
+                    self.meta.remove(&victim);
                 }
             }
         }
@@ -315,7 +358,7 @@ impl Rev {
         match self.policy {
             Policy::Random => resident().next().map(|(k, _)| k.clone()),
             Policy::Lru => resident()
-                .min_by_key(|(k, _)| self.last_read.get(*k).copied().unwrap_or(0))
+                .min_by_key(|(k, _)| self.meta.get(*k).map_or(0, |m| m.last_read))
                 .map(|(k, _)| k.clone()),
             Policy::CostAware => {
                 // Keep what is read often; drop what is cheap to rebuild. The score is
@@ -324,7 +367,7 @@ impl Rev {
                 // with per-key checkpoints the cost is bounded by the interval and is
                 // nearly uniform, which is itself a consequence of SC7.
                 resident()
-                    .min_by_key(|(k, _)| self.reads_of.get(*k).copied().unwrap_or(0))
+                    .min_by_key(|(k, _)| self.meta.get(*k).map_or(0, |m| m.reads))
                     .map(|(k, _)| k.clone())
             }
         }
@@ -388,6 +431,7 @@ impl Rev {
     pub fn wipe(&mut self) {
         self.slots.clear();
         self.pinned.clear();
+        self.meta.clear();
         self.resident = 0;
     }
 
@@ -569,9 +613,8 @@ impl Runtime {
                 applied: 0,
                 next_to_apply: 0,
                 pinned: BTreeSet::new(),
-                reads_of: BTreeMap::new(),
+                meta: BTreeMap::new(),
                 clock: 0,
-                last_read: BTreeMap::new(),
                 rung: contract.consistency,
                 mode: contract.materialize,
                 stats: Stats::default(),
@@ -761,6 +804,101 @@ mod tests {
         );
         c.set_output("balance", agg);
         c
+    }
+
+    /// **The budget must bound the metadata, not only the values — T-05.1.**
+    ///
+    /// The eviction budget bounded `slots`' *resident* count and nothing else. Two per-key
+    /// maps beside it — a read count and a clock — took an entry for every key ever read and
+    /// released none, so a view's memory was linear in history where the design promises it
+    /// is linear in the budget. Every answer was correct throughout, which is why four audit
+    /// cycles went past it: the defect is in the shape, not in the output.
+    ///
+    /// Read at twice the budget, so eviction is continuous, and assert the three things that
+    /// together say the bound is real: residency is capped, the metadata is capped with it,
+    /// and — the one a careless fix would break — every key ever read still has a *slot*,
+    /// because an evicted entry is `Hole(e)` and forgetting it would turn honest absence into
+    /// `Bottom` and a miss into a zero.
+    #[test]
+    fn metadata_is_bounded_by_the_budget() {
+        const BUDGET: u64 = 8;
+        const KEYS: i64 = 16;
+        let mut base = FoldBase::new(0);
+        for k in 0..KEYS {
+            base.seal(vec![k], 100 + k as i128);
+        }
+        let mut rt = Runtime::install(
+            circuit(Materialize::Demand, Consistency::Snapshot),
+            Some(BUDGET),
+            Policy::Lru,
+        )
+        .unwrap();
+        let anchor = base.frontier();
+        let v = rt.view_mut("balance").unwrap();
+        for k in 0..KEYS {
+            v.read(&base, &vec![k], anchor);
+        }
+
+        assert!(
+            v.stats.evictions > 0,
+            "the budget must bite or this test asserts nothing: {:?}",
+            v.stats
+        );
+        assert!(
+            v.resident_count() <= BUDGET,
+            "{} entries resident against a budget of {BUDGET}",
+            v.resident_count()
+        );
+        assert!(
+            v.metadata_len() as u64 <= BUDGET,
+            "the policy metadata holds {} keys against a budget of {BUDGET}: it is bounded by \
+             history, not by the budget, and a long-lived view does not fit",
+            v.metadata_len()
+        );
+        // Honest absence survives the bound: the value went, the version stayed.
+        for k in 0..KEYS {
+            assert!(
+                v.slot(&vec![k]).version().is_some(),
+                "key {k} has no version after eviction: absence of value became absence of \
+                 history, which is how a miss becomes a zero"
+            );
+        }
+    }
+
+    /// A key that comes back is a key the metadata describes again.
+    ///
+    /// The other half of the bound: dropping metadata on eviction must not make a returning
+    /// key unrankable. It is re-created on the next read, at one, which is what the doc on
+    /// `meta` says it gives up.
+    #[test]
+    fn an_evicted_key_read_again_is_ranked_again() {
+        let mut base = FoldBase::new(0);
+        for k in 0..4i64 {
+            base.seal(vec![k], 10);
+        }
+        let mut rt = Runtime::install(
+            circuit(Materialize::Demand, Consistency::Snapshot),
+            Some(1),
+            Policy::Lru,
+        )
+        .unwrap();
+        let anchor = base.frontier();
+        let v = rt.view_mut("balance").unwrap();
+        for k in 0..4i64 {
+            v.read(&base, &vec![k], anchor);
+        }
+        assert_eq!(
+            v.metadata_len(),
+            1,
+            "one resident entry, one metadata entry"
+        );
+        let first = v.read(&base, &vec![0], anchor).value;
+        assert_eq!(v.metadata_len(), 1);
+        assert_eq!(
+            first,
+            v.read(&base, &vec![0], anchor).value,
+            "the value must not depend on whether its metadata survived"
+        );
     }
 
     #[test]

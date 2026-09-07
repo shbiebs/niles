@@ -2102,6 +2102,7 @@ fn run_nilestream_level(
             m.lock_wait_p99_us = wait;
             m.base_epochs = nls_frontier(nls_port);
             report_mixed(&m);
+            report_slow_reads(nls_port);
             out_mixed.push(m);
         }
     }
@@ -2166,6 +2167,45 @@ fn report_mixed(m: &workloads::MixedSample) {
 ///
 /// `None` when the server cannot be asked, and the level then renders `n/a` rather than
 /// `0.0%`: "no read fell back" and "the question was not asked" are different claims.
+/// **Where the slowest keyed reads went**, printed after a mixed level.
+///
+/// The client can see only its own total. This asks the server for the same reads broken
+/// into base wait, view wait, view hold, and the remainder — which is the wire, the framing
+/// and whatever the scheduler did between them. A tail that is all remainder is not a lock
+/// this engine holds, and saying so needs the column rather than an argument.
+fn report_slow_reads(port: u16) {
+    let Ok(mut c) = bank_bench::wire::Client::connect("127.0.0.1", port, "bench", "bank") else {
+        return;
+    };
+    let Ok(r) = c.simple("select nilestream_slow_reads") else {
+        return;
+    };
+    if r.rows.is_empty() {
+        eprintln!("  slowest keyed reads: none recorded (no keyed read reached the view)");
+        return;
+    }
+    let at = |row: &Vec<Option<String>>, name: &str| -> u64 {
+        r.columns
+            .iter()
+            .position(|c| c == name)
+            .and_then(|i| row.get(i)?.as_ref()?.trim().parse().ok())
+            .unwrap_or(0)
+    };
+    eprintln!("  slowest keyed reads (server-side), µs:");
+    eprintln!("    rank | total | base wait | view wait | view hold | unaccounted");
+    for (i, row) in r.rows.iter().enumerate() {
+        eprintln!(
+            "    {:>4} | {:>5} | {:>9} | {:>9} | {:>9} | {:>11}",
+            i,
+            at(row, "total_us"),
+            at(row, "base_wait_us"),
+            at(row, "view_wait_us"),
+            at(row, "view_hold_us"),
+            at(row, "unaccounted_us"),
+        );
+    }
+}
+
 fn nls_view_counters(port: u16) -> Option<(u64, u64)> {
     let mut c = bank_bench::wire::Client::connect("127.0.0.1", port, "bench", "bank").ok()?;
     let r = c.simple("select nilestream_stats").ok()?;

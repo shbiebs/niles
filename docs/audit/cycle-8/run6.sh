@@ -97,11 +97,11 @@ fi
 # --- D. the tail: three mixed shapes with the per-read breakdown (T-12.3) --------------------------
 if want D; then
   echo; echo "### D. mixed 4r2w / 8r1w / 8r4w with the slowest-16 breakdown"
-  grep -q -- "--mixed-breakdown" "$HC/wt-a/crates/bank-bench/src/bin/bench.rs" || { echo "REFUSING section D: T-12 (--mixed-breakdown) is not in arm A yet"; ONLY=NONE; }
+  grep -q -- "report_slow_reads" "$HC/wt-a/crates/bank-bench/src/bin/bench.rs" || { echo "REFUSING section D: T-12 (the slowest-16 breakdown) is not in arm A yet"; ONLY=NONE; }
   [ "$ONLY" != NONE ] && for shape in 4:2 8:1 8:4; do
     r=${shape%:*}; w=${shape#*:}
     ( cd "$HC/wt-a" && ./target/release/bench --run --scaling-only --connections $((r+w)) \
-        --mixed-seconds 30 --mixed-breakdown 2>&1 | tee "$OUT/mixed-${r}r${w}w.txt" | grep -E "^\| (readers|writers|mixed)|slowest|B wait|V wait|view_(wait|hold)_max|lock_wait_max|fallbacks" )
+        --mixed-seconds 30 2>&1 | tee "$OUT/mixed-${r}r${w}w.txt" | grep -E "^\| (readers|writers|mixed)|slowest|rank \||^ +[0-9]+ \||view_(wait|hold)_(p99|max)|lock_wait_max|fallbacks" )
   done
 fi
 

@@ -145,6 +145,32 @@ if they do not, the comparison is between machines and the ratio is not about th
 with no `--baseline` says in its header that it is an absolute measurement rather than an A/B —
 which is the case E16 was quoted as for two cycles.
 
+## Attributing a tail
+
+`select nilestream_sealer` reports two histograms — the base lock (`lock_*`) and the view
+mutex (`view_*`) — over the same 24 power-of-two buckets, so a wait on one is directly
+comparable with a wait on the other. Percentiles are **bucket boundaries, not interpolated
+values**: `p99 ≤ 2048µs` is honest and `p99 = 1873µs` would not be.
+
+An aggregate cannot attribute a *tail*. A mixed level's read maximum of 12–13 ms against a
+p99 of 246 µs is a handful of reads per run, and a histogram is the wrong instrument for a
+handful. `select nilestream_slow_reads` keeps the slowest sixteen keyed reads this process
+has served, each broken into:
+
+| column | what waited |
+|---|---|
+| `base_wait_us` | acquiring the base's shared guard — contended by an append's apply |
+| `view_wait_us` | acquiring the view mutex, inside the base guard |
+| `view_hold_us` | the keyed read itself, holding the view |
+| `unaccounted_us` | the remainder of the server-side read: everything the engine does not lock for, plus whatever the scheduler did |
+
+**A tail that is all `unaccounted_us` is not a lock this engine holds**, and that is a
+finding rather than a failure to find one: it points at the scheduler, the wire, or the host,
+and it means no change to the lock order would move it. `bench --run` prints the table after
+every mixed level. The table is bounded at sixteen entries in a fixed array, costs one
+relaxed atomic load per keyed read that is faster than the slowest kept, and allocates
+nothing — an instrument that shows up in E18 is an instrument that changed what it measured.
+
 ## The machine these results came from
 
 Recorded because a benchmark without its machine is a number without units.

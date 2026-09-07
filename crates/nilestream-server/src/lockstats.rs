@@ -145,6 +145,21 @@ impl Default for LockStats {
 /// produces and the shape a mutex cannot.
 pub static ENGINE_LOCK: LockStats = LockStats::new();
 
+/// **The view mutex — `V` in the lock order `O < B < P < V < C`.**
+///
+/// The one lock in this engine that nothing measured. `ENGINE_LOCK` covers the base; the
+/// view is taken inside it by an append (to `advance` the maintained state) and taken
+/// alone by a keyed read, a report and a stats query. A mixed workload's read *maximum* is
+/// 12–13 ms on the reference host while the base's longest wait is 1.7 ms, so the tail is
+/// somewhere the instrumented lock cannot explain — and "somewhere" was as precise as this
+/// project could be about it, because the only other candidates were this mutex and the
+/// scheduler, and one of them had no counter.
+///
+/// Both histograms use the same 24 power-of-two buckets, so a wait here and a wait on the
+/// base are directly comparable; the top bucket is about 8.4 seconds, well past the 32 ms
+/// the tail lives under.
+pub static VIEW_LOCK: LockStats = LockStats::new();
+
 /// Acquire, timing both the wait and the hold, and record on drop.
 ///
 /// A guard rather than two calls, so a path that returns early — a refused statement, a
@@ -211,11 +226,12 @@ impl<'a, T> TimedRead<'a, T> {
     pub fn acquire(l: &'a std::sync::RwLock<T>, stats: &'static LockStats) -> TimedRead<'a, T> {
         let asked = Instant::now();
         let guard = l.read().expect("the base lock is not poisoned");
-        let waited = asked.elapsed();
+        // One clock read, not two: see `Timed::acquire`.
+        let acquired = Instant::now();
         TimedRead {
             guard: Some(guard),
-            since: Instant::now(),
-            waited_ns: waited.as_nanos() as u64,
+            waited_ns: acquired.duration_since(asked).as_nanos() as u64,
+            since: acquired,
             stats,
         }
     }
@@ -248,11 +264,12 @@ impl<'a, T> TimedWrite<'a, T> {
     pub fn acquire(l: &'a std::sync::RwLock<T>, stats: &'static LockStats) -> TimedWrite<'a, T> {
         let asked = Instant::now();
         let guard = l.write().expect("the base lock is not poisoned");
-        let waited = asked.elapsed();
+        // One clock read, not two: see `Timed::acquire`.
+        let acquired = Instant::now();
         TimedWrite {
             guard: Some(guard),
-            since: Instant::now(),
-            waited_ns: waited.as_nanos() as u64,
+            waited_ns: acquired.duration_since(asked).as_nanos() as u64,
+            since: acquired,
             stats,
         }
     }
@@ -358,3 +375,187 @@ mod tests {
         assert_eq!(S.snapshot().0, 1, "the early return still counted its hold");
     }
 }
+
+#[cfg(test)]
+mod view_lock_tests {
+    use super::*;
+
+    /// **A hold on the view must land in the view's histogram.**
+    ///
+    /// The instrument's own failure mode: a static that nothing records into reports zeros,
+    /// and zeros read exactly like a lock nobody waits for — which is the answer this
+    /// experiment is trying to distinguish from. So the guard is a deliberate 5 ms hold,
+    /// asserted to appear.
+    #[test]
+    fn a_long_hold_on_the_view_lands_in_the_view_histogram() {
+        let m = std::sync::Mutex::new(0u32);
+        let before = VIEW_LOCK.snapshot();
+        {
+            let mut g = Timed::acquire(&m, &VIEW_LOCK);
+            *g += 1;
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let after = VIEW_LOCK.snapshot();
+        assert!(
+            after.0 > before.0,
+            "the acquisition was not counted: {before:?} -> {after:?}"
+        );
+        assert!(
+            after.6 >= 4_000,
+            "a 5 ms hold must show in `view_hold_max_us`, which read {} — a histogram that \
+             does not see a hold it was handed cannot rule the view out of a 12 ms tail",
+            after.6
+        );
+    }
+}
+
+/// **What the instrument costs, so that a run with it can be compared with one without.**
+///
+/// `#[ignore]`d: a wall-clock figure, run explicitly.
+///
+/// ```sh
+/// cargo test --release -p nilestream-server --lib -- --ignored --test-threads=1 instrument_cost
+/// ```
+#[cfg(test)]
+mod instrument_cost {
+    use super::*;
+
+    #[test]
+    #[ignore = "a measurement: run with --release -- --ignored --test-threads=1"]
+    fn timing_an_acquisition_is_not_a_measurable_share_of_a_read() {
+        const N: u32 = 200_000;
+        let m = std::sync::Mutex::new(0u64);
+        // Interleaved, five measured runs after one warm-up, medians reported — the
+        // protocol every wall-clock figure in this project is held to, at this scale
+        // because the difference being measured is nanoseconds and a single run of
+        // anything on a shared two-core host is not evidence.
+        let mut bare = Vec::new();
+        let mut timed = Vec::new();
+        for run in 0..6 {
+            let t0 = std::time::Instant::now();
+            for _ in 0..N {
+                let mut g = m.lock().unwrap();
+                *g += 1;
+            }
+            let b = t0.elapsed().as_nanos() as f64 / N as f64;
+            let t1 = std::time::Instant::now();
+            for _ in 0..N {
+                let mut g = Timed::acquire(&m, &VIEW_LOCK);
+                *g += 1;
+            }
+            let t = t1.elapsed().as_nanos() as f64 / N as f64;
+            if run > 0 {
+                bare.push(b);
+                timed.push(t);
+            }
+        }
+        let med = |mut v: Vec<f64>| {
+            v.sort_by(|a, b| a.partial_cmp(b).expect("no NaN"));
+            v[v.len() / 2]
+        };
+        let (b, t) = (med(bare), med(timed));
+        eprintln!(
+            "bare {b:.1} ns/acq, timed {t:.1} ns/acq, delta {:.1} ns",
+            t - b
+        );
+        assert!(
+            t - b < 200.0,
+            "timing an acquisition costs {:.1} ns. A keyed read is tens of microseconds, so \
+             the instrument may not be a measurable share of one; above this it changes what \
+             it measures",
+            t - b
+        );
+    }
+}
+
+/// **The slowest keyed reads, broken into where the time went.**
+///
+/// The histograms above say how long the base and the view were *held and waited for*, in
+/// aggregate. They cannot answer the question the mixed workload actually poses: a read
+/// maximum of 12–13 ms against a p99 of 246 µs is a handful of reads per run, and an
+/// aggregate is exactly the wrong instrument for a handful. This keeps the slowest few,
+/// whole, with their parts.
+///
+/// Bounded and cheap: a fixed array behind one mutex, and a relaxed atomic floor read on
+/// every read so the common case — a read faster than the slowest kept — takes no lock at
+/// all. Sixteen samples is enough to see whether the tail is one event or a population, and
+/// small enough that the table fits in a wire reply.
+pub struct SlowReads {
+    floor_ns: AtomicU64,
+    /// A fixed array and a length, not a `Vec`: a measurement instrument that allocates
+    /// shows up in the measurement. The first version grew a `Vec` to sixteen and cost
+    /// `served_point` three allocations and 896 live bytes in E18 — small, and exactly the
+    /// kind of small that makes a memory row unreproducible for a reason unrelated to the
+    /// program.
+    samples: std::sync::Mutex<([ReadTrace; SlowReads::KEEP], usize)>,
+}
+
+/// One keyed read, and the three waits inside it. Microseconds, because that is the unit
+/// every other latency in this system is reported in.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReadTrace {
+    pub total_us: u64,
+    pub base_wait_us: u64,
+    pub view_wait_us: u64,
+    pub view_hold_us: u64,
+}
+
+impl SlowReads {
+    pub const KEEP: usize = 16;
+
+    pub const fn new() -> SlowReads {
+        SlowReads {
+            floor_ns: AtomicU64::new(0),
+            samples: std::sync::Mutex::new((
+                [ReadTrace {
+                    total_us: 0,
+                    base_wait_us: 0,
+                    view_wait_us: 0,
+                    view_hold_us: 0,
+                }; SlowReads::KEEP],
+                0,
+            )),
+        }
+    }
+
+    /// Offer a completed read. Kept only if it is slower than the slowest already kept, or
+    /// if there is room.
+    pub fn offer(&self, total_ns: u64, t: ReadTrace) {
+        if total_ns < self.floor_ns.load(Relaxed) {
+            return;
+        }
+        let Ok(mut g) = self.samples.lock() else {
+            return;
+        };
+        let (buf, len) = &mut *g;
+        if *len < Self::KEEP {
+            buf[*len] = t;
+            *len += 1;
+        } else if t.total_us > buf[Self::KEEP - 1].total_us {
+            buf[Self::KEEP - 1] = t;
+        } else {
+            return;
+        }
+        buf[..*len].sort_by_key(|s| std::cmp::Reverse(s.total_us));
+        if *len == Self::KEEP {
+            self.floor_ns
+                .store(buf[Self::KEEP - 1].total_us * 1_000, Relaxed);
+        }
+    }
+
+    pub fn snapshot(&self) -> Vec<ReadTrace> {
+        self.samples
+            .lock()
+            .map(|g| g.0[..g.1].to_vec())
+            .unwrap_or_default()
+    }
+}
+
+impl Default for SlowReads {
+    fn default() -> Self {
+        SlowReads::new()
+    }
+}
+
+/// The slowest keyed reads this process has served.
+pub static SLOW_READS: SlowReads = SlowReads::new();

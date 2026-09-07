@@ -816,8 +816,7 @@ impl crate::session::Serving for RevEngine {
         // the saving partiality buys and is why this is not a per-epoch scan of the key
         // space.
         if let Some(rt) = self.runtime.as_ref() {
-            rt.lock()
-                .expect("the view lock is not poisoned")
+            crate::lockstats::Timed::acquire(rt, &crate::lockstats::VIEW_LOCK)
                 .advance(&*base, epoch);
         }
         if let Some(e) = base.epochs.get(epoch as usize) {
@@ -886,7 +885,7 @@ impl crate::session::Serving for RevEngine {
         let guard = self
             .runtime
             .as_ref()
-            .map(|rt| rt.lock().expect("the view lock is not poisoned"));
+            .map(|rt| crate::lockstats::Timed::acquire(rt, &crate::lockstats::VIEW_LOCK));
         let idem_keys = self.base().idem_window_keys() as u64;
         let view_answers = self.view_answers.load(std::sync::atomic::Ordering::Relaxed);
         let fallbacks = self
@@ -1099,11 +1098,8 @@ impl RevEngine {
         if !with_currency && self.currency_count() != 1 {
             return None;
         }
-        let rt = self
-            .runtime
-            .as_ref()?
-            .lock()
-            .expect("the view lock is not poisoned");
+        let rt =
+            crate::lockstats::Timed::acquire(self.runtime.as_ref()?, &crate::lockstats::VIEW_LOCK);
         let view = rt.view(BALANCE_VIEW)?;
         if !view.is_full() || view.applied_through() != anchor {
             return None;
@@ -1172,11 +1168,8 @@ impl RevEngine {
         use niles_ir::value::Value;
 
         let with_currency = self.report_shape(p, circuit, output, anchor)?;
-        let rt = self
-            .runtime
-            .as_ref()?
-            .lock()
-            .expect("the view lock is not poisoned");
+        let rt =
+            crate::lockstats::Timed::acquire(self.runtime.as_ref()?, &crate::lockstats::VIEW_LOCK);
         let view = rt.view(BALANCE_VIEW)?;
 
         let mut columns: Vec<String> = (0..p.width()).map(|i| format!("c{i}")).collect();
@@ -1272,18 +1265,35 @@ impl RevEngine {
         // arrived in between, so two guards would trade one hang for a rarer one. Holding it
         // across the keyed read is cheap — the read is microseconds — and it buys the base
         // and the view being read at one instant instead of two.
+        // **The parts of a keyed read, timed, so the tail can be attributed to one of
+        // them.** A mixed workload's read maximum is 12-13 ms on the reference host against
+        // a p99 of 246 us and a base-lock wait that never exceeds 1.7 ms: a handful of reads
+        // per run go somewhere, and an aggregate histogram is the wrong instrument for a
+        // handful. Four clock reads on a path that already takes two locks, offered to a
+        // bounded table that keeps the slowest sixteen.
+        let read_began = std::time::Instant::now();
         let base = self.base();
-        let mut rt = self
-            .runtime
-            .as_ref()?
-            .lock()
-            .expect("the view lock is not poisoned");
+        let base_ready = std::time::Instant::now();
+        let mut rt =
+            crate::lockstats::Timed::acquire(self.runtime.as_ref()?, &crate::lockstats::VIEW_LOCK);
+        let view_ready = std::time::Instant::now();
         let view = rt.view_mut(BALANCE_VIEW)?;
         let answered = view.read(&*base, &vec![acct as i64, cur as i64], anchor);
         // The view's own lock is released here: what follows reads the base and the plan,
         // and holding the view across it would put an unrelated fold's worth of time inside
         // the one section a keyed read is supposed to hold for microseconds.
         drop(rt);
+        let view_done = std::time::Instant::now();
+        let total_ns = view_done.duration_since(read_began).as_nanos() as u64;
+        crate::lockstats::SLOW_READS.offer(
+            total_ns,
+            crate::lockstats::ReadTrace {
+                total_us: total_ns / 1_000,
+                base_wait_us: base_ready.duration_since(read_began).as_micros() as u64,
+                view_wait_us: view_ready.duration_since(base_ready).as_micros() as u64,
+                view_hold_us: view_done.duration_since(view_ready).as_micros() as u64,
+            },
+        );
 
         // **The answer must be true at the anchor that was asked for, not merely at least as
         // fresh.** A hit reports the entry's *effective* version, which can be later than the
@@ -2957,8 +2967,13 @@ mod lock_order_tests {
                 .find("self.base()")
                 .or_else(|| body.find("TimedWrite::acquire"))
                 .unwrap_or_else(|| panic!("`{name}` must take the base"));
+            // Either spelling: a bare `.lock()`, or the timed acquisition that T-12 routed
+            // every view hold through. A guard that recognised only one of them would pass
+            // silently the moment the other was used, which is the failure mode of a
+            // source-level test.
             let view = body
-                .find(".lock()")
+                .find("VIEW_LOCK")
+                .or_else(|| body.find(".lock()"))
                 .unwrap_or_else(|| panic!("`{name}` must take the view"));
             assert!(
                 base < view,

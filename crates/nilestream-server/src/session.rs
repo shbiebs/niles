@@ -818,6 +818,12 @@ impl Session {
             let durable = engine.sealer_stats().is_some();
             let (acq, wp50, wp99, wmax, hp50, hp99, hmax, htotal) =
                 crate::lockstats::ENGINE_LOCK.snapshot();
+            // **The view mutex, which nothing measured.** The base's longest wait is under
+            // 2 ms on the reference host while a mixed workload's read maximum is 12-13 ms,
+            // so the tail is not where the instrumented lock is. These columns are the other
+            // candidate, made a number instead of an argument.
+            let (vacq, vwp50, vwp99, vwmax, vhp50, vhp99, vhmax, vhtotal) =
+                crate::lockstats::VIEW_LOCK.snapshot();
             let per_fsync = if fsyncs == 0 {
                 0.0
             } else {
@@ -840,6 +846,14 @@ impl Session {
                     Field::int8("lock_hold_p99_us"),
                     Field::int8("lock_hold_max_us"),
                     Field::int8("lock_hold_total_us"),
+                    Field::int8("view_acquisitions"),
+                    Field::int8("view_wait_p50_us"),
+                    Field::int8("view_wait_p99_us"),
+                    Field::int8("view_wait_max_us"),
+                    Field::int8("view_hold_p50_us"),
+                    Field::int8("view_hold_p99_us"),
+                    Field::int8("view_hold_max_us"),
+                    Field::int8("view_hold_total_us"),
                 ]),
                 Backend::DataRow(vec![
                     Some(if durable { "yes" } else { "no" }.to_string()),
@@ -857,9 +871,54 @@ impl Session {
                     Some(hp99.to_string()),
                     Some(hmax.to_string()),
                     Some(htotal.to_string()),
+                    Some(vacq.to_string()),
+                    Some(vwp50.to_string()),
+                    Some(vwp99.to_string()),
+                    Some(vwmax.to_string()),
+                    Some(vhp50.to_string()),
+                    Some(vhp99.to_string()),
+                    Some(vhmax.to_string()),
+                    Some(vhtotal.to_string()),
                 ]),
                 Backend::CommandComplete("SELECT 1".into()),
             ];
+        }
+        // **The slowest keyed reads, with their parts.** The histograms above are
+        // aggregates, and a read maximum of 12-13 ms against a p99 of 246 us is a handful of
+        // reads: an aggregate cannot say whether that handful waited for the base, waited
+        // for the view, or waited for nothing this process can see — which is the difference
+        // between a lock to fix and a scheduler to stop blaming the engine for.
+        if lower.starts_with("select") && lower.contains("nilestream_slow_reads") {
+            let mut rows = Vec::new();
+            for (i, t) in crate::lockstats::SLOW_READS.snapshot().iter().enumerate() {
+                rows.push(Backend::DataRow(vec![
+                    Some(i.to_string()),
+                    Some(t.total_us.to_string()),
+                    Some(t.base_wait_us.to_string()),
+                    Some(t.view_wait_us.to_string()),
+                    Some(t.view_hold_us.to_string()),
+                    // What the engine cannot see: the wire, the framing, and whatever the
+                    // scheduler did between them. Reported as the gap rather than left for a
+                    // reader to compute, because the gap is the interesting column.
+                    Some(
+                        t.total_us
+                            .saturating_sub(t.base_wait_us + t.view_wait_us + t.view_hold_us)
+                            .to_string(),
+                    ),
+                ]));
+            }
+            let n = rows.len();
+            let mut out = vec![Backend::RowDescription(vec![
+                Field::int8("rank"),
+                Field::int8("total_us"),
+                Field::int8("base_wait_us"),
+                Field::int8("view_wait_us"),
+                Field::int8("view_hold_us"),
+                Field::int8("unaccounted_us"),
+            ])];
+            out.extend(rows);
+            out.push(Backend::CommandComplete(format!("SELECT {n}")));
+            return out;
         }
         if lower.starts_with("select") && lower.contains("nilestream_durability") {
             let mode = engine.durability();

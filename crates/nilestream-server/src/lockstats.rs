@@ -1,14 +1,26 @@
-//! **How long the engine mutex is held, and how long connections wait for it.**
+//! **How long the engine's locks are held, and how long connections wait for them.**
 //!
-//! `daemon::serve` takes one `Arc<Mutex<RevEngine>>` around the whole of `Session::handle` —
-//! parse, plan, execute, frame — and on a write that critical section contains the `fsync`,
-//! because `RevEngine::append` blocks in the sequencer until the epoch is on stable storage.
-//! So every other connection, reads included, waits behind one disk barrier.
+//! This module was written when `daemon::serve` took one `Arc<Mutex<RevEngine>>` around the
+//! whole of `Session::handle` — parse, plan, execute, frame — and that critical section
+//! contained the `fsync`, because `RevEngine::append` blocked in the sequencer until the
+//! epoch was on stable storage. Every other connection, reads included, waited behind one
+//! disk barrier. Nothing measured it: the published contract numbers were
+//! single-connection, where a lock nobody contends for costs nothing, and the one
+//! experiment that varied connections (E19) was read as a scaling result rather than as a
+//! lock diagnosis. This module is the instrument that made the diagnosis a number instead
+//! of an argument, and the number is what justified the two changes that followed.
 //!
-//! Nothing measured it. The published contract numbers are single-connection, where a lock
-//! nobody contends for costs nothing, and the one experiment that varied connections (E19)
-//! was read as a scaling result rather than as a lock diagnosis. This module is the
-//! instrument that makes the diagnosis a number instead of an argument.
+//! **Neither of those sentences describes the engine today, which is why they are in the
+//! past tense.** Since cycle 6 the engine is behind an `RwLock`, so readers run
+//! concurrently with each other; since cycle 7's T-05 the barrier is submitted inside the
+//! base guard and *waited on* outside it, so no lock in this process is held across an
+//! `fsync`. What the histograms measure now is the base guard: an exclusive hold across an
+//! append's apply, and a shared hold across a keyed read.
+//!
+//! What is **not** instrumented, and is the open question the audit leaves: the view mutex
+//! (`V` in the lock order `O < B < P < V < C`). A mixed workload's read *maximum* is 12–13
+//! ms on the reference host while the base guard's longest wait is 1.7 ms, so the tail is
+//! somewhere this file cannot see.
 //!
 //! # Why a bucketed histogram rather than samples
 //!

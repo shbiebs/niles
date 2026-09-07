@@ -943,3 +943,42 @@ fn the_readme_test_count_is_the_number_of_tests_that_exist() {
         );
     }
 }
+
+/// **The audit preflight may not carry a figure about the tree it is run against.**
+///
+/// The cycle-8 preflight told its auditor the tree pinned `channel = "stable"` (it pinned
+/// `1.95.0`), that the workspace held 801 test functions (843), and that the heads to expect
+/// were the previous cycle's. Every one of those was true when it was written and false when
+/// it was read — the same defect class the audit it opens exists to find, in the instrument
+/// that opens it.
+///
+/// A number about the tree belongs in the preflight's *output*, measured when it runs. This
+/// asserts the script contains no literal test count; the pin and the heads are checked by
+/// reading, since they are no longer written down at all.
+#[test]
+fn the_audit_preflight_measures_the_tree_rather_than_describing_it() {
+    let src = std::fs::read_to_string(repo_root().join("docs/audit/cycle-8/preflight.sh"))
+        .expect("the cycle-8 preflight");
+    for line in src.lines() {
+        let l = line.trim_start();
+        // Only the lines that *print*: a comment may quote a historical figure, and the
+        // shell arithmetic that counts may name a bound.
+        if !l.starts_with("say ") {
+            continue;
+        }
+        assert!(
+            !l.contains("test fns") && !l.contains("test functions"),
+            "the preflight prints a test count it did not measure:\n  {line}\n\
+             count it from the tree at run time — a figure typed into an audit instrument is \
+             stale the first time the instrument is reused"
+        );
+    }
+    assert!(
+        src.contains("rust-toolchain.toml"),
+        "the preflight must read the pin out of rust-toolchain.toml rather than describe it"
+    );
+    assert!(
+        !src.contains("channel = \\\"stable\\\"`"),
+        "the preflight still describes the pin instead of reading it"
+    );
+}

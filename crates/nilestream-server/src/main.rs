@@ -34,7 +34,7 @@
 
 #[path = "daemon.rs"]
 mod daemon;
-// The engine-mutex instrument. `daemon` times every acquisition through it; the binary
+// The engine-lock instrument. `daemon` times every acquisition through it; the binary
 // itself never calls it, which is why it needs the allow.
 #[allow(dead_code)]
 #[path = "lockstats.rs"]
@@ -196,13 +196,11 @@ fn main() {
         );
     }
     if durable.is_none() {
-        eprintln!("  NOTE: the read side is in-memory and single-threaded, with no durability and");
-        eprintln!(
-            "        no consensus. It serves the real REV mechanism -- partial state, honest"
-        );
-        eprintln!(
-            "        absence, anchored reconstruction -- and it is not a production database."
-        );
+        eprintln!("  NOTE: nothing here is durable and there is no consensus: an epoch is");
+        eprintln!("        acknowledged from memory, and a restart loses every row. Reads do");
+        eprintln!("        run concurrently over the base. It serves the real REV mechanism");
+        eprintln!("        -- partial state, honest absence, anchored reconstruction -- and it");
+        eprintln!("        is not a production database.");
     } else {
         // **Two claims that were false when they were printed.** "Durable" meant the epoch
         // number reached stable storage, not the rows, so a restart recovered nothing (T-01);
@@ -216,4 +214,60 @@ fn main() {
     eprintln!("  try:  psql -h 127.0.0.1 -p {port} -U anyone bank");
 
     daemon::accept_loop(listener, schema, engine);
+}
+
+#[cfg(test)]
+mod banner_tests {
+    /// **The banner is the first thing an operator reads and the last thing anyone
+    /// re-checks.**
+    ///
+    /// Two of its claims were false when they were printed: "durable" meant the epoch number
+    /// reached stable storage and not the rows, so a restart recovered nothing; and it
+    /// described an engine mutex that had been replaced by a reader-writer split two commits
+    /// earlier. Both were fixed in cycle 7 and neither was guarded, so nothing stops the next
+    /// one.
+    ///
+    /// Source-level, and deliberately so: the alternative is spawning the daemon to read its
+    /// stderr, which is a slower test of a weaker property. What it asserts is the shape of
+    /// the claim, not its wording — the banner may not name a mutex the engine does not have,
+    /// and may not call the read side single-threaded when readers run concurrently.
+    #[test]
+    fn the_banner_describes_the_engine_this_binary_has() {
+        let src = include_str!("main.rs");
+        // Only `main`'s own body: this module's prose and its own needles are in this file
+        // too, and a test that matched them would fail on itself.
+        let body = &src[src.find("fn main()").expect("main")
+            ..src.find("mod banner_tests").expect("this module")];
+        let banner: String = body
+            .lines()
+            .filter(|l| l.trim_start().starts_with("eprintln!") || l.trim_start().starts_with('"'))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for (needle, why) in [
+            (
+                "mutex",
+                "the engine has been behind an `RwLock` since cycle 6; a banner naming a mutex \
+                 describes a serialisation this binary does not do",
+            ),
+            (
+                "single-threaded",
+                "readers run concurrently over the base, durable or not",
+            ),
+        ] {
+            assert!(
+                !banner.to_lowercase().contains(needle),
+                "the banner says `{needle}`: {why}"
+            );
+        }
+        // And the durability claim is only made when a sink is attached.
+        let durable_claim = src
+            .lines()
+            .find(|l| l.contains("appends are durable"))
+            .expect("the durable branch's NOTE");
+        assert!(
+            src[..src.find(durable_claim).expect("found above")].contains("if durable.is_none()"),
+            "the `appends are durable` line must sit in the branch that has a durable sink: \
+             printed unconditionally it is the claim T-01 found false for a whole cycle"
+        );
+    }
 }

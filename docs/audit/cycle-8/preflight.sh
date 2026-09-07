@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Cycle 7 audit preflight — run this FIRST, in whatever container you are auditing from,
-# and paste its entire output at the top of your work order.
+# Audit preflight — run this FIRST, in whatever container you are auditing from, and paste
+# its entire output at the top of your work order.
 #
-#   bash docs/audit/cycle-7/preflight.sh            # from a clone of `niles`
+#   bash docs/audit/cycle-8/preflight.sh            # from a clone of `niles`
 #   bash preflight.sh /path/to/niles /path/to/gbs   # or name both trees
 #
 # It writes nothing outside its own scratch directory and touches no tracked file. It
@@ -93,12 +93,25 @@ say "reminder: \`make fsync-proof\` checks the syscall REACHES THE KERNEL. It pa
 say "volatile overlay too. The two checks are necessary together; neither is sufficient."
 
 # ------------------------------------------------------------------ C. toolchain
+#
+# Probed twice: as the tree asks, and with the pin overridden. A container with no egress to
+# static.rust-lang.org cannot resolve a pinned version at all, and `rustc --version` then
+# fails in a way that reads as "no toolchain" when what is meant is "not that one".
 hdr "C. toolchain"
-say "rustc            : $(rustc --version 2>/dev/null || echo 'ABSENT — you cannot build or test')"
-say "cargo            : $(cargo --version 2>/dev/null || echo ABSENT)"
-say "host triple      : $(rustc -vV 2>/dev/null | awk '/^host:/{print $2}')"
-say "rustfmt          : $(cargo fmt --version 2>/dev/null || echo ABSENT)"
-say "clippy           : $(cargo clippy --version 2>/dev/null || echo ABSENT)"
+RUSTC_PINNED="$(rustc --version 2>/dev/null || echo UNRESOLVED)"
+RUSTC_STABLE="$(RUSTUP_TOOLCHAIN=stable rustc --version 2>/dev/null || echo ABSENT)"
+say "rustc            : $RUSTC_PINNED"
+if [ "$RUSTC_PINNED" = UNRESOLVED ]; then
+  say "                   the pin does not resolve here. With RUSTUP_TOOLCHAIN=stable: $RUSTC_STABLE"
+  say "                   Build and gate with that override, and say so beside every figure."
+fi
+# `rt` runs a toolchain probe as the tree asks, and again with the pin overridden if that
+# fails, so an unresolvable pin reads as one line at the top rather than as four ABSENTs.
+rt() { "$@" 2>/dev/null || RUSTUP_TOOLCHAIN=stable "$@" 2>/dev/null || echo ABSENT; }
+say "cargo            : $(rt cargo --version)"
+say "host triple      : $(rt rustc -vV | awk '/^host:/{print $2}')"
+say "rustfmt          : $(rt cargo fmt --version)"
+say "clippy           : $(rt cargo clippy --version)"
 say "valgrind         : $(valgrind --version 2>/dev/null || echo 'ABSENT — no callgrind/dhat/massif attribution')"
 say "python3          : $(python3 --version 2>&1 || echo ABSENT)"
 say "git              : $(git --version 2>/dev/null || echo ABSENT)"
@@ -112,10 +125,16 @@ if [ -n "${CARGO_TARGET_DIR:-}" ]; then
   say "                   accident. Unset it for ordinary runs."
 fi
 RSV="$(rustc --version 2>/dev/null | awk '{print $2}')"
+[ -n "$RSV" ] || RSV="$(RUSTUP_TOOLCHAIN=stable rustc --version 2>/dev/null | awk '{print $2}') (via RUSTUP_TOOLCHAIN=stable)"
+# **Read the pin; do not describe it.** This script said the tree pinned `channel = "stable"`
+# for a cycle after it stopped doing so, which is the class of defect the audit it opens
+# exists to find. Every claim below about the tree is now measured from the tree.
+PIN="$(sed -n 's/^ *channel *= *"\(.*\)"/\1/p' "$NILES/rust-toolchain.toml" 2>/dev/null | head -1)"
 say ""
-say "the tree pins \`channel = \"stable\"\` with \`rust-version = 1.95.0\`, because the machine"
-say "it was built on had no egress to static.rust-lang.org and could not name a version."
-say "Your \`stable\` is ${RSV:-unknown}. If that is NEWER than 1.95.0, a new lint can turn"
+say "the tree pins \`channel = \"${PIN:-unreadable}\"\` in rust-toolchain.toml."
+say "Your \`rustc\` is ${RSV:-unknown}. If the pin names a version this machine cannot resolve"
+say "— no egress to static.rust-lang.org — build with RUSTUP_TOOLCHAIN=stable and say so"
+say "beside every figure. If your toolchain is NEWER than the pin, a new lint can turn"
 say "\`clippy -- -D warnings\` red for reasons unrelated to this code. **A red gate from a"
 say "newer toolchain is a finding about the pin, not about the code** — report it that way."
 
@@ -163,9 +182,10 @@ for t in "$NILES" "$GBS"; do
   git -C "$t" status --porcelain 2>/dev/null | head -6 | sed 's/^/    /'
 done
 say ""
-say "EXPECTED at the start of cycle 7:"
-say "  niles  d9c8699  c6/06a-lock-order   (or 474f153 c6/audit-cycle-7, which adds only docs)"
-say "  gbs    e803b7d  c6/07-hold-index"
+say "The heads above are what you are auditing. This script does not carry a list of expected"
+say "SHAs: the one it carried was a cycle out of date the first time it was reused, and a"
+say "wrong expectation is worse than none — it invites an auditor to \"correct\" a tree that"
+say "was right. Your brief names the heads; compare them yourself."
 say "If you are on the author's Mac, the FOUR untracked files in \`niles\` are his and must"
 say "never be edited, staged, deleted, moved or bundled: .DS_Store, AGENTS.md,"
 say "thesis/.DS_Store, thesis/Niles-Thesis.pdf. Anything else untracked is yours to explain."
@@ -174,7 +194,15 @@ say "thesis/.DS_Store, thesis/Niles-Thesis.pdf. Anything else untracked is yours
 hdr "G. gate — run these yourself and record the result"
 say "  cargo fmt --all -- --check"
 say "  cargo clippy --offline --all-targets -- -D warnings"
-say "  cargo test --offline --workspace          # niles: 801 test fns; gbs: 506 declared"
+NILES_TESTS="$(grep -rho '#\[test\]' "$NILES/crates" "$NILES/tools" 2>/dev/null | wc -l | tr -d ' ')"
+if [ -n "$GBS" ] && [ -d "$GBS" ]; then
+  GBS_TESTS="$(grep -rho '#\[test\]' "$GBS/crates" 2>/dev/null | wc -l | tr -d ' ')"
+else
+  GBS_TESTS="?"
+fi
+say "  cargo test --offline --workspace          # niles: ~$NILES_TESTS #[test] attributes; gbs: ~$GBS_TESTS"
+say "    (counted from the trees just now, not typed in. The workspace figure a run reports"
+say "     can exceed it: one attribute can be a parameterised family.)"
 say "  make reproduce                            # must exit 0 with a clean diff"
 say "  make fsync-proof                          # needs strace"
 say "A red row here is a RESULT. Record it; never fix it by deletion."

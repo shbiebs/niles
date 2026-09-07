@@ -702,7 +702,7 @@ change and needs a matching commit in the other repository recording this tree's
 | trait | crate | out-of-tree implementor |
 |---|---|---|
 | `nilestream_core::rev::Base` | `nilestream-core` | `gbs-nilestream::JournalBase` (GBS) |
-| `nilestream_server::session::Serving` | `nilestream-server` | none today; listed because the daemon's harness adapter and any embedder implement it |
+| `nilestream_server::session::Serving` | `nilestream-server` | none out of tree today. In tree: `RwLock<RevEngine>` (`rev_engine.rs`), which is what the daemon serves every session from, and the benchmark's swappable adapter. Listed because any embedder implements it, and because the in-tree implementor is what a change to the trait actually breaks |
 
 This section exists because the pair was broken for a cycle and neither gate could see it. T-06
 turned `Base::reconstruct` and `deltas_at` from `&mut self` to `&self` — the right change, for a

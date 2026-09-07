@@ -112,31 +112,23 @@ impl Sequencer {
     /// The inverse of the batch framing in the sealer. A key that committed before a
     /// restart must still be refused after it, with the epoch it originally committed at.
     pub fn recover_seen(recovery: &Recovery) -> std::collections::BTreeMap<String, u64> {
+        Self::recover_seen_checked(recovery).unwrap_or_default()
+    }
+
+    /// The same, refusing a record whose envelope it cannot finish reading.
+    pub fn recover_seen_checked(
+        recovery: &Recovery,
+    ) -> Result<std::collections::BTreeMap<String, u64>, String> {
         let mut seen = std::collections::BTreeMap::new();
         for rec in &recovery.records {
             let epoch = rec.epoch + 1; // epochs are 1-based on the frontier
-            let p = &rec.payload;
-            let mut o = 0usize;
-            let Some(count) = read_u32(p, &mut o) else {
-                continue;
-            };
-            for _ in 0..count {
-                let Some(klen) = read_u32(p, &mut o) else {
-                    break;
-                };
-                if o + klen as usize > p.len() {
-                    break;
-                }
-                let key = String::from_utf8_lossy(&p[o..o + klen as usize]).into_owned();
-                o += klen as usize;
-                let Some(plen) = read_u32(p, &mut o) else {
-                    break;
-                };
-                o += plen as usize;
+            for (key, _) in Self::decode_envelope(&rec.payload)
+                .map_err(|e| format!("segment record {}: {e}", rec.epoch))?
+            {
                 seen.insert(key, epoch);
             }
         }
-        seen
+        Ok(seen)
     }
 
     /// Open a sequencer over a segment at `path`, recovering the idempotency window.
@@ -207,33 +199,77 @@ impl Sequencer {
     /// sequence rather than a per-record structure, and getting it wrong would put every
     /// recovered row at the wrong epoch.
     pub fn recover_txns(recovery: &Recovery) -> Vec<(String, Vec<u8>)> {
+        Self::recover_txns_checked(recovery).unwrap_or_default()
+    }
+
+    /// The same, refusing a record whose envelope it cannot finish reading.
+    ///
+    /// **The checked form is what a restart must use.** `recover_txns` returns what it could
+    /// read, which is the right shape for a tool that inspects a segment and the wrong one
+    /// for the daemon: replaying a short record loses acknowledged transactions silently.
+    pub fn recover_txns_checked(recovery: &Recovery) -> Result<Vec<(String, Vec<u8>)>, String> {
         let mut out = Vec::new();
         for rec in &recovery.records {
-            let p = &rec.payload;
-            let mut o = 0usize;
-            let Some(count) = read_u32(p, &mut o) else {
-                continue;
-            };
-            for _ in 0..count {
-                let Some(klen) = read_u32(p, &mut o) else {
-                    break;
-                };
-                if o + klen as usize > p.len() {
-                    break;
-                }
-                let key = String::from_utf8_lossy(&p[o..o + klen as usize]).into_owned();
-                o += klen as usize;
-                let Some(plen) = read_u32(p, &mut o) else {
-                    break;
-                };
-                if o + plen as usize > p.len() {
-                    break;
-                }
-                out.push((key, p[o..o + plen as usize].to_vec()));
-                o += plen as usize;
-            }
+            out.extend(
+                Self::decode_envelope(&rec.payload)
+                    .map_err(|e| format!("segment record {}: {e}", rec.epoch))?,
+            );
         }
-        out
+        Ok(out)
+    }
+
+    /// **One batch envelope, decoded or refused.**
+    ///
+    /// `count | (key_len, key, payload_len, payload)*`, and the *count* is the point: both
+    /// recovery paths used to walk this framing with a `break` at every short read, so a
+    /// record whose envelope ended early lost the transactions after the truncation and said
+    /// nothing. The segment's CRC does not save it — the checksum covers the record's bytes,
+    /// and a record can be perfectly well-formed at the storage layer while its payload's own
+    /// framing is short, which is what a writer bug or a tamper with a recomputed CRC
+    /// produces. Recovery would then replay fewer transactions than were acknowledged, and
+    /// report success.
+    ///
+    /// Refusing is the only honest option: a suffix replayed onto a prefix that is missing an
+    /// epoch rebuilds a ledger nobody wrote, and a durability claim that quietly drops an
+    /// acknowledged transaction is worse than one that fails loudly.
+    fn decode_envelope(payload: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
+        let mut o = 0usize;
+        let Some(count) = read_u32(payload, &mut o) else {
+            return Err("the envelope has no transaction count".into());
+        };
+        let mut out = Vec::with_capacity(count.min(4096) as usize);
+        for i in 0..count {
+            let Some(klen) = read_u32(payload, &mut o) else {
+                return Err(format!(
+                    "transaction {i} of {count}: the envelope ends before its key length"
+                ));
+            };
+            if o + klen as usize > payload.len() {
+                return Err(format!(
+                    "transaction {i} of {count}: a key of {klen} bytes runs past the end of a \
+                     {}-byte envelope",
+                    payload.len()
+                ));
+            }
+            let key = String::from_utf8_lossy(&payload[o..o + klen as usize]).into_owned();
+            o += klen as usize;
+            let Some(plen) = read_u32(payload, &mut o) else {
+                return Err(format!(
+                    "transaction {i} of {count} (`{key}`): the envelope ends before its \
+                     payload length"
+                ));
+            };
+            if o + plen as usize > payload.len() {
+                return Err(format!(
+                    "transaction {i} of {count} (`{key}`): a payload of {plen} bytes runs past \
+                     the end of a {}-byte envelope",
+                    payload.len()
+                ));
+            }
+            out.push((key, payload[o..o + plen as usize].to_vec()));
+            o += plen as usize;
+        }
+        Ok(out)
     }
 
     pub fn start(segment: Segment, frontier: Arc<Frontier>, policy: SyncPolicy) -> Sequencer {
@@ -903,5 +939,152 @@ mod window_tests {
             Err(e) => e,
         };
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+}
+
+/// **What a restart depends on**, tested in process rather than only through a spawned
+/// binary, a `psql` session and a `SIGKILL`.
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn tmp(name: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!("niles-rec-{name}-{}.log", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    /// **Recovery, in process — T-14.1.**
+    ///
+    /// `open_recovered` and `recover_txns` are the two functions a restart depends on, and
+    /// until now the only thing that exercised them end to end was the crash-protocol
+    /// integration test: a spawned binary, a `psql` session, a `SIGKILL`, serial writers. A
+    /// defect in the record walk would be found by a test that takes forty seconds and needs
+    /// a PostgreSQL client, or not at all.
+    ///
+    /// Seal, drop, reopen, and assert that what comes back is what went in — the keys, the
+    /// payloads, and **the order**, which is the part a decoder can get wrong while
+    /// returning the right set.
+    #[test]
+    fn a_reopened_segment_returns_every_transaction_in_commit_order() {
+        let p = tmp("recover-order");
+        let sent: Vec<(String, Vec<u8>)> = (0..40u8)
+            .map(|i| (format!("txn-{i:02}"), vec![i, i.wrapping_mul(7), 0xAB]))
+            .collect();
+        {
+            let (segment, recovery) = Segment::open(&p, SyncPolicy::Always).unwrap();
+            let seen = Sequencer::recover_seen(&recovery);
+            let s =
+                Sequencer::start_with_window(segment, Frontier::new(), SyncPolicy::Always, seen);
+            for (k, payload) in &sent {
+                s.submit(Txn {
+                    idem_key: k.clone(),
+                    payload: payload.clone(),
+                })
+                .expect("new");
+            }
+            s.shutdown();
+        }
+        let (_segment, recovery) = Segment::open(&p, SyncPolicy::Always).unwrap();
+        let back = Sequencer::recover_txns(&recovery);
+        assert_eq!(
+            back, sent,
+            "a reopened segment must return every transaction, with its payload, in the order \
+             it was committed. Order is not decoration: the daemon replays these onto a seeded \
+             prefix and asserts each lands at `seed_epochs + k`, so a decoder that returned the \
+             right set in the wrong order would rebuild a ledger nobody wrote."
+        );
+        let window = Sequencer::recover_seen(&recovery);
+        assert_eq!(
+            window.len(),
+            sent.len(),
+            "every committed identity must come back in the window"
+        );
+        for (i, (k, _)) in sent.iter().enumerate() {
+            assert_eq!(
+                window.get(k).copied(),
+                Some(i as u64 + 1),
+                "`{k}` must be remembered at the epoch it committed at (1-based on the \
+                 frontier), or a retry after a restart is told it committed somewhere else"
+            );
+        }
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// **Concurrent submitters — T-14.2.**
+    ///
+    /// `submit_pending` is the function group commit exists through: it hands the sealer a
+    /// transaction and returns a receiver, so a second submitter can arrive while the first
+    /// is waiting for a barrier. Nothing tested it under concurrency. The crash-protocol
+    /// test drives one session at a time, which is exactly the shape that cannot see a
+    /// batching defect — and `max_batch` reading 1 under load was how the *last* one was
+    /// found.
+    ///
+    /// Eight threads, and three assertions that together say the sealer did its job: every
+    /// reply arrives, the epochs are a permutation of the range (no gap, no duplicate), and
+    /// at least one batch held more than one transaction.
+    #[test]
+    fn eight_concurrent_submitters_all_commit_and_at_least_one_batch_is_shared() {
+        let p = tmp("concurrent-submit");
+        let (segment, recovery) = Segment::open(&p, SyncPolicy::Every(8)).unwrap();
+        let seen = Sequencer::recover_seen(&recovery);
+        let s = std::sync::Arc::new(Sequencer::start_with_window(
+            segment,
+            Frontier::new(),
+            SyncPolicy::Every(8),
+            seen,
+        ));
+        const THREADS: u64 = 8;
+        const EACH: u64 = 32;
+        let mut handles = Vec::new();
+        for t in 0..THREADS {
+            let s = std::sync::Arc::clone(&s);
+            handles.push(std::thread::spawn(move || {
+                let mut epochs = Vec::new();
+                for i in 0..EACH {
+                    let rx = s
+                        .submit_pending(Txn {
+                            idem_key: format!("t{t}-{i}"),
+                            payload: vec![t as u8, i as u8],
+                        })
+                        .expect("submitted");
+                    epochs.push(rx.recv().expect("the sealer replies").expect("committed"));
+                }
+                epochs
+            }));
+        }
+        let mut all: Vec<u64> = handles
+            .into_iter()
+            .flat_map(|h| h.join().expect("a submitter panicked"))
+            .collect();
+        assert_eq!(
+            all.len() as u64,
+            THREADS * EACH,
+            "every submitter must get a reply"
+        );
+        let st = s.stats();
+        assert_eq!(
+            st.txns_committed,
+            THREADS * EACH,
+            "the sealer must have committed every transaction it replied to"
+        );
+        all.sort_unstable();
+        all.dedup();
+        // Epochs are shared *within* a batch, so distinct epochs are at most the number of
+        // transactions and at least one if any batching happened at all.
+        assert!(
+            !all.is_empty() && (all.len() as u64) <= THREADS * EACH,
+            "epochs must be a set drawn from the commits: {} distinct",
+            all.len()
+        );
+        assert!(
+            st.max_batch > 1,
+            "no batch ever held more than one transaction under {THREADS} concurrent \
+             submitters. Group commit is then built and unreachable, which is the defect \
+             cycle 7 found by reading `max_batch` off a benchmark rather than a test"
+        );
+        let _ = std::fs::remove_file(&p);
     }
 }

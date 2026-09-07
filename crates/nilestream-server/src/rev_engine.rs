@@ -1002,7 +1002,21 @@ impl RevEngine {
         // for.
         let seed_epochs = self.base().epochs.len() as u64;
         let (sink, recovery) = DurableSink::open_bounded(path, idem_window)?;
-        let txns = nilestream_ledger::sequencer::Sequencer::recover_txns(&recovery);
+        // **The checked form.** `recover_txns` returns what it could read; a restart must
+        // refuse what it could not. A record whose batch envelope ends early loses the
+        // transactions after the truncation, and replaying the remainder onto a prefix that
+        // is missing an epoch rebuilds a ledger nobody wrote — silently, and with a success
+        // exit code, which is the worst way for a durability claim to be false.
+        let txns = nilestream_ledger::sequencer::Sequencer::recover_txns_checked(&recovery)
+            .map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "recovered transaction stream is not decodable: {e}. Recovery stops \
+                         here rather than replaying the part it could read."
+                    ),
+                )
+            })?;
 
         {
             let mut base = self.ledger.write().expect("the base lock is not poisoned");
@@ -3490,6 +3504,100 @@ mod chain_verification_tests {
             proto_engine::EvictionPolicy::Lru,
         )
         .with_durable(seg)
+    }
+
+    /// **A record that stops in the middle is refused, and the message names which one —
+    /// T-14.3.**
+    ///
+    /// The forged-record case is `a_forged_record_is_refused_by_the_chain` below: a record
+    /// whose CRC and segment hash are both valid and whose *rows* are wrong. This is the
+    /// other failure a replay can meet — a record the decoder cannot finish reading, because
+    /// the envelope claims a length the payload does not have.
+    ///
+    /// Two things are asserted, and the second is the one an operator needs. Recovery must
+    /// **refuse**, rather than replay the prefix it could read: a suffix applied onto a
+    /// prefix missing an epoch rebuilds a ledger nobody wrote. And the refusal must name the
+    /// record, because "recovery failed" on a segment of a hundred thousand records is not
+    /// something anyone can act on.
+    #[test]
+    fn a_record_that_cannot_be_decoded_is_refused_and_named() {
+        let p = seg("truncated-record");
+        {
+            let e = engine(&p).expect("a durable engine");
+            for i in 0..6u64 {
+                e.append(
+                    vec![
+                        proto_engine::Row::Post(proto_engine::Posting {
+                            txn: i,
+                            acct: 1,
+                            cur: 0,
+                            amt: 100,
+                            valid: 0,
+                        }),
+                        proto_engine::Row::Post(proto_engine::Posting {
+                            txn: i,
+                            acct: 2,
+                            cur: 0,
+                            amt: -100,
+                            valid: 0,
+                        }),
+                    ],
+                    &format!("t{i}"),
+                )
+                .expect("balanced");
+            }
+            for pend in e.take_pending() {
+                pend.wait().expect("durable");
+            }
+        }
+        // Truncate the *payload* of the last record while leaving the framing intact: the
+        // segment's own CRC is recomputed, so this is not a corrupt record — it is a
+        // well-formed record carrying an envelope that ends early, which is the case the
+        // batch decoder has to refuse rather than half-read.
+        let mut recovered = nilestream_ledger::segment::recover(&p).expect("recoverable");
+        // **One record is one batch and one batch is many transactions.** Six appends can
+        // land in six records or in one, depending on whether the sealer drained them
+        // together — which under a loaded test runner it does. The test must not care: it
+        // truncates the last record, whatever the batching produced. An earlier version
+        // asserted six records and failed one run in three for that reason, which is the
+        // same class of load-dependent assertion T-13 found in the concurrent differential.
+        assert!(
+            !recovered.records.is_empty(),
+            "at least one record must have been written"
+        );
+        let last = recovered.records.pop().expect("a last record");
+        let mut payload = last.payload.clone();
+        assert!(payload.len() > 12, "the envelope has a header to keep");
+        payload.truncate(payload.len() - 4);
+        let _ = std::fs::remove_file(&p);
+        {
+            // Re-sealed through `Segment::append`, exactly as the forgery test does: the
+            // record's own hash and CRC are recomputed from the bytes given, so every check
+            // the *storage* layer makes passes. What fails is the batch decoder, one layer
+            // up, which is the layer this test is about.
+            let (mut fresh, _) = nilestream_ledger::segment::Segment::open(
+                &p,
+                nilestream_ledger::segment::SyncPolicy::Always,
+            )
+            .expect("a fresh segment");
+            for rec in recovered.records {
+                fresh.append(rec.payload).expect("re-seal");
+            }
+            fresh.append(payload).expect("re-seal the short one");
+            fresh.sync().expect("flush");
+        }
+
+        let err = match engine(&p) {
+            Ok(_) => panic!("recovery must refuse a record it cannot decode"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("segment record") && msg.contains("envelope"),
+            "the refusal must name the record it stopped at and what was short, or an \
+             operator has a segment and no place to look: {msg}"
+        );
+        let _ = std::fs::remove_file(&p);
     }
 
     /// Rebuild a sealed batch envelope with account 6's postings redirected to account 7,

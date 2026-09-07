@@ -1171,16 +1171,61 @@ impl Session {
     /// and the narrowness is *stated* — a wider parser would be inventing a DML surface the
     /// language has not specified, and thesis §11.3's rule is to narrow publicly.
     fn insert(&mut self, sql: &str, engine: &dyn Serving) -> Vec<Backend> {
-        let Some(rows) = parse_insert(sql) else {
-            self.failed = true;
-            return vec![pg_wire::sqlstate_error(
-                "0A000",
-                "this `insert` is outside the supported form",
-                Some(
-                    "the form is `INSERT INTO postings VALUES (txn, acct, cur, amt)[, …]`, with \
-                     integer literals. Anything else is refused rather than partly understood.",
-                ),
-            )];
+        // The declared currencies and their scales, read once: the ingress check below needs
+        // the set, and the amount parser needs each code's scale.
+        let declared = match declared_currencies(&self.schema) {
+            Some(d) => d,
+            None => {
+                self.failed = true;
+                return vec![pg_wire::sqlstate_error(
+                    "22023",
+                    "this session's schema does not resolve, so no currency can be checked",
+                    Some(
+                        "an `insert` is refused rather than admitted while the declared \
+                         currencies are unknown.",
+                    ),
+                )];
+            }
+        };
+
+        let rows = match parse_insert(sql, &declared) {
+            // **An amount the currency cannot hold, refused as that** and not as a syntax
+            // error. `22003` is `numeric_value_out_of_range`: the statement's shape is fine and
+            // its value is not, which is a different thing for a caller to be told and sends
+            // them somewhere else to fix it.
+            Err(r) => {
+                self.failed = true;
+                let written = r.written.clone();
+                let digits = written.split_once('.').map(|(_, f)| f.len()).unwrap_or(0);
+                return vec![pg_wire::sqlstate_error(
+                    "22003",
+                    &format!(
+                        "`{written}` has more fractional digits than currency {} declares",
+                        r.currency
+                    ),
+                    Some(&format!(
+                        "the schema declares scale {} for that currency, so it holds {} \
+                         fractional digit(s); `{written}` has {digits}. The amount is refused \
+                         rather than rounded — rounding would move money silently, and the \
+                         amount you wrote is the amount you meant. Write it in minor units, or \
+                         to the declared scale.",
+                        r.declared, r.declared
+                    )),
+                )];
+            }
+            Ok(None) => {
+                self.failed = true;
+                return vec![pg_wire::sqlstate_error(
+                    "0A000",
+                    "this `insert` is outside the supported form",
+                    Some(
+                        "the form is `INSERT INTO postings VALUES (txn, acct, cur, amt)[, …]`. \
+                         `amt` is minor units, or a decimal at the currency's declared scale. \
+                         Anything else is refused rather than partly understood.",
+                    ),
+                )];
+            }
+            Ok(Some(r)) => r,
         };
         if rows.is_empty() {
             return vec![Backend::CommandComplete("INSERT 0 0".into())];
@@ -1198,35 +1243,21 @@ impl Session {
         // Refused here rather than deeper because this is the boundary the premise enters at:
         // the ledger's `Cur` is a `u32` and cannot be narrowed without changing the base's
         // type, and the engine below has no schema. `22023` is `invalid_parameter_value`.
-        match declared_currency_codes(&self.schema) {
-            None => {
-                self.failed = true;
-                return vec![pg_wire::sqlstate_error(
-                    "22023",
-                    "this session's schema does not resolve, so no currency can be checked",
-                    Some(
-                        "an `insert` is refused rather than admitted while the declared currencies are unknown.",
-                    ),
-                )];
-            }
-            Some(declared) => {
-                let offending = rows.iter().find_map(|r| match r {
-                    proto_engine::Row::Post(p) if !declared.contains(&p.cur) => Some(p.cur),
-                    _ => None,
-                });
-                if let Some(cur) = offending {
-                    self.failed = true;
-                    let names: Vec<String> = declared.iter().map(|c| c.to_string()).collect();
-                    return vec![pg_wire::sqlstate_error(
-                        "22023",
-                        &format!("currency {cur} is not declared by this schema"),
-                        Some(&format!(
-                            "declared currency codes are [{}] — a currency's code is its position among the schema's `currency` declarations, counting from zero. Declare it in the schema rather than inserting it: a currency with no declaration has no scale, so its amounts have no meaning and `conserve per (txn, cur)` cannot hold over it.",
-                            names.join(", ")
-                        )),
-                    )];
-                }
-            }
+        let offending = rows.iter().find_map(|r| match r {
+            proto_engine::Row::Post(p) if !declared.contains_key(&p.cur) => Some(p.cur),
+            _ => None,
+        });
+        if let Some(cur) = offending {
+            self.failed = true;
+            let names: Vec<String> = declared.keys().map(|c| c.to_string()).collect();
+            return vec![pg_wire::sqlstate_error(
+                "22023",
+                &format!("currency {cur} is not declared by this schema"),
+                Some(&format!(
+                    "declared currency codes are [{}] — a currency's code is its position among the schema's `currency` declarations, counting from zero. Declare it in the schema rather than inserting it: a currency with no declaration has no scale, so its amounts have no meaning and `conserve per (txn, cur)` cannot hold over it.",
+                    names.join(", ")
+                )),
+            )];
         }
 
         let n = rows.len();
@@ -1339,7 +1370,7 @@ fn split_statements(sql: &str) -> Vec<String> {
 /// Returns `None` if the schema does not resolve; the caller then refuses rather than
 /// admitting everything, because "the schema is unreadable" is not a reason to accept a
 /// currency no schema declared.
-fn declared_currency_codes(schema: &str) -> Option<std::collections::BTreeSet<u32>> {
+fn declared_currencies(schema: &str) -> Option<std::collections::BTreeMap<u32, u32>> {
     let (prog, d) = niles_lang::parser::parse_program(schema);
     if d.has_errors() {
         return None;
@@ -1350,44 +1381,170 @@ fn declared_currency_codes(schema: &str) -> Option<std::collections::BTreeSet<u3
     }
     let mut by_span: Vec<&niles_lang::resolve::CurrencyInfo> = cat.currencies.values().collect();
     by_span.sort_by_key(|c| c.span.start);
-    Some((0..by_span.len() as u32).collect())
+    // Code -> declared scale. The scale travels with the code because it is the *currency's*
+    // property: `currency jpy { scale: 0 }` and `currency bhd { scale: 3 }` are both real, and
+    // a wire that assumed 2 would accept a third decimal place in yen.
+    Some(
+        by_span
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (i as u32, c.scale))
+            .collect(),
+    )
 }
 
-fn parse_insert(sql: &str) -> Option<Vec<proto_engine::Row>> {
+/// Why an `amt` was refused, when it was refused for its value rather than its shape.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ScaleRefusal {
+    pub currency: u32,
+    pub declared: u32,
+    pub written: String,
+}
+
+fn parse_insert(
+    sql: &str,
+    scales: &std::collections::BTreeMap<u32, u32>,
+) -> Result<Option<Vec<proto_engine::Row>>, ScaleRefusal> {
+    // `?` is not available on the shape path any more: the function distinguishes "this is not
+    // the supported form" (`Ok(None)`) from "the form is right and the value is not"
+    // (`Err`), and collapsing the second into the first is what let an out-of-scale amount be
+    // reported as a syntax error.
+    macro_rules! shape {
+        ($e:expr) => {
+            match $e {
+                Some(v) => v,
+                None => return Ok(None),
+            }
+        };
+    }
+
     let lower = sql.to_ascii_lowercase();
-    let into = lower.find("into")?;
-    let values = lower.find("values")?;
+    let into = shape!(lower.find("into"));
+    let values = shape!(lower.find("values"));
     let target = lower[into + 4..values].trim();
     // The column list, if written, is accepted only in the declared order — an insert
     // naming columns in another order would be silently permuted otherwise.
-    let target = target.split('(').next()?.trim();
+    let target = shape!(target.split('(').next()).trim();
     if target != "postings" {
-        return None;
+        return Ok(None);
     }
     let mut out = Vec::new();
     let mut rest = &sql[values + 6..];
     while let Some(open) = rest.find('(') {
-        let close = rest[open..].find(')')? + open;
-        let fields: Vec<i128> = rest[open + 1..close]
-            .split(',')
-            .map(|f| f.trim().parse::<i128>().ok())
-            .collect::<Option<Vec<_>>>()?;
-        if fields.len() != 4 {
-            return None;
+        let close = shape!(rest[open..].find(')')) + open;
+        let raw: Vec<&str> = rest[open + 1..close].split(',').map(|f| f.trim()).collect();
+        if raw.len() != 4 {
+            return Ok(None);
         }
+        let whole = |t: &str| t.parse::<i128>().ok();
+        let txn = u64::try_from(shape!(whole(raw[0]))).ok();
+        let acct = u64::try_from(shape!(whole(raw[1]))).ok();
+        let cur = u32::try_from(shape!(whole(raw[2]))).ok();
+        let (txn, acct, cur) = (shape!(txn), shape!(acct), shape!(cur));
+        let amt = match minor_units(raw[3], scales.get(&cur).copied()) {
+            Ok(Some(a)) => a,
+            Ok(None) => return Ok(None),
+            Err(written) => {
+                return Err(ScaleRefusal {
+                    currency: cur,
+                    declared: scales.get(&cur).copied().unwrap_or(0),
+                    written,
+                })
+            }
+        };
         out.push(proto_engine::Row::Post(proto_engine::Posting {
-            txn: u64::try_from(fields[0]).ok()?,
-            acct: u64::try_from(fields[1]).ok()?,
-            cur: u32::try_from(fields[2]).ok()?,
-            amt: fields[3],
+            txn,
+            acct,
+            cur,
+            amt,
             valid: 0,
         }));
         rest = &rest[close + 1..];
     }
     if out.is_empty() {
-        return None;
+        return Ok(None);
     }
-    Some(out)
+    Ok(Some(out))
+}
+
+/// **An amount, in the currency's own minor units.**
+///
+/// The wire's `amt` is an integer of minor units, so a bare `-250` is 250 minor units and
+/// always was. What was missing is the other spelling: a client that writes `2.50` means the
+/// same thing, and a client that writes `2.505` against `currency usd { scale: 2 }` means
+/// something the currency cannot hold.
+///
+/// Until now `2.505` failed `parse::<i128>()` and came back as *"this `insert` is outside the
+/// supported form"* — a true sentence about the wrong problem, which sends a caller to check
+/// their syntax when their money is the thing that does not fit. The scale is the currency's
+/// (`currency jpy { scale: 0 }` and `currency bhd { scale: 3 }` are both real), so the check is
+/// per row rather than per statement.
+///
+/// `Ok(None)` for something that is not a number at all — that is a shape problem and the
+/// caller reports it as one. `Err(text)` for a number with more fractional digits than the
+/// currency declares: **refused, never rounded.** Rounding here would silently move money, and
+/// the amount a client wrote is the amount it meant.
+fn minor_units(text: &str, scale: Option<u32>) -> Result<Option<i128>, String> {
+    let scale = match scale {
+        Some(s) => s as usize,
+        // An undeclared currency: the ingress check refuses the row by name a moment later, and
+        // guessing a scale for it here would decide which error the caller sees.
+        None => return Ok(text.parse::<i128>().ok()),
+    };
+    let (int_part, frac) = match text.split_once('.') {
+        None => (text, ""),
+        Some((i, f)) => (i, f),
+    };
+    if int_part.is_empty() || !frac.chars().all(|c| c.is_ascii_digit()) {
+        return Ok(None);
+    }
+    let whole: i128 = match int_part.parse() {
+        Ok(v) => v,
+        Err(_) => return Ok(None),
+    };
+    if !text.contains('.') {
+        // Already minor units, which is the form every existing client sends.
+        return Ok(Some(whole));
+    }
+    // **One branch, and it is the refusal.** This was two: a `frac.len() > scale` guard, and
+    // below it `scale - frac.len()`. Deleting the guard to prove it mattered did not change the
+    // answer — the subtraction underflowed, `checked_pow` on the wrapped value returned `None`,
+    // and the same `Err` came back for a different reason. The test passed with the check gone,
+    // which made it evidence of nothing. Merging them leaves no second path to the same answer.
+    let pad = match scale.checked_sub(frac.len()) {
+        Some(p) => p,
+        // More fractional digits than the currency holds. Refused, never rounded: rounding
+        // moves money silently, and the amount a client wrote is the amount it meant.
+        None => return Err(text.to_string()),
+    };
+    let frac_units: i128 = if frac.is_empty() {
+        0
+    } else {
+        match frac.parse::<i128>() {
+            Ok(v) => v,
+            Err(_) => return Ok(None),
+        }
+    };
+    let mult = 10i128
+        .checked_pow(scale as u32)
+        .ok_or_else(|| text.to_string())?;
+    let scaled = frac_units
+        .checked_mul(
+            10i128
+                .checked_pow(pad as u32)
+                .ok_or_else(|| text.to_string())?,
+        )
+        .ok_or_else(|| text.to_string())?;
+    let magnitude = whole
+        .checked_mul(mult)
+        .ok_or_else(|| text.to_string())?
+        .checked_add(if int_part.starts_with('-') {
+            -scaled
+        } else {
+            scaled
+        })
+        .ok_or_else(|| text.to_string())?;
+    Ok(Some(magnitude))
 }
 
 #[cfg(test)]
@@ -2034,6 +2191,104 @@ schema bank {
                 .any(|r| r[1] == Some("700".into())),
             "{read:?}"
         );
+    }
+
+    /// **An amount the currency cannot hold is refused as a value, not as a syntax error.**
+    ///
+    /// The schema declares `currency usd { scale: 2 }`, so `2.505` is not a USD amount. Until
+    /// this it failed `parse::<i128>()` and came back as *"this `insert` is outside the
+    /// supported form"* — a true sentence about the wrong problem, which sends a caller to
+    /// check their syntax when their money is what does not fit.
+    #[test]
+    fn an_amount_finer_than_the_declared_scale_is_refused_by_name() {
+        let (mut s, e) = (session(), engine());
+        let out = s.handle(
+            Frontend::Query("insert into postings values (770001, 1, 0, 2.505)".into()),
+            &e,
+        );
+        let msg = format!("{out:?}");
+        assert!(
+            !out.iter()
+                .any(|m| matches!(m, Backend::CommandComplete(t) if t.starts_with("INSERT"))),
+            "an amount below the declared scale must not commit: {msg}"
+        );
+        assert!(
+            msg.contains("22003"),
+            "and must be `numeric_value_out_of_range` — the shape is fine and the value is \
+             not, which is a different thing to be told: {msg}"
+        );
+        assert!(
+            msg.contains("2.505") && msg.contains("fractional digits"),
+            "and must name the amount and what is wrong with it: {msg}"
+        );
+        assert!(
+            msg.contains("rather than rounded"),
+            "and must say it was refused rather than rounded — silently rounding an amount is \
+             moving money: {msg}"
+        );
+    }
+
+    /// The two spellings that *are* the same amount both commit, and to the same minor units.
+    /// A check that refused decimals outright would pass the test above and be useless.
+    #[test]
+    fn a_decimal_at_the_declared_scale_is_the_same_amount_as_its_minor_units() {
+        for (sql, label) in [
+            (
+                "insert into postings values (770010, 1, 0, 250)",
+                "minor units",
+            ),
+            (
+                "insert into postings values (770011, 1, 0, 2.50)",
+                "a decimal",
+            ),
+            (
+                "insert into postings values (770012, 1, 0, -2.50)",
+                "a negative decimal",
+            ),
+        ] {
+            let (mut s, e) = (session(), engine());
+            let out = s.handle(Frontend::Query(sql.into()), &e);
+            assert!(
+                out.iter()
+                    .any(|m| matches!(m, Backend::CommandComplete(t) if t == "INSERT 0 1")),
+                "{label} must commit: {out:?}"
+            );
+        }
+        // And the value is the same one, which the parser is the only place to check.
+        let scales = std::collections::BTreeMap::from([(0u32, 2u32)]);
+        let of = |sql: &str| match parse_insert(sql, &scales) {
+            Ok(Some(rows)) => match rows.first() {
+                Some(proto_engine::Row::Post(p)) => p.amt,
+                _ => panic!("a posting"),
+            },
+            other => panic!("{sql}: {other:?}"),
+        };
+        assert_eq!(of("insert into postings values (1, 1, 0, 250)"), 250);
+        assert_eq!(of("insert into postings values (1, 1, 0, 2.50)"), 250);
+        assert_eq!(of("insert into postings values (1, 1, 0, -2.50)"), -250);
+        assert_eq!(of("insert into postings values (1, 1, 0, 2.5)"), 250);
+        assert_eq!(of("insert into postings values (1, 1, 0, 0.01)"), 1);
+    }
+
+    /// The scale is the **currency's**, not the wire's. `currency jpy { scale: 0 }` holds no
+    /// fractional digit at all, and a wire that assumed 2 would take a fraction of a yen.
+    #[test]
+    fn the_scale_that_applies_is_the_one_that_currency_declares() {
+        let scales = std::collections::BTreeMap::from([(0u32, 2u32), (1u32, 0u32)]);
+        // Currency 1 is scale 0: one fractional digit is one too many.
+        assert!(matches!(
+            parse_insert("insert into postings values (1, 1, 1, 2.5)", &scales),
+            Err(ScaleRefusal {
+                currency: 1,
+                declared: 0,
+                ..
+            })
+        ));
+        // The same text against currency 0 is fine.
+        assert!(matches!(
+            parse_insert("insert into postings values (1, 1, 0, 2.5)", &scales),
+            Ok(Some(_))
+        ));
     }
 
     /// **The F-41 witness at the wire: an undeclared currency is refused.**

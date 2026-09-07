@@ -732,7 +732,7 @@ mod tests {
         }
     }
 
-    fn circuit(mat: Materialize, rung: Consistency) -> Circuit {
+    pub(super) fn circuit(mat: Materialize, rung: Consistency) -> Circuit {
         let mut c = Circuit::new();
         let src = c.add(
             Op::Source {
@@ -1549,6 +1549,183 @@ mod tests {
         assert_eq!(
             before, after,
             "a full rebuild from the base must reproduce every balance"
+        );
+    }
+}
+
+#[cfg(test)]
+mod concurrent_differential {
+    //! **The view's answer, against an independent fold, while a writer moves the frontier.**
+    //!
+    //! T-02 made `read` serve a resident entry at the anchor it was asked for whenever
+    //! `stamp ≤ anchor ≤ effective`. Every test that gates it is either single-threaded or
+    //! asserts a *rate* — the fallback counters say how often the view answered, not whether the
+    //! answer was right. A rate cannot falsify a correctness change.
+    //!
+    //! This is the differential that can. A writer seals epochs; readers sample an anchor, read
+    //! the key through the view, and compare against `Base::reconstruct` at that same anchor —
+    //! a fold over the frozen prefix, computed independently of anything the view holds. The
+    //! comparison is the whole claim of the certification interval: *the value is unchanged
+    //! across `[stamp, effective]`, so serving it at any anchor inside is exact.* If the upper
+    //! bound were too loose the reader would see a value from the future; if the lower bound
+    //! were missing it would see one from after its own anchor. Either way the fold disagrees.
+    //!
+    //! The eviction budget is deliberately below the key count, so the same key is answered from
+    //! a resident entry on one read and rebuilt on the next, and both must agree with the fold.
+
+    use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::RwLock;
+
+    const KEYS: i64 = 24;
+
+    /// A base a writer can extend while readers fold it.
+    ///
+    /// `FoldBase` above is `&mut` to seal, which is right for a definition of the answer and
+    /// useless here: the race being tested is between an append and a read. The rows are behind
+    /// an `RwLock`, and every method of `Base` takes `&self` already — that was T-06's change,
+    /// and it is what makes this test expressible at all.
+    #[derive(Default)]
+    struct SharedBase {
+        rows: RwLock<Vec<(Epoch, Key, Value)>>,
+        head: AtomicU64,
+    }
+
+    impl SharedBase {
+        fn seal(&self, key: Key, delta: Value) {
+            let mut rows = self.rows.write().expect("not poisoned");
+            let e = self.head.fetch_add(1, Ordering::SeqCst) + 1;
+            rows.push((e, key, delta));
+        }
+    }
+
+    impl Base for SharedBase {
+        fn frontier(&self) -> Epoch {
+            self.head.load(Ordering::SeqCst)
+        }
+        fn reconstruct(&self, key: &Key, anchor: Epoch) -> (Value, u64) {
+            let rows = self.rows.read().expect("not poisoned");
+            let mut acc = 0i128;
+            let mut read = 0u64;
+            for (e, k, d) in rows.iter() {
+                if *e <= anchor && k == key {
+                    acc += *d;
+                    read += 1;
+                }
+            }
+            (acc, read)
+        }
+        fn deltas_at(&self, e: Epoch) -> Vec<(Key, Value)> {
+            let rows = self.rows.read().expect("not poisoned");
+            rows.iter()
+                .filter(|(x, _, _)| *x == e)
+                .map(|(_, k, d)| (k.clone(), *d))
+                .collect()
+        }
+    }
+
+    fn circuit() -> Circuit {
+        super::tests::circuit(Materialize::Demand, Consistency::Snapshot)
+    }
+
+    #[test]
+    fn every_answer_matches_an_independent_fold_at_its_own_anchor() {
+        let base = std::sync::Arc::new(SharedBase::default());
+        // A prefix, so readers have something to hit before the writer starts.
+        for i in 0..(KEYS * 4) {
+            base.seal(vec![i % KEYS], 10 + i as i128);
+        }
+        let rt = std::sync::Arc::new(std::sync::Mutex::new(
+            Runtime::install(circuit(), Some(8), Policy::Lru).expect("installs"),
+        ));
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let compared = std::sync::Arc::new(AtomicU64::new(0));
+
+        let writer = {
+            let (base, stop) = (base.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let mut i = 0i64;
+                while !stop.load(Ordering::Relaxed) {
+                    i += 1;
+                    base.seal(vec![i % KEYS], 1);
+                    // Advance the view from the writer, as the engine does under its own lock.
+                    std::thread::yield_now();
+                }
+                i
+            })
+        };
+
+        let advancer = {
+            let (base, rt, stop) = (base.clone(), rt.clone(), stop.clone());
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let f = base.frontier();
+                    rt.lock().expect("not poisoned").advance(&*base, f);
+                    std::thread::yield_now();
+                }
+            })
+        };
+
+        let readers: Vec<_> = (0..4)
+            .map(|t| {
+                let (base, rt, compared) = (base.clone(), rt.clone(), compared.clone());
+                std::thread::spawn(move || {
+                    let mut divergences: Vec<String> = Vec::new();
+                    for n in 0..400u64 {
+                        let key = vec![((t * 7 + n as i64) % KEYS).max(0)];
+                        // The anchor a session would hold: sampled, then used. Everything the
+                        // writer does after this sample is outside the read's snapshot.
+                        let anchor = base.frontier();
+                        let answered = {
+                            let mut g = rt.lock().expect("not poisoned");
+                            let v = g.view_mut("balance").expect("installed");
+                            v.read(&*base, &key, anchor)
+                        };
+                        // The oracle: a fold over the frozen prefix ending at the anchor the
+                        // answer says it is true at. Independent of every resident entry.
+                        let (expected, _) = base.reconstruct(&key, answered.anchor);
+                        compared.fetch_add(1, Ordering::Relaxed);
+                        if answered.value != expected {
+                            divergences.push(format!(
+                                "key {key:?} at anchor {anchor}: view said {} stamped {}, the \
+                                 fold at {} says {expected}",
+                                answered.value, answered.anchor, answered.anchor
+                            ));
+                        }
+                        if answered.anchor != anchor {
+                            divergences.push(format!(
+                                "key {key:?}: asked for anchor {anchor}, answered at {}",
+                                answered.anchor
+                            ));
+                        }
+                    }
+                    divergences
+                })
+            })
+            .collect();
+
+        let mut divergences = Vec::new();
+        for r in readers {
+            divergences.extend(r.join().expect("a reader panicked"));
+        }
+        stop.store(true, Ordering::Relaxed);
+        let sealed = writer.join().expect("the writer panicked");
+        advancer.join().expect("the advancer panicked");
+
+        assert!(
+            sealed > 100,
+            "the writer must actually have moved the frontier under the readers: {sealed} epochs"
+        );
+        assert!(
+            compared.load(Ordering::Relaxed) >= 1_500,
+            "the differential must actually compare: {} comparisons",
+            compared.load(Ordering::Relaxed)
+        );
+        assert!(
+            divergences.is_empty(),
+            "{} divergences under concurrent append and read. First: {}",
+            divergences.len(),
+            divergences.first().expect("non-empty")
         );
     }
 }

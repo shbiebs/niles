@@ -131,6 +131,8 @@ struct Args {
     /// is never reached, so `results/E16-wallclock.md` cannot be touched however `--publish`
     /// is passed.
     scaling_only: bool,
+    /// Connection counts at which to measure the oltp contract shape. Empty = not asked.
+    oltp_connections: Vec<u32>,
     /// Run the Nilestream arm without a PostgreSQL to compare against.
     ///
     /// The harness refuses to substitute anything for a real PostgreSQL, and that is right
@@ -202,6 +204,7 @@ impl Args {
             nls_budget: 2_500,
             connections: Vec::new(),
             scaling_only: false,
+            oltp_connections: Vec::new(),
             nls_only: false,
             publish: false,
         };
@@ -278,6 +281,20 @@ impl Args {
                 }
                 "--operations" => {
                     a.operations = argv[i + 1].parse().unwrap_or(a.operations);
+                    i += 1;
+                }
+                // **The contract's oltp row is measured at one connection**, where the
+                // sealer is structurally at 1.03 transactions per fsync: one submitter can
+                // never find a second in the queue, so group commit — the mechanism the
+                // 5-10x target is only reachable through — is not exercised at all. This
+                // runs the same two-leg transfer at each named connection count, with the
+                // sealer's own counters beside each, so the verdict can be read where the
+                // design says it should be taken.
+                "--oltp-connections" => {
+                    a.oltp_connections = argv[i + 1]
+                        .split(',')
+                        .filter_map(|x| x.trim().parse().ok())
+                        .collect();
                     i += 1;
                 }
                 "--baseline" => {
@@ -913,6 +930,11 @@ fn run(args: &Args) -> i32 {
             eprintln!("bench: writing the scaling results failed: {e}");
             return 6;
         }
+    }
+
+    // ---- the contract's oltp shape, at the concurrency the design needs ----
+    if !args.oltp_connections.is_empty() {
+        run_oltp_levels(args, pg.as_mut(), &hosted);
     }
 
     // ---- E23: the two asymptotic sweeps, into their own document ----
@@ -1923,6 +1945,143 @@ fn run_scaling(args: &Args, mut pg: Option<&mut PgTarget>, hosted: &Option<Hoste
         scaling: out,
         mixed: out_mixed,
     }
+}
+
+/// **The oltp contract shape, at more than one connection — T-15.2.**
+///
+/// The contract row in E16 is measured from one connection. On the reference host that puts
+/// the sealer at 1.03 transactions per fsync: a single submitter is never in the queue at
+/// the same time as another, so the drain always finds one transaction and group commit —
+/// the only mechanism by which "5-10x PostgreSQL" is reachable at all — is not exercised.
+/// The arithmetic is worth stating: at Host C's `F_FULLFSYNC` (~4-8 ms) one writer commits
+/// 125-250 transactions a second, and 5x a PostgreSQL measured at 2,706 ops/s needs ~13,500,
+/// which is 54-108 transactions per fsync. The sealer drains up to 4,096. The design allows
+/// it; the harness had never offered it more than one.
+///
+/// The same two-leg transfer as `workloads::oltp`, run concurrently, against **both** targets
+/// so that the comparison stays a comparison. The sealer's counters are read either side of
+/// the Nilestream level, so every row carries the transactions-per-fsync it achieved.
+fn run_oltp_levels(args: &Args, mut pg: Option<&mut PgTarget>, hosted: &Option<Hosted>) {
+    eprintln!("\n== oltp at {:?} connections ==", args.oltp_connections);
+    eprintln!("  The contract row above is one connection. These are the same statement at");
+    eprintln!("  more, with the sealer's own batching beside each: a verdict taken where");
+    eprintln!("  group commit cannot happen is a verdict about the harness.");
+    let mut best: Option<(u32, f64, f64)> = None;
+    for (level, &conns) in args.oltp_connections.iter().enumerate() {
+        let seed = 0x01D ^ ((conns as u64) << 8);
+        let per = (args.operations / 4).max(50);
+        let statement = |thread: u32, i: u64| {
+            let from = scaling_key(seed, thread, i, args.accounts);
+            let mut to = scaling_key(seed ^ 0x5EED, thread, i, args.accounts);
+            if to == from {
+                to = 1 + (to % args.accounts.max(1));
+            }
+            let amount = 1 + ((i * 7 + thread as u64) % 10_000) as i64;
+            let id = txn_base(1, level + 900, thread, i);
+            format!(
+                "insert into postings values ({id}, {from}, 0, -{amount}), ({id}, {to}, 0, {amount})"
+            )
+        };
+        if let Some(p) = pg.as_deref_mut() {
+            if p.prepare(args.accounts, args.rounds).is_ok() {
+                let (host, port, user, db) = (
+                    args.pg_host.clone(),
+                    args.pg_port,
+                    args.pg_user.clone(),
+                    args.pg_db.clone(),
+                );
+                let open_pg = move || bank_bench::wire::Client::connect(&host, port, &user, &db);
+                let s = workloads::concurrent(
+                    workloads::Level {
+                        workload: "oltp",
+                        target: "postgres",
+                        connections: conns,
+                        run: 1,
+                        per_connection: per,
+                        durable: true,
+                    },
+                    &open_pg,
+                    &|thread, i| {
+                        let from = scaling_key(seed, thread, i, args.accounts);
+                        let mut to = scaling_key(seed ^ 0x5EED, thread, i, args.accounts);
+                        if to == from {
+                            to = 1 + (to % args.accounts.max(1));
+                        }
+                        let amount = 1 + ((i * 7 + thread as u64) % 10_000) as i64;
+                        let id = txn_base(1, level + 900, thread, i);
+                        format!(
+                            "insert into postings (txn, acct, cur, amt, epoch) values \
+                             ('oltp-{id}', {from}, 'USD', -{amount}, {id}), \
+                             ('oltp-{id}', {to}, 'USD', {amount}, {id})"
+                        )
+                    },
+                );
+                report_scaling(&s);
+            }
+        }
+        if let Some(h) = hosted {
+            if let Err(e) = h.reseed() {
+                eprintln!(
+                    "  oltp {conns} conns — NOT RUN: the hosted engine would not reseed: {e}"
+                );
+                continue;
+            }
+        }
+        let nls_port = args.nls_port;
+        let open_nls =
+            move || bank_bench::wire::Client::connect("127.0.0.1", nls_port, "bench", "bank");
+        let before = nls_sealer_totals(nls_port);
+        let s = workloads::concurrent(
+            workloads::Level {
+                workload: "oltp",
+                target: "nilestream",
+                connections: conns,
+                run: 1,
+                per_connection: per,
+                durable: true,
+            },
+            &open_nls,
+            &statement,
+        );
+        let after = nls_sealer_totals(nls_port);
+        let per_fsync = match (before, after) {
+            (Some((t0, f0)), Some((t1, f1))) if f1 > f0 => (t1 - t0) as f64 / (f1 - f0) as f64,
+            _ => 0.0,
+        };
+        let ops = if s.wall.as_secs_f64() > 0.0 {
+            s.operations as f64 / s.wall.as_secs_f64()
+        } else {
+            0.0
+        };
+        report_scaling(&s);
+        eprintln!("    txns per fsync at {conns} connections: {per_fsync:.2}");
+        if best.is_none_or(|(_, b, _)| ops > b) {
+            best = Some((conns, ops, per_fsync));
+        }
+    }
+    match best {
+        Some((c, ops, pf)) => {
+            eprintln!(
+                "  best: {ops:.0} txns/s at {c} connection(s), {pf:.2} transactions per fsync."
+            );
+            eprintln!(
+                "  The contract's oltp verdict belongs here and not at one connection, where \
+                 the sealer cannot batch."
+            );
+        }
+        None => eprintln!("  no level ran"),
+    }
+}
+
+/// `(txns_committed, fsyncs)` from `select nilestream_sealer`, by name.
+fn nls_sealer_totals(port: u16) -> Option<(u64, u64)> {
+    let mut c = bank_bench::wire::Client::connect("127.0.0.1", port, "bench", "bank").ok()?;
+    let r = c.simple("select nilestream_sealer").ok()?;
+    let at = |name: &str| -> Option<u64> {
+        let i = r.columns.iter().position(|c| c == name)?;
+        r.rows.first()?.get(i)?.as_ref()?.trim().parse().ok()
+    };
+    Some((at("txns_committed")?, at("fsyncs")?))
 }
 
 /// The account a scaling thread touches at iteration `i`, drawn without shared state.

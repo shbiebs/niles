@@ -80,9 +80,9 @@ if want B; then
   ( cd "$HC/wt-b" && ./target/release/bench --run --out "$OUT/e16-arm-b" 2>&1 | tee "$OUT/e16-b.txt" | tail -20 )
   if grep -q -- "--oltp-connections" "$HC/wt-a/crates/bank-bench/src/bin/bench.rs"; then
     ( cd "$HC/wt-a" && ./target/release/bench --run --baseline "$(git -C "$HC/wt-b" rev-parse --short HEAD)" \
-        --baseline-bin "$HC/wt-b/target/release/nilestreamd" --oltp-connections 1,4,16 --publish 2>&1 | tee "$OUT/e16-a.txt" | tail -40 )
+        --oltp-connections 1,4,16 --publish 2>&1 | tee "$OUT/e16-a.txt" | tail -50 )
   else
-    echo "REFUSING section B's arm A: T-15 (--oltp-connections / --baseline-bin) is not in arm A yet; arm B's absolute run is kept in $OUT/e16-arm-b"
+    echo "REFUSING section B's arm A: T-15 (--oltp-connections) is not in arm A yet; arm B's absolute run is kept in $OUT/e16-arm-b"
   fi
 fi
 

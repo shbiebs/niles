@@ -145,6 +145,40 @@ if they do not, the comparison is between machines and the ratio is not about th
 with no `--baseline` says in its header that it is an absolute measurement rather than an A/B —
 which is the case E16 was quoted as for two cycles.
 
+## The oltp row, and the concurrency the design needs
+
+`SPEC-ENGINE.md` Part 0 states "5–10× PostgreSQL" for oltp without a concurrency qualifier,
+and E16 measures it from **one connection**. That is where the sealer cannot batch: one
+submitter is never in the queue at the same time as another, so the drain always finds one
+transaction and reports 1.03 transactions per fsync. Group commit is the only mechanism by
+which the target is reachable at all, and the harness had never offered it more than one
+transaction to commit.
+
+The arithmetic, on Host C: `F_FULLFSYNC` is ~4–8 ms, so one writer commits 125–250
+transactions a second. Five times a PostgreSQL measured at 2,706 ops/s is ≈13,500, which
+needs **54–108 transactions per fsync**. The sealer drains up to 4,096, so the design allows
+it; whether the engine achieves it is a measurement nobody had taken.
+
+```sh
+cargo run --release -p bank-bench --bin bench -- --run --oltp-connections 1,4,16
+```
+
+Both targets, the same two-leg transfer, at each named count, with the sealer's own
+`txns_committed` and `fsyncs` read either side of every Nilestream level so each row carries
+the batching it achieved. **A verdict taken at one connection is a verdict about the
+harness**, and the summary line names the level the contract row belongs at.
+
+### What is not yet done: one process, two arms
+
+`--baseline <commit>` labels a run as one arm of an A/B and the two arms run back to back in
+one session (above). Interleaving them *within* one process — which would cancel drift inside
+the session as well as between sessions — needs a second target, because this harness measures
+an *already running* `nilestreamd` rather than spawning one: the arms are two daemons on two
+ports, and a two-column contract table means a second target name flowing through the sample
+stream and the renderer. Specified rather than half-built; `run6.sh` section B runs the two
+arms back to back in one session on one instance, which is the property the F-29 finding
+actually required.
+
 ## Attributing a tail
 
 `select nilestream_sealer` reports two histograms — the base lock (`lock_*`) and the view

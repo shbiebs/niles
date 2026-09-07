@@ -2402,7 +2402,7 @@ fn report_scaling(s: &ScalingSample) {
 }
 
 fn write_e23(args: &Args, pts: &[E23]) -> std::io::Result<()> {
-    let dir = bank_bench::publish::e23_dir(std::path::Path::new(&args.out));
+    let dir = bank_bench::publish::e23_dir(std::path::Path::new(&args.out), args.publish);
     std::fs::create_dir_all(&dir)?;
     let mut csv = String::from(E23_HEADER);
     csv.push('\n');
@@ -2433,7 +2433,7 @@ fn write_scaling(
     samples: &[ScalingSample],
     mixed: &[workloads::MixedSample],
 ) -> std::io::Result<()> {
-    let dir = bank_bench::publish::scaling_dir(std::path::Path::new(&args.out));
+    let dir = bank_bench::publish::scaling_dir(std::path::Path::new(&args.out), args.publish);
     std::fs::create_dir_all(&dir)?;
     let mut by_file: BTreeMap<&str, Vec<&ScalingSample>> = BTreeMap::new();
     for s in samples {
@@ -3062,7 +3062,7 @@ fn render_only(args: &Args) -> i32 {
     // machine-dependent, so `make reproduce` cannot re-run it — but the *document* is a pure
     // function of the CSV, and that part must not drift. A results file whose prose and
     // whose data can disagree is a results file nobody can check.
-    let e23_dir = bank_bench::publish::e23_dir(std::path::Path::new(&args.out));
+    let e23_dir = bank_bench::publish::e23_dir(std::path::Path::new(&args.out), args.publish);
     let e23_csv = e23_dir.join("E23-scaling.csv");
     if let Ok(text) = std::fs::read_to_string(&e23_csv) {
         let pts: Vec<E23> = text.lines().skip(1).filter_map(parse_e23_line).collect();

@@ -29,9 +29,10 @@ pub const DEFAULT_SCALING_OUT: &str = "results/E19-scaling";
 pub const COMMITTED_E23: &str = "results/E23-scaling.md";
 pub const DEFAULT_E23_OUT: &str = "results/E23-scaling";
 
-/// Where an E23 sweep's CSV goes, given `--out`.
-pub fn e23_dir(out: &Path) -> PathBuf {
-    if out == Path::new(DEFAULT_OUT) {
+/// Where an E23 sweep's CSV goes, given `--out` and whether this run publishes. Same gate as
+/// [`scaling_dir`], and for the same reason.
+pub fn e23_dir(out: &Path, publish: bool) -> PathBuf {
+    if publish && out == Path::new(DEFAULT_OUT) {
         PathBuf::from(DEFAULT_E23_OUT)
     } else {
         out.join("E23-scaling")
@@ -47,14 +48,22 @@ pub fn e23_destinations(dir: &Path, publish: bool) -> Vec<PathBuf> {
     out
 }
 
-/// Where a scaling run's CSVs go, given `--out`.
+/// Where a scaling run's CSVs go, given `--out` and whether this run publishes.
 ///
-/// The default `--out` means "the committed layout", and E19 then sits beside E16 in
-/// `results/`. **Any other `--out` keeps the scaling run inside it**, so an exploratory run —
-/// the audit's baseline capture, a bisect, a CI job — cannot write a CSV into the committed
-/// tree by naming an output directory and forgetting that E19 has one of its own.
-pub fn scaling_dir(out: &Path) -> PathBuf {
-    if out == Path::new(DEFAULT_OUT) {
+/// The committed layout — E19 beside E16 in `results/` — is reached **only when
+/// publishing**, which is the same gate the documents have and the rule this project states:
+/// *benchmarks touch committed artefacts only with `--publish`*. It was not true of the
+/// CSVs. `scaling_dir` mapped the default `--out` to the committed directory unconditionally,
+/// so an exploratory run with no `--publish` at all overwrote `results/E19-scaling/*.csv` and
+/// left the tree dirty. On Host C that is exactly what happened: a diagnostic run rewrote
+/// four committed files and added a fifth, and the next run's retarget-and-refuse clause
+/// stopped the whole script — correctly, and for a reason nobody had put there on purpose.
+///
+/// Any other `--out` keeps the scaling run inside it either way, so a baseline capture, a
+/// bisect or a CI job still cannot reach the committed tree by forgetting that E19 has a
+/// directory of its own.
+pub fn scaling_dir(out: &Path, publish: bool) -> PathBuf {
+    if publish && out == Path::new(DEFAULT_OUT) {
         PathBuf::from(DEFAULT_SCALING_OUT)
     } else {
         out.join("E19-scaling")
@@ -134,7 +143,7 @@ mod tests {
         // its own default directory: a caller who passed `--out /tmp/...` and nothing else
         // would otherwise have written `results/E19-scaling/*.csv` from an exploratory run.
         let scratch = Path::new("/tmp/wo4/t02-before");
-        let dir = scaling_dir(scratch);
+        let dir = scaling_dir(scratch, false);
         assert!(
             dir.starts_with(scratch),
             "a custom --out must contain its own scaling directory, got {dir:?}"
@@ -149,12 +158,39 @@ mod tests {
             .iter()
             .any(|p| p == Path::new(COMMITTED_SCALING)));
 
-        // And the default `--out` puts E19 beside E16 rather than inside it: the two are
-        // separate experiments and their CSVs must not share a directory.
+        // And the default `--out` puts E19 beside E16 rather than inside it — **when
+        // publishing**: the two are separate experiments and their CSVs must not share a
+        // directory, and the committed directory is reached only by a run that says it is
+        // publishing.
         assert_eq!(
-            scaling_dir(Path::new(DEFAULT_OUT)),
+            scaling_dir(Path::new(DEFAULT_OUT), true),
             Path::new(DEFAULT_SCALING_OUT)
         );
+    }
+
+    /// **A run that does not publish may not write a committed CSV — the rule, not nearly
+    /// the rule.**
+    ///
+    /// `scaling_dir` mapped the *default* `--out` to `results/E19-scaling` whatever the run
+    /// was doing, so a diagnostic run with no `--publish` overwrote four committed files and
+    /// added a fifth. It happened on Host C, and the next run's retarget-and-refuse clause
+    /// stopped the script — which is the only reason anybody saw it.
+    #[test]
+    fn a_default_out_without_publish_stays_out_of_the_committed_tree() {
+        for (dir, what) in [
+            (scaling_dir(Path::new(DEFAULT_OUT), false), "E19"),
+            (e23_dir(Path::new(DEFAULT_OUT), false), "E23"),
+        ] {
+            assert_ne!(
+                dir,
+                Path::new(DEFAULT_SCALING_OUT),
+                "{what} reached the committed directory without --publish"
+            );
+            assert!(
+                dir.starts_with(DEFAULT_OUT),
+                "{what} without --publish must stay under --out, got {dir:?}"
+            );
+        }
     }
 
     #[test]
@@ -170,22 +206,28 @@ mod tests {
     #[test]
     fn an_unpublished_e23_sweep_writes_nothing_a_repository_tracks() {
         let scratch = Path::new("/tmp/e23-scratch");
-        assert!(!e23_destinations(&e23_dir(scratch), false)
+        assert!(!e23_destinations(&e23_dir(scratch, false), false)
             .iter()
             .any(|p| p == Path::new(COMMITTED_E23)));
-        assert!(e23_destinations(&e23_dir(scratch), true)
+        assert!(e23_destinations(&e23_dir(scratch, true), true)
             .iter()
             .any(|p| p == Path::new(COMMITTED_E23)));
         // The default `--out` puts E23 beside E16 and E19 rather than inside E16's
         // directory, which is where it landed the first time and where its CSV would have
         // been mistaken for one of E16's.
-        assert_eq!(e23_dir(Path::new(DEFAULT_OUT)), Path::new(DEFAULT_E23_OUT));
-        assert_eq!(e23_dir(scratch), scratch.join("E23-scaling"));
+        assert_eq!(
+            e23_dir(Path::new(DEFAULT_OUT), true),
+            Path::new(DEFAULT_E23_OUT)
+        );
+        assert_eq!(e23_dir(scratch, false), scratch.join("E23-scaling"));
         // Three experiments, three directories, none of them a prefix of another's file.
-        assert_ne!(e23_dir(Path::new(DEFAULT_OUT)), Path::new(DEFAULT_OUT));
         assert_ne!(
-            e23_dir(Path::new(DEFAULT_OUT)),
-            scaling_dir(Path::new(DEFAULT_OUT))
+            e23_dir(Path::new(DEFAULT_OUT), true),
+            Path::new(DEFAULT_OUT)
+        );
+        assert_ne!(
+            e23_dir(Path::new(DEFAULT_OUT), true),
+            scaling_dir(Path::new(DEFAULT_OUT), true)
         );
     }
 }

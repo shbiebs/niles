@@ -2294,12 +2294,7 @@ fn scaling_document(
          until this table existed nothing in the repository could have said whether either \
          target does.\n\n",
     );
-    s.push_str(
-        "> **This host has 2 cores.** These rows say whether throughput rises from 1 to 2 to \
-         4 connections *on two cores*. They say nothing about 16 or 48, and a reader who \
-         extrapolates them to a server-class machine is reading a number this experiment did \
-         not measure. The saturation point of a 2-core host is a property of the host.\n\n",
-    );
+    s.push_str(&render::Provenance::gather(None).cores_caveat());
     s.push_str(&render::scaling_table(samples));
     s.push_str("\n### The top step\n\n");
     s.push_str(&render::scaling_verdicts(samples));

@@ -671,6 +671,17 @@ pub struct Provenance {
     commit: &'static str,
     dirty: bool,
     baseline: Option<String>,
+    /// Cores this process may actually run on.
+    ///
+    /// **Read at run time, because it used to be typed into the prose.** Every E19 document
+    /// ever generated said "This host has 2 cores" — true of the container the sentence was
+    /// written in, and printed unchanged onto a ten-core reference host, in the one paragraph
+    /// whose whole job is to stop a reader extrapolating from the wrong machine.
+    ///
+    /// The cgroup quota first and `available_parallelism` second: `nproc` reports the
+    /// machine's cores and not the ones this process was granted, and the difference is the
+    /// whole point of the sentence.
+    cores: usize,
 }
 
 impl Provenance {
@@ -705,7 +716,46 @@ impl Provenance {
             commit: env!("NILES_COMMIT"),
             dirty: env!("NILES_DIRTY") == "true",
             baseline,
+            cores: Self::granted_cores(),
         }
+    }
+
+    /// The cgroup's quota if there is one, else what the runtime says is available.
+    ///
+    /// `cpu.max` is `"<quota> <period>"`, or `"max <period>"` when unlimited; the quota
+    /// divided by the period is the number of cores the scheduler will actually give this
+    /// process, which on a shared host is lower than the core count and is the figure a
+    /// scaling curve saturates against.
+    fn granted_cores() -> usize {
+        if let Ok(t) = std::fs::read_to_string("/sys/fs/cgroup/cpu.max") {
+            let mut it = t.split_whitespace();
+            if let (Some(q), Some(p)) = (it.next(), it.next()) {
+                if q != "max" {
+                    if let (Ok(q), Ok(p)) = (q.parse::<f64>(), p.parse::<f64>()) {
+                        if p > 0.0 && q > 0.0 {
+                            return (q / p).ceil() as usize;
+                        }
+                    }
+                }
+            }
+        }
+        std::thread::available_parallelism().map_or(1, |n| n.get())
+    }
+
+    /// The sentence that says what a connection-count curve on *this* machine can be read
+    /// for. Rendered, never typed.
+    pub fn cores_caveat(&self) -> String {
+        format!(
+            "> **This host grants {n} core{s}.** These rows say whether throughput rises with \
+             connections *on {n} core{s}*. They say nothing about a machine with more, and a \
+             reader who extrapolates them to a server-class host is reading a number this \
+             experiment did not measure: the saturation point of an {n}-core host is a \
+             property of the host. Measured from the cgroup quota at run time, not typed into \
+             this sentence — it read \"2 cores\" on a ten-core reference host for two \
+             cycles.\n\n",
+            n = self.cores,
+            s = if self.cores == 1 { "" } else { "s" }
+        )
     }
 
     pub fn render(&self, ceiling: Option<crate::storage::Ceiling>) -> String {
@@ -1351,6 +1401,59 @@ pub mod asymptotic {
             let none = fit(&[(1.0, 1.0), (2.0, 2.0)]);
             assert_eq!(per_row_of_base(&none, &ok), "**NOT RUN**");
             assert_eq!(per_row_of_answer(&ok, &none), "**NOT RUN**");
+        }
+    }
+}
+
+/// **What a machine-shaped sentence may say.**
+#[cfg(test)]
+mod provenance_cores_tests {
+    use super::Provenance;
+
+    /// The sentence must carry the number this process was granted, and must not carry a
+    /// number that was typed into it.
+    ///
+    /// Every E19 document generated before T-11 said "This host has 2 cores" — true of the
+    /// container the sentence was written in, false of the ten-core reference host it was
+    /// then published from, in the one paragraph whose job is to stop a reader extrapolating
+    /// from the wrong machine.
+    #[test]
+    fn the_cores_caveat_is_measured_rather_than_typed() {
+        let p = Provenance::gather(None);
+        let s = p.cores_caveat();
+        let n = std::thread::available_parallelism().map_or(1, |n| n.get());
+        assert!(
+            s.contains(&format!("grants {n} core")) || s.contains("grants 1 core"),
+            "the caveat does not name this machine's core count ({n}): {s}"
+        );
+        assert!(
+            s.contains("Measured from the cgroup quota"),
+            "the caveat must say the figure was measured, so a reader can tell it from a \
+             typed one: {s}"
+        );
+    }
+
+    /// The renderer's own source may not contain a core count.
+    #[test]
+    fn no_core_count_is_written_into_the_e19_prose() {
+        for (file, src) in [
+            ("render.rs", include_str!("render.rs")),
+            ("bin/bench.rs", include_str!("bin/bench.rs")),
+        ] {
+            for line in src.lines() {
+                let l = line.trim_start();
+                if !l.starts_with("s.push_str") && !l.starts_with('"') && !l.starts_with("> **") {
+                    continue;
+                }
+                for n in ["2 cores", "two cores", "4 cores", "10 cores", "ten cores"] {
+                    assert!(
+                        !l.contains(n),
+                        "{file} writes `{n}` into a rendered document. A core count belongs to \
+                         the machine a run happens on, and this document is published from \
+                         more than one:\n  {line}"
+                    );
+                }
+            }
         }
     }
 }

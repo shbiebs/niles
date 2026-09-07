@@ -778,6 +778,13 @@ impl Session {
                     // took it under concurrent writers, and no surface said so.
                     Field::int8("view_answers"),
                     Field::int8("fallbacks"),
+                    // **The two bounded-by-nothing structures, asked about.** A residency
+                    // budget that bounds values and not their metadata, and a declared
+                    // idempotency window that reached no crate below the compiler, were both
+                    // invisible: the only surface for either was a memory profile of the
+                    // whole process.
+                    Field::int8("view_metadata_keys"),
+                    Field::int8("idem_window_keys"),
                 ]),
                 Backend::DataRow(vec![
                     Some(s.reads.to_string()),
@@ -787,6 +794,8 @@ impl Session {
                     Some(s.resident.to_string()),
                     Some(s.view_answers.to_string()),
                     Some(s.fallbacks.to_string()),
+                    Some(s.view_metadata_keys.to_string()),
+                    Some(s.idem_window_keys.to_string()),
                 ]),
                 Backend::CommandComplete("SELECT 1".into()),
             ];
@@ -1370,6 +1379,31 @@ fn split_statements(sql: &str) -> Vec<String> {
 /// Returns `None` if the schema does not resolve; the caller then refuses rather than
 /// admitting everything, because "the schema is unreadable" is not a reason to accept a
 /// currency no schema declared.
+/// The idempotency window the schema declares on its ledger's `IdemKey` column, in epochs.
+///
+/// **In epochs, because the ledger has no other clock** — a wall-clock window is refused by
+/// the compiler (NL0217), so anything that reaches here is already in the unit the engine
+/// enforces. `None` means the schema did not compile or declares no ledger with an
+/// `IdemKey`, in which case both idempotency indexes keep every identity, which is what they
+/// did unconditionally before T-05 (cycle 8).
+pub fn declared_idem_window(schema: &str) -> Option<u64> {
+    let (prog, d) = niles_lang::parser::parse_program(schema);
+    if d.has_errors() {
+        return None;
+    }
+    let (cat, rd) = niles_lang::resolve::resolve_program(&prog, 0);
+    if rd.has_errors() {
+        return None;
+    }
+    cat.relations
+        .values()
+        .flat_map(|r| r.columns.iter())
+        .find_map(|c| match c.idem_window {
+            Some(niles_lang::resolve::IdemWindow::Epochs(n)) => Some(n),
+            _ => None,
+        })
+}
+
 fn declared_currencies(schema: &str) -> Option<std::collections::BTreeMap<u32, u32>> {
     let (prog, d) = niles_lang::parser::parse_program(schema);
     if d.has_errors() {
@@ -1555,7 +1589,7 @@ mod tests {
 schema bank {
     currency usd { scale: 2 }
     ledger postings { txn: TxnId, acct: Id<A>, cur: Currency, amt: Money,
-        idem: IdemKey window 1.days, conserve per (txn, cur); retain forever; }
+        idem: IdemKey window 50_000.epochs, conserve per (txn, cur); retain forever; }
     index ix on postings (acct) anchor;
 }";
 
@@ -2323,12 +2357,36 @@ schema bank {
             "resident",
             "view_answers",
             "fallbacks",
+            "view_metadata_keys",
+            "idem_window_keys",
         ] {
             assert!(
                 names.iter().any(|n| n == wanted),
                 "`select nilestream_stats` must name `{wanted}` — the benchmark looks it up                  by name and renders `n/a` when it is missing, so dropping it here would                  quietly unmeasure the column rather than break anything. Got: {names:?}"
             );
         }
+    }
+
+    /// **The declared window reaches the engine — T-05.3.**
+    ///
+    /// `idem: IdemKey window N.epochs` was checked for existence by the compiler and read by
+    /// nothing: both idempotency indexes kept every identity ever committed. The daemon now
+    /// reads it out of the schema it already compiles at start-up, and hands it to the base
+    /// and to the sealer. A schema with no window still keeps everything, which the banner
+    /// says out loud.
+    #[test]
+    fn the_daemons_schema_declares_an_idempotency_window_in_epochs() {
+        assert_eq!(
+            super::declared_idem_window(crate::daemon::DEFAULT_SCHEMA),
+            Some(1_000_000),
+            "the shipped schema must declare a window the engine can honour, in epochs"
+        );
+        assert_eq!(
+            super::declared_idem_window("schema s { currency usd { scale: 2 } }"),
+            None,
+            "a schema with no ledger declares no window, and the daemon says so rather than \
+             assuming one"
+        );
     }
 
     #[test]

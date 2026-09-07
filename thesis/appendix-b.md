@@ -117,7 +117,7 @@ schema bank {
         cur: Currency,
         amt: Money,
         value_date: Date,
-        idem: IdemKey window 30.days,
+        idem: IdemKey window 1_000_000.epochs,
         conserve per (txn, cur);      // the commit rule
         retain forever;               // mandatory on a ledger
         lineage full;                 // base-level provenance retention
@@ -361,14 +361,14 @@ schema demo_bank {
 
     ledger postings {
         txn: TxnId, acct: Id<Account>, cur: Currency, amt: Money,
-        value_date: Date, idem: IdemKey window 30.days,
+        value_date: Date, idem: IdemKey window 1_000_000.epochs,
         conserve per (txn, cur);
         retain forever;
     }
 
     ledger holds {
         id: HoldId, acct: Id<Account>, cur: Currency, amount: Money,
-        expires: Instant, idem: IdemKey window 7.days,
+        expires: Instant, idem: IdemKey window 250_000.epochs,
         retain forever;
     }
 

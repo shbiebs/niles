@@ -775,6 +775,7 @@ impl<'a> Parser<'a> {
             primary_key: false,
             unique: false,
             default: None,
+            window: None,
             check: None,
             attrs: attrs.clone(),
             span: start,
@@ -801,12 +802,12 @@ impl<'a> Parser<'a> {
                     f.check = Some(self.expr());
                     self.expect(Tok::RParen, "to close a check constraint");
                 }
-                // `idem: IdemKey window 30.days` — the window belongs to the column,
+                // `idem: IdemKey window 1_000_000.epochs` — the window belongs to the column,
                 // because an idempotency key without a window is not idempotent, it is
                 // merely unique, and the difference is a business rule.
                 Tok::Kw(Kw::Window) => {
                     self.bump();
-                    f.default = Some(self.expr());
+                    f.window = Some(self.expr());
                 }
                 Tok::At | Tok::HashBracket => f.attrs.extend(self.attrs()),
                 _ => break,

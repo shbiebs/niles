@@ -10,7 +10,7 @@ schema bank {
     // which arrived for the right reason by accident. The pair claims the same defect written
     // twice; on this row it was two different defects until now.
     ledger postings { txn: TxnId, acct: Id<A>, cur: Currency, amt: Money,
-        value_date: Instant, idem: IdemKey window 1.days,
+        value_date: Instant, idem: IdemKey window 50_000.epochs,
         conserve per (txn, cur); retain forever; }
     index ix on postings (acct, cur) anchor;
     view v = postings.group_by(|p| p.value_date).sum(|p| p.amt)

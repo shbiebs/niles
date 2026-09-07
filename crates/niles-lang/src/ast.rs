@@ -236,6 +236,15 @@ pub struct FieldDecl {
     pub primary_key: bool,
     pub unique: bool,
     pub default: Option<Expr>,
+    /// `idem: IdemKey window 1_000_000.epochs` — the idempotency window declared on the
+    /// column.
+    ///
+    /// **Its own field, because it used to share `default`'s.** The parser wrote both
+    /// clauses into `default`, so `IdemKey default "x"` satisfied the only check that an
+    /// idempotency key has a window (NL0215), and a column declaring both kept whichever
+    /// came last. The check on the one construct whose absence is a business rule was
+    /// vacuous in the presence of an unrelated clause.
+    pub window: Option<Expr>,
     pub check: Option<Expr>,
     pub attrs: Vec<Attr>,
     pub span: Span,

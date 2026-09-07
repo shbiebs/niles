@@ -75,8 +75,32 @@ pub struct ColumnInfo {
     /// `None` on a column that is not confidential, and a refusal (NL0261) on one that is:
     /// a sealed value whose owner the schema does not name is a value no erasure can find.
     pub confidential_subject: Option<String>,
-    pub idem_window: bool,
+    /// The idempotency window this column declares, if it declares one.
+    ///
+    /// Carried rather than reduced to a flag: it used to be `bool`, so the window was
+    /// checked for *existence* and then dropped, and nothing below the compiler knew how
+    /// long an identity was supposed to be remembered. Both idempotency indexes therefore
+    /// kept every identity ever committed — 68.8 B and 99.6 B each, forever (E18) — which is
+    /// the one structure in the write path whose size was a function of history.
+    pub idem_window: Option<IdemWindow>,
     pub span: Span,
+}
+
+/// A declared idempotency window.
+///
+/// **Epochs are the only unit the engine can honour.** An epoch carries no wall clock: the
+/// durable record is `parent ‖ hash ‖ canon(rows)`, and a timestamp under that hash would
+/// make every committed chain hash time-dependent. So a wall-clock window is refused
+/// (NL0217) rather than converted with an assumed epoch quantum — the conversion would be a
+/// number the compiler invented, and the window would be wrong by whatever the write rate
+/// turned out to be. Decided by the author as LC-28, cycle 8.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdemWindow {
+    /// `window 1_000_000.epochs` — the form the ledger and the sealer both enforce.
+    Epochs(u64),
+    /// `window 30.days` — declared in wall-clock time, which this system has no coordinate
+    /// for. Kept in the catalogue so the diagnostic can say what was written.
+    WallClock { millis: i128 },
 }
 
 /// The two numbers a `bounded(..)` rung is parameterised by.
@@ -493,8 +517,17 @@ fn relation_info(r: &RelDecl) -> RelationInfo {
             money_currency,
             confidential,
             confidential_subject,
-            idem_window: f.default.is_some()
-                && matches!(&f.ty, Ty::Path { path, .. } if path.last().text == "IdemKey"),
+            idem_window: f.window.as_ref().and_then(|w| match w {
+                Expr::Duration {
+                    value,
+                    unit: crate::lexer::TimeUnit::Epochs,
+                    ..
+                } => Some(IdemWindow::Epochs((*value).max(0) as u64)),
+                Expr::Duration { value, unit, .. } => Some(IdemWindow::WallClock {
+                    millis: unit.millis().unwrap_or(0) * *value,
+                }),
+                _ => None,
+            }),
             span: f.name.span,
         });
     }
@@ -712,14 +745,27 @@ fn check_relation(r: &RelDecl, cat: &Catalog, d: &mut Diagnostics) {
             }
         }
         // W19: an idempotency key without a window is not idempotent, merely unique.
-        if matches!(&c.ty, Ty::Path { path, .. } if path.last().text == "IdemKey") && !c.idem_window
-        {
-            d.push(
-                Diagnostic::error("NL0215", format!("`{}` is an `IdemKey` with no window", c.name))
-                    .primary(c.span, "no `window` clause")
-                    .note("without a window a key is unique forever, which is a uniqueness constraint, not an idempotency window")
-                    .suggest(c.span, "window 24.hours", "declare the window", Applicability::HasPlaceholders),
-            );
+        if matches!(&c.ty, Ty::Path { path, .. } if path.last().text == "IdemKey") {
+            match c.idem_window {
+                None => d.push(
+                    Diagnostic::error("NL0215", format!("`{}` is an `IdemKey` with no window", c.name))
+                        .primary(c.span, "no `window` clause")
+                        .note("without a window a key is unique forever, which is a uniqueness constraint, not an idempotency window")
+                        .suggest(c.span, "window 1_000_000.epochs", "declare the window", Applicability::HasPlaceholders),
+                ),
+                // NL0217: a window this system has no clock to measure.
+                Some(IdemWindow::WallClock { .. }) => d.push(
+                    Diagnostic::error(
+                        "NL0217",
+                        format!("`{}` declares its idempotency window in wall-clock time", c.name),
+                    )
+                    .primary(c.span, "an epoch carries no clock")
+                    .note("the ledger's only time coordinate is the epoch. The durable record is `parent | hash | canon(rows)`, and a timestamp under that hash would make every committed chain hash depend on when it was written")
+                    .note("converting days to epochs here would mean inventing a write rate, and the window would then be wrong by however much the real rate differed")
+                    .suggest(c.span, "window 1_000_000.epochs", "count the window in epochs", Applicability::HasPlaceholders),
+                ),
+                Some(IdemWindow::Epochs(_)) => {}
+            }
         }
     }
 }
@@ -922,5 +968,63 @@ mod confidentiality_tests {
              owner: Text @confidential(e2ee, subject = who) }} }}"
         ))
         .contains(&"NL0261".to_string()));
+    }
+}
+
+/// **The idempotency window: that it is declared, and in a unit the engine can honour.**
+#[cfg(test)]
+mod idem_window_tests {
+    use crate::{parser, resolve};
+
+    fn codes(src: &str) -> Vec<String> {
+        let (prog, mut d) = parser::parse_program(src);
+        let (_cat, rd) = resolve::resolve_program(&prog, 0);
+        d.extend(rd);
+        d.items
+            .iter()
+            .filter(|x| x.severity == crate::diagnostics::Severity::Error)
+            .map(|x| x.code.to_string())
+            .collect()
+    }
+
+    fn ledger_with(col: &str) -> String {
+        format!(
+            "schema s {{ currency usd {{ scale: 2 }}\n\
+             ledger postings {{ txn: TxnId, acct: Id<Account>, cur: Currency, amt: Money, \
+             {col}, conserve per (txn, cur); retain forever; }}\n\
+             index ix on postings (acct) anchor; }}"
+        )
+    }
+
+    #[test]
+    fn a_window_in_epochs_is_accepted() {
+        assert!(codes(&ledger_with("idem: IdemKey window 1_000_000.epochs")).is_empty());
+    }
+
+    #[test]
+    fn a_window_in_wall_clock_is_refused() {
+        assert!(codes(&ledger_with("idem: IdemKey window 30.days")).contains(&"NL0217".to_string()));
+    }
+
+    #[test]
+    fn no_window_at_all_is_still_refused() {
+        assert!(codes(&ledger_with("idem: IdemKey")).contains(&"NL0215".to_string()));
+    }
+
+    /// **The check on the window was vacuous in the presence of an unrelated clause.**
+    ///
+    /// `window <expr>` and `default <expr>` were parsed into the same `FieldDecl` slot, and
+    /// the only thing NL0215 asked was whether that slot was occupied. So an `IdemKey` with
+    /// a `default` and no window passed the one check whose whole purpose is to say that an
+    /// idempotency key without a window is a uniqueness constraint on all of history — and a
+    /// column declaring both kept whichever came last, silently. The window now has its own
+    /// field, and this is the case that was accepted before it did.
+    #[test]
+    fn a_default_is_not_a_window() {
+        assert!(
+            codes(&ledger_with("idem: IdemKey default \"x\"")).contains(&"NL0215".to_string()),
+            "an `IdemKey` with a `default` and no window must still be refused: a default is \
+             not a window, and reading one as the other made the check vacuous"
+        );
     }
 }

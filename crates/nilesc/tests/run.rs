@@ -68,7 +68,7 @@ schema bank {
     currency usd { scale: 2 }
     ledger postings {
         txn: TxnId, acct: Id<Account>, cur: Currency, amt: Money,
-        idem: IdemKey window 30.days,
+        idem: IdemKey window 1_000_000.epochs,
         conserve per (txn, cur);
         retain forever;
     }
@@ -288,7 +288,7 @@ schema bank {
     currency usd { scale: 2 }
     ledger postings {
         txn: TxnId, acct: Id<Account>, cur: Currency, amt: Money,
-        idem: IdemKey window 30.days,
+        idem: IdemKey window 1_000_000.epochs,
         conserve per (txn, cur);
         retain forever;
     }

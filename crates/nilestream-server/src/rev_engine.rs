@@ -53,6 +53,19 @@ pub struct ReadStats {
     /// because no surface in the server could be asked.
     pub view_answers: u64,
     pub fallbacks: u64,
+    /// **The two structures whose size is a function of history, made askable.**
+    ///
+    /// `view_metadata_keys` is how many keys the view's eviction-policy metadata describes;
+    /// the residency budget is supposed to bound it and did not, at 159 B per key ever read.
+    /// `idem_window_keys` is how many identities the base's idempotency index holds, which
+    /// the declared window is supposed to bound and did not, at 68.8 B each forever.
+    ///
+    /// Both are columns rather than a memory figure because a bound nobody can ask about is
+    /// a bound nobody can hold: a view whose metadata is linear in history and a ledger whose
+    /// index is linear in history are the two ways this engine stops fitting, and until T-05
+    /// (cycle 8) neither had a surface.
+    pub view_metadata_keys: u64,
+    pub idem_window_keys: u64,
 }
 
 impl ReadStats {
@@ -241,9 +254,18 @@ impl DurableSink {
     pub fn open_recovered(
         path: impl AsRef<std::path::Path>,
     ) -> std::io::Result<(DurableSink, nilestream_ledger::segment::Recovery)> {
-        let (seq, recovery) = nilestream_ledger::sequencer::Sequencer::open_recovered(
+        Self::open_bounded(path, None)
+    }
+
+    /// The same, with the schema's declared idempotency window, in epochs.
+    pub fn open_bounded(
+        path: impl AsRef<std::path::Path>,
+        idem_window: Option<u64>,
+    ) -> std::io::Result<(DurableSink, nilestream_ledger::segment::Recovery)> {
+        let (seq, recovery) = nilestream_ledger::sequencer::Sequencer::open_bounded(
             path,
             nilestream_ledger::segment::SyncPolicy::Always,
+            idem_window,
         )?;
         Ok((DurableSink { seq }, recovery))
     }
@@ -328,6 +350,27 @@ impl RevEngine {
     /// latencies for queries that return nothing, and because a partial view over a base with
     /// no history has nothing to reconstruct — the miss path, which is the interesting one,
     /// would never run.
+    /// Apply the schema's declared idempotency window, in epochs, to the base's admission
+    /// index.
+    ///
+    /// The other half is [`with_durable_bounded`](Self::with_durable_bounded), which gives
+    /// the same window to the sealer. Both are needed: a durable daemon holds two indexes and
+    /// every committed identity is in both.
+    pub fn with_idem_window(self, epochs: Option<u64>) -> Self {
+        if let Some(w) = epochs {
+            let ledger = std::mem::take(&mut *self.ledger.write().expect("not poisoned"));
+            *self.ledger.write().expect("not poisoned") = ledger.with_idem_window(w);
+        }
+        self
+    }
+
+    /// How many identities the base's idempotency index holds, and the window it was
+    /// declared with. `nilestream_stats.idem_window_keys`.
+    pub fn idem_window(&self) -> (usize, Option<u64>) {
+        let l = self.base();
+        (l.idem_window_keys(), l.idem_window())
+    }
+
     pub fn seeded(
         accounts: i64,
         postings_per_account: u32,
@@ -844,6 +887,7 @@ impl crate::session::Serving for RevEngine {
             .runtime
             .as_ref()
             .map(|rt| rt.lock().expect("the view lock is not poisoned"));
+        let idem_keys = self.base().idem_window_keys() as u64;
         let view_answers = self.view_answers.load(std::sync::atomic::Ordering::Relaxed);
         let fallbacks = self
             .view_fallbacks
@@ -859,6 +903,8 @@ impl crate::session::Serving for RevEngine {
                     resident: v.resident_count() as usize,
                     view_answers,
                     fallbacks,
+                    view_metadata_keys: v.metadata_len() as u64,
+                    idem_window_keys: idem_keys,
                 }
             }
             // No runtime: the server has no partial state at all, so nothing is resident
@@ -869,6 +915,7 @@ impl crate::session::Serving for RevEngine {
                 rows_touched: served_rows,
                 view_answers,
                 fallbacks,
+                idem_window_keys: idem_keys,
                 ..Default::default()
             },
         }
@@ -928,7 +975,21 @@ impl crate::session::Serving for std::sync::RwLock<RevEngine> {
 impl RevEngine {
     /// Attach a durable sink, so every append reaches stable storage before it is
     /// acknowledged. Refuses any policy but `Always`, which the sequencer also refuses.
-    pub fn with_durable(mut self, path: impl AsRef<std::path::Path>) -> std::io::Result<Self> {
+    pub fn with_durable(self, path: impl AsRef<std::path::Path>) -> std::io::Result<Self> {
+        self.with_durable_bounded(path, None)
+    }
+
+    /// `with_durable`, with the idempotency window the schema declared, in epochs.
+    ///
+    /// The window reaches **both** indexes: the ledger's admission map here and the sealer's
+    /// own, through [`DurableSink::open_bounded`]. Two structures held every identity ever
+    /// committed until T-05 (cycle 8), at a measured 68.8 B and 99.6 B each (E18), and a
+    /// window that bounded one of them would have moved the leak rather than closed it.
+    pub fn with_durable_bounded(
+        mut self,
+        path: impl AsRef<std::path::Path>,
+        idem_window: Option<u64>,
+    ) -> std::io::Result<Self> {
         // **The seeded prefix, before anything is replayed.** Seeding is not durable and is
         // not meant to be: it is a deterministic function of `(accounts, rounds)` that both
         // the original process and this one ran. Every recovered transaction lands on top of
@@ -941,7 +1002,7 @@ impl RevEngine {
         // epoch under group commit — which is to say, under every workload the sealer exists
         // for.
         let seed_epochs = self.base().epochs.len() as u64;
-        let (sink, recovery) = DurableSink::open_recovered(path)?;
+        let (sink, recovery) = DurableSink::open_bounded(path, idem_window)?;
         let txns = nilestream_ledger::sequencer::Sequencer::recover_txns(&recovery);
 
         {
@@ -3909,6 +3970,10 @@ mod fallback_rate_tests {
             resident: after.resident,
             view_answers: after.view_answers - before.view_answers,
             fallbacks: after.fallbacks - before.fallbacks,
+            // Levels, not deltas: both are sizes of a structure, and the difference between
+            // two sizes is not a size.
+            view_metadata_keys: after.view_metadata_keys,
+            idem_window_keys: after.idem_window_keys,
         }
     }
 

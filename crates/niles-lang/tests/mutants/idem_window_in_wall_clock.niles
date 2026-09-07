@@ -1,0 +1,19 @@
+// RULE: LC-28 (cycle 8) — an idempotency window is counted in epochs, because the ledger has
+// no other clock. The durable record is `parent | hash | canon(rows)`, and a timestamp under
+// that hash would make every committed chain hash depend on when it was written.
+// WHY IT MATTERS: `window 30.days` compiled for four cycles and reached nothing. Both
+// idempotency indexes kept every identity ever committed — 68.8 B and 99.6 B each, forever
+// (E18) — so the declared window was a comment. Converting days to epochs in the compiler
+// would mean inventing a write rate, and the window would then be wrong by however much the
+// real rate differed; the refusal is the honest option.
+// EXPECT: NL0217
+// STAGE: check
+schema wallclock {
+    ledger wallclock_postings {
+        txn: TxnId, acct: Id<Account>, cur: Currency, amt: Money,
+        idem: IdemKey window 30.days,
+        conserve per (txn, cur);
+        retain forever;
+    }
+    index ix_wallclock on wallclock_postings (acct) anchor;
+}

@@ -62,7 +62,7 @@ schema bank {
     table accounts { id: Id<Account> primary key, owner: Text @confidential(e2ee, subject = id) }
     ledger postings {
         txn: TxnId, acct: Id<Account>, cur: Currency, amt: Money,
-        idem: IdemKey window 30.days,
+        idem: IdemKey window 1_000_000.epochs,
         conserve per (txn, cur);
         retain forever;
     }
@@ -450,7 +450,7 @@ fn a_missing_anchor_index_warns_with_the_measured_reason() {
 schema b {
     currency usd { scale: 2 }
     ledger postings { txn: TxnId, acct: Id<A>, cur: Currency, amt: Money,
-        idem: IdemKey window 1.days, conserve per (txn, cur); retain forever; }
+        idem: IdemKey window 50_000.epochs, conserve per (txn, cur); retain forever; }
     view v = postings.group_by(|p| (p.acct, p.cur)).sum(|p| p.amt)
         serve { consistency: snapshot, materialize: demand };
 }

@@ -44,7 +44,7 @@ schema warehouse {
         place: Id<Account>,
         sku: Currency,
         qty: Money,
-        idem: IdemKey window 30.days,
+        idem: IdemKey window 1_000_000.epochs,
         conserve per (txn, sku);
         retain forever;
     }

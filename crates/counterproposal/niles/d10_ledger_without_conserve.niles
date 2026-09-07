@@ -5,7 +5,7 @@
 schema bank {
     currency usd { scale: 2 }
     ledger postings { txn: TxnId, acct: Id<A>, cur: Currency, amt: Money,
-        idem: IdemKey window 1.days,
+        idem: IdemKey window 50_000.epochs,
         retain forever; }
     index ix on postings (acct, cur) anchor;
 }

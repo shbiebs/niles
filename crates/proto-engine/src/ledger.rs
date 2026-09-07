@@ -7,7 +7,8 @@
 //!     key's own update count rather than to the length of history, and it is what the
 //!     history-independence experiment (E5) tests.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 
 use nilestream_ledger::chain::Hasher256;
 
@@ -79,7 +80,30 @@ pub struct RowRef {
 #[derive(Default)]
 pub struct Ledger {
     pub epochs: Vec<EpochRec>,
-    idem: HashSet<String>,
+    /// The idempotency window: which identities have committed, and at which epoch.
+    ///
+    /// A `HashSet<String>` before T-05 (cycle 8), and unbounded: every identity the ledger
+    /// had ever admitted stayed in it forever, at a measured 68.8 B each (E18,
+    /// `idem_admission_index`), so the write path's memory was linear in history. A
+    /// declared window — `idem: IdemKey window N.epochs` — is what the language always
+    /// said this was, and nothing below the compiler had it.
+    ///
+    /// `Arc<str>`, so [`idem_order`](Self::idem_order) can hold the same identity in commit
+    /// order without a second copy of the string: sixteen bytes for the pointer against
+    /// sixty-eight for the key. A `HashMap` and not a `BTreeMap` because this index is
+    /// looked up by key and never iterated in an order anything depends on — the one place
+    /// order matters, [`with_idem_window`](Self::with_idem_window), sorts by epoch — and a
+    /// `BTreeMap` here measured 26 B per identity more (E18 `ledger_seeded`), on the
+    /// structure whose size this task exists to bound.
+    idem: HashMap<Arc<str>, Epoch>,
+    /// The same identities in commit order, so pruning is O(1) at the front rather than a
+    /// scan for old epochs. One transaction is one epoch, so the deque's length *is* the
+    /// number of epochs the window holds.
+    idem_order: VecDeque<Arc<str>>,
+    /// How many epochs an identity stays in the window. `None` is the old behaviour —
+    /// forever — and is what a ledger built without a declared window still does; it is
+    /// reported as such rather than assumed, over the wire as `idem_window_keys`.
+    idem_window: Option<u64>,
     /// Anchor index: account -> positions of that account's postings, in epoch order.
     by_account: HashMap<Acct, Vec<RowRef>>,
     /// Anchor index for holds, keyed by account.
@@ -288,10 +312,79 @@ impl Ledger {
         h.finalize()
     }
 
+    /// Set the idempotency window, in epochs, and prune to it.
+    ///
+    /// **Epochs, not days.** An epoch carries no wall clock: the durable record is
+    /// `parent ‖ hash ‖ canon(rows)` and adding a timestamp under the chain would make every
+    /// committed hash time-dependent. The window is therefore counted in the coordinate the
+    /// ledger actually has (LC-28, decided by the author, cycle 8), and a declaration in
+    /// days is refused by the compiler rather than silently rounded here.
+    ///
+    /// What it gives up, stated where it is chosen: **a retry of a transaction older than
+    /// the window commits a second time.** That is what a window *is* — an idempotency key
+    /// without one is a uniqueness constraint on all of history, which is the unbounded
+    /// structure this replaces — and it is the reason the language requires the window to be
+    /// declared rather than defaulted.
+    pub fn with_idem_window(mut self, epochs: u64) -> Self {
+        self.idem_window = Some(epochs);
+        // A window declared over an already-populated ledger has no commit order to prune
+        // by — the index was built without one — so it starts from what is there. Every
+        // identity committed from here is ordered, and the window binds once the deque
+        // holds more than it.
+        if self.idem_order.is_empty() && !self.idem.is_empty() {
+            let mut by_epoch: Vec<(Epoch, Arc<str>)> =
+                self.idem.iter().map(|(k, e)| (*e, Arc::clone(k))).collect();
+            by_epoch.sort_by_key(|(e, _)| *e);
+            self.idem_order = by_epoch.into_iter().map(|(_, k)| k).collect();
+        }
+        self.prune_idem();
+        self
+    }
+
+    /// How many identities the window holds. `nilestream_stats.idem_window_keys`.
+    pub fn idem_window_keys(&self) -> usize {
+        self.idem.len()
+    }
+
+    /// The declared window, in epochs; `None` if this ledger was built without one.
+    pub fn idem_window(&self) -> Option<u64> {
+        self.idem_window
+    }
+
+    fn remember_identity(&mut self, key: &str, at: Epoch) {
+        let k: Arc<str> = Arc::from(key);
+        // **The commit-order index exists only for a declared window.** With no window
+        // nothing is ever pruned, so the deque would be a second pointer to every identity
+        // in the ledger's history for no purpose — measured at +12% bytes per transaction
+        // (E18 `append_in_memory`) before this branch existed. A cost that buys nothing is
+        // not a cost this path should pay.
+        if self.idem_window.is_some() {
+            self.idem_order.push_back(Arc::clone(&k));
+        }
+        self.idem.insert(k, at);
+        self.prune_idem();
+    }
+
+    /// Drop identities that have fallen out of the window.
+    ///
+    /// One transaction is one epoch, so the deque's length is the number of epochs held and
+    /// the bound is exact rather than amortised. Popping the front is O(1): the deque is in
+    /// commit order because epochs are, which is the one thing an append-only ledger can
+    /// always be relied on for.
+    fn prune_idem(&mut self) {
+        let Some(w) = self.idem_window else { return };
+        let w = w.max(1) as usize;
+        while self.idem_order.len() > w {
+            if let Some(old) = self.idem_order.pop_front() {
+                self.idem.remove(&old);
+            }
+        }
+    }
+
     /// Admission: idempotency, then the commit rule (per (txn, currency) sum-zero), then
     /// hold-resolution validity; then seal the batch as one epoch.
     pub fn submit(&mut self, key: &str, rows: Vec<Row>) -> Result<Epoch, Reject> {
-        if self.idem.contains(key) {
+        if self.idem.contains_key(key) {
             return Err(Reject::Duplicate);
         }
 
@@ -376,7 +469,7 @@ impl Ledger {
             hash,
             rows,
         });
-        self.idem.insert(key.to_string());
+        self.remember_identity(key, id);
         Ok(id)
     }
 
@@ -927,6 +1020,81 @@ mod chain_tests {
             !l.verify_chain(),
             "reordering sealed epochs must break the chain, or the ledger's order is not \
              part of what it commits to"
+        );
+    }
+}
+
+/// **The idempotency window: what it bounds, and what it gives up.**
+///
+/// Its own module because it is its own mechanism — not a checkpoint, not the commit rule —
+/// and the two tests below are the pair the design has to be judged on together: the index
+/// is bounded, *and* a retry older than the bound commits again.
+#[cfg(test)]
+mod idem_window_tests {
+    use super::*;
+
+    const USD: Cur = 840;
+
+    fn post(txn: u64, acct: Acct, amt: Minor) -> Row {
+        Row::Post(Posting {
+            txn,
+            acct,
+            cur: USD,
+            amt,
+            valid: 0,
+        })
+    }
+
+    /// **A key older than the window is admitted as new — T-05.3.**
+    ///
+    /// The window is what makes the idempotency index bounded, and this is the behaviour it
+    /// buys and pays for in the same breath: inside the window a retry is refused and told
+    /// nothing committed twice; outside it, the same key commits again, because the ledger
+    /// no longer holds the evidence that it ever committed. An `IdemKey` without a window is
+    /// a uniqueness constraint over all of history, which is exactly the structure that grew
+    /// at 68.8 B per identity forever.
+    #[test]
+    fn a_key_older_than_the_window_is_new() {
+        const WINDOW: u64 = 4;
+        let mut l = Ledger::default().with_idem_window(WINDOW);
+        for i in 0..10u64 {
+            l.submit(&format!("k{i}"), vec![post(i, 1, 5), post(i, 999, -5)])
+                .expect("balanced and new");
+        }
+        assert_eq!(
+            l.idem_window_keys(),
+            WINDOW as usize,
+            "the window must bound the index: {} identities held against a window of {WINDOW}",
+            l.idem_window_keys()
+        );
+        assert_eq!(
+            l.submit("k9", vec![post(99, 1, 5), post(99, 999, -5)]),
+            Err(Reject::Duplicate),
+            "`k9` is inside the window and its retry must be refused"
+        );
+        assert!(
+            l.submit("k0", vec![post(100, 1, 5), post(100, 999, -5)])
+                .is_ok(),
+            "`k0` has fallen out of the window, so the ledger no longer knows it committed \
+             and admits it as new. That is what a window is, and why it is declared."
+        );
+    }
+
+    /// Without a declared window nothing is pruned — stated as a test rather than as an
+    /// absence, so that the default is visible and a change to it is a failing assertion.
+    #[test]
+    fn no_declared_window_keeps_every_identity() {
+        let mut l = Ledger::default();
+        for i in 0..10u64 {
+            l.submit(&format!("k{i}"), vec![post(i, 1, 5), post(i, 999, -5)])
+                .expect("balanced and new");
+        }
+        assert_eq!(l.idem_window(), None);
+        assert_eq!(l.idem_window_keys(), 10);
+        assert_eq!(
+            l.submit("k0", vec![post(100, 1, 5), post(100, 999, -5)]),
+            Err(Reject::Duplicate),
+            "with no window, the first identity is still known"
         );
     }
 }

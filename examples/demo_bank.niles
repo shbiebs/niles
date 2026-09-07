@@ -24,7 +24,7 @@ schema demo_bank {
         cur: Currency,
         amt: Money,
         value_date: Date,
-        idem: IdemKey window 30.days,
+        idem: IdemKey window 1_000_000.epochs,
         conserve per (txn, cur);
         retain forever;
         bitemporal;
@@ -41,7 +41,7 @@ schema demo_bank {
         cur: Currency,
         amount: Money,
         expires: Instant,
-        idem: IdemKey window 7.days,
+        idem: IdemKey window 250_000.epochs,
         retain forever;
     }
 

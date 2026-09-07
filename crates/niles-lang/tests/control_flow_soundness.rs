@@ -37,7 +37,7 @@ fn check(body: &str) -> Out {
     currency usd {{ scale: 2 }}
     currency eur {{ scale: 2 }}
     ledger postings {{ txn: TxnId, acct: Id<A>, cur: Currency, amt: Money,
-        idem: IdemKey window 1.days, conserve per (txn, cur); retain forever; }}
+        idem: IdemKey window 50_000.epochs, conserve per (txn, cur); retain forever; }}
     index ix on postings (acct) anchor;
 }}
 {body}

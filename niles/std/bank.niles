@@ -41,7 +41,7 @@ schema std_bank {
         // a payment recorded on Friday with Monday's value date — and a ledger that
         // conflated them could not answer "what did we believe on Friday" at all.
         value_date: Date,
-        idem: IdemKey window 30.days,
+        idem: IdemKey window 1_000_000.epochs,
         conserve per (txn, cur);
         retain forever;
         bitemporal;
@@ -56,7 +56,7 @@ schema std_bank {
         cur: Currency,
         amount: Money,
         expires: Instant,
-        idem: IdemKey window 7.days,
+        idem: IdemKey window 250_000.epochs,
         retain forever;
     }
 

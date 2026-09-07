@@ -132,16 +132,32 @@ fn main() {
     //
     // `SyncPolicy::Always` is the only policy `DurableSink::open` accepts, so there is no
     // flag here that quietly buys throughput by weakening the guarantee.
+    // **The declared idempotency window, in epochs, from the schema this daemon compiled.**
+    //
+    // `idem: IdemKey window N.epochs` reached nothing below the compiler until T-05 (cycle
+    // 8): both idempotency indexes kept every identity ever committed, at a measured 68.8 B
+    // and 99.6 B each (E18), so the write path's memory was a function of history. A schema
+    // that declares no window still keeps everything — the banner says which, because a
+    // memory bound nobody can see is a memory bound nobody can act on.
+    let idem_window = crate::session::declared_idem_window(&schema);
+    match idem_window {
+        Some(w) => eprintln!("  idempotency window: {w} epochs, from the schema"),
+        None => eprintln!(
+            "  idempotency window: none declared — every identity is kept, and the index \
+             grows with history"
+        ),
+    }
     let base = RevEngine::seeded(
         accounts,
         rounds,
         budget,
         mode,
         proto_engine::EvictionPolicy::Lru,
-    );
+    )
+    .with_idem_window(idem_window);
     let base = match &durable {
         None => base,
-        Some(path) => match base.with_durable(path) {
+        Some(path) => match base.with_durable_bounded(path, idem_window) {
             Ok(e) => {
                 eprintln!("  durable sink at {path} — SyncPolicy::Always, fsync before publish");
                 e

@@ -164,6 +164,15 @@ impl Sequencer {
         path: impl AsRef<std::path::Path>,
         policy: SyncPolicy,
     ) -> std::io::Result<(Sequencer, Recovery)> {
+        Self::open_bounded(path, policy, None)
+    }
+
+    /// `open_recovered`, with the idempotency window the schema declared, in epochs.
+    pub fn open_bounded(
+        path: impl AsRef<std::path::Path>,
+        policy: SyncPolicy,
+        window: Option<u64>,
+    ) -> std::io::Result<(Sequencer, Recovery)> {
         if matches!(policy, SyncPolicy::Never) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -182,7 +191,7 @@ impl Sequencer {
             frontier.publish(head + 1);
         }
         Ok((
-            Self::start_with_window(segment, frontier, policy, seen),
+            Self::start_bounded(segment, frontier, policy, seen, window),
             recovery,
         ))
     }
@@ -233,10 +242,35 @@ impl Sequencer {
 
     /// Start with a recovered idempotency window.
     pub fn start_with_window(
+        segment: Segment,
+        frontier: Arc<Frontier>,
+        policy: SyncPolicy,
+        recovered_seen: std::collections::BTreeMap<String, u64>,
+    ) -> Sequencer {
+        Self::start_bounded(segment, frontier, policy, recovered_seen, None)
+    }
+
+    /// The same, with the idempotency window the schema declared, **in epochs**.
+    ///
+    /// The sealer's window is the second of the two this system holds — the ledger's
+    /// admission index is the other — and until T-05 (cycle 8) neither was bounded: every
+    /// identity ever committed stayed in both, at a measured 99.6 B here and 68.8 B there
+    /// (E18), so 168.4 B per identity, forever, on the write path.
+    ///
+    /// `None` keeps every identity, which is what a sequencer built without a declared
+    /// window does, and is reported rather than assumed.
+    ///
+    /// **Epochs, not days**: an epoch carries no wall clock, and putting a timestamp under
+    /// the chain hash would make every committed hash time-dependent (LC-28, decided by the
+    /// author, cycle 8). A batch commits as one epoch here, so unlike the ledger's window
+    /// this one holds *at least* `window` epochs' worth of identities and not a fixed count:
+    /// the bound is on age, which is what the declaration says.
+    pub fn start_bounded(
         mut segment: Segment,
         frontier: Arc<Frontier>,
         policy: SyncPolicy,
         recovered_seen: std::collections::BTreeMap<String, u64>,
+        window: Option<u64>,
     ) -> Sequencer {
         let (tx, rx): (Sender<Request>, Receiver<Request>) = channel();
         let stats = Arc::new(Mutex::new(SequencerStats::default()));
@@ -247,7 +281,18 @@ impl Sequencer {
             // starting empty. `BTreeMap`, not `HashMap`: the window decides which epoch a
             // duplicate is told it committed at, and an epoch is a hashed, audited value
             // (GC-12 in this repository's conventions).
-            let mut seen: std::collections::BTreeMap<String, u64> = recovered_seen;
+            let mut seen: std::collections::BTreeMap<std::sync::Arc<str>, u64> = recovered_seen
+                .into_iter()
+                .map(|(k, e)| (std::sync::Arc::from(k.as_str()), e))
+                .collect();
+            // The same identities in commit order, so the window prunes from the front in
+            // O(1) instead of scanning the map for old epochs. `Arc<str>`: the deque holds a
+            // pointer to the key the map already owns, not a second copy of it.
+            let mut order: std::collections::VecDeque<(std::sync::Arc<str>, u64)> = seen
+                .iter()
+                .map(|(k, e)| (std::sync::Arc::clone(k), *e))
+                .collect();
+            order.make_contiguous().sort_by_key(|(_, e)| *e);
 
             while let Ok(first) = rx.recv() {
                 // Drain everything already waiting: one fsync will commit all of it.
@@ -276,7 +321,7 @@ impl Sequencer {
                     std::collections::HashMap::new();
                 let mut deferred: Vec<(usize, Sender<Result<u64, Rejected>>)> = Vec::new();
                 for req in batch {
-                    if let Some(e) = seen.get(&req.txn.idem_key) {
+                    if let Some(e) = seen.get(req.txn.idem_key.as_str()) {
                         // Account for it *before* replying. The reply is what makes the
                         // outcome observable to the caller, and a caller who can see the
                         // outcome must be able to see the state that produced it. This is
@@ -350,7 +395,25 @@ impl Sequencer {
                             st.max_batch = st.max_batch.max(fresh.len() as u64);
                         }
                         for r in &fresh {
-                            seen.insert(r.txn.idem_key.clone(), epoch);
+                            let k: std::sync::Arc<str> =
+                                std::sync::Arc::from(r.txn.idem_key.as_str());
+                            seen.insert(std::sync::Arc::clone(&k), epoch);
+                            order.push_back((k, epoch));
+                        }
+                        // Prune what has fallen out of the window. An identity is dropped
+                        // when its epoch is `window` epochs behind the one just committed;
+                        // a retry older than that commits again, which is what a window is
+                        // and why the language makes it a declaration rather than a default.
+                        if let Some(w) = window {
+                            while let Some((k, at)) = order.front() {
+                                if at.saturating_add(w.max(1)) <= epoch {
+                                    let k = std::sync::Arc::clone(k);
+                                    order.pop_front();
+                                    seen.remove(&k);
+                                } else {
+                                    break;
+                                }
+                            }
                         }
                         // The deferred copies get the same epoch their original got, and
                         // are told it was a duplicate — which is what makes a retry safe.
@@ -721,6 +784,47 @@ mod window_tests {
         p.push(format!("niles-win-{name}-{}.log", std::process::id()));
         let _ = std::fs::remove_file(&p);
         p
+    }
+
+    /// **The sealer's window, bounded by epoch age — T-05.3.**
+    ///
+    /// One submitter under `SyncPolicy::Always`, so each transaction is its own epoch and
+    /// "four epochs ago" is "four transactions ago". A key inside the window is still
+    /// refused as a duplicate and told the epoch it committed at; one that has aged out is
+    /// admitted again, because the window no longer holds it.
+    #[test]
+    fn a_key_older_than_the_window_is_new_to_the_sealer() {
+        let p = tmp("window");
+        let (segment, recovery) = Segment::open(&p, SyncPolicy::Always).unwrap();
+        let seen = Sequencer::recover_seen(&recovery);
+        let s =
+            Sequencer::start_bounded(segment, Frontier::new(), SyncPolicy::Always, seen, Some(4));
+        for i in 0..10u64 {
+            s.submit(Txn {
+                idem_key: format!("k{i}"),
+                payload: vec![i as u8],
+            })
+            .expect("new");
+        }
+        assert!(
+            matches!(
+                s.submit(Txn {
+                    idem_key: "k9".into(),
+                    payload: vec![9],
+                }),
+                Err(Rejected::Duplicate { .. })
+            ),
+            "`k9` is inside the window and its retry must be told the original epoch"
+        );
+        assert!(
+            s.submit(Txn {
+                idem_key: "k0".into(),
+                payload: vec![0],
+            })
+            .is_ok(),
+            "`k0` has aged out of the window, so the sealer no longer knows it committed"
+        );
+        let _ = std::fs::remove_file(&p);
     }
 
     #[test]

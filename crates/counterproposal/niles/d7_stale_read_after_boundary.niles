@@ -10,7 +10,7 @@
 schema bank {
     currency usd { scale: 2 }
     ledger postings { txn: TxnId, acct: Id<A>, cur: Currency, amt: Money,
-        idem: IdemKey window 1.days, conserve per (txn, cur); retain forever; }
+        idem: IdemKey window 50_000.epochs, conserve per (txn, cur); retain forever; }
     index ix on postings (acct, cur) anchor;
     view month_to_date = postings.group_by(|p| p.acct).sum(|p| p.amt)
         serve { consistency: bounded(epochs: 64, millis: 60000), materialize: full };

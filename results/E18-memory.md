@@ -23,6 +23,9 @@ The tool lives outside the workspace. `GlobalAlloc` cannot be implemented withou
 | `served_having_on_key` | query | 200 | 4200 | 21.0 | 635600 | 3178 | 0 | 1856 |
 | `rev_read_hit` | read | 1000 | 2000 | 2.0 | 32000 | 32 | 0 | 16 |
 | `append_in_memory` | transaction | 500 | 3500 | 7.0 | 257392 | 515 | 67392 | 67624 |
+| `rev_metadata_2x_budget` | key | 5000 | 24999 | 5.0 | 1540480 | 308 | 1420480 | 1420512 |
+| `idem_admission_index` | identity | 100000 | 100016 | 1.0 | 10153756 | 102 | 6876816 | 6979652 |
+| `idem_window_sealer` | identity | 100000 | 116666 | 1.2 | 9961568 | 100 | 9961568 | 9961568 |
 
 ## The budgets, and what breaches one
 
@@ -43,6 +46,9 @@ Allocations per operation, asserted exactly — an allocation count is not a tol
 | `served_having_on_key` | 24.0 | 21.0 | 12% |
 | `rev_read_hit` | 2.2 | 2.0 | 9% |
 | `append_in_memory` | 7.7 | 7.0 | 9% |
+| `rev_metadata_2x_budget` | 26.0 | 5.0 | 81% |
+| `idem_admission_index` | 1.2 | 1.0 | 17% |
+| `idem_window_sealer` | 1.2 | 1.2 | 3% |
 
 ## What this does not measure
 

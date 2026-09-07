@@ -444,6 +444,176 @@ pub fn append_in_memory() -> Row {
 }
 
 /// Every scenario, in the order `memory::SCENARIOS` names them.
+/// **What the view's per-key metadata costs, at twice the residency budget.**
+///
+/// The eviction budget bounds *values*. It does not bound the two policy maps beside them:
+/// `reads_of` (per-key read counts, for the cost-aware policy) and `last_read` (per-key
+/// clock, for LRU) took an entry for every key ever read and gave it back to nobody. The
+/// slot map is different and must stay: an evicted entry becomes `Hole(e)`, which is honest
+/// absence and the reason a miss is not a zero.
+///
+/// Read at `2 x BUDGET` distinct keys, so eviction is continuous and the difference between
+/// "bounded by the budget" and "bounded by history" is a factor of two in this row and
+/// unbounded in a running system. `live` is what the view still held when the region ended,
+/// which is the figure that decides whether a long-lived view fits.
+pub fn rev_metadata_2x_budget() -> Row {
+    use nilestream_core::rev::{Base, Key, Policy, Runtime, Value};
+    struct LedgerBase {
+        ledger: Ledger,
+    }
+    impl Base for LedgerBase {
+        fn frontier(&self) -> u64 {
+            self.ledger.head()
+        }
+        fn reconstruct(&self, key: &Key, anchor: u64) -> (Value, u64) {
+            let before = self.ledger.rows_touched();
+            let v = self.ledger.reconstruct_balance(
+                key[0] as u64,
+                key.get(1).copied().unwrap_or(0) as u32,
+                anchor,
+            );
+            (v, self.ledger.rows_touched() - before)
+        }
+        fn deltas_at(&self, e: u64) -> Vec<(Key, Value)> {
+            let Some(rec) = self.ledger.epochs.get(e as usize) else {
+                return Vec::new();
+            };
+            rec.rows
+                .iter()
+                .filter_map(|r| match r {
+                    LedgerRow::Post(p) => Some((vec![p.acct as i64, p.cur as i64], p.amt)),
+                    _ => None,
+                })
+                .collect()
+        }
+    }
+
+    let mut ledger = Ledger::new();
+    let keys = (BUDGET * 2) as u64;
+    let mut txn = 0u64;
+    for a in 1..=keys {
+        txn += 1;
+        let amt = 100 + (a as i128 % 13);
+        let _ = ledger.submit(
+            &format!("meta-{txn}"),
+            vec![
+                LedgerRow::Post(Posting {
+                    txn,
+                    acct: a,
+                    cur: 0,
+                    amt,
+                    valid: 0,
+                }),
+                LedgerRow::Post(Posting {
+                    txn,
+                    acct: 0,
+                    cur: 0,
+                    amt: -amt,
+                    valid: 0,
+                }),
+            ],
+        );
+    }
+    let base = LedgerBase { ledger };
+    let c = circuit("select acct, cur, sum(amt) from postings group by acct, cur");
+    let mut rt = Runtime::install(c, Some(BUDGET as u64), Policy::Lru)
+        .unwrap_or_else(|u| panic!("the keyed fragment must install: {}", u.explain()));
+    let head = base.frontier();
+    let view = rt.view_mut("__wire_result").expect("the installed view");
+    let (_, counted) = count(|| {
+        for a in 1..=keys {
+            std::hint::black_box(view.read(&base, &vec![a as i64, 0], head));
+        }
+    });
+    assert!(
+        view.resident_count() <= BUDGET as u64,
+        "the budget must bind for this row to mean anything: {} resident",
+        view.resident_count()
+    );
+    Row {
+        scenario: "rev_metadata_2x_budget",
+        unit: "key",
+        operations: keys,
+        counted,
+    }
+}
+
+/// The identity population both idempotency windows hold, in the wire's key shape.
+///
+/// Thirty-six characters, because that is what a client sends: a UUID, or something the
+/// same size. A shorter key would understate the string heap, which is most of the cost.
+fn identities(n: u64) -> Vec<String> {
+    (0..n)
+        .map(|i| {
+            format!(
+                "{:08x}-{:04x}-4{:03x}-8{:03x}-{:012x}",
+                i,
+                i % 65536,
+                i % 4096,
+                i % 4096,
+                i
+            )
+        })
+        .collect()
+}
+
+/// **The admission index: `proto_engine::Ledger::idem`, a `HashSet<String>`.**
+///
+/// One of *two* windows a durable daemon holds. This one answers whether a key has
+/// committed; the sealer's answers at which epoch, and both hold every identity ever
+/// committed. Neither is pruned by anything today, so the pair is the write path's
+/// unbounded term.
+///
+/// Measured on the structure rather than through the sealer: the sealer owns its window on
+/// its own thread, and a `#[global_allocator]`'s counters are process-wide, so a second
+/// thread allocating inside a measured region lands in the numbers.
+pub fn idem_admission_index() -> Row {
+    let n = 100_000u64;
+    let ids = identities(n);
+    // The structure is *returned* from the measured region rather than forgotten: `count`
+    // reads `live` before the returned value is dropped, so this reports what the window
+    // holds without leaking it.
+    let (_held, counted) = count(|| {
+        let mut idem: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for k in &ids {
+            idem.insert(k.clone());
+        }
+        std::hint::black_box(idem.len());
+        idem
+    });
+    Row {
+        scenario: "idem_admission_index",
+        unit: "identity",
+        operations: n,
+        counted,
+    }
+}
+
+/// **The sealer's window: `BTreeMap<String, u64>` in `nilestream_ledger::sequencer`.**
+///
+/// The second copy. It maps an identity to the epoch it committed at, because a retry must
+/// be told the *original* epoch — "committed at a new epoch" would be a second transaction
+/// wearing the first one's name. That is why it is a map and not a set, and why it cannot
+/// simply be dropped in favour of the admission index above.
+pub fn idem_window_sealer() -> Row {
+    let n = 100_000u64;
+    let ids = identities(n);
+    let (_held, counted) = count(|| {
+        let mut seen: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+        for (e, k) in ids.iter().enumerate() {
+            seen.insert(k.clone(), e as u64);
+        }
+        std::hint::black_box(seen.len());
+        seen
+    });
+    Row {
+        scenario: "idem_window_sealer",
+        unit: "identity",
+        operations: n,
+        counted,
+    }
+}
+
 pub fn all() -> Vec<Row> {
     vec![
         ledger_seeded(),
@@ -459,5 +629,8 @@ pub fn all() -> Vec<Row> {
         served_having_on_key(),
         rev_read_hit(),
         append_in_memory(),
+        rev_metadata_2x_budget(),
+        idem_admission_index(),
+        idem_window_sealer(),
     ]
 }

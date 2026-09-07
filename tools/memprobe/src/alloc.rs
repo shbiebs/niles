@@ -176,6 +176,16 @@ pub fn budget(scenario: &str) -> Option<f64> {
         // own growth. T-04 takes the Z-set off the served path; this row keeps measuring the
         // reference evaluator's base, which stays and should stay.
         "zset_base_at" => 1.4,
+        // **The view's per-key metadata, at twice the residency budget.** One read that
+        // misses reconstructs and installs, and the two policy maps take an entry each. The
+        // budget bounds the values; until T-05 it bounded neither map, so this row is the
+        // one that says whether a long-lived view is Theta(budget) or Theta(history).
+        "rev_metadata_2x_budget" => 26.0,
+        // The two idempotency windows, by the structure each is. Held per identity, forever,
+        // by both: a `HashSet<String>` for admission and a `BTreeMap<String, u64>` for the
+        // epoch a duplicate is told it committed at. One string clone and one node each.
+        "idem_admission_index" => 1.2,
+        "idem_window_sealer" => 1.2,
         // A seeded ledger: one epoch record, one idempotency string and one index entry per
         // transaction, amortised over two postings — **plus the maintained REV**, which is
         // three more per epoch (the delta vector and its two keys) and took this from 2.3 to
@@ -276,6 +286,9 @@ pub const SCENARIOS: &[&str] = &[
     "served_having_on_key",
     "rev_read_hit",
     "append_in_memory",
+    "rev_metadata_2x_budget",
+    "idem_admission_index",
+    "idem_window_sealer",
 ];
 
 #[cfg(test)]

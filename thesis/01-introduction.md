@@ -172,7 +172,7 @@ Every hypothesis is stated with its independent variable (IV), dependent variabl
 *Status:* **partly measured.** The throughput half is measured and two contract rows are NOT MET (§9.14.1); the client-compatibility half has no pass rate and no MySQL listener. §1.9.1.
 
 **H-S6 — Static checkability subsumes runtime policing.** For the invariant classes the effect calculus covers, moving checks to compile time removes the corresponding class of runtime failures at no measurable runtime cost, whereas imposing the same invariants on SQL baselines via triggers and constraints has measurable cost.
-*IV:* enforcement site (Niles types vs. runtime constraints vs. none). *DV:* runtime overhead; residual violation count; compile time. *CV:* program corpus, workload.
+*IV:* enforcement site (Niles types vs. runtime constraints vs. none). *DV:* runtime overhead; residual violation count; compile time. *CV:* program corpus, workload. The three are measured by E14 (§9.14.3), the mutant corpus (§9.2), and **E26** (`results/E26-compile-cost.md`) respectively; E26 also establishes the premise the runtime-overhead half rests on, that the front end runs once per distinct statement and not per execution.
 *Method:* comparative experiment on ported programs, plus the argument that a compile-time rejection is a categorically stronger artifact than a runtime abort.
 *Status:* **not measured.** Neither side of the comparison has been run. §1.9.1.
 

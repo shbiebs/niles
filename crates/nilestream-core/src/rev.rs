@@ -1778,6 +1778,12 @@ mod concurrent_differential {
         ));
         let stop = std::sync::Arc::new(AtomicBool::new(false));
         let compared = std::sync::Arc::new(AtomicU64::new(0));
+        /// How far the frontier must move under the readers for the run to be the
+        /// experiment it claims to be.
+        const SEAL_TARGET: Epoch = 120;
+        /// Reads per reader, so four readers clear the comparison floor below.
+        const READS_EACH: u64 = 400;
+        let start_head = base.frontier();
 
         let writer = {
             let (base, stop) = (base.clone(), stop.clone());
@@ -1809,7 +1815,26 @@ mod concurrent_differential {
                 let (base, rt, compared) = (base.clone(), rt.clone(), compared.clone());
                 std::thread::spawn(move || {
                     let mut divergences: Vec<String> = Vec::new();
-                    for n in 0..400u64 {
+                    // **Bounded by the writer's progress, not by a fixed count.** The
+                    // experiment is "answers taken while the frontier moves", so the loop
+                    // ends when the frontier has moved far enough — 400 reads on a machine
+                    // that gave the writer no CPU is 400 reads of a static base, which is a
+                    // different experiment reported under this one's name. On a loaded
+                    // two-core container the writer sealed 3 epochs against these readers'
+                    // 1,600 reads, and the run failed its own precondition rather than
+                    // passing vacuously; now the readers wait for it.
+                    //
+                    // **Both preconditions, or neither is met.** Stopping as soon as the
+                    // frontier had moved made the run end after nine comparisons when the
+                    // writer got a burst of CPU, which failed the *other* precondition: an
+                    // experiment that compares nine answers has not looked for a race
+                    // either. The loop therefore runs until the frontier has moved *and*
+                    // this reader has taken its share of reads.
+                    let mut n = 0u64;
+                    while (base.frontier() < start_head + SEAL_TARGET || n < READS_EACH)
+                        && n < 20_000
+                    {
+                        n += 1;
                         let key = vec![((t * 7 + n as i64) % KEYS).max(0)];
                         // The anchor a session would hold: sampled, then used. Everything the
                         // writer does after this sample is outside the read's snapshot.
@@ -1851,12 +1876,19 @@ mod concurrent_differential {
         advancer.join().expect("the advancer panicked");
 
         assert!(
-            sealed > 100,
-            "the writer must actually have moved the frontier under the readers: {sealed} epochs"
+            base.frontier() >= start_head + SEAL_TARGET,
+            "the readers gave up before the frontier moved {SEAL_TARGET} epochs ({sealed} \
+             sealed, head {} from {start_head}). Every reader hit its 20,000-read ceiling, \
+             which means the writer thread was not scheduled — the machine could not run \
+             this experiment, and a pass here would be a pass for a static base.",
+            base.frontier()
         );
         assert!(
             compared.load(Ordering::Relaxed) >= 1_500,
-            "the differential must actually compare: {} comparisons",
+            "the differential must actually compare: {} comparisons. Each of the four \
+             readers runs until the frontier has moved and it has taken {READS_EACH} reads, \
+             so falling short means a reader hit its 20,000-read ceiling with the writer \
+             starved",
             compared.load(Ordering::Relaxed)
         );
         assert!(

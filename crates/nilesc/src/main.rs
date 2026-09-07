@@ -13,6 +13,7 @@
 //! nilesc postings FILE FN the legs a function declares, in source order
 //! nilesc run     FILE FN  *execute* FN and print the canonical bytes it posts
 //! nilesc plan    FILE     the materialization plan the optimizer would choose
+//! nilesc time    FILE     what each stage of the pipeline costs, and on what
 //! ```
 //!
 //! `postings` and `run` are the two halves of conformance and the difference between them is
@@ -111,6 +112,110 @@ fn main() -> ExitCode {
                 u8::from(!failed),
                 report.conservation_proved,
                 report.runtime_obligations
+            );
+        }
+        // **What the compiler costs, which nothing had ever asked.**
+        //
+        // H-S6 names *compile time* as a dependent variable (`thesis/01`, §1.5) and E14
+        // measures the other two. Eight cycles of work on this language and the only figure
+        // anyone had for its compiler was the 2.6 µs in `check`'s comment above, measured
+        // once, by hand, and never again.
+        //
+        // Two instruments, because neither alone is honest. **Wall clock per phase** says
+        // where the time goes — it is the only way to separate six stages inside one process
+        // — but it is host-shaped and noisy, so it is reported as a median over repeats with
+        // its spread beside it. **Instruction counts** are deterministic and comparable
+        // across runs and hosts of one architecture, and `callgrind` can only count a whole
+        // process: run `valgrind --tool=callgrind nilesc check FILE` for that number, which
+        // is what `experiments e26` does over a corpus. A phase table and a total that
+        // cannot be added together are still the two facts worth having.
+        "time" => {
+            let repeat: u32 = args
+                .get(3)
+                .and_then(|s| s.strip_prefix("--repeat="))
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(200);
+            let med = |mut v: Vec<u128>| -> u128 {
+                v.sort_unstable();
+                v[v.len() / 2]
+            };
+            let mut lex_ns = Vec::new();
+            let mut parse_ns = Vec::new();
+            let mut resolve_ns = Vec::new();
+            let mut check_ns = Vec::new();
+            let mut lower_ns = Vec::new();
+            let mut verify_ns = Vec::new();
+            for _ in 0..repeat.max(1) {
+                let t = std::time::Instant::now();
+                let lexed = niles_lang::lexer::lex(&src);
+                lex_ns.push(t.elapsed().as_nanos());
+                std::hint::black_box(&lexed);
+
+                let t = std::time::Instant::now();
+                let (prog, _) = parser::parse_program(&src);
+                parse_ns.push(t.elapsed().as_nanos());
+
+                let t = std::time::Instant::now();
+                let (cat, _) = resolve::resolve_program(&prog, 0);
+                resolve_ns.push(t.elapsed().as_nanos());
+
+                let t = std::time::Instant::now();
+                let checked = typecheck::check_program(&prog, &cat);
+                check_ns.push(t.elapsed().as_nanos());
+                std::hint::black_box(&checked);
+
+                let t = std::time::Instant::now();
+                let (lowered, _) = lower::lower_program(&prog, &cat);
+                lower_ns.push(t.elapsed().as_nanos());
+
+                let t = std::time::Instant::now();
+                let v = verify::verify(&lowered.circuit);
+                verify_ns.push(t.elapsed().as_nanos());
+                std::hint::black_box(&v);
+            }
+            // Parsing includes lexing — `parse_program` lexes for itself — so the parser's
+            // own cost is the difference. Reported that way rather than as two numbers that
+            // do not add up to the whole.
+            let (l, p_, r, c, lo, v) = (
+                med(lex_ns),
+                med(parse_ns),
+                med(resolve_ns),
+                med(check_ns),
+                med(lower_ns),
+                med(verify_ns),
+            );
+            let total = p_ + r + c + lo + v;
+            let items = counts(&prog);
+            println!("file={path} repeats={repeat}");
+            println!("stage,median_ns,share");
+            let row = |name: &str, ns: u128| {
+                println!(
+                    "{name},{ns},{:.1}%",
+                    if total == 0 {
+                        0.0
+                    } else {
+                        100.0 * ns as f64 / total as f64
+                    }
+                );
+            };
+            row("lex", l);
+            row("parse_incl_lex", p_);
+            row("resolve", r);
+            row("typecheck", c);
+            row("lower", lo);
+            row("verify_ir", v);
+            println!("total,{total},100.0%");
+            println!("items,{}", items.total());
+            println!(
+                "by_class,view={},function={},relation={},currency={},other={}",
+                items.views, items.functions, items.relations, items.currencies, items.other
+            );
+            if items.total() > 0 {
+                println!("per_item_ns,{}", total / items.total() as u128);
+            }
+            println!(
+                "note,a wall-clock figure is this host's. For a deterministic count run: \
+                 valgrind --tool=callgrind --callgrind-out-file=/dev/null nilesc check {path}"
             );
         }
         "parse" => {
@@ -304,6 +409,49 @@ USAGE:
     nilesc run     FILE FN     execute FN; print the canonical encoding of its posting set
                                [--ledger FIXTURE] [--args FIXTURE]
 ";
+
+/// What a program declares, by class — the axis `nilesc time` reports cost against.
+///
+/// A "statement class" in this language is an *item*: a view is compiled once and served
+/// many times, which is the whole shape of the system, so per-statement cost is per-item
+/// cost and not per-query cost.
+#[derive(Default)]
+struct ItemCounts {
+    views: usize,
+    functions: usize,
+    relations: usize,
+    currencies: usize,
+    other: usize,
+}
+
+impl ItemCounts {
+    fn total(&self) -> usize {
+        self.views + self.functions + self.relations + self.currencies + self.other
+    }
+}
+
+fn counts(p: &niles_lang::ast::Program) -> ItemCounts {
+    use niles_lang::ast::{Item, SchemaItem};
+    let mut c = ItemCounts::default();
+    for i in &p.items {
+        match i {
+            Item::Schema(s) => {
+                for si in &s.items {
+                    match si {
+                        SchemaItem::Currency(_) => c.currencies += 1,
+                        SchemaItem::Table(_) | SchemaItem::Base(_) => c.relations += 1,
+                        SchemaItem::View(_) => c.views += 1,
+                        _ => c.other += 1,
+                    }
+                }
+            }
+            Item::View(_) => c.views += 1,
+            Item::Fn(_) => c.functions += 1,
+            _ => c.other += 1,
+        }
+    }
+    c
+}
 
 fn describe_item(i: &niles_lang::ast::Item) -> String {
     use niles_lang::ast::{Item, SchemaItem};

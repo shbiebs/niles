@@ -462,9 +462,6 @@ fn run(args: &Args) -> i32 {
     // **One arm, and it says so.** `--nls-only` is only meaningful with `--scaling-only`:
     // the contract table *is* the comparison, so a one-armed E16 would be a table of
     // unlabelled absolute numbers, which is the shape this harness exists to refuse.
-    // **One arm, and it says so.** `--nls-only` is only meaningful with `--scaling-only`:
-    // the contract table *is* the comparison, so a one-armed E16 would be a table of
-    // unlabelled absolute numbers, which is the shape this harness exists to refuse.
     if args.nls_only && !args.scaling_only {
         eprintln!(
             "bench: --nls-only measures one engine, so it needs --scaling-only. The contract \

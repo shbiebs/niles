@@ -403,13 +403,27 @@ pub struct Session {
     /// than a fact a reader has to go and check, and leaves the door open for a session whose
     /// schema can move.
     compiled: std::collections::HashMap<(u64, String), niles_lang::lower::Lowered>,
-    /// Bounded, and cleared rather than evicted when it fills.
+    /// Compile order, so a full cache evicts its oldest entry instead of emptying itself.
     ///
-    /// A cache keyed by arbitrary client text is unbounded memory with a friendly name. LRU
-    /// would be better and is not obviously worth the machinery here: a session issues a
-    /// handful of statement shapes, and a session that issues more than this many distinct
-    /// ones is not one a plan cache was going to help.
-    compiled_cleared: u64,
+    /// **It used to empty itself, and that made the cache worse than no cache for the one
+    /// workload it mattered on.** A cache keyed by arbitrary client text is unbounded memory
+    /// with a friendly name, so a limit is right; clearing all 256 entries to admit the
+    /// 257th is what turned a working set of 1,000 statements into 1,000 compilations *per
+    /// pass* — 2,000 for two passes over the same thousand, measured, where 1,000 is the
+    /// number a cache exists to produce. The old note said "a session that issues more than
+    /// this many distinct ones is not one a plan cache was going to help", which is true of
+    /// a session that issues 10,000 unrelated statements once each and false of every
+    /// session whose working set is a little larger than the limit — and the second is the
+    /// ordinary shape of generated SQL.
+    ///
+    /// First-in-first-out and not LRU: one `VecDeque` and no bookkeeping on the hit path,
+    /// where LRU would touch a recency structure on every *hit*. FIFO holds a working set
+    /// that fits and degrades gracefully for one that does not, which is the whole
+    /// difference from clearing.
+    compile_order: std::collections::VecDeque<(u64, String)>,
+    /// How many plans were evicted to make room. Was `compiled_cleared`, a count of
+    /// wholesale emptyings.
+    compiled_evicted: u64,
     pub compile_hits: u64,
     pub compile_misses: u64,
     pub queries_served: u64,
@@ -432,7 +446,8 @@ impl Session {
             schema,
             binary: false,
             compiled: std::collections::HashMap::new(),
-            compiled_cleared: 0,
+            compile_order: std::collections::VecDeque::new(),
+            compiled_evicted: 0,
             compile_hits: 0,
             compile_misses: 0,
             queries_served: 0,
@@ -459,6 +474,12 @@ impl Session {
     /// One entry point, used by the simple path and by the extended one, so the two cannot
     /// come to disagree about what a statement means — which is the compatibility-layer
     /// failure this crate's own module docs argue against, in miniature.
+    /// How many compiled plans this session holds. **Unbounded**: see
+    /// `the_plan_cache_is_unbounded_and_this_test_is_the_notice`.
+    pub fn compiled_len(&self) -> usize {
+        self.compiled.len()
+    }
+
     fn compile_cached(&mut self, sql: &str) -> Result<&niles_lang::lower::Lowered, Vec<Backend>> {
         let key = (self.schema_key(), sql.to_string());
         if self.compiled.contains_key(&key) {
@@ -526,10 +547,21 @@ impl Session {
                 Some(&first),
             )]);
         }
-        if self.compiled.len() >= PLAN_CACHE_LIMIT {
-            self.compiled.clear();
-            self.compiled_cleared += 1;
+        while self.compiled.len() >= PLAN_CACHE_LIMIT {
+            match self.compile_order.pop_front() {
+                Some(old) => {
+                    self.compiled.remove(&old);
+                    self.compiled_evicted += 1;
+                }
+                // The order queue and the map disagree, which cannot happen through this
+                // function. Emptying is the safe response and is the old behaviour.
+                None => {
+                    self.compiled.clear();
+                    break;
+                }
+            }
         }
+        self.compile_order.push_back(key.clone());
         Ok(self.compiled.entry(key).or_insert(lowered))
     }
 
@@ -1791,6 +1823,113 @@ schema bank {
     /// the test is about.
     fn rows_of(out: &[Backend]) -> Vec<Vec<Option<String>>> {
         pg_wire::decoded_rows(out)
+    }
+
+    /// **A statement is compiled once, and the IR verifier runs once with it — T-13.3.**
+    ///
+    /// H-S6 claims static checking subsumes runtime policing *at no measurable runtime
+    /// cost*, and that claim is only true if the checking happens off the serving path.
+    /// Nothing had asserted it. A verifier that ran per execution would put the whole front
+    /// end — parse, resolve, typecheck, lower, verify, 243 µs on a 158-line program (E26) —
+    /// inside every query, and the hypothesis would be false for a reason no experiment in
+    /// this project was looking at.
+    ///
+    /// A thousand distinct statements and a thousand repeats of them: the compile count must
+    /// be a thousand and not two thousand.
+    #[test]
+    fn the_front_end_runs_once_per_distinct_statement_and_not_per_execution() {
+        let (mut s, e) = (session(), engine());
+        // Inside the cache's limit, so this measures the front end's invocation count and
+        // not the eviction policy — which is the next test's subject.
+        const N: u64 = 200;
+        for i in 0..N {
+            let _ = s.handle(
+                Frontend::Query(format!("select sum(amt) from postings where acct = {i}")),
+                &e,
+            );
+        }
+        let after_first = (s.compile_misses, s.compile_hits);
+        assert_eq!(
+            after_first.0, N,
+            "{N} distinct statements must compile {N} times, not {}",
+            after_first.0
+        );
+        for i in 0..N {
+            let _ = s.handle(
+                Frontend::Query(format!("select sum(amt) from postings where acct = {i}")),
+                &e,
+            );
+        }
+        assert_eq!(
+            s.compile_misses,
+            N,
+            "a repeat must not recompile: {} compilations after {} executions of {N} \
+             statements. The front end would then be on the serving path, and H-S6's \
+             \"no measurable runtime cost\" would be a claim about a compiler nobody runs",
+            s.compile_misses,
+            2 * N
+        );
+        assert_eq!(
+            s.compile_hits, N,
+            "every repeat must be a cache hit: {} hits",
+            s.compile_hits
+        );
+    }
+
+    /// **One new statement must not cost a session every plan it holds — T-13.3's other
+    /// half.**
+    ///
+    /// The limit is 256 plans per session, and the policy used to be *empty the cache* to
+    /// admit the 257th. Under that policy a single novel statement — one generated `where`
+    /// clause, one ad-hoc query from a human — threw away every plan the session had, so a
+    /// workload of a stable hot set plus occasional one-offs recompiled its whole hot set
+    /// after every one-off. Measured before the change: 1,000 distinct statements executed
+    /// twice cost **2,000** compilations, where a cache exists to produce 1,000.
+    ///
+    /// The property, minimally: fill the cache, admit one novel statement, and ask for a hot
+    /// statement that is not the one evicted. FIFO answers from the cache; clearing does
+    /// not. Both policies lose a strict cyclic scan of `limit + 1` statements — that is
+    /// Bélády's worst case and LRU shares it — so the test does not claim otherwise.
+    #[test]
+    fn one_new_statement_evicts_one_plan_and_not_the_whole_cache() {
+        let (mut s, e) = (session(), engine());
+        let limit = super::PLAN_CACHE_LIMIT as u64;
+        let send = |s: &mut Session, sql: String| {
+            let _ = s.handle(Frontend::Query(sql), &e);
+        };
+        let hot = |i: u64| format!("select sum(amt) from postings where acct = {i}");
+        for i in 0..limit {
+            send(&mut s, hot(i));
+        }
+        assert_eq!(s.compiled_len(), limit as usize, "the cache is full");
+        // One novel statement. Exactly one plan may leave.
+        send(
+            &mut s,
+            "select sum(amt) from postings where acct = 999999".into(),
+        );
+        assert_eq!(
+            s.compiled_len(),
+            limit as usize,
+            "the cache must stay at its limit, not below it"
+        );
+        let before = s.compile_hits;
+        // The newest hot statement, which no policy has any reason to have evicted.
+        send(&mut s, hot(limit - 1));
+        assert_eq!(
+            s.compile_hits,
+            before + 1,
+            "a hot plan did not survive one unrelated statement. Emptying the cache to admit \
+             one entry makes it worse than no cache for every session whose working set is a \
+             little larger than the limit — it pays to compile *and* to store."
+        );
+        // And the oldest is the one that went.
+        let before = s.compile_misses;
+        send(&mut s, hot(0));
+        assert_eq!(
+            s.compile_misses,
+            before + 1,
+            "the evicted plan must be the oldest: first in, first out"
+        );
     }
 
     #[test]

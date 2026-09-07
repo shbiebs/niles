@@ -116,7 +116,7 @@ reproduce:
 	cargo test -p nilestream-optimizer --test unnest_corpus -- --ignored
 	cargo test -p nilestream-server --test psql_conformance -- --ignored transcript
 	cargo run --release -p bank-bench --bin bench -- --render
-	cargo run --release -p experiments -- e1 e4 e8
+	cargo run --release -p experiments -- e1 e4 e8 e26
 	cargo run -q --release --manifest-path tools/memprobe/Cargo.toml
 	./target/release/nilestream sweep examples/demo_bank.niles ledger_balance > results/e12_phase_compiled.csv
 	python3 thesis/include-results.py

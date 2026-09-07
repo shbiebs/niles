@@ -97,11 +97,18 @@ fi
 # --- D. the tail: three mixed shapes with the per-read breakdown (T-12.3) --------------------------
 if want D; then
   echo; echo "### D. mixed 4r2w / 8r1w / 8r4w with the slowest-16 breakdown"
+  # `--nls-only`: the mixed workload measures ONE engine and compares nothing to
+  # PostgreSQL, so it needs no PostgreSQL — and without this flag the harness refuses,
+  # correctly, three times in a row. The first version of this script omitted it and
+  # produced an empty section on Host C.
   grep -q -- "report_slow_reads" "$HC/wt-a/crates/bank-bench/src/bin/bench.rs" || { echo "REFUSING section D: T-12 (the slowest-16 breakdown) is not in arm A yet"; ONLY=NONE; }
   [ "$ONLY" != NONE ] && for shape in 4:2 8:1 8:4; do
     r=${shape%:*}; w=${shape#*:}
-    ( cd "$HC/wt-a" && ./target/release/bench --run --scaling-only --connections $((r+w)) \
-        --mixed-seconds 30 2>&1 | tee "$OUT/mixed-${r}r${w}w.txt" | grep -E "^\| (readers|writers|mixed)|slowest|rank \||^ +[0-9]+ \||view_(wait|hold)_(p99|max)|lock_wait_max|fallbacks" )
+    ( cd "$HC/wt-a" && ./target/release/bench --run --scaling-only --nls-only \
+        --connections $((r+w)) --mixed-seconds 30 2>&1 | tee "$OUT/mixed-${r}r${w}w.txt" \
+        | grep -E "^\| (readers|writers|mixed)|slowest|rank \||^ +[0-9]+ \||view_(wait|hold)_(p99|max)|lock_wait_max|fallbacks" )
+    # A grep that matches nothing must not look like a section that ran. Show the tail.
+    grep -qE "^\| mixed" "$OUT/mixed-${r}r${w}w.txt" || { echo "  (no mixed row — the run did not get that far; last lines:)"; tail -6 "$OUT/mixed-${r}r${w}w.txt" | sed 's/^/  | /'; }
   done
 fi
 

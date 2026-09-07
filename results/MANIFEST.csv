@@ -67,3 +67,5 @@ E14-minimal-counterproposal.md,historical,none
 E15-bootstrap-gates.md,historical,none
 E16-band.md,historical,none
 E17-unnesting.md,historical,none
+E26-compile-cost.csv,byte-deterministic,cargo run --release -p experiments -- e26
+E26-compile-cost.md,byte-deterministic,cargo run --release -p experiments -- e26

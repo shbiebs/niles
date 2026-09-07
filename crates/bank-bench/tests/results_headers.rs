@@ -59,6 +59,7 @@ fn expected(path: &str) -> Option<Option<&'static str>> {
         | "e10_checkpoints.csv"
         | "e11_checkpoint_bound.csv"
         | "e12_phase_compiled.csv"
+        | "E26-compile-cost.csv"
         | "obligations.csv"
         | "MANIFEST.csv" => None,
         _ => return None,

@@ -37,6 +37,8 @@ An epoch is durable when its segment and hash are synchronized to the primary me
 
 Recovery replays from the last durable epoch: frontiers are re-derived, resident maps restart empty (checkpoints are pure optimization, never trusted), and Theorem 4.1 guarantees rebuilt views are exact. **Recovery is a large eviction** — which is why the same property tests cover both.
 
+`MISMATCH-durability-restart`, **resolved**. This sentence was true of `nilestream-ledger` and false of the daemon that E16 and E19 measure, and the gap survived three audit cycles because both halves were real: the ledger crate did replay and verify, and the daemon's durable record carried the epoch *number* rather than the rows, so a restart recovered the idempotency window and not one posting. Eight writers, 25,416 acknowledged inserts, `SIGKILL`, reopen: the frontier was back at the seed and every account had no balance. Since T-01 (cycle 7) the daemon's record is `parent ‖ hash ‖ canon(rows)` and recovery verifies each recomputed link against the one the record carries, so the sentence is now true of the path the measurements run on. What made it hard to see is worth keeping: a claim can be true of a component and false of the system that contains it, and a reader has no way to tell which one a results table was produced by.
+
 ## 6.5 The General Core of Niles, and Coverage of Workload Classes
 
 Niles is a general-purpose data language whose core is typed relations, expressions, functions and views over the relational algebra, with Rust-derived syntax for items and expressions and SQL vocabulary for query stages where Rust has no equivalent. A schema declares three kinds of object:

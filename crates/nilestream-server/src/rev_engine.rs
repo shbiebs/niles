@@ -28,6 +28,91 @@
 
 use proto_engine::{EvictionPolicy, Ledger, Posting, Row, ViewMode};
 
+/// **A rendezvous inside `read_stats`, between its base phase and its view phase.**
+///
+/// It exists so the deadlock of A10-01 can be *witnessed* rather than argued about. The two
+/// statements the hook sits between are the ones whose order is the bug: with V taken first
+/// and B reached for underneath it, a thread paused here holds V and is about to want B,
+/// which is exactly the state an appender holding B and wanting V cannot be reconciled with.
+/// With the order repaired, a thread paused here holds nothing, and the same test that hangs
+/// on the broken build completes on the repaired one.
+///
+/// Compiled only under `cfg(test)`; in a release build `pause` is not called at all, so this
+/// costs the serving path nothing. Keyed to one thread rather than armed globally, because
+/// the test binary runs tests in parallel and a global arm would park an unrelated test's
+/// stats query.
+#[cfg(test)]
+pub(crate) mod stats_order_hook {
+    use std::sync::{Condvar, Mutex};
+    use std::thread::ThreadId;
+
+    static ARMED_FOR: Mutex<Option<ThreadId>> = Mutex::new(None);
+    static REACHED: Mutex<bool> = Mutex::new(false);
+    static REACHED_CV: Condvar = Condvar::new();
+    static RELEASED: Mutex<bool> = Mutex::new(false);
+    static RELEASED_CV: Condvar = Condvar::new();
+
+    /// Called by the thread that is about to run `read_stats`, before it does.
+    pub(crate) fn arm_this_thread() {
+        *REACHED.lock().expect("not poisoned") = false;
+        *RELEASED.lock().expect("not poisoned") = false;
+        *ARMED_FOR.lock().expect("not poisoned") = Some(std::thread::current().id());
+    }
+
+    pub(crate) fn disarm() {
+        *ARMED_FOR.lock().expect("not poisoned") = None;
+        release();
+    }
+
+    /// The rendezvous itself. A no-op on every thread but the armed one.
+    pub(crate) fn pause() {
+        let armed = *ARMED_FOR.lock().expect("not poisoned") == Some(std::thread::current().id());
+        if !armed {
+            return;
+        }
+        {
+            let mut r = REACHED.lock().expect("not poisoned");
+            *r = true;
+            REACHED_CV.notify_all();
+        }
+        let mut g = RELEASED.lock().expect("not poisoned");
+        while !*g {
+            g = RELEASED_CV.wait(g).expect("not poisoned");
+        }
+    }
+
+    /// Block until the armed thread reaches the rendezvous, or the deadline passes.
+    pub(crate) fn wait_until_reached(within: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + within;
+        let mut g = REACHED.lock().expect("not poisoned");
+        while !*g {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            let (next, timeout) = REACHED_CV.wait_timeout(g, left).expect("not poisoned");
+            g = next;
+            if timeout.timed_out() && !*g {
+                return false;
+            }
+        }
+        true
+    }
+
+    pub(crate) fn release() {
+        let mut g = RELEASED.lock().expect("not poisoned");
+        *g = true;
+        RELEASED_CV.notify_all();
+    }
+}
+
+/// In a non-test build the rendezvous does not exist and nothing calls it.
+#[cfg(not(test))]
+pub(crate) mod stats_order_hook {
+    #[inline(always)]
+    pub(crate) fn pause() {}
+}
+
 /// What one attempt at answering a keyed read from the maintained view produced.
 ///
 /// Three cases, because the two-phase read has three outcomes and collapsing them into an
@@ -1022,11 +1107,33 @@ impl crate::session::Serving for RevEngine {
         // that a mixed workload's rate is over everything the server answered.
         let served = self.served.load(std::sync::atomic::Ordering::Relaxed);
         let served_rows = self.served_rows.load(std::sync::atomic::Ordering::Relaxed);
+        // **The base phase, complete before the view is touched — A10-01 / F-10-01.**
+        //
+        // These two statements used to be the other way round: V was acquired, and then
+        // `self.base()` reached for B underneath it. `append` takes B exclusively and then
+        // takes V, so a stats request from one connection and an append from another form
+        // the cycle B→V / V→B and neither ever returns. It is reachable from the wire —
+        // `select nilestream_stats` is an ordinary statement — and the whole of cycle 9's
+        // mixed sweep queries this table between levels, so the harness that measures the
+        // engine could hang the engine it was measuring.
+        //
+        // The order is B < P < V < C and this path now takes a subsequence of it: B is
+        // acquired, read and released on the line below, and V is acquired after. Not nested
+        // at all, which is stronger than nested in the right order.
+        //
+        // **What that costs, stated rather than hidden: this snapshot is not atomic.** The
+        // idempotency-window size is read at one instant and the view's counters at another,
+        // and an append may land between them, so the row can pair a window size with view
+        // counters that are one epoch newer. That is the correct trade for a diagnostic
+        // table — the alternative is holding both locks across the read, which is the
+        // deadlock — and it is stated here because a reader who assumes atomicity would
+        // read a one-epoch skew as a counter that does not reconcile.
+        let idem_keys = self.base().idem_window_keys() as u64;
+        crate::rev_engine::stats_order_hook::pause();
         let guard = self
             .runtime
             .as_ref()
             .map(|rt| crate::lockstats::Timed::acquire(rt, &crate::lockstats::VIEW_LOCK));
-        let idem_keys = self.base().idem_window_keys() as u64;
         let view_answers = self.view_answers.load(std::sync::atomic::Ordering::Relaxed);
         let fallbacks = self
             .view_fallbacks
@@ -3248,35 +3355,201 @@ mod lock_order_tests {
     use super::*;
     use crate::session::Serving;
 
+    /// **The deadlock of A10-01, witnessed and bounded — the stats cycle.**
+    ///
+    /// `read_stats` took V and then reached for B beneath it while `append` takes B and then
+    /// V. Two connections — one running `select nilestream_stats`, one committing — is the
+    /// whole of the schedule, and it is reachable from the wire. Cycle 9's own mixed sweep
+    /// queries that table between levels, so the harness that measured the engine could hang
+    /// the engine it was measuring, which is why this is repaired before anything is scored.
+    ///
+    /// **Latched, not raced.** A test that merely runs stats queries beside appends passes on
+    /// a lucky schedule and says nothing. The rendezvous in `stats_order_hook` pauses the
+    /// stats thread at the exact point between the two acquisitions, the appender is started
+    /// while it is parked there, and only then is it released. On the broken order the
+    /// paused thread holds V and wants B while the appender holds B and wants V; on the
+    /// repaired order it holds nothing, because B was taken and released before the pause.
+    ///
+    /// **Bounded, so a red test is a failure and not a hung suite.** Each thread reports
+    /// through a channel and the assertions are `recv_timeout`s. A deadlocked pair is left
+    /// parked on an engine this test owns and nothing else can reach; the process is not
+    /// waited on it, and no other test's locks are involved.
+    #[test]
+    fn a_stats_snapshot_and_a_concurrent_append_both_finish() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        // Long enough that a slow machine is not called a deadlock, short enough that a
+        // deadlock is not called a slow machine. The repaired path answers in microseconds.
+        const DEADLINE: Duration = Duration::from_secs(10);
+
+        let engine = std::sync::Arc::new(RevEngine::seeded(
+            64,
+            2,
+            256,
+            ViewMode::Demand,
+            EvictionPolicy::Lru,
+        ));
+
+        let (stats_tx, stats_rx) = mpsc::channel();
+        let (append_tx, append_rx) = mpsc::channel();
+
+        let e = engine.clone();
+        std::thread::spawn(move || {
+            stats_order_hook::arm_this_thread();
+            let s = Serving::read_stats(&*e);
+            let _ = stats_tx.send(s.reads);
+        });
+
+        assert!(
+            stats_order_hook::wait_until_reached(DEADLINE),
+            "PRECONDITION UNMET: the stats thread never reached the rendezvous between its \
+             base phase and its view phase, so this run witnesses nothing either way"
+        );
+
+        // Parked at the rendezvous. Now the appender, which takes B exclusively and then V.
+        let e = engine.clone();
+        std::thread::spawn(move || {
+            let r = e.append(
+                vec![
+                    Row::Post(proto_engine::Posting {
+                        txn: 77,
+                        acct: 1,
+                        cur: 0,
+                        amt: 5,
+                        valid: 0,
+                    }),
+                    Row::Post(proto_engine::Posting {
+                        txn: 77,
+                        acct: 2,
+                        cur: 0,
+                        amt: -5,
+                        valid: 0,
+                    }),
+                ],
+                "deadlock-witness",
+            );
+            let _ = append_tx.send(r.is_ok());
+        });
+
+        // Long enough for the appender to have taken B and to be inside or waiting for V.
+        // If it has not started at all the test still holds: releasing the stats thread then
+        // simply lets both run, which is the outcome being asserted.
+        std::thread::sleep(Duration::from_millis(200));
+        stats_order_hook::release();
+
+        let appended = append_rx.recv_timeout(DEADLINE).unwrap_or_else(|_| {
+            stats_order_hook::disarm();
+            panic!(
+                "the append never returned within {DEADLINE:?}. It holds the base \
+                 exclusively and is waiting for the view; the stats snapshot holds the view \
+                 and is waiting for the base. That is the cycle of A10-01, and no answer is \
+                 ever wrong on the way into it — the connection simply never replies."
+            )
+        });
+        let reads = stats_rx.recv_timeout(DEADLINE).unwrap_or_else(|_| {
+            stats_order_hook::disarm();
+            panic!(
+                "the stats snapshot never returned within {DEADLINE:?}, having been \
+                 released at the rendezvous: it is waiting for the base under the view"
+            )
+        });
+        stats_order_hook::disarm();
+
+        assert!(appended, "the witness transaction must actually commit");
+        // The snapshot is not atomic across the two locks and this asserts nothing about
+        // which side of the append it landed on; what it asserts is that it landed.
+        let _ = reads;
+    }
+
     /// The order is a property of the source, and reading it there is not a weaker test —
     /// it is the only one that cannot pass by luck.
+    ///
+    /// **Every function, not a list of two.** This guard named `answer_from_view` and
+    /// `append`, which were the two paths that took both locks when it was written. A third
+    /// appeared — `read_stats`, which took V and then reached for B underneath it — and the
+    /// guard said nothing, because a hand-written list of the paths that must obey a rule
+    /// only covers the paths someone remembered (A10-01). It now derives the list: every
+    /// `fn` in this file that acquires both is checked, so the next path to take both is
+    /// covered on the commit that introduces it rather than on the commit that finds it.
+    ///
+    /// A function that takes neither, or only one, is not the rule's business and is skipped
+    /// — but the count of functions that take both is asserted to be non-trivial, so a
+    /// change to how the locks are spelled cannot empty the scan and leave a green test
+    /// asserting nothing.
     #[test]
     fn the_base_is_acquired_before_the_view_on_every_path_that_takes_both() {
         let src = include_str!("rev_engine.rs");
-        for (name, marker) in [
-            ("answer_from_view", "fn answer_from_view("),
-            ("append", "fn append(&self, rows: Vec<Row>"),
-        ] {
-            let body = src.split(marker).nth(1).unwrap_or_else(|| panic!("{name}"));
-            let body = &body[..body.find("\n    }").unwrap_or(body.len())];
+        // Bodies are delimited by the `    fn ` / `\n    }` shape every method in this file
+        // has. A free function or a nested closure is inside some method's body and is
+        // checked as part of it, which is what the rule is about anyway: the order of
+        // acquisitions on one thread's path.
+        let mut checked = 0;
+        let mut names = Vec::new();
+        for chunk in src.split("\n    fn ").skip(1) {
+            let name = chunk
+                .split(['(', '<'])
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let body = &chunk[..chunk.find("\n    }").unwrap_or(chunk.len())];
+            // **Code only.** The scan reads positions of lock acquisitions, and a comment
+            // that *names* one moves that position. This is not hypothetical: the repair for
+            // A10-01 carries a paragraph explaining that `read_stats` used to reach for
+            // `self.base()` under the view, and with comments included that sentence sat
+            // where the acquisition used to be — so the guard passed against the reverted,
+            // deadlocking build, on the strength of the prose describing the deadlock.
+            let body: String = body
+                .lines()
+                .map(|l| match l.find("//") {
+                    Some(i) => &l[..i],
+                    None => l,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let body = body.as_str();
+            // The test module below contains this very test, whose text mentions both
+            // spellings in prose and in assertions; scanning it would check the guard
+            // against itself. Everything above `mod tests` is the engine.
+            if src.find(&format!("\n    fn {name}")).unwrap_or(0)
+                > src.find("\nmod tests {").unwrap_or(src.len())
+            {
+                continue;
+            }
             let base = body
                 .find("self.base()")
                 .or_else(|| body.find("TimedWrite::acquire"))
-                .unwrap_or_else(|| panic!("`{name}` must take the base"));
-            // Either spelling: a bare `.lock()`, or the timed acquisition that T-12 routed
-            // every view hold through. A guard that recognised only one of them would pass
-            // silently the moment the other was used, which is the failure mode of a
-            // source-level test.
+                .or_else(|| body.find("TimedRead::acquire"));
             let view = body
                 .find("VIEW_LOCK")
                 .or_else(|| body.find(".lock()"))
-                .unwrap_or_else(|| panic!("`{name}` must take the view"));
+                .or_else(|| body.find("view_mut("));
+            let (Some(base), Some(view)) = (base, view) else {
+                continue;
+            };
+            checked += 1;
+            names.push(name.clone());
             assert!(
                 base < view,
-                "`{name}` takes the view at {view} and the base at {base}. Both paths must \
-                 take the base first: a read holding the view while it waits for the base, \
+                "`{name}` takes the view at {view} and the base at {base}. Every path must \
+                 take the base first: a thread holding the view while it waits for the base, \
                  against an append holding the base while it waits for the view, is a \
                  deadlock and no answer is ever wrong on the way into it."
+            );
+        }
+        assert!(
+            checked >= 3,
+            "PRECONDITION UNMET: only {checked} function(s) were found to take both locks \
+             ({names:?}). `answer_from_view`, `append` and `read_stats` all do, so a scan \
+             that finds fewer is not recognising an acquisition and is asserting nothing."
+        );
+        for required in ["answer_from_view", "append", "read_stats"] {
+            assert!(
+                names.iter().any(|n| n == required),
+                "the scan did not recognise `{required}` as taking both locks; it does, so \
+                 the spellings this test matches on have fallen behind the source. Found: \
+                 {names:?}"
             );
         }
     }

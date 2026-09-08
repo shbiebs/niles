@@ -388,13 +388,32 @@ mod read_concurrency_guard {
              can see because every answer stays correct."
         );
 
+        // **The marker is the signature `append` actually has.**
+        //
+        // This arm split on `"fn append(&self, rows: Vec<Row>"`, which is not how the
+        // function is written — `rustfmt` broke that signature across four lines long ago.
+        // The only place that string existed in `rev_engine.rs` was inside the *lock-order
+        // test's* own list of markers, so the split landed in a test module and the
+        // `contains("TimedWrite::acquire")` below was satisfied by that module's prose. The
+        // arm has been asserting nothing about `append` since the signature was reformatted,
+        // and it went on passing because a guard that reads the source can be satisfied by
+        // the source of another guard. It surfaced when cycle 10 replaced that marker list
+        // with a derived scan and the string disappeared.
+        //
+        // Two consequences kept here deliberately: the marker is the multi-line form, and
+        // the body is required to be found rather than defaulted to the rest of the file by
+        // `unwrap_or(len)` — a default that turns "the function was not located" into "the
+        // whole file, which certainly contains the string I am looking for".
+        const APPEND_SIG: &str = "\n    fn append(\n        &self,\n        rows: Vec<Row>,";
         let append = src
-            .split("fn append(&self, rows: Vec<Row>")
+            .split(APPEND_SIG)
             .nth(1)
-            .expect("`append` is where the exclusive borrow belongs");
+            .expect("`append` is where the exclusive borrow belongs, at its real signature");
+        let append = &append[..append
+            .find("\n    }")
+            .expect("the body of `append` closes at its own indentation")];
         assert!(
-            append[..append.find("\n    }").unwrap_or(append.len())]
-                .contains("TimedWrite::acquire"),
+            append.contains("TimedWrite::acquire"),
             "`append` must take the base exclusively: `submit` chains a hash and mutates five \
              indexes, and the write guard is also what makes the epoch ids it assigns \
              contiguous."

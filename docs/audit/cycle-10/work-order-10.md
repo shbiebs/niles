@@ -69,38 +69,95 @@ https://static.rust-lang.org: 000FAIL
 |---|---|
 | `~/Documents/niles` | **`8548189`** on `c7/01-durable-rows`; branches `c9/07-pending`, `c10/00-audit` present; clean apart from the five protected files |
 | protected files | `.DS_Store` 10,244 · `AGENTS.md` 16,639 · `niles/.DS_Store` 6,148 · `thesis/.DS_Store` 8,196 · `thesis/Niles-Thesis.pdf` 816,110 — **unchanged** |
-| `~/Documents/GBS` | **`963e4d9`** on `c7/00-adapter` — **two commits behind**, the block given at three landings and not run |
+| `~/Documents/GBS` | **`688919c`** on `c7/00-adapter` as of 16:10:42 UTC (reflog: two fast-forwards, 447544d then 688919c) and pushed. It was at `963e4d9` when this audit's first bridge read was taken at 16:05 UTC; the author synced it five minutes later. |
 | `~/Documents/niles-sync/cycle-10/` | both briefs and `niles-c10-audit.bundle` present |
 
-**The author must run this now**, before anything else in this cycle — the Mac's niles gate is
-red until it is (§2, F-10-03):
+**A correction to this audit's own instruction.** The GBS sync block given at three cycle-9
+landings and again in this work order's first draft named the ref `c7/00-adapter` on both
+bundles. The bundles carry **`c9/01-batch-seq`** and **`c9/02-idem-key-only`** (`git bundle
+list-heads`); a fetch by the name given fails with `couldn't find remote ref`. The author landed
+the commits anyway at 16:10 UTC, and the block as written then reported `Already up to date` and
+`cannot force update the branch used by worktree` — both harmless, both symptoms of a wrong
+instruction. **Rule for the executor, added to §8:** a sync block names the ref the bundle
+actually carries, checked with `git bundle list-heads` before the block is written, and never
+`git branch -f`s the branch that is checked out.
+
+The Mac preflight has been run (§0.2a); `c10-rwlock.sh` has been run (§0.2b).
+
+### 0.2a Mac preflight, verbatim (the sections that carry facts)
 
 ```
-cd ~/Documents/GBS
-git fetch ~/Documents/niles-sync/cycle-9/gbs-01-batch-seq.bundle c7/00-adapter
-git merge --ff-only FETCH_HEAD
-git fetch ~/Documents/niles-sync/cycle-9/gbs-02-idem-key-only.bundle c7/00-adapter
-git merge --ff-only FETCH_HEAD
-git branch -f c7/00-adapter HEAD
-git push origin c7/00-adapter
-RUSTUP_AUTO_INSTALL=0 cargo +1.97.1 clippy --offline --all-targets -- -D warnings
+cycle-10 audit preflight — 2026-09-08T16:32:46Z
+=== A. host
+uname            : Darwin 25.6.0 arm64
+cores (nproc)    : 10
+memtotal         : 16.0 GiB
+=== B. filesystem under the tree
+mount            : /dev/disk3s1s1 on / (apfs, sealed, local, read-only, journaled)
+barrier          : fsync
+median           : 15.7 us  ->  63,658 barriers/s
+spread           : 13.1-48.2 us
+VERDICT          : suspicious — verify the mount is not volatile before
+                   publishing any durability figure.
+=== C. toolchain
+pin              : channel = "1.95.0" — resolves here
+rustc            : rustc 1.95.0 (59807616e 2026-04-14)   (toolchain: 1.95.0)
+1.97.1           : installed — the author's newer-lint gate
+valgrind         : ABSENT — no callgrind/dhat/massif attribution
+strace           : ABSENT — make fsync-proof cannot run
+=== D. PostgreSQL
+psql             : psql (PostgreSQL) 18.6 (Homebrew)
+pg_isready       : /tmp:5432 - no response
+bench PostgreSQL : 127.0.0.1:5433 - no response
+=== E. network egress
+https://github.com          : 200
+=== F. trees
+niles  HEAD 69488a81  branch c7/01-durable-rows  dirty 5 (the five protected files)
+GBS    HEAD 688919c   branch c7/00-adapter       dirty 0
+=== G. gate
+  cargo test --offline --workspace   # niles: ~907 #[test] attributes; gbs: ~567
 ```
 
-The author has not yet run the Mac preflight; it is requested below (§5) and every C-host figure
-in this work order is marked *to be measured*.
+**Two of those lines are the instrument, not the machine** (F-10-13). Section B's "barrier:
+fsync, 15.7 µs, *suspicious*" is Python's `os.fsync`, which on Darwin does **not** reach the
+device — `F_FULLFSYNC` does, at ~255/s, and that is what the ledger's sink issues. The preflight
+measures the wrong syscall on the one host whose storage figures are publishable, and reports
+the reference host as suspicious. Its "mount … read-only" line is the sealed APFS system volume
+that `df` resolves the path to through a firmlink, not the Data volume the tree lives on. Neither
+changes any admissibility answer below — cycle 9's `c9-storage.sh` contract and the sink's own
+probe are the storage evidence — but a preflight whose section B is wrong on Host C is a
+preflight that would have passed a volatile mount on Host C too.
+
+### 0.2b `c10-rwlock.sh` on Host C, verbatim
+
+```
+=== c10-rwlock: 2026-09-08T16:32:33Z on Darwin 25.6.0 arm64 ===
+toolchain: rustc 1.97.1 (8bab26f4f 2026-07-14)
+platform                                     : macos / std::sync::RwLock
+second reader admitted AFTER the queued writer : 200/200  (writer-preferring)
+second reader admitted BEFORE the queued writer: 0/200  (reader-preferring)
+second reader's wait, us                      : p50 217 p90 222 max 269
+```
+
+**200 of 200.** On the reference host a queued writer blocks every later reader, without
+exception and with less jitter than Linux (143/200 in the container, where the 57 were
+scheduling races on two cores). The mechanism behind every slowest-16 table in C9-06.2 is
+established on the machine that produced them: a reader folding under the base guard queues
+the appender, and every reader arriving behind the appender waits for both.
 
 ### 0.3 Admissibility
 
 | question | container | Host C |
 |---|---|---|
-| cores actually granted | 2 (no cgroup quota reported; `nproc` = 2) | 10 (4P + 6E) |
-| barrier, median, rate | `fdatasync`, 139 µs, 7,195/s | `F_FULLFSYNC`, ~255/s (cycle 9) |
-| storage evidence? | yes, ratios only | yes |
-| may publish durability rows? | **no** | yes |
+| cores actually granted | 2 (no cgroup quota reported; `nproc` = 2) | 10 (`nproc`; no cgroup) — measured |
+| barrier, median, rate | `fdatasync`, 139 µs, 7,195/s | preflight prints `fsync` 15.7 µs / 63,658/s, which is **not a barrier on Darwin** (F-10-13); the sink's `F_FULLFSYNC` is ~255/s (cycle 9's `c9-storage.sh` contract, to be re-run before any durability row) |
+| storage evidence? | yes, ratios only | yes — from the sink's probe, not the preflight |
+| may publish durability rows? | **no** | yes, after `c9-storage.sh`'s `F_FULLFSYNC` line is on record this cycle |
 | may publish > 3-core curves? | **no** | yes |
-| toolchain newer than 1.95.0? | no (stable = 1.95.0) | 1.97.1 for lint only |
-| valgrind attribution possible | yes, per function | no |
-| PostgreSQL comparison possible | 16.13 on 5432 after a manual start; nothing on 5433 | installed, not running on 5433 |
+| toolchain newer than 1.95.0? | no (stable = 1.95.0) | pin resolves; 1.97.1 for lint only — measured |
+| valgrind attribution possible | yes, per function | **no** (absent) — measured |
+| PostgreSQL comparison possible | 16.13 on 5432 after a manual start; nothing on 5433 | **PATH has 18.6 (Homebrew)**; nothing on 5432 or 5433; a PG16 on 5433 is still the C republish's precondition (C10-11) — measured |
+| `make fsync-proof` | runs | **cannot** (no `strace`) — the Mac gate is fmt + clippy + tests + reproduce |
 
 Every container figure below is a **count, a ratio, or a per-function instruction total**.
 Nothing in this document is a wall-clock claim about Host C except where labelled *cycle 9,
@@ -219,8 +276,11 @@ against the current niles fails with `error[E0609]: no field 'epoch' on type
 `downstream_adapter.rs` finds `../GBS` beside the tree and compiles the real adapter, so `make
 gate` on the Mac is red on that test today. The author has run `cargo +1.97.1 clippy` at each
 landing, which does not run tests, so nothing has said so. The GBS sync block was given at three
-landings and not run — the cycle-9 brief's own rule ("repeat until confirmed") was followed and
-was not enough. *Repair:* the block in §0.2, now; and F-10-04.
+landings with the **wrong ref name** (§0.2) — the cycle-9 brief's rule "repeat until confirmed"
+was followed and the thing repeated was wrong. **Resolved at 16:10 UTC:** the Mac's GBS is at
+`688919c` and pushed. What remains is the verdict: the Mac's `cargo test --workspace` on niles
+has not been run since, so the cross-repo guard's green on the reference host is *expected*,
+not *recorded* — §5 asks for it. And F-10-04.
 
 ### F-10-04 — the cross-repo guard passes when there is nothing to check
 *instrument-gap · EV 3×5÷1 = 15 · HI · read from source.*
@@ -311,6 +371,17 @@ the_batch_size`). What does not exist is the *negative*: a test that retries an 
 old gap and shows it is refused by both. *Repair:* C10-02 adds that one test; it is the "not
 reproduced" record with teeth.
 
+### F-10-13 — the preflight's storage section measures the wrong syscall on Darwin and reports the reference host as suspicious
+*instrument-gap · EV 3×5÷1 = 15 · HI · measured by the author on request.*
+`docs/audit/cycle-10/preflight.sh` §B (inherited from cycle 9): Python `os.fdatasync` falls
+back to `os.fsync` on Darwin, which does not flush the device; the honest barrier there is
+`fcntl(fd, F_FULLFSYNC)`. The probe prints 63,658 barriers/s and the verdict *suspicious* on
+Host C, whose real barrier is ~255/s. The mount line resolves to the sealed system volume through
+a firmlink. The section that exists to catch a volatile mount cannot tell Host C from one.
+*Repair:* C10-02 — `fcntl.fcntl(fd, fcntl.F_FULLFSYNC)` when `sys.platform == "darwin"`, with the
+syscall named in the output; the mount line taken from the Data volume (`df -P` of the path's
+real parent). *Gives up:* nothing.
+
 ---
 
 ## 3. Tasks, in dependency order
@@ -378,12 +449,16 @@ columns; no histogram is cumulative across levels.
 `crates/niles-interp/src/lib.rs:401`; `crates/nilestream-core/src/rev.rs` (`finish_fold` doc);
 `docs/audit/cycle-9/execution-report.md` §5 fact 3 (**a correction appended, the original left
 in place** — audit evidence is not rewritten); `crates/nilestream-ledger/src/sequencer.rs` (the
-window-gap negative test).
+window-gap negative test); `docs/audit/cycle-10/preflight.sh` §B (F-10-13).
 **Baseline:** 34 public items in 7 files absent from Appendix D; `ZSet` 0 occurrences.
 **Targets.**
 - C10-02.1 *`downstream_adapter` fails, naming the path it looked for, when no GBS checkout is
-  found and `NILES_NO_GBS` is unset; it skips only when that variable is set; and the author has
-  run the §0.2 block so the Mac's GBS is at `688919c` and `make gate` on the Mac is green.*
+  found and `NILES_NO_GBS` is unset; it skips only when that variable is set; and the author's
+  `cargo test --offline --workspace` on the Mac's niles at the landing shows it green against
+  `~/Documents/GBS` at `688919c`.*
+- C10-02.5 *`preflight.sh` §B issues `F_FULLFSYNC` on Darwin and names the syscall it issued;
+  its mount line is the Data volume; run on Host C it reports the barrier at the rate the sink's
+  own probe reports, not 63,658/s.*
 - C10-02.2 *`gen-appendix-d.py` cuts a file only at a `#[cfg(test)]` that begins a line, and the
   regenerated `appendix-d-api.md` names `ZSet`, `eval_scalar` and every other public item of
   `niles-ir::eval`; a test in the workspace asserts that no `pub` item at column 0 in the three
@@ -541,17 +616,19 @@ Per landing, container: `make gate` (starting PostgreSQL first: `sudo -n service
 start`); `cargo test --offline --workspace --no-fail-fast`; the task's guard proved by reversion
 in a disposable worktree with the transcript captured; `make reproduce` after commit.
 Per landing, Mac: the sync block, then `RUSTUP_AUTO_INSTALL=0 cargo +1.97.1 clippy --offline
---all-targets -- -D warnings`; and **after C10-02, once, `make gate` on the Mac**, so the
-cross-repo guard's verdict on the reference host is on record.
+--all-targets -- -D warnings`. The Mac cannot run `make gate` in full (no `strace` for
+`fsync-proof`; no `valgrind`); its gate is fmt + clippy + `cargo test --offline --workspace` +
+`make reproduce`. **Now, and again after C10-02:** `cd ~/Documents/niles && cargo test --offline
+--workspace` on the Mac, so the cross-repo guard's verdict on the reference host is recorded
+rather than expected.
 
 Green means: exit 0 and no changed verdict against the previous landing's run. A red row is a
 result. **Environment reds**, which are recorded and are not defects: `numeric_binary_oracle`
 without PostgreSQL started; `downstream_adapter` on a host with no GBS sibling (after C10-02, a
 refusal naming the path, which is the intended red).
 
-**Mac preflight — the author must now run** `bash ~/Documents/niles/docs/audit/cycle-10/
-preflight.sh ~/Documents/niles ~/Documents/GBS` and paste it; its admissibility table replaces
-the *Host C* column of §0.3, which is carried from cycle 9.
+The Mac preflight was run at 16:32 UTC (§0.2a) and its facts are in §0.3; its §B is wrong on
+Darwin (F-10-13) and is repaired by C10-02.5.
 
 ---
 
@@ -565,7 +642,7 @@ complete.
 |---|---|---|---|
 | `c10-baselock.sh --baseline-only` | one arm, current build (`c7/01-durable-rows`): 6r3w / 9r5w / 12r6w × 30 s, 2 warm-ups + 5 measured; throughput, slowest-16 with base/view split, flights, and — after C10-01 — the lockstats row with read/write holds | ≈ 12 min / cap 20 | **after C10-01 lands** — this is the cycle's baseline |
 | `c10-baselock.sh --candidate <ref>` | two arms interleaved, same protocol | 25–35 min / cap 45 | after C10-03; after C10-04; after C10-05 |
-| `c10-rwlock.sh` | Darwin `std::sync::RwLock` fairness: 200 trials, second reader vs queued writer | < 1 min | **now** — it needs no landing |
+| `c10-rwlock.sh` | Darwin `std::sync::RwLock` fairness: 200 trials, second reader vs queued writer | < 1 min | **run, 16:32 UTC: 200/200 writer-preferring** (§0.2b) |
 
 The `--checkpoint-interval` probe in `c10-baselock.sh` §2 must read the same on both arms except
 when C10-04 is the candidate.
@@ -579,7 +656,7 @@ LC-16, LC-35.
 
 | LC | position after this audit |
 |---|---|
-| **23 / 24** | reopened against the base; **mechanism measured** in the container (readers' holds 2.9× the writer's; a queued writer blocks later readers 143/200 on Linux `std`); Darwin by `c10-rwlock.sh`; repair is C10-04 (short holds) now and C10-06 (no hold) as a spike |
+| **23 / 24** | reopened against the base; **mechanism measured**: readers' holds 2.9× the writer's in aggregate (container); a queued writer blocks later readers **200/200 on Darwin** (Host C, `c10-rwlock.sh`) and 143/200 on Linux; repair is C10-04 (short holds) now and C10-06 (no hold) as a spike |
 | 03, 05, 06, 07, 13, 19, 22, 25, 26, 27, 29 | carried unchanged from cycle 9 |
 | 20 | `BLOCKED-LC20-definition` — retire the number at the end of this cycle if the author has not supplied a subject |
 | **30** | implemented and guarded; **the author confirms in one sentence** or names the change |
@@ -614,10 +691,11 @@ GBS head. Evidence class on every figure.
 | C10-00.2 | One connection inserting continuously and one issuing `select nilestream_stats` continuously against the daemon's real bytes both make progress for 3 s, tested with a deadline; the same in-process with `append` and `read_stats`. |
 | C10-01.1 | `select nilestream_lockstats` reports the base lock's shared and exclusive acquisitions as separate scopes with their own wait and hold quantiles, both reset by `reset`, and a test asserts a `TimedRead` lands in the shared scope only and a `TimedWrite` in the exclusive scope only. |
 | C10-01.2 | Every mixed level of `bench` prints the full lockstats row, level-local, and `c10-baselock.sh --baseline-only` has been run on Host C with its transcript pasted into the execution report as the cycle's baseline. |
-| C10-02.1 | `downstream_adapter` fails, naming the path it looked for, when no GBS checkout is found and `NILES_NO_GBS` is unset; it skips only when that variable is set; and the author has run the §0.2 block so the Mac's GBS is at `688919c` and `make gate` on the Mac is green. |
+| C10-02.1 | `downstream_adapter` fails, naming the path it looked for, when no GBS checkout is found and `NILES_NO_GBS` is unset; it skips only when that variable is set; and the author's `cargo test --offline --workspace` on the Mac's niles at the landing shows it green against `~/Documents/GBS` at `688919c`. |
 | C10-02.2 | `gen-appendix-d.py` cuts a file only at a `#[cfg(test)]` that begins a line, and the regenerated `appendix-d-api.md` names `ZSet`, `eval_scalar` and every other public item of `niles-ir::eval`; a test in the workspace asserts that no `pub` item at column 0 in the three documented crates is absent from the generated appendix. |
 | C10-02.3 | `MISMATCH-A9-F05` is struck from `SPEC-ENGINE.md` with C9-04.1 cited; no doc comment in the workspace names `ignored_windows`; `finish_fold`'s comment and an appended correction to the cycle-9 report's fact 3 state the generation check's second hazard as a discarded fresher result and a stamp moving backwards, not as an orphaned marker. |
 | C10-02.4 | A test retries an identity that the old record-counted window would have admitted and the transaction-counted one refuses, and shows both admission and sealer refuse it — the "not reproduced" record C9-02.4 asked for, with the invariant named in its message. |
+| C10-02.5 | `preflight.sh` §B issues `F_FULLFSYNC` on Darwin and names the syscall it issued; its mount line is the Data volume; run on Host C it reports the barrier at the rate the sink's own probe reports, not 63,658/s. |
 | C10-03.1 | A flight that lands with `applied − anchor ≤ MERGE_CAP` installs at `applied`, unpinned, with the key's deltas in `(anchor, applied]` folded in, and `deferred_merges` counts it; one that lands further behind installs pinned as before; both proved by the latched differential, which now asserts `deferred_merges > 0` on its merged arm and reads exactly at `applied` afterwards. |
 | C10-03.2 | At 12r/6w on Host C, `pinned_installs` is below 0.5% of reads and `deferred_merges` is above 5% of reads, on `c10-baselock.sh --candidate c10/04-deferred-merge` against the C10-01.2 baseline; read throughput is reported beside it under the ≥ 10% ∧ ≥ 3 pooled-MAD gate and is **not** a pass condition. |
 | C10-03.3 | Chapter 3's upquery rule and Theorem 4.1 clause 5c state the merge as implemented, including the cap and that a landing beyond it pins. |
@@ -637,17 +715,19 @@ found while executing that this work order does not cover** — nothing from §2
 than three reported as `not done: only N`. (6) Worktree status before and after with the five
 protected files' sizes (10,244 / 16,639 / 6,148 / 8,196 / 816,110 at audit; a discrepancy is
 referred, never corrected); every SHA and bundle hash, base and tip; the sync block for every
-landing, **repeated in every subsequent landing's message until the author's paste shows it
-run**; the author's 1.97.1 result. No executor push; attribution is the executing session's own.
+landing, **naming the ref the bundle carries (`git bundle list-heads` first), never
+`branch -f`-ing the checked-out branch, and repeated in every subsequent landing's message until
+the author's paste shows it run**; the author's 1.97.1 result. No executor push; attribution is the executing session's own.
 
 ---
 
 ## 9. What this audit could not do, and says so
 
 - **GitHub:** unreachable without a credential; not requested; not needed for any finding.
-- **Host C:** no measurement of the current build exists yet; every C-host figure here is cycle
+- **Host C:** the preflight and the RwLock probe have been run (§0.2a, §0.2b); no throughput
+  or lock-hold measurement of the current build exists yet, and every such figure here is cycle
   9's. The first thing the executor lands (C10-01) is the instrument, and the first thing the
-  author runs is the baseline. `c10-rwlock.sh` needs no landing and should be run today.
+  author runs after it is the baseline.
 - **Astra:** the §8 checks 2, 3, 5 and 6 were done here from source and are for Astra to do
   independently; the reconciliation table (cycle 9's §2A shape) is the author's to commission.
 - **The three material facts** of cycle 9 were each turned into a finding here (F-10-07, the

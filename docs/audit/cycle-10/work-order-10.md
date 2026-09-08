@@ -1,738 +1,569 @@
-# Cycle 10 work order — Fable
+# Cycle 10 — consolidated work order (Astra + Fable)
 
-**Auditor:** Claude Fable 5.1, container, from `docs/audit/cycle-10/fable-audit-prompt.md`.
-**Trees audited:** `niles` at **`8548189`** (`c10/00-audit`, = `53b40f6` + the briefs) and `gbs` at
-**`688919c`**, both in the container's clones; the author's Mac read through the bridge.
-**Executor:** Claude Opus, in a later session, offline. This document is the only thing it sees.
+Audit date: 2026-09-08. This is the sole audit deliverable and the controlling document for
+cycle 10. Astra read source and existing evidence; Astra did not build, test, benchmark, modify
+either repository, or make commits. Opus executes the tasks below offline. This consolidates the
+updated Fable work order (preserved beside it as `work-order-10-fable.md`) with Astra's
+independent audit and the author's subsequent complete gate results. The reconciliation in §1A
+resolves scope and target conflicts; **the source work orders are evidence, not additional
+instructions.**
 
-GitHub was **not reachable from the container** (`GIT_TERMINAL_PROMPT=0 git ls-remote` →
-"could not read Username"; the repositories are private and the container holds no credential).
-No token was requested: the container's clones are the histories the bundles carry and the Mac's
-trees were read directly, so nothing in this work order depends on GitHub. The author should
-still confirm, on GitHub, that `c9/07-pending`, `c10/00-audit` and `c7/01-durable-rows` are at
-`8548189` and `c7/00-adapter` at `688919c` — the second of those is **not yet true** (§0.2).
+## 0. Baseline, access, and admissibility
 
----
+`N` means `/Users/checolino/Documents/niles`; `G` means `/Users/checolino/Documents/GBS`. Source
+references below use these absolute roots and one-based lines. Numbers from archived runs are
+explicitly historical evidence, not Cycle 10 performance baselines.
 
-## 0. Preflight and admissibility
+| Repository or ref | Verified state at initial audit/sync | Consequence |
+|---|---|---|
+| N audited source, then local `c7/01-durable-rows` and `c10/00-audit` | `85481890808c8b808c46a7534870abf40e8b0de5` | Cycle 10 starting commit. |
+| N runtime predecessor, `c9/07-pending` | `53b40f6dcde3d4fe110f5c3d75e0018741f6768e` | Diff to 8548189 contains only the two Cycle 10 briefs and preflight, three files, 1,670 added lines; runtime source is identical. |
+| G before author sync | `963e4d9ed8ba503b9ea629b5173f994f026f2d71` | Preflight's GBS row was behind; it was not used as the Cycle 10 implementation baseline. |
+| G after requested author sync | `688919c87852c86d8e8c3abc0af2135db60a5197`, clean, `c7/00-adapter` | Correct baseline now present. |
+| Author's `git ls-remote` | N c7 and c10 at 8548189; N c9 at 53b40f6; G c7 at 688919c | Both owed Cycle 9 changes are present remotely. N's differing refs are the verified documentation delta, not an outstanding runtime sync. |
+| Author's G workspace Clippy | `cargo +1.97.1 clippy --offline --all-targets -- -D warnings`: exit 0 | This alone does not check the excluded Nilestream adapter; `make gate` includes it. |
+| Astra GitHub probes | Noninteractive, bounded probes failed to resolve github.com | Agent network failure, not a finding of denied repository authorization. Author's network succeeded. Local source access sufficed. |
 
-### 0.1 Container preflight, verbatim
+The brief's GBS sync block named bundle refs that do not exist and then attempted to force-update
+the checked-out branch. The actual exports are `c9/01-batch-seq` at
+`447544ded3e4306ceeed7300c6354e470cec8e9f` and `c9/02-idem-key-only` at 688919c. The author
+fetched those refs, fast-forwarded the checked-out c7 branch, pushed it, and pasted successful
+outputs. **The Cycle 9 GBS sync is closed; do not repeat the broken block.** Repeat every new,
+still-owed Cycle 10 sync at each landing until acknowledged.
 
-```
-cycle-10 audit preflight — 2026-09-08T16:05:54Z
+### Filled admissibility table
 
-=== A. host
-uname            : Linux 6.18.44-fc-v24 x86_64 GNU/Linux
-cores (nproc)    : 2
-cpu model        : Intel(R) Xeon(R) Processor @ 2.80GHz
-memtotal         : 7.8 GiB
-cgroup cpu.max   : n/a
-cgroup mem.max   : n/a
-
-=== B. filesystem under the tree — THE decisive section
-path             : /home/claude/work/niles
-mount            : /dev/vda ext4   rw,relatime,resv_strict,resuid=65534,resgid=65534
-free space       : 18G avail of 252G
-barrier          : fdatasync
-median           : 139.0 us  ->  7,195 barriers/s
-spread           : 136.9-940.4 us
-VERDICT          : plausible as a real barrier for THIS container. Still a
-                   host-shaped number: usable for within-host ratios only.
-
-=== C. toolchain
-pin              : channel = "1.95.0" — does NOT resolve here — every probe uses RUSTUP_TOOLCHAIN=stable
-rustc            : rustc 1.95.0 (59807616e 2026-04-14)   (toolchain: stable)
-cargo            : cargo 1.95.0 (f2d3ce0bd 2026-03-21)
-host triple      : x86_64-unknown-linux-gnu
-1.97.1           : not installed here — the author runs that gate on the Mac
-valgrind         : valgrind-3.22.0
-python3          : Python 3.11.15
-
-=== D. PostgreSQL
-psql             : psql (PostgreSQL) 16.13
-pg_isready       : /var/run/postgresql:5432 - accepting connections   (started by hand first: `sudo -n service postgresql start`)
-bench PostgreSQL : 127.0.0.1:5433 - no response
-
-=== E. network egress
-https://github.com          : 400
-https://crates.io           : 403
-https://static.rust-lang.org: 000FAIL
-
-=== F. trees
-/home/claude/work/niles   HEAD 8548189  branch c10/00-audit   dirty 0
-/home/claude/work/gbs     HEAD 688919c  branch c9/02-idem-key-only   dirty 0
-```
-
-### 0.2 The Mac, through the bridge (read-only)
-
-| | value |
+| Field | Cycle 10 verdict |
 |---|---|
-| `~/Documents/niles` | **`8548189`** on `c7/01-durable-rows`; branches `c9/07-pending`, `c10/00-audit` present; clean apart from the five protected files |
-| protected files | `.DS_Store` 10,244 · `AGENTS.md` 16,639 · `niles/.DS_Store` 6,148 · `thesis/.DS_Store` 8,196 · `thesis/Niles-Thesis.pdf` 816,110 — **unchanged** |
-| `~/Documents/GBS` | **`688919c`** on `c7/00-adapter` as of 16:10:42 UTC (reflog: two fast-forwards, 447544d then 688919c) and pushed. It was at `963e4d9` when this audit's first bridge read was taken at 16:05 UTC; the author synced it five minutes later. |
-| `~/Documents/niles-sync/cycle-10/` | both briefs and `niles-c10-audit.bundle` present |
+| Cores actually granted | Host C reports 10 native cores; no cgroup quota applies. This is not ten equal-performance cores or ten exclusively reserved cores. Record actual hardware and load with each run. |
+| Barrier, median, rate | Author-requested ordinary `fsync`, 17.9 µs median, 55,944/s, 15.1–56.4 µs range. Seven probes; this is preflight evidence, not a benchmark passing the timing protocol. |
+| Storage evidence | Incomplete. The printed sealed root mount does not establish the actual writable data volume backing the segment. Neither volatility nor power-loss persistence is established by this row. |
+| Publish durability rows | **Blocked now** on verifying the actual segment path and the production Darwin barrier. The brief's historical ~255 F_FULLFSYNC/s is not this probe and is not a fresh baseline. |
+| Publish >3-core curves | Host C can measure connection scaling on its 10-core hardware after provenance/load checks. A 12-reader/6-writer point is an oversubscribed connection count, not an 18-core claim. Publication remains a separate author-controlled action. |
+| Newer toolchain | 1.97.1 installed; requested G workspace Clippy passed. Full paired gates have separate results below. Never equate `stable` with 1.95.0 without resolving it. |
+| Valgrind attribution | Unsupported on current C setup; leave per-function instruction costs to an already-equipped execution host/Fable. No installation task. |
+| PostgreSQL comparison | Blocked: no service on 5433; PATH identifies PG18.6, not PG16. An installed PG16 elsewhere is unverified. No wal_sync_method measured. |
+| Container | 2 reported cores, stable resolving to 1.95.0, Valgrind 3.22, PG16.13 on 5432 but not 5433. No exclusive CPU grant proved. No container publication or durability/scaling extrapolation. |
 
-**A correction to this audit's own instruction.** The GBS sync block given at three cycle-9
-landings and again in this work order's first draft named the ref `c7/00-adapter` on both
-bundles. The bundles carry **`c9/01-batch-seq`** and **`c9/02-idem-key-only`** (`git bundle
-list-heads`); a fetch by the name given fails with `couldn't find remote ref`. The author landed
-the commits anyway at 16:10 UTC, and the block as written then reported `Already up to date` and
-`cannot force update the branch used by worktree` — both harmless, both symptoms of a wrong
-instruction. **Rule for the executor, added to §8:** a sync block names the ref the bundle
-actually carries, checked with `git bundle list-heads` before the block is written, and never
-`git branch -f`s the branch that is checked out.
+**T00 is the script task that produces the current Host C snapshot/merge performance baseline**,
+and all downstream performance pass lines use its figures.
 
-The Mac preflight has been run (§0.2a); `c10-rwlock.sh` has been run (§0.2b).
-
-### 0.2a Mac preflight, verbatim (the sections that carry facts)
-
-```
-cycle-10 audit preflight — 2026-09-08T16:32:46Z
-=== A. host
-uname            : Darwin 25.6.0 arm64
-cores (nproc)    : 10
-memtotal         : 16.0 GiB
-=== B. filesystem under the tree
-mount            : /dev/disk3s1s1 on / (apfs, sealed, local, read-only, journaled)
-barrier          : fsync
-median           : 15.7 us  ->  63,658 barriers/s
-spread           : 13.1-48.2 us
-VERDICT          : suspicious — verify the mount is not volatile before
-                   publishing any durability figure.
-=== C. toolchain
-pin              : channel = "1.95.0" — resolves here
-rustc            : rustc 1.95.0 (59807616e 2026-04-14)   (toolchain: 1.95.0)
-1.97.1           : installed — the author's newer-lint gate
-valgrind         : ABSENT — no callgrind/dhat/massif attribution
-strace           : ABSENT — make fsync-proof cannot run
-=== D. PostgreSQL
-psql             : psql (PostgreSQL) 18.6 (Homebrew)
-pg_isready       : /tmp:5432 - no response
-bench PostgreSQL : 127.0.0.1:5433 - no response
-=== E. network egress
-https://github.com          : 200
-=== F. trees
-niles  HEAD 69488a81  branch c7/01-durable-rows  dirty 5 (the five protected files)
-GBS    HEAD 688919c   branch c7/00-adapter       dirty 0
-=== G. gate
-  cargo test --offline --workspace   # niles: ~907 #[test] attributes; gbs: ~567
-```
-
-**Two of those lines are the instrument, not the machine** (F-10-13). Section B's "barrier:
-fsync, 15.7 µs, *suspicious*" is Python's `os.fsync`, which on Darwin does **not** reach the
-device — `F_FULLFSYNC` does, at ~255/s, and that is what the ledger's sink issues. The preflight
-measures the wrong syscall on the one host whose storage figures are publishable, and reports
-the reference host as suspicious. Its "mount … read-only" line is the sealed APFS system volume
-that `df` resolves the path to through a firmlink, not the Data volume the tree lives on. Neither
-changes any admissibility answer below — cycle 9's `c9-storage.sh` contract and the sink's own
-probe are the storage evidence — but a preflight whose section B is wrong on Host C is a
-preflight that would have passed a volatile mount on Host C too.
-
-### 0.2b `c10-rwlock.sh` on Host C, verbatim
-
-```
-=== c10-rwlock: 2026-09-08T16:32:33Z on Darwin 25.6.0 arm64 ===
-toolchain: rustc 1.97.1 (8bab26f4f 2026-07-14)
-platform                                     : macos / std::sync::RwLock
-second reader admitted AFTER the queued writer : 200/200  (writer-preferring)
-second reader admitted BEFORE the queued writer: 0/200  (reader-preferring)
-second reader's wait, us                      : p50 217 p90 222 max 269
-```
-
-**200 of 200.** On the reference host a queued writer blocks every later reader, without
-exception and with less jitter than Linux (143/200 in the container, where the 57 were
-scheduling races on two cores). The mechanism behind every slowest-16 table in C9-06.2 is
-established on the machine that produced them: a reader folding under the base guard queues
-the appender, and every reader arriving behind the appender waits for both.
-
-### 0.3 Admissibility
-
-| question | container | Host C |
-|---|---|---|
-| cores actually granted | 2 (no cgroup quota reported; `nproc` = 2) | 10 (`nproc`; no cgroup) — measured |
-| barrier, median, rate | `fdatasync`, 139 µs, 7,195/s | preflight prints `fsync` 15.7 µs / 63,658/s, which is **not a barrier on Darwin** (F-10-13); the sink's `F_FULLFSYNC` is ~255/s (cycle 9's `c9-storage.sh` contract, to be re-run before any durability row) |
-| storage evidence? | yes, ratios only | yes — from the sink's probe, not the preflight |
-| may publish durability rows? | **no** | yes, after `c9-storage.sh`'s `F_FULLFSYNC` line is on record this cycle |
-| may publish > 3-core curves? | **no** | yes |
-| toolchain newer than 1.95.0? | no (stable = 1.95.0) | pin resolves; 1.97.1 for lint only — measured |
-| valgrind attribution possible | yes, per function | **no** (absent) — measured |
-| PostgreSQL comparison possible | 16.13 on 5432 after a manual start; nothing on 5433 | **PATH has 18.6 (Homebrew)**; nothing on 5432 or 5433; a PG16 on 5433 is still the C republish's precondition (C10-11) — measured |
-| `make fsync-proof` | runs | **cannot** (no `strace`) — the Mac gate is fmt + clippy + tests + reproduce |
-
-Every container figure below is a **count, a ratio, or a per-function instruction total**.
-Nothing in this document is a wall-clock claim about Host C except where labelled *cycle 9,
-Host C* and taken from `c9-pending-results.md`.
-
-### 0.4 The gate, at these heads
-
-| tree | row | result |
-|---|---|---|
-| niles `8548189` | `make gate` | **exit 0** (fmt, clippy, workspace tests, memprobe budgets) |
-| niles | `cargo test --workspace --no-fail-fast` | 1,037 passed, 0 failed, 7 ignored (named in cycle 9's report §3) |
-| niles | three runs at `--test-threads=8` under two `yes >/dev/null &` hogs, one `taskset -c 0` at `--test-threads=1` (taken at `dc19a4a`, which differs from `8548189` only in `docs/`) | 1,037 / 1,037 / 1,037 / 1,037, **no changed verdict** |
-| gbs `688919c` | fmt, clippy, workspace tests, `make reproduce` | all exit 0; **504 passed, 0 failed, 1 ignored** |
-| cross-repo | `downstream_adapter` (compiles the real `gbs-nilestream` from the sibling checkout) | green **in the container**; **red on the Mac** until §0.2 is run — see F-10-03 |
-
-Test-attribute counts, by the rule "occurrences of `#[test]` under `crates/` and `tools/`": niles
-916, gbs 625. The preflight's own count (`crates/` only, one rule) prints ~904 / ~560. The
-runner's pass count is the number that matters and is above.
-
----
+The verbatim container preflight (16:05:54Z), Mac preflight (16:32:46Z) and `c10-rwlock.sh`
+transcript (200/200 writer-preferring on Darwin) are recorded in `work-order-10-fable.md` §0.1,
+§0.2a and §0.2b, and in this cycle's execution report.
 
 ## 1. Executive judgement
 
-**Where the three artefacts stand.** Nilestream's write path is durable, receipt-owned and
-strictly recoverable, and its read path now reaches all four states of the absence lattice under
-load; those are the claims the thesis makes and the engine now supports. Its efficiency ceiling is
-**one lock**: the base `RwLock<Ledger>`, held shared across every reconstruction and exclusively
-across every append. Niles has been swept for "checked twice" and the answer is now *no*: what an
-insert spends its instructions on is a reference SHA-256 (56%) and allocation (~10%), not a fact
-the compiler already proved (§2, F-10-06). GBS is exactly where cycle 9 left it — inadmissible
-for an efficiency claim, six rows generic, F-24 and F-12 open — and, today, **its checkout on the
-reference host does not compile against the engine it adapts** (F-10-03).
+**Nilestream:** immutable-prefix reconstruction is a sound direction, but a stable integer head
+cannot make a mutable `Vec` safe to read without its lock. Pin owned immutable rows, their lookup
+structure and the relevant metadata; release B before folding. Keep the returned answer at the
+requested anchor even if a separately certified result can be installed later. Before speed work,
+repair the directly served V→B stats inversion and the report's split certification/copy, and
+settle the mixed public-API wait cycle. These source-derived correctness/liveness risks outrank
+throughput.
 
-**The three questions.**
+**Niles:** the next checked-twice saving is not permission to remove admission validation. Static
+money types, declared schema/window metadata and supported query shape can be cached or represented
+by a verified object. Conservation of incoming postings, representable numeric values, duplicates,
+live balances and wire currencies remain data obligations. `conserve per` currently stores names
+but does not carry arbitrary partition semantics into admission. The first action there is honest
+refusal and a precise claim, not deleting the per-currency validator.
 
-1. *What lets a reconstruction run over an immutable prefix without holding the base lock?*
-   **Today, nothing can.** `Ledger.epochs` is a `Vec<EpochRec>` and `by_account` is a
-   `HashMap<Acct, Vec<RowRef>>`; both are mutated by `submit` and both move under an append (a
-   `Vec` reallocates on push; a `HashMap` rehashes). A snapshot handle over the in-memory base
-   is not a guard change, it is a storage change (chunked, append-only, `Arc`-shared) — LC-37,
-   below the cut, with a spike. What *can* be done this cycle is to make the hold **short** and
-   the lock **honest**: the base lock's histogram cannot tell a reader's hold from the writer's
-   (F-10-02); split it, measure on Host C, and then bound the reader's hold with checkpoints
-   (C10-04, which is C9-07 promoted for a new reason — a fold of ≤ C+1 rows is a hold of ≤ C+1
-   rows). The container measures **readers holding the base 2.9× longer in aggregate than the
-   writer** (2.82 s against 0.98 s of a 10-second level), reader holds reaching 3.2 ms, and a
-   queued writer that then blocks later readers (143/200 on Linux `std`; Darwin to be measured by
-   `c10-rwlock.sh`). That is the mechanism, shown rather than inferred. The lock order survives
-   every candidate in this work order; the one path that violates it today is F-10-01.
-2. *Where else does the engine re-establish a fact the type system proved?* **Nowhere that
-   costs anything.** Per-function callgrind on `checked-twice oltp`: `Hasher256::compress` 56.3%
-   of the process, SipHash/`hash_one` 7.0% (the idempotency, conservation-sum and account
-   indexes), malloc/free ~10%, `Ledger::submit` self 2.4%, `Session::insert` self 1.0%. The
-   conservation re-check in `submit` is a *data* fact (a wire row can be unbalanced) and stays;
-   at ~360 instructions per epoch it is not a cost. The sweep is closed; what it found is that the
-   hash chain is computed under the most contended lock in the engine (F-10-06).
-3. *Which Loan IQ / Calypso shape is a new invariant, and which closes F-24 or F-12?* Unchanged:
-   the thousand-share pro-rata payment (C9-G01 → C10-G01) is both (i) and (ii) and is still the
-   only admissible product task. New this cycle from the vendor material: **partitioned
-   conservation** (CCP account segregation) is probably expressible today by adding the partition
-   column to `conserve per (…)`'s key list — a transaction must then balance within each partition
-   — which makes it a new *use* of an old spelling and one GBS row rather than a language task;
-   what the spelling cannot say is selective netting across some lines and not others (LC-41). Nothing in
-   §6.5 of the brief is admissible ahead of C10-G01, and C10-G01 is below the cut because two
-   liveness-or-gate findings and one instrument outrank it.
+**GBS:** the author's correct tree is now available and the simple newer-lint gate passed. Neither
+durable product lifecycle replay (F-12) nor a benchmark-shaping product trace (F-24) is closed. The
+first product task remains a deterministic thousand-share syndicated distribution with one joint
+durable/wire/restart witness. No GBS efficiency task is admitted yet.
 
-**Reachability arithmetic.** The only efficiency target this work order sets is scored against
-`c10-baselock.sh --baseline-only`, which the author has not yet run. From cycle 9's Host C
-transcript (5 replicates, 12r/6w): 160,838 reads/s median, pooled MAD 888; slowest-16 `base
-wait` 400–1,100 µs; `pinned_installs` 311,921 per 30 s level (6.35% of reads). C10-03 removes
-~99% of those pinned installs (the container measures the gap `applied − anchor` as exactly 1 in
-**98.7%** of pinned installs on the served path); each is a fold that no longer happens. What that
-is worth in reads/s on Host C is not predicted here — cycle 9's prediction was 1.25× and the
-measurement was 1.018× — it is measured.
+The historical 12r6w medians yield `163753 / 160837.6 = 1.018126…`. This is neither the old
+collapse nor the required 1.25× gain. At that point a budget of 2,500 exceeds the 2,000-account
+single-currency working set; it is not evidence about quarter-resident eviction. Historical pinned
+and join counters do not imply a 22× opportunity: they count different events, pinned values can
+serve later reads at that same anchor, and the daemon currently throws joined results away before
+retrying. Measure gap, reuse and actual saved work.
 
----
+## 1A. Reconciliation of the two audits — controlling decisions
 
-## 2. Findings
+**Integration parent.** N's last verified local main head before this order is
+`96b6d9e4d962bb35e64a13d1345d821ae271cb36`; compared with the audited 8548189 it changes only
+audit documentation and adds `c10-baselock.sh`/`c10-rwlock.sh`. Runtime source is unchanged, so
+the exact-8548189 paired gate results remain applicable to runtime. Execution starts from the
+commit of this consolidated order atop that audit-only chain. Do not rewind c7 to 8548189 or
+overwrite newer audit commits.
 
-Class · EV = impact × confidence ÷ cost (each 1–5) · HI (integrity) / HS (speed) · evidence class.
+The Fable file's opening/executive language saying GBS is behind or cannot compile is superseded by
+the author's successful sync and real adapter compile. **Compiles** and **passes all adapter
+tests** remain different: the latter is false in the three-run evidence of §9.
 
-### F-10-01 — `read_stats` takes V then B; `append` takes B then V: `select nilestream_stats` concurrent with an `INSERT` deadlocks the daemon
-*liveness · EV 5×5÷1 = 25 · HI · measured in the container.*
-`crates/nilestream-server/src/rev_engine.rs:991–995`: `let guard = self.runtime…map(|rt|
-Timed::acquire(rt, &VIEW_LOCK)); let idem_keys = self.base().idem_window_keys()` — V is alive
-when B is taken. `append` (`:872`, `:934`) takes B exclusively and then V. The lock-order source
-guard (`the_base_is_acquired_before_the_view_on_every_path_that_takes_both`) checks exactly two
-functions, `answer_from_view` and `append`; `read_stats` is not one of them, and no behavioural
-test drives a stats query against a writer. **Reproduced**: a throwaway test with one thread
-looping `append` and one looping `read_stats`, under a 5 s deadline, made **zero** progress on
-either side (`PROBE: appends=0 stats=0 stalled_ms=1000`); each side alone completes 199/199 and
-100/100. Reachable from the wire: every `select nilestream_stats` is `read_stats`. The benchmark
-never hit it because it samples the counters before threads start and after they join.
-*Repair:* take B before V, or take neither together — read `idem_window_keys` first and drop the
-guard before V. *Gives up:* nothing; the two values are not read atomically today either.
+### Finding-by-finding disposition
 
-### F-10-02 — the base lock's histogram cannot tell a reader's hold from the writer's
-*instrument-gap · EV 4×5÷1 = 20 · HS · read from source, measured in the container.*
-`lockstats.rs:203`: one `ENGINE_LOCK` for `TimedRead` (`rev_engine.rs:617`) and `TimedWrite`
-(`:872`). The design question of §6.1 — is the base wait caused by readers' folds or the writer's
-section — is unanswerable from the instrument that exists. With a probe split (throwaway, in a
-worktree) at 2r/1w over 10 s in the container: **read holds 247,139 acquisitions, p50 3 µs, p99
-127 µs, max 3,167 µs, total 2.82 s; write holds 27,853, p50 31 µs, p99 255 µs, max 4,058 µs,
-total 0.98 s; read waits p99 255 µs, max 4,131 µs.** Readers occupy the base 2.9× longer than
-the writer; a single reader hold reaches 3 ms (a fold). The combined histogram reports "p99 255,
-max 4,131" and says nothing about which. *Repair:* `ENGINE_READ` and `ENGINE_WRITE` scopes,
-both in `select nilestream_lockstats`, both reset per level, both printed by `bench` after each
-mixed level. *Gives up:* one more row in a table.
-
-### F-10-03 — the reference host's GBS does not compile against the reference host's niles, and the Mac gate has been red since C9-02 landed
-*correctness (of the pair) · EV 4×5÷1 = 20 · HI · read from the Mac; reproduced in the container.*
-`~/Documents/GBS` is at `963e4d9`; niles is at `8548189`. GBS `963e4d9`'s adapter reads
-`rec.epoch` on `nilestream_ledger::segment::Record`, renamed `batch_seq` in C9-02: building it
-against the current niles fails with `error[E0609]: no field 'epoch' on type
-'&nilestream_ledger::segment::Record'` at `src/lib.rs:177` and `:335`. The cross-repo guard
-`downstream_adapter.rs` finds `../GBS` beside the tree and compiles the real adapter, so `make
-gate` on the Mac is red on that test today. The author has run `cargo +1.97.1 clippy` at each
-landing, which does not run tests, so nothing has said so. The GBS sync block was given at three
-landings with the **wrong ref name** (§0.2) — the cycle-9 brief's rule "repeat until confirmed"
-was followed and the thing repeated was wrong. **Resolved at 16:10 UTC:** the Mac's GBS is at
-`688919c` and pushed. **Recorded green on Host C**: `cargo test --offline -p nilestream-core --test
-downstream_adapter` at niles `e168d2d` against GBS `688919c` — `1 passed` in 2.79 s, which is
-a real compile of the adapter and not the skip. F-10-03 is closed as a state and stays as a
-finding about the interval nobody could see (C9-02 landing → 16:10 UTC) and about the
-instruction. What remains of it is F-10-04. The Mac's full workspace run stops at
-`numeric_binary_oracle` (no PostgreSQL on 5432) unless `--no-fail-fast` is given; that is the
-environment red §5 names.
-
-### F-10-04 — the cross-repo guard passes when there is nothing to check
-*instrument-gap · EV 3×5÷1 = 15 · HI · read from source.*
-`downstream_adapter.rs:44–58`: with no GBS checkout it prints `SKIPPED: …` and **returns Ok**. On
-a host where the sibling is missing the gate is green for a check that did not run — the cycle-6
-class ("cannot tell refused from did not run"), in the one test that exists to catch the pair
-breaking. *Repair:* skip only under an explicit `NILES_NO_GBS=1`; otherwise fail naming the path
-looked for. Both hosts this project runs on have the sibling. *Gives up:* a clone with no GBS
-beside it must set one variable to be green.
-
-### F-10-05 — pinned installs land exactly one epoch behind, 98.7% of the time
-*negative-turned-positive · EV 4×5÷2 = 10 · HS · measured in the container (deterministic gap
-histogram on the served path, 2r/1w, 10 s).*
-At every pinned install, `applied − anchor`: **1 → 67,514 (98.7%); 2–3 → 856 (1.3%); 4–7 → 1;
-nothing beyond.** (In-process differential, for contrast: spread out to 1,024+, because that
-harness has one advancer racing four readers over 24 keys.) On the served path the deferred merge
-(§6.2 of the brief; Theorem 4.1 clause 5c; `deferred_merges`, zero today) is **one `deltas_at`
-lookup**, not a fold. Cycle 9, Host C: pinned installs are 6.35% of reads at 12r/6w and each is a
-reconstruction thrown away after one anchor. *Repair:* C10-03. *Gives up:* under V, one
-`deltas_at(applied)` per landing that is one epoch behind — an allocation of that epoch's delta
-vector, filtered to one key.
-
-### F-10-06 — 56% of an insert is a reference SHA-256 computed under the exclusive base lock
-*guarantee-bounded · EV 3×5÷3 = 5 · HS · measured in the container (callgrind, per function).*
-`checked-twice oltp`, 2,000 inserts after seeding: process total 267.7 M instructions;
-`nilestream_ledger::chain::Hasher256::compress` **150.7 M (56.3%)**, `finalize` 3.6%, `update`
-3.0%; SipHash + `hash_one` 7.0%; malloc/free/`_int_*` ~10%; `Ledger::submit` self 2.4%;
-`Session::insert` self 1.0%; `Rev::apply_epoch` 0.6%. The hash is `H(parent ‖ epoch ‖
-canon(rows))` in `Ledger::chain` (`ledger.rs:298`), called from `submit` (`:416`) — inside the
-write guard `append` holds (`rev_engine.rs:872`). The implementation is the FIPS reference by
-design (`chain.rs:27`: no SIMD, no unrolling); a faster hash needs `core::arch` and `unsafe`, or
-a crate — both forbidden. What is *not* forbidden is where it runs: `parent` is known the moment
-the previous epoch's hash is, so the chain can be computed after B is released, serialised by a
-small appender-only lock taken in epoch order. The segment sealer already hashes the same row
-bytes a second time (`Record::seal`, over the payload that embeds this hash). *Repair:* C10-05,
-below the cut — the container says readers, not the writer, dominate base occupancy (F-10-02),
-so this is second. *Gives up:* the in-memory hash lags the append by one hand-off; a reader of
-`epochs[e].hash` must wait for it, which today only replay does.
-
-### F-10-07 — Appendix D omits the Z-set API, because a doc comment says `#[cfg(test)]`
-*stale-claim · EV 3×5÷1 = 15 · HI · read from source; reproduced.*
-`thesis/gen-appendix-d.py:70–74` cuts each file at the first occurrence of the string
-`#[cfg(test)]`. `crates/niles-ir/src/eval.rs:11` contains that string **in a `//!` doc comment**
-("…rather than living in a `#[cfg(test)]`…"), 930 lines before the real one. Every public item
-in `eval.rs` — `pub type Row`, **`pub type ZSet`**, `eval_scalar`, 14 more — is absent from
-`thesis/appendix-d-api.md` (0 occurrences of `ZSet`). Across the workspace, **34 public items in 7
-files** follow their file's first `#[cfg(test)]` and are silently omitted; `niles-ir` is one of
-the three crates the appendix exists to document. Cycle 9's fact 1 was this generator; this is
-what it costs. *Repair:* C10-02 — cut at the first `#[cfg(test)]` **at column 0**, or skip
-test-attributed items. *Gives up:* nothing.
-
-### F-10-08 — cycle 9's execution report overstates the generation check's second hazard
-*stale-claim · EV 2×5÷1 = 10 · HI · read from source.*
-`docs/audit/cycle-9/execution-report.md` §5 fact 3 and `rev.rs::finish_fold`'s doc comment say
-the generation check prevents "a stale owner clearing a flight record it does not own, which
-strands the successor's `Pending` marker with nobody left to publish it". Traced: with the check
-removed, the stale owner's `install()` writes `Present(v_old, a_old)` over the marker — the slot
-is never left `Pending`, and the successor's waiters are published by the successor's own
-`Arc<Completion>`, which it still holds. What is lost is the **successor's fresher result**
-(uninstalled) and the stamp (backwards): a cost, not liveness. The report corrected the work order
-by one rung and was itself one rung high. Theorem 4.1's clause (5) is unaffected (5a–5c do not
-cite the generation; §8.3 below). *Repair:* C10-02 corrects both sentences.
-
-### F-10-09 — `MISMATCH-A9-F05` stands at a rule C9-04.1 repaired; `ignored_windows` survives in prose
-*stale-claim · EV 2×5÷1 = 10 · HI · read from source.* `docs/SPEC-ENGINE.md:599` and
-`crates/niles-interp/src/lib.rs:401`. *Repair:* C10-02.
-
-### F-10-10 — the plan-cache miss costs ~170,000 instructions, and `point-cold` misses 1,952 of 2,000
-*guarantee-bounded · EV 3×4÷3 = 4 · HS · measured in the container.* `checked-twice point-cold`:
-`compile_cached` 340.8 M inclusive over 1,952 misses = **174 k instructions per miss**, of which
-`parse_program` 206.7 M (35% of the process). `point` (warm, 100 misses) costs 257.5 M against
-`point-cold`'s 590.4 M for the same statements. The templated key (C9-11 → C10-10) is what turns
-1,952 misses into ~1; this is its baseline, deterministic, and the first one it has had.
-
-### F-10-11 — baselines inferred from documents: one instance, already known
-*negative · EV — · swept.* Every pass line in `work-order-9.md` §8 was checked for a figure taken
-from `docs/audit/` rather than a transcript. One: C9-06.2, flagged by the work order itself.
-C9-05.2's 113,500 and C9-08.1's 14.8× were audit-time container measurements; C9-07.1's "at
-most 17 rows" is design-derived (C + 1 at C = 16) and stays a design statement until measured.
-Nothing to repair; the rule in §10 of the brief now forbids the class.
-
-### F-10-12 — C9-02.4's witness was not produced, and is worth producing
-*instrument-gap · EV 3×3÷2 = 4.5 · HI · read from the cycle-9 report.* The line asked for a
-reproduction of the applied-undurable state or a "not reproduced" record naming the invariant.
-The invariant is now nameable — admission and sealer prune the same per-transaction queue — and a
-test that asserts it at W−1/W/W+1 exists (`the_window_holds_the_last_w_transactions_whatever_
-the_batch_size`). What does not exist is the *negative*: a test that retries an identity in the
-old gap and shows it is refused by both. *Repair:* C10-02 adds that one test; it is the "not
-reproduced" record with teeth.
-
-### F-10-13 — the preflight's storage section measures the wrong syscall on Darwin and reports the reference host as suspicious
-*instrument-gap · EV 3×5÷1 = 15 · HI · measured by the author on request.*
-`docs/audit/cycle-10/preflight.sh` §B (inherited from cycle 9): Python `os.fdatasync` falls
-back to `os.fsync` on Darwin, which does not flush the device; the honest barrier there is
-`fcntl(fd, F_FULLFSYNC)`. The probe prints 63,658 barriers/s and the verdict *suspicious* on
-Host C, whose real barrier is ~255/s. The mount line resolves to the sealed system volume through
-a firmlink. The section that exists to catch a volatile mount cannot tell Host C from one.
-*Repair:* C10-02 — `fcntl.fcntl(fd, fcntl.F_FULLFSYNC)` when `sys.platform == "darwin"`, with the
-syscall named in the output; the mount line taken from the Data volume (`df -P` of the path's
-real parent). *Gives up:* nothing.
-
----
-
-## 3. Tasks, in dependency order
-
-Every task: branch, what it closes, files, **baseline** (measured, with host), **target lines**
-(each a sentence the executor marks `done` / `not done: why` — the §8 checklist is these lines
-verbatim), method, acceptance, **guard and the reversion that must make it fail**, guardrails.
-Guards are proved in a disposable `git worktree`; a compile error is never the witness.
-
-### C10-00 — the stats query and the append take the two locks in one order (F-10-01) — `c10/01-stats-order`
-
-**Closes:** F-10-01. **Files:** `crates/nilestream-server/src/rev_engine.rs` (`read_stats`, the
-`lock_order_tests` module).
-**Baseline:** the probe in F-10-01 — zero progress under a 5 s deadline, container.
-**Method.** In `read_stats`, read `idem_window_keys` through `self.base()` **before** any view
-guard exists and drop it, then take V; or restructure so no function holds both. Generalise the
-source guard: enumerate every `fn` in `rev_engine.rs` whose body contains both a base acquisition
-(`self.base()`, `TimedRead::acquire`, `TimedWrite::acquire`) and a view acquisition (`VIEW_LOCK`,
-`.lock()` on the runtime), and assert base-before-view for each — not a fixed list of two. Add the
-behavioural test as a committed one (`a_stats_query_and_a_concurrent_append_do_not_deadlock`,
-deadline-bounded, progress-checked) and its wire form: two connections against the daemon's real
-bytes, one `INSERT`ing in a loop, one issuing `select nilestream_stats` in a loop, 3 s, both make
-progress.
-**Targets.**
-- C10-00.1 *`read_stats` holds no view guard while it acquires the base, and the lock-order source
-  guard enumerates every function in `rev_engine.rs` that takes both locks rather than naming two.*
-- C10-00.2 *One connection inserting continuously and one issuing `select nilestream_stats`
-  continuously against the daemon's real bytes both make progress for 3 s, tested with a
-  deadline; the same in-process with `append` and `read_stats`.*
-**Guard/reversion.** Reversion: restore the V-then-B order in `read_stats` → both new tests red
-(progress 0 under the deadline) and the generalised source guard red naming `read_stats`.
-**Guardrails.** No new lock. The counters `read_stats` reads are relaxed atomics and need no
-guard at all; only `rt.view(BALANCE_VIEW)` needs V and only `idem_window_keys` needs B.
-
-### C10-01 — the base lock reports its two holds, and the harness prints them (F-10-02) — `c10/02-base-split`
-
-**Closes:** F-10-02; gives every later task its baseline. **Files:** `lockstats.rs`,
-`rev_engine.rs:616–617, 872`, `session.rs` (`nilestream_lockstats` columns), `bank-bench/src/
-bin/bench.rs` (print the full lockstats row after each mixed level, level-local), `docs/
-BENCHMARK.md`, `docs/audit/cycle-10/hostc/c10-baselock.sh` (exists; prints what the bench prints).
-**Baseline:** the container split in F-10-02 (ratios); **Host C: none yet.**
-**Method.** `ENGINE_READ` and `ENGINE_WRITE` replace the single `ENGINE_LOCK` (keep the name as
-the sum if anything reads it); `TimedRead` records to the first, `TimedWrite` to the second; both
-in `select nilestream_lockstats [reset]` with `read_`/`write_` column prefixes; `bench` prints the
-row after each mixed level beside the flights line. Then **the author must now run `bash
-~/Documents/niles/docs/audit/cycle-10/hostc/c10-baselock.sh --baseline-only` and paste the
-output** — that transcript is the baseline for C10-03 and C10-04.
-**Targets.**
-- C10-01.1 *`select nilestream_lockstats` reports the base lock's shared and exclusive
-  acquisitions as separate scopes with their own wait and hold quantiles, both reset by `reset`,
-  and a test asserts a `TimedRead` lands in the shared scope only and a `TimedWrite` in the
-  exclusive scope only.*
-- C10-01.2 *Every mixed level of `bench` prints the full lockstats row, level-local, and
-  `c10-baselock.sh --baseline-only` has been run on Host C with its transcript pasted into the
-  execution report as the cycle's baseline.*
-**Guard/reversion.** Reversion: route `TimedWrite` to the shared scope → the scope test red.
-**Guardrails.** `nilestream_stats_names_the_columns_the_benchmark_reads` extended to the new
-columns; no histogram is cumulative across levels.
-
-### C10-02 — the gate and the prose stop saying things that are not so (F-10-03, F-10-04, F-10-07, F-10-08, F-10-09, F-10-12) — `c10/03-honest-gate`
-
-**Closes:** the five small stale-claim and instrument findings. **Files:**
-`crates/nilestream-core/tests/downstream_adapter.rs`; `thesis/gen-appendix-d.py`;
-`thesis/appendix-d-api.md` (regenerated); `docs/SPEC-ENGINE.md:599`;
-`crates/niles-interp/src/lib.rs:401`; `crates/nilestream-core/src/rev.rs` (`finish_fold` doc);
-`docs/audit/cycle-9/execution-report.md` §5 fact 3 (**a correction appended, the original left
-in place** — audit evidence is not rewritten); `crates/nilestream-ledger/src/sequencer.rs` (the
-window-gap negative test); `docs/audit/cycle-10/preflight.sh` §B (F-10-13).
-**Baseline:** 34 public items in 7 files absent from Appendix D; `ZSet` 0 occurrences.
-**Targets.**
-- C10-02.1 *`downstream_adapter` fails, naming the path it looked for, when no GBS checkout is
-  found and `NILES_NO_GBS` is unset; it skips only when that variable is set; and the author's
-  `cargo test --offline --workspace` on the Mac's niles at the landing shows it green against
-  `~/Documents/GBS` at `688919c`.*
-- C10-02.5 *`preflight.sh` §B issues `F_FULLFSYNC` on Darwin and names the syscall it issued;
-  its mount line is the Data volume; run on Host C it reports the barrier at the rate the sink's
-  own probe reports, not 63,658/s.*
-- C10-02.2 *`gen-appendix-d.py` cuts a file only at a `#[cfg(test)]` that begins a line, and the
-  regenerated `appendix-d-api.md` names `ZSet`, `eval_scalar` and every other public item of
-  `niles-ir::eval`; a test in the workspace asserts that no `pub` item at column 0 in the three
-  documented crates is absent from the generated appendix.*
-- C10-02.3 *`MISMATCH-A9-F05` is struck from `SPEC-ENGINE.md` with C9-04.1 cited; no doc comment
-  in the workspace names `ignored_windows`; `finish_fold`'s comment and an appended correction
-  to the cycle-9 report's fact 3 state the generation check's second hazard as a discarded
-  fresher result and a stamp moving backwards, not as an orphaned marker.*
-- C10-02.4 *A test retries an identity that the old record-counted window would have admitted
-  and the transaction-counted one refuses, and shows both admission and sealer refuse it — the
-  "not reproduced" record C9-02.4 asked for, with the invariant named in its message.*
-**Guard/reversion.** Reversion for .2: restore `text.find("#[cfg(test)]")` → the appendix test
-red on `ZSet`. Reversion for .1: restore the early `return` → a run with `GBS_ROOT=/nonexistent`
-and no sibling passes, which the new test's own precondition check turns red. Reversion for .4:
-restore `while order.len() > w * 4096` in a worktree → red.
-**Guardrails.** `docs/audit/*` is evidence: the correction to the cycle-9 report is an appended,
-dated paragraph, never an edit of the original sentence.
-
-### C10-03 — the deferred-delta merge: a flight that lands one epoch behind lands current (F-10-05, LC-38) — `c10/04-deferred-merge`
-
-**Closes:** F-10-05, LC-38; makes `deferred_merges` non-zero. **Files:**
-`crates/nilestream-core/src/rev.rs` (`finish_fold`, `install`, `Stats`),
-`crates/nilestream-server/src/rev_engine.rs` (`answer_from_view` passes the base),
-`thesis/03-theoretical-framework.md` (upquery rule), `thesis/04-novel-contributions.md` (5c).
-**Baseline:** container, served path, 2r/1w: 98.7% of pinned installs at gap 1, 1.3% at 2–3,
-none beyond 7. Host C, cycle 9: 6.35% of reads pinned, 0.29% joined, 12r/6w. **The Host C
-baseline for the pass line is C10-01.2's transcript.**
-**Method.** `finish_fold` gains the base: `finish_fold(ticket, value, rows, base: &dyn Base)`.
-When `ticket.anchor < self.applied` and `self.applied − ticket.anchor ≤ MERGE_CAP` (start at 8;
-the container says 1 covers 98.7%), fold `base.deltas_at(e)` for `e` in `(anchor, applied]`
-filtered to `ticket.key` into `value`, install at `applied` **unpinned**, count
-`deferred_merges`; beyond the cap, pin as today. The caller holds B across `finish_fold` already
-(B < V; the base guard spans `answer_from_view`), so the read is in order. Sound by H-F2 /
-Q_lin: it is Theorem 4.1's step (3) applied to the landing value.
-**Targets.**
-- C10-03.1 *A flight that lands with `applied − anchor ≤ MERGE_CAP` installs at `applied`,
-  unpinned, with the key's deltas in `(anchor, applied]` folded in, and `deferred_merges` counts
-  it; one that lands further behind installs pinned as before; both proved by the latched
-  differential, which now asserts `deferred_merges > 0` on its merged arm and reads exactly at
-  `applied` afterwards.*
-- C10-03.2 *At 12r/6w on Host C, `pinned_installs` is below 0.5% of reads and `deferred_merges`
-  is above 5% of reads, on `c10-baselock.sh --candidate c10/04-deferred-merge` against the
-  C10-01.2 baseline; read throughput is reported beside it under the ≥ 10% ∧ ≥ 3 pooled-MAD gate
-  and is **not** a pass condition.*
-- C10-03.3 *Chapter 3's upquery rule and Theorem 4.1 clause 5c state the merge as implemented,
-  including the cap and that a landing beyond it pins.*
-**Guard/reversion.** Reversion 1: install at `applied` **without** folding `(anchor, applied]` →
-the differential's exact-read assertion red (the divergence C9-06's reversion 1 produced).
-Reversion 2: fold but install pinned → `deferred_merges` assertion red. Each red, each
-transcript. No timing assertion in a unit test.
-**Guardrails.** Under V the merge reads the base the caller already holds; it must not take a
-lock. `MERGE_CAP` is a constant with the container histogram beside it, not a flag. The
-uninstalled path and the join path are untouched.
-**Host C:** *the author must now run `bash ~/Documents/niles/docs/audit/cycle-10/hostc/
-c10-baselock.sh --candidate c10/04-deferred-merge` and paste the output.*
-
-### C10-04 — checkpoints in the served daemon, promoted as the base-lock repair (C9-07; F-64, A9-F12, LC-32; F-10-02's reader holds) — `c10/05-checkpoints`
-
-**Closes:** C9-07's three targets and bounds the reader's hold on B. **Files:**
-`crates/nilestream-server/src/main.rs` (`--checkpoint-interval N`, default 16, `0` allowed and
-banner-stated), `rev_engine.rs` (`seeded` / construction passes it; provenance header),
-`proto-engine/src/ledger.rs` (the index Astra corrected: keyed by `(acct, cur)` or the bound
-restated), `bank-bench` results headers, `tools/memprobe` (the E18 row `checkpoints_per_posting`),
-`thesis/09-evaluation.md` §9.14.1/§9.14.5, `results/E19-scaling.md`, `docs/SPEC-ENGINE.md`.
-**Baseline:** Host C `ENGINE_READ` hold p99 / max from C10-01.2 (to be measured); container:
-read holds p99 127 µs, max 3,167 µs at C = 0.
-**Method.** Cycle 9's C9-07 design, with Astra's two corrections adopted (the scan index is per
-account while checkpoints are per (account, currency): key the index by the reconstruction key or
-narrow the bound to target-key rows with the adversary case committed; checkpoint memory is
-O(K + N/C) and is measured in an E18 row, not assumed). The daemon default is 16; `0` is the
-explicit ablation and both `c10-baselock.sh` arms print which they ran at.
-**Targets.**
-- C10-04.1 *`nilestreamd` without flags serves with `checkpoint_interval = 16`, prints it, carries
-  it in every provenance header, and a head read of a 1,024-posting key touches at most 17 base
-  rows.*
-- C10-04.2 *A `(a, usd)` read on an account with 1,000 `eur` postings and 16 `usd` postings
-  visits at most 17 rows — or the thesis bound is restated as target-key rows and the adversary
-  case is a committed test that reports the visited count.*
-- C10-04.3 *An E18 row measures checkpoint bytes per posting at C = 16, and §9.14.1, §9.14.5 and
-  `E19-scaling.md` state the interval their tables were measured at.*
-- C10-04.4 *At 12r/6w on Host C, the base lock's shared-hold p99 on `c10-baselock.sh
-  --candidate c10/05-checkpoints` is at most half the C10-01.2 baseline's, and its maximum is
-  reported beside it; read throughput is reported under the gate and is not a pass condition.*
-**Guard/reversion.** Revert the constructor's default → 1,025 rows: red. Revert the index key →
-C10-04.2 red. Revert the header → the provenance test red.
-**Guardrails.** Definition 3.9 (end-of-epoch checkpoints only) is already tested
-(`checkpoint_tests`); it must stay green. The two `c10-baselock.sh` arms differ in the
-checkpoint flag **only** for this task and the transcript says so.
-**Host C:** *the author must now run `bash ~/Documents/niles/docs/audit/cycle-10/hostc/
-c10-baselock.sh --candidate c10/05-checkpoints` and paste the output.*
-
-### ——— cut line ———
-
-C10-00 … C10-04 are the cycle. Below the line, in order, only when all five are green; none is
-taken to compensate for an unresolved one above.
-
-### C10-05 — the hash chain leaves the exclusive base hold (F-10-06) — `c10/06-hash-off-lock`
-Design as in F-10-06: `submit` assigns `id` and `parent` under B and stores the rows with the
-hash pending; the chain is computed after B is released under an appender-only lock **H** taken
-in epoch order (H is below B and never held with V; the order becomes O < B < H < P < V < C, S
-and F leaves); `append` builds the durable payload after the hash lands; replay verifies exactly
-as today. **Baseline:** Host C `ENGINE_WRITE` hold p50/p99 from C10-01.2. **Targets:** the
-write-hold p50 halves at 12r/6w (gate applies); the chain is byte-identical on the shipped
-determinism fixture (`chain` and `write_rows` streams, C9-12.1's corpus) before and after; the
-lock-order guard learns H. **Guard:** hash under B again → the hold assertion is a Host C
-measurement, so the unit guard is the determinism fixture plus a source guard that `Ledger::
-chain` is not called inside `submit`. Reversion → source guard red.
-
-### C10-06 — a snapshot the fold can hold instead of the base (LC-37) — `c10/07-snapshot-spike`
-A **spike, not a landing**: a design note with a measured prototype in a worktree, never merged.
-Chunked, append-only epoch storage (`Vec<Arc<[EpochRec]>>`-shaped, chunks sealed at a fixed
-size and never moved) and a per-account index that is likewise chunked, so `Base::reconstruct`
-can run over an `Arc` snapshot with **no** base guard. Deliverable: the storage layout, the new
-`Base` method, the lock order, the E18 cost per epoch and per account, and a container
-measurement of reader hold → 0 on the snapshot path. The author decides LC-37 on it.
-
-### C10-07 = C9-08 (holes compact to ⊥; `install` walks the graph; `MISMATCH-A9-F15`) — `c10/08-bounded-view`
-### C10-08 = C9-09 (E18 on production structures; the plan-cache trace table) — `c10/09-e18-rows`
-### C10-09 = C9-10 (the sentence ledger; every `MISMATCH`/`BLOCKED` in one table; LC-40's generator test generalised to every generator) — `c10/10-prose`
-### C10-10 = C9-11 (the templated plan key; baseline F-10-10: 174 k instructions per miss, 1,952 misses of 2,000 on `point-cold`) — `c10/11-plan-key`
-### C10-11 = C9-12 (the C republish; still blocked on PostgreSQL 16 on 5433) — `c10/12-republish`
-### C10-G01 = C9-G01 (the 1,000-share syndicated payment trace; F-24, F-12, LC-34) — GBS `c10/g01-syndicated`
-### C10-12 — `conserve per (…)` and a partition prohibition (LC-41) — a language design note, no code
-
-Each carries cycle 9's task text (`work-order-9.md` §3) unchanged except that **every baseline is
-re-derived before its target is carried** (the brief's §6.3), and C10-09 additionally strikes
-every marker repaired without being struck.
-
----
-
-## 4. Branch stacks and merge order
-
-**niles**, from `c10/00-audit` (`8548189`):
-```
-c10/00-audit
-  → c10/01-stats-order      C10-00
-  → c10/02-base-split       C10-01   (baseline script run here)
-  → c10/03-honest-gate      C10-02
-  → c10/04-deferred-merge   C10-03   (Host C two-arm run)
-  → c10/05-checkpoints      C10-04   (Host C two-arm run)
-  ——— cut ———
-  → c10/06-hash-off-lock … c10/12-republish, in order
-```
-Each branch is a fast-forward of the previous; `c7/01-durable-rows` follows the tip at each
-landing, as in every cycle.
-
-**gbs**, from `c7/00-adapter` (`688919c`, **after §0.2**): no GBS commit is required above the
-cut. C10-02.1's Mac verification is a run, not a commit. `c10/g01-syndicated` below the cut.
-
----
-
-## 5. Validation protocol
-
-Per landing, container: `make gate` (starting PostgreSQL first: `sudo -n service postgresql
-start`); `cargo test --offline --workspace --no-fail-fast`; the task's guard proved by reversion
-in a disposable worktree with the transcript captured; `make reproduce` after commit.
-Per landing, Mac: the sync block, then `RUSTUP_AUTO_INSTALL=0 cargo +1.97.1 clippy --offline
---all-targets -- -D warnings`. The Mac cannot run `make gate` in full (no `strace` for
-`fsync-proof`; no `valgrind`); its gate is fmt + clippy + `cargo test --offline --workspace` +
-`make reproduce`. **Now, and again after C10-02:** `cd ~/Documents/niles && cargo test --offline
---workspace` on the Mac, so the cross-repo guard's verdict on the reference host is recorded
-rather than expected.
-
-Green means: exit 0 and no changed verdict against the previous landing's run. A red row is a
-result. **Environment reds**, which are recorded and are not defects: `numeric_binary_oracle`
-without PostgreSQL started; `downstream_adapter` on a host with no GBS sibling (after C10-02, a
-refusal naming the path, which is the intended red).
-
-The Mac preflight was run at 16:32 UTC (§0.2a) and its facts are in §0.3; its §B is wrong on
-Darwin (F-10-13) and is repaired by C10-02.5.
-
----
-
-## 6. Host C scripts
-
-Both in the tree at `docs/audit/cycle-10/hostc/`, both refuse `--publish`, neither writes a
-tracked artefact, both print a status per section and exit non-zero if a section did not
-complete.
-
-| script | what | runtime | run when |
+| Fable finding | Astra counterpart | Consolidated verdict and reason | Owner |
 |---|---|---|---|
-| `c10-baselock.sh --baseline-only` | one arm, current build (`c7/01-durable-rows`): 6r3w / 9r5w / 12r6w × 30 s, 2 warm-ups + 5 measured; throughput, slowest-16 with base/view split, flights, and — after C10-01 — the lockstats row with read/write holds | ≈ 12 min / cap 20 | **after C10-01 lands** — this is the cycle's baseline |
-| `c10-baselock.sh --candidate <ref>` | two arms interleaved, same protocol | 25–35 min / cap 45 | after C10-03; after C10-04; after C10-05 |
-| `c10-rwlock.sh` | Darwin `std::sync::RwLock` fairness: 200 trials, second reader vs queued writer | < 1 min | **run, 16:32 UTC: 200/200 writer-preferring** (§0.2b) |
+| F-10-01 stats lock inversion | A10-01 | **Confirmed independently in source; reproduced by Fable in container.** Ship deterministic latches plus a wire-progress guard. | T01 |
+| F-10-02 shared/exclusive lock scope | A10-08/10 | **Confirmed-narrowed.** Separate read/write histograms required. Summing overlapping reader hold durations is reader-lock-time, not exclusive wall-clock occupancy; 2.82/0.98≈2.88 does not establish which activity causes every tail. | T00 |
+| F-10-03 stale GBS pair | A10-16 | **Closed as current state.** Correct bundle refs synced; pair compiles. Preserve the historical bad-instruction finding. New adapter tests are separate red rows. | T00a |
+| F-10-04 absent sibling passes | BLOCKED-adapter | **Confirmed independently in source.** Explicit opt-out must be reported as not-run and must not satisfy the paired audit gate. | T00a |
+| F-10-05 gap mostly one | A10-11 | **Accepted as Fable-reported container measurement; inference narrowed.** Supports a capped-merge experiment, not guaranteed avoided reconstructions or constant-cost `deltas_at`. | T04 |
+| F-10-06 SHA-256 dominates probe | A10-14 | **Accepted scoped attribution; design not accepted as a ready repair.** Parent-hash handoff and H ordering need their own design proof. | T10 |
+| F-10-07 cfg(test) in doc comment | A10-13 | **Confirmed independently in source.** Column-zero cutoff alone still loses legitimate items after a real intermediate test item. | T00a minimal fix; T05 general policy |
+| F-10-08 generation second hazard | A10-12 | **Confirmed.** Stale resident/result loss is established, permanent waiter stranding is not. Retain structural generation guard. | T01 |
+| F-10-09 stale markers/comment | A9-F05 | **Confirmed.** Strike active repaired marker, remove obsolete `ignored_windows` prose; preserve historical reports with dated correction. | T00a/T05 |
+| F-10-10 cold plan cost | — | **Accepted as Fable-reported scoped measurement.** 340.8M/1952≈174,590 inclusive instructions/miss. | T06/T08 |
+| F-10-11 old baseline sweep | A10-09 | **Confirmed-narrowed.** Earlier audit-time measurements are legitimate historical evidence, but not new Cycle 10 baselines. | T00 registry |
+| F-10-12 window negative witness | C9-02.4 | **Useful test; proposed target direction corrected.** The old gap was admission-new/sealer-duplicate. A correct expired retry is accepted by both, not refused by both. | T00a |
+| F-10-13 Darwin storage probe | A10-17 | **Confirmed-narrowed.** Do not call all ordinary fsync "no barrier," assume a Python constant exists, or certify a Data mount merely by re-running `df` on a firmlink. | T00a |
+| No counterpart | A10-02…07 | **Astra source findings retained:** split report certification, mixed legacy wait cycle, discarded joins/outer lock, abandoned flight capacity, whole-graph refusal, unimplemented conserve keys. | T01/T02 |
+| No counterpart | A10-18/19/20 | **Author-measured after that order:** adapter tamper/guaranteed-hit guards red on all runs; N allocation budget red on both Mac toolchains. Binding gate evidence. | T00a |
 
-The `--checkpoint-interval` probe in `c10-baselock.sh` §2 must read the same on both arms except
-when C10-04 is the candidate.
+### Resolved design and priority disagreements
 
----
+1. **Snapshot landing versus smaller repairs first:** above-cut efficiency work is bounded merge
+   and measured served checkpoints. The full storage snapshot is T03's below-cut design/prototype.
+2. **Merge before snapshot:** allowed on the current daemon using its existing B acquisition, but
+   never by calling an arbitrary internally-locking Base under V. Epoch cap 8 is a candidate
+   starting policy, **not a row/allocation bound**: `Ledger::deltas_at` visits the entire record
+   and allocates a key per posting. Bound rows/work too. No new lock or second B acquisition.
+3. **Merge targets:** replace fixed rates with a deterministic eligible-landing contract and a
+   measured current-control comparison; report rates as hypotheses, not pass requirements.
+4. **Checkpoints:** T07 above the cut. Default 16 with 0 ablation; measure 0/16/64/256 and actual
+   account-index visits. A C+1 target-key bound is not a bound on mixed-currency physical work;
+   either change the index or state the limit. The p99 target is against the *immediate
+   merge-enabled control*. A missed speed target is recorded, not repaired by another baseline.
+5. **Partition semantics:** reject "already a prohibition". No admission use of arbitrary
+   `conserve_keys`; repeated rules overwrite; per-group net zero is weaker than prohibiting paired
+   cross-partition flow. T02 truthful refusal above cut.
+6. **Generated API:** adopt the ZSet witness above cut but use an inclusion-aware fix.
+7. **Hash off B / new H:** below-cut design only, T10/LC-42. No unreviewed lock-order change.
+8. **Gate meaning:** neither Valgrind nor fsync-proof is a prerequisite of `make gate`. PG absence,
+   the adapter assertion and the memory budget are its actual observed issues.
 
-## 7. The open-questions ledger
+The first performance script is the already-delivered **c10-baselock.sh, repaired in T00**. Its
+current default baseline `c7/01-durable-rows` moves to the candidate after a landing; first-run
+A=B and reused stale worktrees are both possible. Resolve/freeze baseline once into a manifest, use
+an explicit predecessor SHA for later arms, verify actual worktree HEAD, and enforce the §6 fault
+corpus before taking any number from it.
 
-**Settled, not reopened:** LC-01, 02, 04, 08–12, 14, 15, 17, 18, 21, 28. **Decided in cycle 9:**
-LC-16, LC-35.
+## 2. Findings and structural evidence
 
-| LC | position after this audit |
+Evidence labels: **S** = read from source; **D** = inferred from a document or re-derived from
+archived data, not a new run; **A** = measured by the author on request. HI = independently
+identified; HS = shaped by the brief or carried finding. EV = impact × confidence ÷ cost; each
+input is 1–5.
+
+| ID | Class; origin; evidence | Finding, source and cost | EV | Repair and what it gives up |
+|---|---|---|---|---|
+| A10-01 / F-10-01 | liveness; HI; S+container | `rev_engine.rs:992–1000` retains V across `self.base()`. `append:872,934` takes B→V. A stats request and append can deadlock. Source guard at 3159 lists only two functions. | 25 | Copy stats under a valid order or release V before B; document a non-atomic diagnostic snapshot. T01. |
+| A10-02 | correctness; HI; S | `report_shape:1226–1233` checks full/applied=a under V; `report_from_view:1295–1328` reacquires V and copies current rows without rechecking. Values from e>a can be labelled a. | 25 | Certify and copy within the same V guard; otherwise fall back after dropping V. T01. |
+| A10-03 | liveness; HI; S | `rev.rs:474–494`: synchronous `read(&mut self)` waits on an existing flight while the caller retains exclusive Rev/V. Owner requires that Rev for `finish_fold`. | 12.5 | Make the legacy read incapable of joining while holding Rev. T01. |
+| A10-04 | guarantee-bounded; HI; S | Server `query:755–764` discards `w.wait()` and retries. One logical read can reacquire B; `RwLock<RevEngine>::query:1044–1052` retains outer O throughout the wait. | 10 | Consume the joined anchored value with sufficient metadata; clone an owned generation before waiting. T01. |
+| A10-05 | guarantee-bounded; HI; S | `begin_read:517–550`, `reap_cancelled:730`, `WaitTicket:211`: cancelled flights are reaped only on a miss for their own key; dropped wait tickets never release their reservation. 256 abandoned keys can exhaust sharing capacity. | 10 | Bounded maintenance/cancellation and exact waiter release; separate refusal reasons. T01. |
+| A10-06 | correctness; HS; S | `Runtime::install` checks output aggregates, not the reachable graph; thesis 4:37 retains A9-F15. | 12.5 | Refuse unsupported whole graphs at public install. T02. |
+| A10-07 | correctness; HI; S | `parser.rs:646–664` accepts repeated conserve clauses; `resolve.rs:554–556` overwrites. `conserve_keys` has no consumer; `ledger.rs:384–410` enforces per-(txn,cur). | 12.5 | Reject unsupported/repeated keys until a real partition rule exists. T02, LC-41. |
+| A10-08 / F-10-02 | instrument-gap; HI; S | `answer_from_view:1447,1461,1484` omits joins from slowest-16 and the second V acquisition from `view_wait_us`; aggregate ENGINE_LOCK combines readers/writers; `ReadStats` omits `deferred_merges`. | 10 | Measure logical-read phases, both V waits, mode and gap; expose all flight counters including zero. T00. |
+| A10-09 | wrong-measurement; HI; D/S | Archive arithmetic used mean(MADs), not RMS pooling; `c9-pending.sh` does not implement all the retarget/deadline/refusal guarantees attributed to it. | 20 | Correct arithmetic and causal language, then measure a fresh baseline with an audited harness. T00. |
+| A10-10 | guarantee-bounded; HS; S/D | `answer_from_view:1428–1477` folds under B; `Ledger:108,127,506–549` needs mutable-container-backed indices/rows. | 5 | Owned immutable prefix plus measured bounded capture. T03. |
+| A10-11 / F-10-05 | instrument-gap; HS; D/S | No archived e−a distribution; Fable's container histogram exists; keyed suffix cost unmeasured. Pinning is exact and can be reused historically. | 5 | Preserve answer a; merge only a certified available suffix; pin when unavailable. T04. |
+| A10-12 / F-10-08 | stale-claim; HS; S | Generation does not establish 5a; completion publication at `rev.rs:655` is outside `mine`. A retained Present means M is not always Pending during a flight. | 20 | Separate answer correctness, certification and ownership/cost claims. T01. |
+| A10-13 / F-10-07 | instrument-gap; HS; S | `gen-appendix-d.py:70–79` truncates at the first `cfg(test)` **string**; `eval.rs:11` has it in a doc comment. `include-results.py:291–310` only recognises matched BEGIN/END pairs. | 10 | Inclusion policy with positive and omission mutants. T00a minimal; T05 general. |
+| A10-14 | negative; HS; S | Conservation report retains undecided/may-violate obligations (`typecheck.rs:126–143,1977`); direct append has no trusted compiler certificate. | 10 | Cost the sweep first; cache proven schema/plan facts only. T06. |
+| A10-15 | instrument-gap; HS; S/D | G3 uses separate wire/reopen evidence; lifecycle events remain in-memory. Its "reads equals upqueries in every row" is contradicted by term 6/5, trade loans 22/20, trading 16/14. | 6.67 | Joint product witness; repair generated prose. TG01. |
+| A10-16 / F-10-03 | instrument-gap; HS; A/S | Broken brief sync refs; corrected author sync succeeded. | 15 | Validate exported bundle refs and the checked-out branch before every sync. |
+| A10-17 / F-10-13 | negative; HS; S/A | PG absence is a host fact. Darwin `os.fsync` is not `F_FULLFSYNC`; the root mount line is a firmlink artefact. | 15 | Per-command status; probe the actual path and supported syscall. T00a. |
+| A10-18 | instrument-gap; HI; A/S | G `a_tampered_record_is_refused_and_the_segment_is_not_truncated` fails: `gbs-nilestream/src/lib.rs:774` selects `buf.len()/2` despite saying third-record payload; the reader reports a damaged header at offset 660 and refuses without truncation; the assertion at 791 demands `damaged at offset`. **A real red test and a stale instrument, not accepted corruption.** | 20 | Decode record boundaries, select a proven interior payload byte and a separate header check-word byte. T00a. |
+| A10-19 | guarantee-bounded; HI; A | N `make reproduce` exits nonzero for `rev_metadata_2x_budget`: 44,165 allocations on Mac against 34,165 committed, +2 allocations and +112 bytes per key, identical `live` and `peak`. Reproduced on both Mac toolchains. | 10 | Attribute with host/toolchain-labelled runs; repair with a reverting cost guard or record as unresolved without raising the budget. T00a. |
+| A10-20 | instrument-gap; HI; A/S | All three G adapter runs fail `money_is_conserved_at_every_anchor_under_continuous_eviction:250` on the **hit-coverage** assertion, not a balance mismatch. Under `Policy::CostAware` an inserted cold key can be evicted immediately at a full budget. | 15 | Isolate a resident-hit phase with known capacity; preserve the continuous-eviction phase. T00a. |
+
+### 2.1 Concrete schedules
+
+**Stats cycle:** S locks V in `read_stats`; A locks B(write) in `append`; A blocks on V; S blocks
+on B(read). Reachable from the wire (`session.rs:899`). A test must latch those acquisitions,
+observe the cycle without hanging the suite, and prove the repaired path completes.
+
+**Report race:** initialise a full view at `a`; let `report_shape` finish its certification; append
+a balanced transaction changing the value at `e>a`; resume `report_from_view`. The loop copies the
+new value and stores `anchor: a`.
+
+**Legacy wait cycle:** A begins a miss and owns ticket T, releases V. B locks V and calls
+`Rev::read` at T's key/anchor, joining T. A needs V to finish T. B waits on A while holding V.
+
+Rust's standard `RwLock` does not promise a particular scheduling policy; the deadlocks above do
+not depend on it.
+
+### 2.3 Theorem 4.1 and hazard-class audit
+
+| Clause / former hazard | Verdict | Required guard |
+|---|---|---|
+| 5a served answer | Correct without generation under the fold precondition. | Independent prefix oracle for every returned answer, including a stale-generation completion. |
+| 5b Pending admits no delta | Slot-kind handling prevents it; the generation test is unrelated. | Force pending across advance; require a value/certification witness where the mutation causes one. |
+| 5c moved-frontier install | `install` pins `anchor<applied` independently of generation. | Unpin a stale fold then query a genuinely changed key at e: value divergence. |
+| Generation ownership | Prevents superseded installs and removing a successor's entry. Resident regression is established; permanent stranded-waiter liveness is **not**. | Reversion must produce a stale overwrite/removal, not a fabricated wrong-value transcript. |
+| "Between begin and finish M=Pending" | **False** for a pre-existing Present unable to answer this anchor: `prior=None` retains it. | Exercise retained Present plus an owned flight; state slot and flight metadata separately. |
+| "Deferred merge is strictly better" | Can add more work than saved, evict a useful historical answer, or race beyond covered h. | Cost and reuse measurements; no unconditional benefit theorem. |
+| Cancel restores exact prior | Restoration occurs at reap, not at owner Drop; untouched cancelled keys retain markers/capacity. | Immediate waiter release plus eventual bounded cleanup. |
+
+### 2.4 Instruments, arithmetic and falsification
+
+Pooled MAD is `sqrt((MAD_A² + MAD_B²)/2)`.
+
+| Host / readers,writers | Baseline median; MAD | Candidate median; MAD | Ratio | Δ / pooled MAD | Verdict |
+|---|---|---|---:|---:|---|
+| C archive / 6,3 | 147305.6; 3709.0 | 151185.0; 2527.3 | 1.026336 | 3879.4 / 3173.636 = 1.222 | noise-limited |
+| C archive / 9,5 | 156685.6; 1396.2 | 159498.9; 768.9 | 1.017955 | 2813.3 / 1127.072 = 2.496 | noise-limited |
+| C archive / 12,6 | 160837.6; 1119.0 | 163753.0; 656.8 | 1.018126 | 2915.4 / 917.482 = 3.178 | fails ≥10% and ≥25% target |
+
+The report's ~3118/~1083/~888 pools are arithmetic averages of the MADs. Correcting them changes
+none of the overall decisions. The script runs A then B on every iteration rather than alternating,
+leaving an order effect.
+
+For 12r6w, archived per-run pinned/read percentages are 6.4913, 6.3303, 6.3313, 6.5888, 6.4891:
+median **6.4891%**, not the reported ~6.35% (a ratio of medians). Median joins 14,377 gives
+pinned/joins ≈ 21.695. Denominators include core read attempts/retries; these are not a measured
+fraction of client RPCs that can be saved.
+
+**Instrument falsifiability.** For each histogram, counter and table, the executor states what
+result would falsify the hypothesis it was added for, and whether the harness can produce it. The
+document-baseline sweep treats every prior cycle's timing target as a candidate until its raw
+transcript is identified; T00's baseline registry enumerates each inherited target line with its
+raw-data path or `not run`.
+
+### 2.6 Partition conservation is two questions
+
+Per-group zero sums prohibit **net imbalance** across groups. They do not prohibit every
+cross-group flow: two opposite cross-book transfers in one transaction can cancel within each book.
+Strict segregation needs an explicit admissible-participant/edge rule, or an atomic transfer
+identity and partition constraint, with a defined allowance for FX/linked legs. Cross-line netting
+needs a declared permitted netting set. LC-41 therefore contains a missing implementation of
+declared grouping **and** a potentially new provenance/admission invariant. First refuse
+unsupported declarations; the author chooses the richer policy before it is built.
+
+## 3. Executable tasks, dependency order and cut
+
+All tasks inherit §0 exact refs, §5 validation and §6 script contracts. All changes include their
+meaningful guard in the same commit; the executor proves a reverted-change **runtime/assertion
+failure** in a disposable worktree. A compile failure is an invalid mutation trial. The target
+sentences prefixed **Target** are copied verbatim into §8's report checklist.
+
+### T00 — Correct instruments and measure the current baseline
+
+Closes A10-08/09/16/17; establishes the LC-23/24/38/39 baseline. Branch `c10/01-instruments`.
+Files: `docs/audit/cycle-10/hostc/c10-baselock.sh` and its support code,
+`crates/nilestream-server/src/{lockstats,rev_engine,session}.rs`, benchmark instrumentation,
+baseline registry. The first commit repairs the existing harness; an instrumentation commit then
+adds missing phases/counters, with neutral comparisons before it is used to score a runtime
+change. Do not put a functional optimisation into the instrument control arm.
+
+Because A10-01 exists, query diagnostic stats at quiescent boundaries in the baseline; separately
+run the bounded deadlock witness. If the baseline cannot complete safely, mark it blocked and run
+the correctness repair before scoring any performance task.
+
+Record 6r3w, 9r5w, 12r6w at the historical 2,000-account/2,500-budget point **and** a genuinely
+partial point with budget below distinct keys, labelled separately. Two warm-ups and ≥5 interleaved
+measured arms, AB/BA order balanced. The first baseline stage has no performance pass line; neutral
+A=A is the falsification control. Record `(a, applied_begin, applied_finish, readable_head,
+visible)` gaps and actual keyed suffix rows before proposing merge thresholds.
+
+**Target T00.1:** The current-build baseline script reports every requested phase and admissibility row at verified SHAs, rejects each harness fault injection, and produces a neutral A=A control before any performance task is scored.
+
+**Target T00.2:** The wire and raw traces separately report shared/exclusive B waits and holds, deferred_merges including zero, both V waits, joined-read outcomes, refusal reasons and phase-separated anchor gaps with counters that reconcile to their defined events.
+
+Guard: inject stale worktree/daemon, mismatched SHA, dirty worktree, failed warm-up, missing field,
+port collision, timeout, bad flag, zero writer progress, and a deliberate second-V/join delay. Each
+must fail or populate the intended column.
+
+**The author must now run `bash ~/Documents/niles/docs/audit/cycle-10/hostc/c10-baselock.sh --baseline-only` and paste the output**, after its instrument commit is bundled and synced. Expected 25–40 minutes, cap 50.
+
+### T00a — Resolve the newly observed gate failures before scoring speed
+
+Above the cut; after T00's harness delivery and before T01–T04 performance scoring. N branch
+`c10/01a-gate-evidence`; G branch `c10/00-adapter-guard` from 688919c.
+
+**Target T00a.1:** The GBS tamper guard mutates verified record regions, distinguishes header and payload corruption, preserves all original bytes on refusal, and passes its clean-file negative control on both paired toolchains.
+
+**Target T00a.2:** The current E18 allocation-budget violation is attributed with same-source, host/toolchain-labelled runs and is either repaired with a reverting cost guard or recorded as an explicit unresolved gate failure without raising the budget to hide it.
+
+**Target T00a.3:** The GBS continuous-eviction guard preserves all value/conservation assertions and separately demonstrates an actual resident hit under an explicit retention precondition instead of assuming every new entry remains cached.
+
+**Target T00a.4:** The paired adapter guard refuses missing GBS unless an explicit opt-out is reported as not-run, Appendix D includes legitimate API items after comment and intermediate-test traps, and Darwin preflight names and checks its actual barrier and data-volume evidence.
+
+**Target T00a.5:** A named old-window-gap retry is accepted by both admission and sealer after expiry, an in-window duplicate is refused consistently, and no applied-but-undurable visibility or premature acknowledgement occurs under either retry schedule.
+
+`NILES_NO_GBS=1` may support standalone development but cannot satisfy this paired audit gate. For
+Appendix D, assert ZSet/eval_scalar plus a legitimate post-test item and intentionally excluded
+helpers; a raw-string cutoff must fail. Darwin must use a supported `F_FULLFSYNC` interface, check
+availability, identify the actual writable path/volume, and preserve failure status. Correct
+`c10-rwlock.sh`'s argument refusal, actual toolchain, deadline and arrival-order labels.
+
+The old state was **admission forgot the identity while the record-counted sealer retained it**;
+the both-refuse target reverses the expiry remedy. Never manufacture a both-refuse outcome for an
+expired identity.
+
+**After T00a is synced, the author runs `bash ~/Documents/niles/docs/audit/cycle-10/hostc/c10-gates.sh` and `bash ~/Documents/niles/docs/audit/cycle-10/hostc/c10-rwlock.sh` and pastes their summaries.**
+
+### T01 — Repair served certification and wait ownership
+
+Closes A10-01/02/03/04/05/12. Branch `c10/02-read-safety`, after T00.
+
+**Target T01.1:** Stats, append, full-report and mixed legacy/two-phase reads complete under their forced interleavings, and every returned row equals the independent fold at its stated visible anchor.
+
+**Target T01.2:** Every logical keyed read acquires B at most once, every joined reader waits with no O/B/P/V/C/S guard, and a successful join consumes its own exact-anchor result without a second reconstruction.
+
+**Target T01.3:** Cancelling owners or abandoning wait tickets releases bounded sharing capacity and counts every capacity refusal while preserving the exact prior absence and generation ownership.
+
+**Target T01.4:** The Pending proof distinguishes served-value correctness, certification and generation ownership, and each reversion transcript claims only the hazard it actually witnesses.
+
+Guard cleanups use a subprocess deadline and tracked owned children so an expected deadlock cannot
+hang the suite. A joined value of zero is not evidence the requested account exists. This task does
+not claim a V-speed improvement.
+
+### T02 — Make public query and conservation claims truthful
+
+Closes A10-06/07 and active A9-F15; narrows LC-41. Branch `c10/03-verified-contracts`, after T01.
+
+**Target T02.1:** Runtime installation refuses every unsupported reachable graph in the guard corpus while all supported keyed balance circuits still agree with an independent fold after advance and eviction.
+
+**Target T02.2:** Every accepted conserve declaration has the grouping semantics admission actually enforces, and unsupported or conflicting partition declarations are refused with a named diagnostic instead of being silently overwritten or ignored.
+
+Use hand-built `Circuit` input as well as compiler-produced input, because the public boundary
+cannot assume the compiler ran. Do not invent a segregation policy on the author's behalf.
+
+### T04 — Bounded, certified deferred merge
+
+Closes A10-11/F-10-05 and LC-38/39; after T00/T00a/T01/T02. Branch `c10/04-deferred-merge`.
+
+**Target T04.1:** Every eligible generation-owned late landing within the preregistered epoch and physical-work caps merges exactly the keyed deltas in (a,e], every owner and same-anchor waiter still receives the answer at a, and unavailable or over-budget suffixes remain honestly pinned or uninstalled.
+
+**Target T04.2:** Against the measured pinned-control figures from c10-merge.sh, deferred merging reports its gap, visited-row, reuse, writer and memory costs and makes a performance claim only when the preregistered ≥10% and ≥3 pooled-MAD gate passes.
+
+Bound physical rows visited and allocations as well as epoch distance. Large gap, unavailable
+suffix, failed ownership or stale coverage must produce an exact pinned/uninstalled result, never a
+counterfeit current certificate. **The author must now run `bash ~/Documents/niles/docs/audit/cycle-10/hostc/c10-merge.sh` and paste the output** after syncing T04. If current gaps make merge
+unattractive, record the negative result and keep the bounded pin policy; T04.1 is then
+`not done: negative experiment`.
+
+### T07 — Served checkpoints with honest scan bounds
+
+Branch `c10/05-checkpoints`; after bounded merge, against its immediate control.
+
+**Target T07.1:** The served daemon proposes default checkpoint interval 16 with explicit 0 ablation, a head-read guard of at most 17 entries for the single-currency fixture, and 0/16/64/256 measurements of physical account-index visits, target-currency visits and memory with exact provenance.
+
+**Target T07.2:** Against the immediate merge-enabled control measured by c10-baselock.sh, the checkpoint candidate targets at least a 50% reduction in shared-hold p99, reports whether it meets the significance gate and its maximum/throughput, and records a missed target without substituting another baseline.
+
+The at-most-17 guard uses a 1,024-posting single-currency head read; do not transfer it to the
+mixed-currency index without proof. **The author must now run `bash ~/Documents/niles/docs/audit/cycle-10/hostc/c10-checkpoints.sh` and paste the output** after delivery.
+
+### — Consolidated cut line —
+
+The ceiling for one cycle is T00, T00a, T01, T02, T04 and T07. If correctness consumes the cycle,
+leave T04/T07 not done; no compensating speed task.
+
+### Below the cut
+
+**T03** immutable-prefix design and unmerged prototype (LC-37); **T05** generated-document
+integrity and the complete sentence/marker ledger (LC-40); **T06** costed checked-twice sweep;
+**T08** production memory, honest holes and cache usefulness (LC-31/33); **T10** ordered
+hash-handoff design only, no H landing (LC-42); **TG01** the thousand-share syndicated trace
+(F-12/F-24, LC-34); **T09** contract republication preparation (LC-19/22/27).
+
+**Target T03.1:** The snapshot design and unmerged prototype demonstrate exact reconstruction outside engine guards through append/reallocation with bounded one-B capture, account for all Base implementors and retained-handle memory, and present the public-trait choice for the author's LC-37 decision.
+
+**Target T05.1:** Every generated document has an explicit inclusion policy and an omission mutant that fails, and the complete marker inventory distinguishes active, repaired, conditional, historical and template occurrences without deleting evidence.
+
+**Target T06.1:** Every checker obligation family has a costed runtime counterpart or an explicit no-duplicate/unsupported row, and any removed recheck is replaced by a schema-bound verified fact while all data refusals remain intact.
+
+**Target T08.1:** Production memory probes separate full-retention base, absence metadata, idempotency, plans and active snapshots, and any compaction or plan-key optimisation preserves exact absence and answers while failing its measured cost guard when reverted.
+
+**Target T10.1:** The hash-handoff design either proves ordered parent-hash availability, byte-identical chains and durable-before-visible publication without waiting under B, or records the blocking invariant and declines the new H lock.
+
+**Target TG01.1:** A thousand-share syndicated payment produces a deterministic conserved posting set with an explicit rounding remainder, and the same trace proves wire acknowledgement, durable restart, eviction and product-lifecycle replay without joining unrelated fixtures into one verdict.
+
+**Target T09.1:** E16/E19 contract evidence is regenerated only on an admissible Host C with exact PostgreSQL and storage provenance, and every unsupported or unrun row remains explicit until the author separately authorizes publication.
+
+## 4. Branch stacks, delivery and merge order
+
+Use paired sibling worktrees; G's adapter path dependencies resolve into `../niles`. Record both
+full SHAs for every adapter build.
+
+```text
+c10/01-instruments         T00
+c10/01a-gate-evidence      T00a N
+c10/02-read-safety         T01
+c10/03-verified-contracts  T02
+c10/04-deferred-merge      T04
+c10/05-checkpoints         T07
+---- consolidated cut ----
+c10/07-snapshot-design  T03 note; prototype unmerged
+c10/06-document-integrity T05
+c10/07-checked-facts    T06
+c10/09-production-memory T08
+c10/11-hash-design      T10 note; no H landing
+c10/10-contract-evidence T09
+```
+
+G starts at `688919c`:
+
+```text
+c10/00-adapter-guard     T00a tamper/hit repairs, above cut
+---- below cut ----
+c10/01-syndicate-trace   TG01 trace and joint witness
+c10/02-lifecycle-replay  TG01 durable product transitions
+```
+
+At **each landing**, deliver the bundle under `~/Documents/niles-sync/cycle-10/` and print a
+complete author block with the actual bundle and **the ref the bundle actually carries**, checked
+with `git bundle list-heads` before the block is written. Never `git branch -f` the branch that is
+checked out. Verify expected current branch and protected status before merging; verify full SHA
+and remote refs after. A divergence is `BLOCKED-sync-divergence`, never a forced reset. Repeat
+every owed bundle/command at the next landing until its sync is confirmed.
+
+## 5. Validation and immutable constraints
+
+`CARGO_NET_OFFLINE=true`, `RUSTUP_AUTO_INSTALL=0`, `GIT_TERMINAL_PROMPT=0`. Use 1.95.0 explicitly;
+if a host only exposes `stable`, prove `rustc -vV` resolves to 1.95.0 or record blocked. No
+network, installs, or new external dependencies.
+
+Required matrix, both repositories at exact paired heads: `cargo fmt --all -- --check`;
+`cargo clippy --offline --all-targets -- -D warnings`; `cargo test --offline --workspace`;
+`make gate`; three `cargo test --offline --workspace --no-fail-fast -- --test-threads=8`;
+`make reproduce`; `make fsync-proof`. Also run the G adapter with
+`--manifest-path crates/gbs-nilestream/Cargo.toml --no-fail-fast` three times.
+
+Green means exit 0 with the required targets and no hidden skip. Missing PG16/service/strace,
+missing companion checkout, unresolved pin or missing Valgrind is `blocked` or `unsupported`.
+Assertion failures and budget violations are **red results to investigate**, not environmental.
+`not run`, `unsupported`, `blocked` and `noise-limited` are separate report values.
+
+Timing protocol: two discarded warm-ups per arm, ≥5 measured replicates, interleaved in one session
+with balanced AB/BA order. Report median, MAD, min/max, sample count, host, full SHA, toolchain and
+actual row/transaction/reader/writer counts. Pooled MAD is `sqrt((dA²+dB²)/2)`; a benefit gate
+requires **both** ≥10% relative improvement and absolute median difference ≥3 pooled MADs.
+Preregister the primary outcome; do not search many cells and report only the winner.
+
+Invariants carried intact: durable-before-visible and before acknowledgement; one sealer per
+ledger; one total epoch order; apply-before-publish; full retention; honest absence — a Hole keeps
+its version, cancellation restores the exact prior slot, Bottom asserts nothing and never means
+zero; fold-never-field; product purity and GBS layering; self-describing amounts; no `unsafe`
+outside the pre-existing measurement exception; no default-on-error; zero external dependencies; no
+fabricated results; honest refusal instead of silent fallback. Currency wire code is the
+declaration index; idempotency windows count **transactions**. LC-21 fail-stop and the settled
+window/durability choices are not reopened.
+
+Lock order is O < B < P < V < C; S is a leaf; flight completion F is a leaf below V. Every logical
+keyed read takes B at most once, every join waits without an ancestor lock, flights and waiters are
+bounded, every capacity refusal is counted, an install belongs to its generation, and
+`deferred_merges` is reported even when zero. `Rev::read`/`begin_read` answer at the requested
+anchor, without a compensating caller branch. **No performance result may compensate for a wrong
+answer, lost wakeup or acknowledgement before durability.**
+
+Every code/thesis divergence gets a `MISMATCH-<id>` at the claim until resolved; ambiguities get a
+specific `BLOCKED-<id>`. Never remove a red test, weaken an oracle, expand normalised fields or
+accept a new known divergence to make the gate green. Python edits to Rust use exact-string
+single-occurrence replacement with the count asserted before writing.
+
+## 6. Host C scripts: required implementation contracts
+
+Opus writes these inside N at `docs/audit/cycle-10/hostc/`, versions them with their task, and
+delivers them before requesting a run. The author always invokes `bash`. Each script has a
+`--help`.
+
+| Script | Required experiment | Expected / cap | Dependencies |
+|---|---|---|---|
+| `c10-baselock.sh` | unchanged-current baseline; instrument control; all mode/gap/falsification rows; A=A control | 25–40 / 50 min | T00 |
+| `c10-merge.sh` | current pinned predecessor versus bounded merge; phase gaps, suffix visits, reuse | 20–35 / 45 min | T04 |
+| `c10-checkpoints.sh` | 0/16/64/256 served intervals, actual physical visits and memory | 20–35 / 45 min | T07 |
+| `c10-gates.sh` | paired gate rows, three complete repeats and memory/adapter continuations | 15–35 / 90 min; ≤12 min/command | isolated checkouts |
+| `c10-rwlock.sh` | bounded arrival/acquisition-order probe with pinned compiler and explicit limits | 1–3 / 5 min | repaired in T00a |
+| `c10-memory-cache.sh`, `c10-syndicate.sh`, `c10-contract.sh`, `c10-snapshot.sh` | below-cut experiments | per §3 | their tasks |
+
+Common requirements: parse all arguments before doing work and **always reject `--publish`
+explicitly**; resolve each candidate ref once with `rev-parse --verify <ref>^{commit}` and freeze
+the SHA in a manifest; create unique paired detached worktrees outside the author's working copies
+and refuse foreign or dirty ones; probe actual options against the release binary and distinguish
+an unknown-flag parse failure from every other failed row; own the daemon per replicate on a unique
+port with verified readiness; supervise with a Python standard-library process-group supervisor
+(`start_new_session=True`, `wait(timeout=…)`, TERM then bounded KILL) because GNU `timeout` does not
+exist on Darwin; write unique raw logs with one status row per planned section; verify sample count
+and mandatory fields before computing statistics; record host, cores, load, the **actual segment
+file's** device/mount, compiler versions and barrier name with its limitations; run the script's own
+fault corpus, including a neutral arm and a deliberately delayed non-B phase so the instrument can
+acquit B.
+
+Durations are planning estimates, not measurements of these scripts. A hard cap must actually kill
+and reap owned child process groups and exit nonzero.
+
+## 7. Open-question ledger
+
+Settled, not reopened: LC-01, 02, 04, 08–12, 14, 15, 17, 18, 21, 28. Decided in C9: LC-16, LC-35.
+
+| LC | Disposition |
 |---|---|
-| **23 / 24** | reopened against the base; **mechanism measured**: readers' holds 2.9× the writer's in aggregate (container); a queued writer blocks later readers **200/200 on Darwin** (Host C, `c10-rwlock.sh`) and 143/200 on Linux; repair is C10-04 (short holds) now and C10-06 (no hold) as a spike |
-| 03, 05, 06, 07, 13, 19, 22, 25, 26, 27, 29 | carried unchanged from cycle 9 |
-| 20 | `BLOCKED-LC20-definition` — retire the number at the end of this cycle if the author has not supplied a subject |
-| **30** | implemented and guarded; **the author confirms in one sentence** or names the change |
-| 31 | C10-07 |
-| **32** | C10-04: default 16, `0` explicit; not a schema declaration this cycle |
-| 33 | C10-08 / C10-10, with F-10-10 as the first measured miss cost |
-| 34 | C10-G01, below the cut, unchanged |
-| 36 | `BLOCKED-recovery-tip`, the author's contract |
-| **37 (new)** | the snapshot: **a storage change, not a guard change** (`Vec` and `HashMap` move under append); C10-06 spike |
-| **38 (new)** | the deferred merge: gap = 1 in 98.7%; **fold, capped**; C10-03 |
-| **39 (new)** | `pinned_installs / reads` as a phase-diagram input — after C10-03 the number changes by an order of magnitude; decide then |
-| **40 (new)** | generator integrity: C10-02.2 for Appendix D now, every generator in C10-09 |
-| **41 (new)** | partitioned conservation: the grammar admits `conserve per (k₁, k₂, …)` as a key list (`ast.rs:256`, `resolve.rs:555`), and **adding the partition column to that list is already a cross-partition prohibition** — a transaction must then balance within each `(cur, book)` and cannot move value between books. So CCP segregation (`conserve per (txn, cur, account_class)`) is probably a new *use* of an old spelling, not a new invariant; what the spelling cannot say is the *opposite* — netting permitted across lines A and B but not C. A language note (C10-12) and one GBS row; Astra confirms the reading |
-| **42 (new)** | the lock order gains **H** if C10-05 lands: O < B < H < P < V < C; the author confirms |
+| 03, 05, 06, 07, 13 | carried; below cut or task-local |
+| 19 | one chapter-6 sentence only after the joint product trace; open TG01/T09 |
+| 20 | `BLOCKED-LC20-definition`: author supplies the subject or the number is retired |
+| 22 | declared-scale wire transcript first; PG client/server versions distinguished; T09 |
+| **23 / 24** | reopened B-tail attribution; T00 first. Correctness cycles are independently sourced. No renewed V-speed premise. |
+| 25, 26, 27, 29 | carried per §7 of the source orders |
+| 30 | implemented and guarded; explicit author confirmation still outstanding |
+| 31 | Hole version is provenance, not a value; deferred cleanup and optional compaction are distinct. T01/T08 |
+| 32 | checkpoint interval: proposed 16 awaits 0/16/64/256 evidence, T07 |
+| 33 | plan-cache memory and usefulness remeasured; T06/T08 |
+| 34 | thousand-share syndicated trace; below cut; F-12 and F-24 both required before efficiency |
+| 36 | `BLOCKED-recovery-tip` remains the author's contract |
+| **37** | owned immutable prefix including index/metadata, not a naked head. Public `Base` shape is the author's decision after T00 and T03 |
+| **38** | gap-at-begin versus fold-induced gap, keyed suffix cost, bounded pin/merge decision; T00 then T04. No assumed 22× gain |
+| **39** | pin rate may be a phase input only with a defined logical-read denominator and reuse/cost |
+| **40** | generated inclusion policy and omission mutants; T05 |
+| **41** | grouping syntax lacks admission semantics, and net-zero per partition is weaker than forbidden cross-partition flow. T02 honest refusal first |
+| **42** | H is not approved. T10 first proves ordered parent-hash/visibility without waiting under B |
 
-Markers: `MISMATCH-A9-F05` struck by C10-02; `MISMATCH-daemon-checkpoints`, `-A9-F12` by
-C10-04; `-A9-F15` by C10-07; the pre-existing families by C10-09.
+## 8. Executor report contract and checklist
 
----
+Deliver `docs/audit/cycle-10/execution-report.md` with every §3 target sentence **verbatim**, one
+row each with `done` or `not done: why`, plus evidence link, exact command/exit, host/SHA/toolchain
+and guard reversion. A conditional negative performance outcome is a valid reported result where
+the target explicitly permits it; it is not permission to mark an unimplemented value contract
+done. Below-cut targets are listed as `not done: below cut`.
 
-## 8. Reporting requirements for the executor
+Report all baseline/candidate numbers beside a host column with derivation and raw-data location.
+Keep A/S/D evidence classes and distinguish source-derived schedules from witnessed interleavings.
+Include a reconciliation row for each Fable agreement/disagreement with **confirmed**,
+**confirmed-narrowed**, **refuted** or **not independently verified**.
 
-One execution report, `docs/audit/cycle-10/execution-report.md`, results only. At the top: the
-audit baseline `8548189`, the integration parent, every task tip, both trees' states, the Mac's
-GBS head. Evidence class on every figure.
+For each optimisation, list the disposable worktree's absolute path, parent/candidate/reversion
+SHAs, the exact mutant diff, compiled command, test command and exit codes. No compile-error
+witness. Attach the complete per-occurrence marker inventory and sentence ledger.
 
-**The checklist — every target line verbatim, with `done` / `not done: why`.**
+Report tracked worktree changes separately from the author's five untracked files, with their final
+byte sizes (10,244 / 16,639 / 6,148 / 8,196 / 816,110 at audit) and any discrepancy referred to the
+author, never corrected. Record both paired repo heads, every branch, every bundle/exported ref and
+SHA-256, and all author sync statuses.
 
-| id | target |
-|---|---|
-| C10-00.1 | `read_stats` holds no view guard while it acquires the base, and the lock-order source guard enumerates every function in `rev_engine.rs` that takes both locks rather than naming two. |
-| C10-00.2 | One connection inserting continuously and one issuing `select nilestream_stats` continuously against the daemon's real bytes both make progress for 3 s, tested with a deadline; the same in-process with `append` and `read_stats`. |
-| C10-01.1 | `select nilestream_lockstats` reports the base lock's shared and exclusive acquisitions as separate scopes with their own wait and hold quantiles, both reset by `reset`, and a test asserts a `TimedRead` lands in the shared scope only and a `TimedWrite` in the exclusive scope only. |
-| C10-01.2 | Every mixed level of `bench` prints the full lockstats row, level-local, and `c10-baselock.sh --baseline-only` has been run on Host C with its transcript pasted into the execution report as the cycle's baseline. |
-| C10-02.1 | `downstream_adapter` fails, naming the path it looked for, when no GBS checkout is found and `NILES_NO_GBS` is unset; it skips only when that variable is set; and the author's `cargo test --offline --workspace` on the Mac's niles at the landing shows it green against `~/Documents/GBS` at `688919c`. |
-| C10-02.2 | `gen-appendix-d.py` cuts a file only at a `#[cfg(test)]` that begins a line, and the regenerated `appendix-d-api.md` names `ZSet`, `eval_scalar` and every other public item of `niles-ir::eval`; a test in the workspace asserts that no `pub` item at column 0 in the three documented crates is absent from the generated appendix. |
-| C10-02.3 | `MISMATCH-A9-F05` is struck from `SPEC-ENGINE.md` with C9-04.1 cited; no doc comment in the workspace names `ignored_windows`; `finish_fold`'s comment and an appended correction to the cycle-9 report's fact 3 state the generation check's second hazard as a discarded fresher result and a stamp moving backwards, not as an orphaned marker. |
-| C10-02.4 | A test retries an identity that the old record-counted window would have admitted and the transaction-counted one refuses, and shows both admission and sealer refuse it — the "not reproduced" record C9-02.4 asked for, with the invariant named in its message. |
-| C10-02.5 | `preflight.sh` §B issues `F_FULLFSYNC` on Darwin and names the syscall it issued; its mount line is the Data volume; run on Host C it reports the barrier at the rate the sink's own probe reports, not 63,658/s. |
-| C10-03.1 | A flight that lands with `applied − anchor ≤ MERGE_CAP` installs at `applied`, unpinned, with the key's deltas in `(anchor, applied]` folded in, and `deferred_merges` counts it; one that lands further behind installs pinned as before; both proved by the latched differential, which now asserts `deferred_merges > 0` on its merged arm and reads exactly at `applied` afterwards. |
-| C10-03.2 | At 12r/6w on Host C, `pinned_installs` is below 0.5% of reads and `deferred_merges` is above 5% of reads, on `c10-baselock.sh --candidate c10/04-deferred-merge` against the C10-01.2 baseline; read throughput is reported beside it under the ≥ 10% ∧ ≥ 3 pooled-MAD gate and is **not** a pass condition. |
-| C10-03.3 | Chapter 3's upquery rule and Theorem 4.1 clause 5c state the merge as implemented, including the cap and that a landing beyond it pins. |
-| C10-04.1 | `nilestreamd` without flags serves with `checkpoint_interval = 16`, prints it, carries it in every provenance header, and a head read of a 1,024-posting key touches at most 17 base rows. |
-| C10-04.2 | A `(a, usd)` read on an account with 1,000 `eur` postings and 16 `usd` postings visits at most 17 rows — or the thesis bound is restated as target-key rows and the adversary case is a committed test that reports the visited count. |
-| C10-04.3 | An E18 row measures checkpoint bytes per posting at C = 16, and §9.14.1, §9.14.5 and `E19-scaling.md` state the interval their tables were measured at. |
-| C10-04.4 | At 12r/6w on Host C, the base lock's shared-hold p99 on `c10-baselock.sh --candidate c10/05-checkpoints` is at most half the C10-01.2 baseline's, and its maximum is reported beside it; read throughput is reported under the gate and is not a pass condition. |
-| — | *cut line* |
-| C10-05 … C10-12, C10-G01 | cycle 9's target lines for C9-07 … C9-12 and C9-G01, verbatim from `work-order-9.md` §8, plus C10-05's three and C10-06's deliverable list above |
+Include **exactly three material facts discovered during execution that this work order did not
+cover**, with evidence class and consequence. Do not recycle A10-01…20 or F-10-01…13. If fewer than
+three are found, report the shortfall rather than inventing facts.
 
-**Also required.** (1) The gate matrix per landing, container and Mac, with the Mac's `make gate`
-result after C10-02. (2) Every guard transcript: worktree, SHA, reverted lines, red assertion,
-restored green, exit codes. (3) Timing tables with a host column; the two `c10-baselock.sh`
-transcripts in full; E18 and RSS never in one column. (4) The updated MISMATCH/BLOCKED table and
-LC ledger with the author's answers to LC-30, LC-37, LC-42. (5) **Exactly three material facts
-found while executing that this work order does not cover** — nothing from §2 recycled; fewer
-than three reported as `not done: only N`. (6) Worktree status before and after with the five
-protected files' sizes (10,244 / 16,639 / 6,148 / 8,196 / 816,110 at audit; a discrepancy is
-referred, never corrected); every SHA and bundle hash, base and tip; the sync block for every
-landing, **naming the ref the bundle carries (`git bundle list-heads` first), never
-`branch -f`-ing the checked-out branch, and repeated in every subsequent landing's message until
-the author's paste shows it run**; the author's 1.97.1 result. No executor push; attribution is the executing session's own.
+## 9. Author-run Cycle 10 gate addendum
 
----
+Full logs: `~/Documents/niles-sync/cycle10-gates-xojp4gqs/`. Isolated paired detached worktrees at
+N 8548189 / G 688919c. `make gate` used 1.97.1; three workspace repeats and reproduce used 1.95.0.
+This is **A** evidence.
 
-## 9. What this audit could not do, and says so
+| Command, Host C | N result | G result |
+|---|---|---|
+| `make gate` | exit 2 at `numeric_binary_oracle` | exit 2 at the adapter tamper test |
+| fmt + full Makefile lint, 1.97.1 | passed before the failing test | passed, including adapter/memprobe lint |
+| workspace tests, 1.95.0, runs 1/2/3 | **1,036 pass, 1 fail, 7 ignored** each; exit 101 | **504 pass, 0 fail, 1 ignored** each; exit 0 |
+| failed N test | `our_numeric_bytes_are_postgresqls_numeric_bytes`, all three — missing PostgreSQL service | — |
+| failed G adapter test in gate | — | `a_tampered_record_is_refused_and_the_segment_is_not_truncated`: 24 pass, 1 fail |
+| `make reproduce` | exit 2: `rev_metadata_2x_budget` OVER BUDGET | exit 0, clean diff |
+| `make fsync-proof` | exit 2, strace absent | exit 2, strace absent |
+| G adapter `--no-fail-fast`, 1.95.0, ×3 | — | **48 passed, 2 failed**, exit 101 each |
+| N `make memory`, 1.95.0 and 1.97.1 | exit 2; 44,165 / 5,000 = **8.833 alloc/key**, budget **7.5**, both toolchains | — |
+| G `make memory`, 1.97.1 | — | exit 0 |
 
-- **GitHub:** unreachable without a credential; not requested; not needed for any finding.
-- **Host C:** the preflight and the RwLock probe have been run (§0.2a, §0.2b); no throughput
-  or lock-hold measurement of the current build exists yet, and every such figure here is cycle
-  9's. The first thing the executor lands (C10-01) is the instrument, and the first thing the
-  author runs after it is the baseline.
-- **Astra:** the §8 checks 2, 3, 5 and 6 were done here from source and are for Astra to do
-  independently; the reconciliation table (cycle 9's §2A shape) is the author's to commission.
-- **The three material facts** of cycle 9 were each turned into a finding here (F-10-07, the
-  PostgreSQL row in §0.1, F-10-08); none was recycled as new.
+N isolated `reproduce` changed only `results/E18-memory.csv`, `results/E18-memory.md`,
+`results/wire-protocol-session.md`; the wire difference is psql 18.6 Homebrew versus committed
+16.13 Ubuntu. Fable reports N's memory gate green on Linux at source-equivalent code: a
+**host-shaped discrepancy to attribute**, not permission to discard either result.
+
+Final read-only verification: N `96b6d9e4d962bb35e64a13d1345d821ae271cb36` with only the five
+protected untracked files at **10,244 / 16,639 / 6,148 / 8,196 / 816,110 bytes**, unchanged; G
+`688919c87852c86d8e8c3abc0af2135db60a5197`, clean.

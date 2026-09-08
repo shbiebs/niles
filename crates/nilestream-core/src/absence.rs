@@ -32,7 +32,17 @@ pub enum Slot<V> {
     /// Never seen. Distinct from a hole: nothing is known, not even a version.
     Bottom,
     /// **Evicted, honestly.** The value is gone; the version is kept. A read here must
-    /// reconstruct, and knows from `e` exactly which prefix to fold.
+    /// reconstruct.
+    ///
+    /// `MISMATCH-hole-version-unused`: this said the read "knows from `e` exactly which
+    /// prefix to fold", and it does not. `Rev::read` passes the *caller's* anchor to
+    /// `Base::reconstruct` and never consults `.version()`; a hole and a ⊥ take the same
+    /// path, and without the value at `e` there is no shorter fold to know about. The
+    /// version is an audit fact — which epoch an entry was certified through when it left —
+    /// not a cost hint, and cycle 9's audit measured what retaining it costs: 125 bytes per
+    /// key ever read, 12.7 MB of a 12.7 MB view at 100k keys under a 2,500 budget. Whether
+    /// a demand view keeps holes at all is LC-31, decided by the author; the sentence is
+    /// corrected here because it was wrong regardless of that decision.
     Hole(Epoch),
     /// A reconstruction is in flight, started at this epoch. A second reader joins it.
     Pending(Epoch),

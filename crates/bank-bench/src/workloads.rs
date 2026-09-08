@@ -231,6 +231,26 @@ pub fn point(
 /// Deliberately an append of two postings rather than an update of two balances. The whole
 /// architecture rests on a balance being a fold, so benchmarking an `UPDATE balances` would
 /// be measuring a system this one is not.
+/// **The write every concurrent level sends: one transaction, two conserved legs.**
+///
+/// E19's `durable` and `mixed` levels sent `insert into postings values (id, acct, 0, 0)` —
+/// one leg, amount zero. It seals a real epoch and pays a real barrier, so the write path was
+/// measured; the *read* path was not. Every view delta was zero, so no resident value ever
+/// changed under the readers, and the mixed levels measured lock interference over a base
+/// whose answers never moved. E16's `oltp` has always sent a real transfer, so the two
+/// experiments were writing different things under one name (F-72).
+///
+/// Identical text on both arms, from one function, so a future divergence has to be
+/// deliberate. The amount is never zero and never the same twice running, because a
+/// conservation suite that only ever sees zero is a suite that cannot fail.
+pub fn transfer_statement(id: i64, from: i64, to: i64, i: u64) -> String {
+    // `from` and `to` must differ, or the transaction nets to nothing on one account and the
+    // level is back to measuring a zero.
+    let to = if to == from { to % 1_000_000 + 1 } else { to };
+    let amount = 1 + (i % 997) as i128;
+    format!("insert into postings values ({id}, {from}, 0, -{amount}), ({id}, {to}, 0, {amount})")
+}
+
 pub fn oltp(
     t: &mut dyn Target,
     accounts: i64,
@@ -923,6 +943,40 @@ pub fn concurrent(
 
 #[cfg(test)]
 mod tests {
+    /// **Every concurrent write moves money — F-72.**
+    ///
+    /// The E19 levels sent one leg of amount zero, so the readers watched a base whose
+    /// answers never changed. This asserts the shape of what they send now: two legs, one
+    /// transaction, a non-zero amount, two different accounts, and the same text whichever
+    /// arm asks for it.
+    #[test]
+    fn a_concurrent_write_is_a_two_leg_transfer_with_a_non_zero_amount() {
+        for i in 0..1_000u64 {
+            let sql = super::transfer_statement(7_000 + i as i64, 11, 12, i);
+            assert_eq!(
+                sql.matches("),(").count() + sql.matches("), (").count(),
+                1,
+                "one transaction, two legs: {sql}"
+            );
+            assert!(
+                !sql.contains(", 0, 0)") && !sql.contains(", 0, -0)"),
+                "a zero-amount leg leaves every view delta at zero, which is the defect: {sql}"
+            );
+            // The two legs must name different accounts, or the transaction nets to nothing
+            // on one key and the level is measuring a zero again by another route.
+            assert!(
+                sql.contains(", 11, 0, -") && sql.contains(", 12, 0, "),
+                "both legs, both accounts: {sql}"
+            );
+        }
+        // A caller that hands the same account twice still gets two distinct accounts.
+        let same = super::transfer_statement(1, 42, 42, 3);
+        assert!(
+            !same.contains(", 42, 0, -4), (1, 42, 0, 4)"),
+            "a self-transfer nets to zero on the only key it touches: {same}"
+        );
+    }
+
     use super::*;
 
     #[test]
@@ -1315,10 +1369,17 @@ pub fn mixed(
     });
 
     let (mut reads, mut writes) = (Vec::new(), Vec::new());
+    let (mut spawned_writing, mut spawned_reading) = (0u32, 0u32);
     for r in per_thread {
         match r {
-            Ok((true, l)) => writes.extend(l),
-            Ok((false, l)) => reads.extend(l),
+            Ok((true, l)) => {
+                spawned_writing += 1;
+                writes.extend(l)
+            }
+            Ok((false, l)) => {
+                spawned_reading += 1;
+                reads.extend(l)
+            }
             Err(e) => {
                 return mixed_skipped(
                     target,
@@ -1333,6 +1394,17 @@ pub fn mixed(
     let (reads_n, writes_n) = (reads.len() as u64, writes.len() as u64);
     let (read_p50, read_p99) = percentiles(reads);
     let (write_p50, write_p99) = percentiles(writes);
+    // **The row names what actually ran.** `readers`/`writers` here are the requested
+    // counts; `spawned_reading`/`spawned_writing` are what the scope actually started and
+    // got a result from. They agree unless a connection failed, and a level that quietly ran
+    // with fewer participants than its label claims is the shape A9-F08 found in the audit
+    // script's own labels. Disagreement is a refusal, not a footnote.
+    assert_eq!(
+        (spawned_reading, spawned_writing),
+        (readers, writers),
+        "the mixed level was labelled {readers}r/{writers}w and ran \
+         {spawned_reading}r/{spawned_writing}w"
+    );
     MixedSample {
         target: target.into(),
         run,

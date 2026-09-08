@@ -2207,9 +2207,10 @@ fn run_nilestream_level(
                 },
                 &open_nls,
                 &|thread, i| {
-                    let acct = scaling_key(seed, thread, i, args.accounts);
+                    let from = scaling_key(seed, thread, i, args.accounts);
+                    let to = scaling_key(seed ^ 0x2E9, thread, i, args.accounts);
                     let id = txn_base(run_no, level, thread, i);
-                    format!("insert into postings values ({id}, {acct}, 0, 0)")
+                    workloads::transfer_statement(id, from, to, i)
                 },
             );
             report_scaling(&s);
@@ -2229,6 +2230,13 @@ fn run_nilestream_level(
             // reader count one-for-one would measure a queue at the sealer rather than
             // contention at the base.
             let writers = conns.div_ceil(2);
+            // Phase boundary: the histograms this level reports must be this level's.
+            if !nls_lockstats_reset(nls_port) {
+                eprintln!(
+                    "  (could not reset the lock histograms before {conns}r/{writers}w; the \
+                     table below is cumulative)"
+                );
+            }
             let before = nls_view_counters(nls_port);
             let mut m = workloads::mixed(
                 workloads::MixedLevel {
@@ -2244,12 +2252,13 @@ fn run_nilestream_level(
                     format!("select acct, sum(amt) from postings where acct = {k} group by acct")
                 },
                 &|thread, i| {
-                    let acct = scaling_key(seed, thread, i, args.accounts);
+                    let from = scaling_key(seed, thread, i, args.accounts);
+                    let to = scaling_key(seed ^ 0x2E9, thread, i, args.accounts);
                     // Offset the identity space so a mixed writer cannot collide with the
                     // `durable` level's, which would be refused as a duplicate and read as a
                     // throughput collapse rather than as the commit rule working.
                     let id = txn_base(run_no, level, thread, i) + 500_000_000;
-                    format!("insert into postings values ({id}, {acct}, 0, 0)")
+                    workloads::transfer_statement(id, from, to, i)
                 },
             );
             m.fallback_rate = fallback_rate_between(before, nls_view_counters(nls_port));
@@ -2283,6 +2292,22 @@ fn nls_sealer_counters(port: u16) -> (Option<u64>, Option<u64>) {
 }
 
 /// The ledger's frontier, so a mixed row can say how much history it was measured against.
+/// **Empty the lock histograms so the next level's table is the next level's — F-75.**
+///
+/// `ENGINE_LOCK` and `VIEW_LOCK` are process-global and were never cleared, so every
+/// histogram a sweep printed carried every level before it: a maximum that only rises and a
+/// p99 weighted by the lightest phase. Called before each level, beside the slow-read table's
+/// own reset, which has had this contract since cycle 8.
+///
+/// Best effort: a daemon that cannot be reached is a level whose histogram is cumulative, and
+/// the caller says so rather than failing the run.
+fn nls_lockstats_reset(port: u16) -> bool {
+    let Ok(mut c) = bank_bench::wire::Client::connect("127.0.0.1", port, "bench", "bank") else {
+        return false;
+    };
+    c.simple("select nilestream_lockstats reset").is_ok()
+}
+
 fn nls_frontier(port: u16) -> Option<u64> {
     let mut c = bank_bench::wire::Client::connect("127.0.0.1", port, "bench", "bank").ok()?;
     let r = c.simple("select nilestream_frontier").ok()?;

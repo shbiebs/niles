@@ -140,6 +140,12 @@ pub fn serve(
         // The barrier is still waited on out here, before the reply is written, exactly as
         // T-05 left it: the acknowledgement follows the fsync, and nothing about releasing
         // the read side changes that.
+        // **The outer boundary, measured rather than inferred.** From here to the reply
+        // reaching the socket: `Session::handle`, the durability barrier, and the framing.
+        // Subtracting `STATEMENT` from it gives the barrier wait and the wire — the term the
+        // slow-read table's "unaccounted" column claimed to bound at 0–2 µs while measuring
+        // nothing outside `answer_from_view` (A9-F07).
+        let wire_began = std::time::Instant::now();
         let replies = session.handle(msg, &*engine);
         let pending = crate::session::Serving::take_pending(&*engine);
 
@@ -171,6 +177,7 @@ pub fn serve(
             break;
         }
         pg_wire::write_all(&mut w, &replies)?;
+        crate::lockstats::WIRE.record(0, wire_began.elapsed().as_nanos() as u64);
     }
     eprintln!(
         "nilestreamd: {peer} disconnected after {} queries",

@@ -596,6 +596,16 @@ from `HashMap` iteration, because a currency code is written into the ledger, wh
 permanent, and one that depended on hash order would differ between runs of the same binary on
 the same schema.
 
+**`MISMATCH-A9-F05`: that is true of the wire and false of the compiler.**
+`session::declared_currencies` does sort by declaration span. `niles_lang::lower` does not: a
+money literal's code is `cat.currencies.keys().position(..)` over a `HashMap<String,
+CurrencyInfo>` with the standard hasher, so a compiled circuit names a currency by an order
+that changes between processes. With one declared currency — every schema this project serves
+today — the two agree at zero and nothing has seen it; with two, a `LitMoney` in the IR and
+the same currency on the wire are different integers, and which ones depends on the run. The
+rule above is the intended one; cycle 9's C9-04 makes the catalog carry the declaration index
+so both consumers read it instead of deriving it.
+
 Two obligations follow, and neither was discharged:
 
 - **An `insert` naming an undeclared currency is refused** with `22023`

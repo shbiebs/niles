@@ -317,13 +317,12 @@ pub fn rev_read_hit() -> Row {
             self.ledger.head()
         }
         fn reconstruct(&self, key: &Key, anchor: u64) -> (Value, u64) {
-            let before = self.ledger.rows_touched();
-            let v = self.ledger.reconstruct_balance(
+            // The fold's own count (A9-F18), not a difference of a global counter.
+            self.ledger.reconstruct_balance_counted(
                 key[0] as u64,
                 key.get(1).copied().unwrap_or(0) as u32,
                 anchor,
-            );
-            (v, self.ledger.rows_touched() - before)
+            )
         }
         fn deltas_at(&self, e: u64) -> Vec<(Key, Value)> {
             let Some(rec) = self.ledger.epochs.get(e as usize) else {
@@ -456,8 +455,10 @@ pub fn append_in_memory() -> Row {
 /// The eviction budget bounds *values*. It does not bound the two policy maps beside them:
 /// `reads_of` (per-key read counts, for the cost-aware policy) and `last_read` (per-key
 /// clock, for LRU) took an entry for every key ever read and gave it back to nobody. The
-/// slot map is different and must stay: an evicted entry becomes `Hole(e)`, which is honest
-/// absence and the reason a miss is not a zero.
+/// slot map is different: an evicted entry becomes `Hole(e)`. `MISMATCH-hole-version-unused`
+/// — this said the hole "is the reason a miss is not a zero", and it is not: ⊥ reconstructs at
+/// the requested anchor too, and `Rev::read` never reads a hole's version. What a hole records
+/// is which epoch the entry was certified through when it left, which is an audit fact.
 ///
 /// Read at `2 x BUDGET` distinct keys, so eviction is continuous and the difference between
 /// "bounded by the budget" and "bounded by history" is a factor of two in this row and
@@ -473,13 +474,12 @@ pub fn rev_metadata_2x_budget() -> Row {
             self.ledger.head()
         }
         fn reconstruct(&self, key: &Key, anchor: u64) -> (Value, u64) {
-            let before = self.ledger.rows_touched();
-            let v = self.ledger.reconstruct_balance(
+            // The fold's own count (A9-F18), not a difference of a global counter.
+            self.ledger.reconstruct_balance_counted(
                 key[0] as u64,
                 key.get(1).copied().unwrap_or(0) as u32,
                 anchor,
-            );
-            (v, self.ledger.rows_touched() - before)
+            )
         }
         fn deltas_at(&self, e: u64) -> Vec<(Key, Value)> {
             let Some(rec) = self.ledger.epochs.get(e as usize) else {
@@ -567,9 +567,15 @@ fn identities(n: u64) -> Vec<String> {
 /// **The admission index: `proto_engine::Ledger::idem`, a `HashSet<String>`.**
 ///
 /// One of *two* windows a durable daemon holds. This one answers whether a key has
-/// committed; the sealer's answers at which epoch, and both hold every identity ever
-/// committed. Neither is pruned by anything today, so the pair is the write path's
-/// unbounded term.
+/// committed; the sealer's answers at which epoch.
+///
+/// **This row measures a stand-in, and its name does not say so (F-65/A9-F09.)** The shipped
+/// structure is `HashMap<Arc<str>, Epoch>` beside a `VecDeque<Arc<str>>`, pruned to the
+/// declared window since cycle 8's T-05; this builds a `HashSet<String>` that is pruned by
+/// nothing. The figure is therefore for a container the code no longer holds — the comment
+/// below it still said "neither is pruned by anything today", which stopped being true in the
+/// same cycle that wrote it. Replacing these rows with measurements of the shipped types is
+/// C9-09.
 ///
 /// Measured on the structure rather than through the sealer: the sealer owns its window on
 /// its own thread, and a `#[global_allocator]`'s counters are process-wide, so a second
@@ -602,6 +608,11 @@ pub fn idem_admission_index() -> Row {
 /// be told the *original* epoch — "committed at a new epoch" would be a second transaction
 /// wearing the first one's name. That is why it is a map and not a set, and why it cannot
 /// simply be dropped in favour of the admission index above.
+///
+/// **A stand-in too (F-65/A9-F09):** the sealer holds `BTreeMap<Arc<str>, u64>` beside a
+/// `VecDeque<(Arc<str>, u64)>`, and this builds a `BTreeMap<String, u64>` alone. One batch is
+/// one segment record and a batch can hold up to 4,096 transactions, so multiplying this row
+/// by a declared window in epochs gives a number for neither structure.
 pub fn idem_window_sealer() -> Row {
     let n = 100_000u64;
     let ids = identities(n);
@@ -639,13 +650,12 @@ pub fn rev_metadata_per_key() -> Row {
             self.ledger.head()
         }
         fn reconstruct(&self, key: &Key, anchor: u64) -> (Value, u64) {
-            let before = self.ledger.rows_touched();
-            let v = self.ledger.reconstruct_balance(
+            // The fold's own count (A9-F18), not a difference of a global counter.
+            self.ledger.reconstruct_balance_counted(
                 key[0] as u64,
                 key.get(1).copied().unwrap_or(0) as u32,
                 anchor,
-            );
-            (v, self.ledger.rows_touched() - before)
+            )
         }
         fn deltas_at(&self, e: u64) -> Vec<(Key, Value)> {
             let Some(rec) = self.ledger.epochs.get(e as usize) else {

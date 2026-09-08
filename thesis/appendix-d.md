@@ -20,7 +20,7 @@ component is for is not derivable from its source.
 
 | Crate | Role | public items |
 |---|---|--:|
-| `bank-bench` | NilesBank generator, wall-clock harness, thesis drift tests | 64 |
+| `bank-bench` | NilesBank generator, wall-clock harness, thesis drift tests | 65 |
 | `conservation-suite` | Reference oracle and the conservation property tests | 23 |
 | `experiments` | The E-series measurement harness | 0 |
 | `niles-interp` | The imperative-subset interpreter `nilesc run` drives, and the ledger it posts to | 16 |

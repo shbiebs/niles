@@ -429,7 +429,10 @@ pub struct Session {
     pub queries_served: u64,
 }
 
-/// How many compiled statements one session holds before the cache is emptied.
+/// How many compiled statements one session holds before the oldest is evicted.
+///
+/// "before the cache is emptied" until cycle 8's T-13, when the policy stopped being
+/// clear-all and became FIFO. The comment outlived the code by a cycle (F-74).
 const PLAN_CACHE_LIMIT: usize = 256;
 
 impl Session {
@@ -474,8 +477,11 @@ impl Session {
     /// One entry point, used by the simple path and by the extended one, so the two cannot
     /// come to disagree about what a statement means — which is the compatibility-layer
     /// failure this crate's own module docs argue against, in miniature.
-    /// How many compiled plans this session holds. **Unbounded**: see
-    /// `the_plan_cache_is_unbounded_and_this_test_is_the_notice`.
+    /// How many compiled plans this session holds. **Bounded at `PLAN_CACHE_LIMIT`**, FIFO,
+    /// since cycle 8's T-13; this said "**Unbounded**" and pointed at a test that no longer
+    /// exists (F-74). One `Lowered` for E16's point statement is 2,281 live bytes, so a full
+    /// cache is about 584 KB per session — measured, not estimated, and the reason the limit
+    /// is not the memory question. What the *key* is remains open (LC-33).
     pub fn compiled_len(&self) -> usize {
         self.compiled.len()
     }
@@ -583,7 +589,22 @@ impl Session {
     }
 
     /// Handle one frontend message, producing the messages to send back.
+    ///
+    /// **Timed into `lockstats::STATEMENT`**, which is the inner of the two boundaries the
+    /// slow-read table could not see past. Its four timestamps live inside
+    /// `answer_from_view`; everything this function does around that — splitting the string,
+    /// compiling or finding the plan, framing rows — is outside them, and the "unaccounted"
+    /// column that purported to cover it was the truncation residual of those same four
+    /// reads (A9-F07). One `Instant::now()` pair per message, on a path that already frames
+    /// a reply.
     pub fn handle(&mut self, msg: Frontend, engine: &dyn Serving) -> Vec<Backend> {
+        let began = std::time::Instant::now();
+        let out = self.handle_inner(msg, engine);
+        crate::lockstats::STATEMENT.record(0, began.elapsed().as_nanos() as u64);
+        out
+    }
+
+    fn handle_inner(&mut self, msg: Frontend, engine: &dyn Serving) -> Vec<Backend> {
         match msg {
             Frontend::Query(sql) => {
                 // **A simple query string may hold several statements**, and PostgreSQL
@@ -915,6 +936,62 @@ impl Session {
                 Backend::CommandComplete("SELECT 1".into()),
             ];
         }
+        // **Every histogram this process keeps, with a phase boundary.**
+        //
+        // `ENGINE_LOCK` and `VIEW_LOCK` were process-global and never cleared, so a sweep
+        // that printed them after each level printed that level *plus every level before
+        // it*: a maximum that can only rise, and a p99 weighted by the lightest phase
+        // (F-75). `select nilestream_lockstats reset` zeroes all four after reading, so the
+        // next level's table is the next level's — the same contract
+        // `nilestream_slow_reads reset` has had since cycle 8.
+        //
+        // Four scopes, nested: `wire` (a message decoded to its reply written) contains
+        // `statement` (`Session::handle`), which contains `base` and `view`. A reader can
+        // subtract to get the framing and the barrier wait, which is what the slow-read
+        // table's residual column was wrongly believed to give.
+        if lower.starts_with("select") && lower.contains("nilestream_lockstats") {
+            let scopes: [(&str, &crate::lockstats::LockStats); 4] = [
+                ("base", &crate::lockstats::ENGINE_LOCK),
+                ("view", &crate::lockstats::VIEW_LOCK),
+                ("statement", &crate::lockstats::STATEMENT),
+                ("wire", &crate::lockstats::WIRE),
+            ];
+            let mut rows = Vec::new();
+            for (name, st) in scopes {
+                let (acq, wp50, wp99, wmax, hp50, hp99, hmax, htotal) = st.snapshot();
+                rows.push(Backend::DataRow(vec![
+                    Some(name.to_string()),
+                    Some(acq.to_string()),
+                    Some(wp50.to_string()),
+                    Some(wp99.to_string()),
+                    Some(wmax.to_string()),
+                    Some(hp50.to_string()),
+                    Some(hp99.to_string()),
+                    Some(hmax.to_string()),
+                    Some(htotal.to_string()),
+                ]));
+            }
+            if lower.contains("reset") {
+                for (_, st) in scopes {
+                    st.reset();
+                }
+            }
+            let n = rows.len();
+            let mut out = vec![Backend::RowDescription(vec![
+                Field::text("scope"),
+                Field::int8("acquisitions"),
+                Field::int8("wait_p50_us"),
+                Field::int8("wait_p99_us"),
+                Field::int8("wait_max_us"),
+                Field::int8("hold_p50_us"),
+                Field::int8("hold_p99_us"),
+                Field::int8("hold_max_us"),
+                Field::int8("hold_total_us"),
+            ])];
+            out.extend(rows);
+            out.push(Backend::CommandComplete(format!("SELECT {n}")));
+            return out;
+        }
         // **The slowest keyed reads, with their parts.** The histograms above are
         // aggregates, and a read maximum of 12-13 ms against a p99 of 246 us is a handful of
         // reads: an aggregate cannot say whether that handful waited for the base, waited
@@ -931,9 +1008,19 @@ impl Session {
                     Some(t.base_wait_us.to_string()),
                     Some(t.view_wait_us.to_string()),
                     Some(t.view_hold_us.to_string()),
-                    // What the engine cannot see: the wire, the framing, and whatever the
-                    // scheduler did between them. Reported as the gap rather than left for a
-                    // reader to compute, because the gap is the interesting column.
+                    // **Rounding, and nothing else.** This column was called
+                    // `unaccounted_us` and described as "what the engine cannot see: the
+                    // wire, the framing, and whatever the scheduler did between them". It is
+                    // none of those. The four timestamps it is computed from are taken one
+                    // after another *inside* `answer_from_view`, so the three parts partition
+                    // the total by construction and the remainder is the truncation of four
+                    // microsecond divisions — bounded by 2 µs whatever the wire does. Cycle
+                    // 8's attribution quoted it as evidence that everything outside the view
+                    // wait was under 2 µs; it was evidence of integer division (A9-F07).
+                    //
+                    // The wire and the framing are measured now, by `STATEMENT` and `WIRE`
+                    // in `select nilestream_lockstats`, which have boundaries that actually
+                    // contain them.
                     Some(
                         t.total_us
                             .saturating_sub(t.base_wait_us + t.view_wait_us + t.view_hold_us)
@@ -951,7 +1038,7 @@ impl Session {
                 Field::int8("base_wait_us"),
                 Field::int8("view_wait_us"),
                 Field::int8("view_hold_us"),
-                Field::int8("unaccounted_us"),
+                Field::int8("rounding_us"),
             ])];
             out.extend(rows);
             out.push(Backend::CommandComplete(format!("SELECT {n}")));
@@ -2568,6 +2655,81 @@ schema bank {
                 "`select nilestream_stats` must name `{wanted}` — the benchmark looks it up                  by name and renders `n/a` when it is missing, so dropping it here would                  quietly unmeasure the column rather than break anything. Got: {names:?}"
             );
         }
+    }
+
+    /// **`select nilestream_lockstats` names four nested scopes and can be reset — F-75.**
+    ///
+    /// The reset is the point. Both lock histograms are process-global and a sweep that
+    /// prints them per level was printing every earlier level with each one.
+    #[test]
+    fn the_lock_histograms_name_four_scopes_and_a_reset_empties_them() {
+        let (mut s, e) = (session(), engine());
+        // Something in every scope: a statement through `handle` fills `STATEMENT`, and the
+        // query it runs takes the base.
+        for _ in 0..3 {
+            let _ = s.handle(
+                Frontend::Query("select acct, sum(amt) from postings group by acct".into()),
+                &e,
+            );
+        }
+        let out = s.handle(Frontend::Query("select nilestream_lockstats".into()), &e);
+        let names: Vec<String> = out
+            .iter()
+            .find_map(|m| match m {
+                Backend::RowDescription(f) => Some(f.iter().map(|x| x.name.clone()).collect()),
+                _ => None,
+            })
+            .expect("a row description");
+        for wanted in [
+            "scope",
+            "acquisitions",
+            "wait_p99_us",
+            "hold_p99_us",
+            "hold_max_us",
+            "hold_total_us",
+        ] {
+            assert!(
+                names.iter().any(|n| n == wanted),
+                "`select nilestream_lockstats` must name `{wanted}`; got {names:?}"
+            );
+        }
+        let scopes: Vec<String> = rows_of(&out)
+            .iter()
+            .filter_map(|r| r.first().cloned().flatten())
+            .collect();
+        assert_eq!(
+            scopes,
+            vec!["base", "view", "statement", "wire"],
+            "four nested scopes, outermost last"
+        );
+        let statement_before: u64 = rows_of(&out)
+            .iter()
+            .find(|r| r.first().cloned().flatten().as_deref() == Some("statement"))
+            .and_then(|r| r[1].clone())
+            .and_then(|v| v.parse().ok())
+            .expect("the statement row carries an acquisition count");
+        assert!(
+            statement_before > 0,
+            "`Session::handle` must be counted; it is the inner boundary the slow-read \
+             table cannot see past"
+        );
+        // The reset, and then a fresh read of the same table.
+        let _ = s.handle(
+            Frontend::Query("select nilestream_lockstats reset".into()),
+            &e,
+        );
+        let after = s.handle(Frontend::Query("select nilestream_lockstats".into()), &e);
+        let statement_after: u64 = rows_of(&after)
+            .iter()
+            .find(|r| r.first().cloned().flatten().as_deref() == Some("statement"))
+            .and_then(|r| r[1].clone())
+            .and_then(|v| v.parse().ok())
+            .expect("the statement row is still there");
+        assert!(
+            statement_after < statement_before,
+            "a reset must drop the counters: {statement_before} before, {statement_after} \
+             after (the one or two statements since the reset are the only ones left)"
+        );
     }
 
     /// **The declared window reaches the engine — T-05.3.**

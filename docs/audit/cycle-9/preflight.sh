@@ -19,16 +19,18 @@ trap 'rm -rf "$SCRATCH"' EXIT
 say() { printf '%s\n' "$*"; }
 hdr() { printf '\n=== %s\n' "$*"; }
 
-say "cycle-7 audit preflight — $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+say "cycle-9 audit preflight — $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 
 # ---------------------------------------------------------------- A. the machine
 hdr "A. host"
 say "uname            : $(uname -srmo 2>/dev/null || uname -a)"
-say "cores (nproc)    : $(nproc 2>/dev/null || echo '?')"
+# `nproc` and /proc are Linux. On Darwin — where Host C is — both were absent and this
+# section printed `?` for the two figures the admissibility table is built from.
+say "cores (nproc)    : $(nproc 2>/dev/null || sysctl -n hw.logicalcpu 2>/dev/null || echo '?')"
 if [ -r /proc/cpuinfo ]; then
   say "cpu model        : $(grep -m1 -E 'model name|Model' /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//')"
 fi
-say "memtotal         : $(awk '/MemTotal/{printf "%.1f GiB", $2/1048576}' /proc/meminfo 2>/dev/null || echo '?')"
+say "memtotal         : $(awk '/MemTotal/{printf "%.1f GiB", $2/1048576}' /proc/meminfo 2>/dev/null || { b=$(sysctl -n hw.memsize 2>/dev/null) && awk -v b="$b" 'BEGIN{printf "%.1f GiB", b/1073741824}'; } || echo '?')"
 say "cgroup cpu.max   : $(cat /sys/fs/cgroup/cpu.max 2>/dev/null || echo 'n/a')"
 say "cgroup mem.max   : $(cat /sys/fs/cgroup/memory.max 2>/dev/null || echo 'n/a')"
 say "NOTE: nproc can exceed what the cgroup actually grants. If cpu.max is not 'max',"
@@ -109,7 +111,28 @@ if rustup toolchain list 2>/dev/null | grep -q "^${PIN:-__none__}"; then
 else
   TC="stable"; PIN_STATE="does NOT resolve here (not installed, and this machine may not be able to fetch it) — every probe below uses RUSTUP_TOOLCHAIN=stable, and so must every build; say so beside every figure"
 fi
-rt() { RUSTUP_TOOLCHAIN="$TC" timeout 20 "$@" 2>/dev/null || echo ABSENT; }
+# **A deadline without `timeout`.** macOS has no `timeout(1)`, so every probe below ran the
+# fallback branch and printed ABSENT for tools that were installed — the Mac's run reported
+# the pin as "resolves here" and then `rustc: ABSENT`, which is a contradiction the reader
+# has to notice. Python 3 is a stated precondition and its `subprocess` has a timeout.
+deadline() {
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 20 "$@"
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 - "$@" <<'PYDEADLINE'
+import subprocess, sys
+try:
+    r = subprocess.run(sys.argv[1:], timeout=20, capture_output=True, text=True)
+    sys.stdout.write(r.stdout)
+    sys.exit(r.returncode)
+except Exception:
+    sys.exit(124)
+PYDEADLINE
+  else
+    "$@"
+  fi
+}
+rt() { RUSTUP_TOOLCHAIN="$TC" deadline "$@" 2>/dev/null || echo ABSENT; }
 say "pin              : channel = \"${PIN:-unreadable}\" — $PIN_STATE"
 say "rustc            : $(rt rustc --version)   (toolchain: $TC)"
 say "cargo            : $(rt cargo --version)"
@@ -180,9 +203,10 @@ say "The heads above are what you are auditing. This script does not carry a lis
 say "SHAs: the one it carried was a cycle out of date the first time it was reused, and a"
 say "wrong expectation is worse than none — it invites an auditor to \"correct\" a tree that"
 say "was right. Your brief names the heads; compare them yourself."
-say "If you are on the author's Mac, the FOUR untracked files in \`niles\` are his and must"
+say "If you are on the author's Mac, the FIVE untracked files in \`niles\` are his and must"
 say "never be edited, staged, deleted, moved or bundled: .DS_Store, AGENTS.md,"
-say "thesis/.DS_Store, thesis/Niles-Thesis.pdf. Anything else untracked is yours to explain."
+say "niles/.DS_Store, thesis/.DS_Store, thesis/Niles-Thesis.pdf. Anything else untracked is"
+say "yours to explain."
 
 # ------------------------------------------------------------------- G. the gate
 hdr "G. gate — run these yourself and record the result"

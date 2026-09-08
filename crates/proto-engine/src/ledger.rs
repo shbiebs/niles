@@ -497,9 +497,24 @@ impl Ledger {
     /// `rows_touched` is incremented by exactly the number of base rows read, which is the
     /// machine-independent cost unit the experiments report.
     pub fn reconstruct_balance(&self, acct: Acct, cur: Cur, anchor: Epoch) -> Minor {
+        self.reconstruct_balance_counted(acct, cur, anchor).0
+    }
+
+    /// The same fold, returning **this call's own** visited-row count as well as the value.
+    ///
+    /// `rows_touched` is one process-global atomic, and per-operation cost was read off it
+    /// as a difference across the call. Under a shared base guard two reconstructions run at
+    /// once, so each one's "cost" included whatever the other visited: the figure is a sum
+    /// over overlapping folds wearing the name of a single read (A9-F18). Single-threaded
+    /// rows — E1 through E12, E18 — are unaffected; every `rows_touched`-derived number taken
+    /// under concurrency was not.
+    ///
+    /// The count is accumulated in a local and published to the global total once, so the
+    /// aggregate still means what it did and the per-call figure is now the caller's own.
+    pub fn reconstruct_balance_counted(&self, acct: Acct, cur: Cur, anchor: Epoch) -> (Minor, u64) {
         let refs = match self.by_account.get(&acct) {
             Some(v) => v,
-            None => return 0,
+            None => return (0, 0),
         };
         let mut total: Minor = 0;
         let mut touched = 0u64;
@@ -532,7 +547,7 @@ impl Ledger {
             }
         }
         self.count_rows(touched);
-        total
+        (total, touched)
     }
 
     /// Unindexed reconstruction: fold the whole prefix. Used only as the *ablation* that
@@ -695,9 +710,10 @@ impl nilestream_core::rev::Base for Ledger {
         let (Some(acct), Some(cur)) = (key.first(), key.get(1)) else {
             return (0, 0);
         };
-        let before = self.rows_touched();
-        let v = self.reconstruct_balance(*acct as Acct, *cur as Cur, anchor);
-        (v, self.rows_touched() - before)
+        // **This call's own count, not a difference of a process-global counter.** The old
+        // body read `rows_touched` before and after; under a shared base guard a concurrent
+        // reconstruction's rows landed in between and were attributed here (A9-F18).
+        self.reconstruct_balance_counted(*acct as Acct, *cur as Cur, anchor)
     }
 
     fn deltas_at(&self, e: Epoch) -> Vec<(nilestream_core::rev::Key, i128)> {
@@ -736,6 +752,72 @@ mod checkpoint_tests {
             amt,
             valid: 0,
         })
+    }
+
+    /// **Two folds at once each report their own rows — A9-F18.**
+    ///
+    /// `rows_touched` is a process-global atomic, and per-read cost used to be read off it
+    /// as a difference across the call. Two reconstructions under the shared base guard —
+    /// the ordinary case for a mixed workload — then each reported the sum of both. This
+    /// runs two folds with very different costs concurrently, many times, and requires each
+    /// to report the count its own key implies, with the global total still the sum.
+    #[test]
+    fn two_concurrent_folds_each_report_their_own_visited_rows() {
+        use std::sync::Arc;
+        let mut l = Ledger::new();
+        // Account 1 gets many postings; account 2 gets few. Their costs must not blend.
+        for e in 0..200u64 {
+            l.submit(&format!("many{e}"), vec![post(e, 1, 1), post(e, 999, -1)])
+                .expect("balanced");
+        }
+        for e in 0..5u64 {
+            l.submit(
+                &format!("few{e}"),
+                vec![post(1_000 + e, 2, 1), post(1_000 + e, 999, -1)],
+            )
+            .expect("balanced");
+        }
+        let head = l.head();
+        let l = Arc::new(l);
+        let before_global = l.rows_touched();
+        const ROUNDS: u64 = 200;
+        let a = {
+            let l = Arc::clone(&l);
+            std::thread::spawn(move || {
+                let mut counts = Vec::with_capacity(ROUNDS as usize);
+                for _ in 0..ROUNDS {
+                    counts.push(l.reconstruct_balance_counted(1, USD, head).1);
+                }
+                counts
+            })
+        };
+        let b = {
+            let l = Arc::clone(&l);
+            std::thread::spawn(move || {
+                let mut counts = Vec::with_capacity(ROUNDS as usize);
+                for _ in 0..ROUNDS {
+                    counts.push(l.reconstruct_balance_counted(2, USD, head).1);
+                }
+                counts
+            })
+        };
+        let (ca, cb) = (a.join().expect("a"), b.join().expect("b"));
+        let (fa, fb) = (ca[0], cb[0]);
+        assert_eq!(fa, 200, "account 1 has 200 postings at the head");
+        assert_eq!(fb, 5, "account 2 has 5");
+        assert!(
+            ca.iter().all(|&c| c == fa),
+            "the busy fold's count must not vary with what another thread was doing: {ca:?}"
+        );
+        assert!(
+            cb.iter().all(|&c| c == fb),
+            "the cheap fold's count must not vary with what another thread was doing: {cb:?}"
+        );
+        assert_eq!(
+            l.rows_touched() - before_global,
+            ROUNDS * (fa + fb),
+            "the global total is still the sum of every fold's own rows"
+        );
     }
 
     #[test]

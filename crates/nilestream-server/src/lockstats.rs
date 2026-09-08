@@ -91,21 +91,49 @@ impl LockStats {
         Self::bump(&self.hold_ns, &self.max_hold_ns, &self.hold, hold_ns);
     }
 
-    /// The upper bound of the bucket the `q`th quantile falls in, in microseconds.
-    fn quantile(hist: &[AtomicU64; BUCKETS], q: f64) -> u64 {
+    /// **The upper bound of the bucket the `q`th quantile falls in, in microseconds.**
+    ///
+    /// It said that and returned the *lower* edge. `bucket` puts a sample of `us`
+    /// microseconds in bucket `floor(log2(us)) + 1`, so bucket `i ≥ 1` holds
+    /// `[2^(i-1), 2^i - 1]`; the old body returned `1 << (i - 1)`, which is that interval's
+    /// **floor**. Every `p50` and `p99` this file has ever printed — in `run6.sh`'s tables,
+    /// in the audit records that quote them, in `E19-scaling` — was therefore a lower bound
+    /// presented under the name "upper bound", understating the quantile by up to a factor
+    /// of two. A9-F07.
+    ///
+    /// Two corrections. The edge is `2^i - 1`. And it is **clamped by the largest sample
+    /// actually observed**, which is both tighter and the only honest answer for the top
+    /// bucket: that one is open-ended (`us ≥ 2^22`, about 4.2 s and up) and has no finite
+    /// edge, so the observed maximum is the smallest true upper bound available. The
+    /// clamp costs nothing for the other buckets and can only make the number smaller and
+    /// still correct.
+    ///
+    /// Bucket 0 is everything under one microsecond; its upper bound, truncated to
+    /// microseconds, is 0. `acquisitions` is what distinguishes that from no data.
+    fn quantile(hist: &[AtomicU64; BUCKETS], q: f64, max_ns: u64) -> u64 {
         let total: u64 = hist.iter().map(|b| b.load(Relaxed)).sum();
         if total == 0 {
             return 0;
         }
+        let max_us = max_ns / 1_000;
         let want = (total as f64 * q).ceil() as u64;
         let mut seen = 0u64;
         for (i, b) in hist.iter().enumerate() {
             seen += b.load(Relaxed);
             if seen >= want {
-                return if i == 0 { 1 } else { 1u64 << (i - 1) };
+                if i == BUCKETS - 1 {
+                    // Open-ended: no finite edge exists, so the observed maximum is it.
+                    return max_us;
+                }
+                let edge = if i == 0 {
+                    0
+                } else {
+                    (1u64 << i).saturating_sub(1)
+                };
+                return edge.min(max_us);
             }
         }
-        1u64 << (BUCKETS - 2)
+        max_us
     }
 
     /// `(acquisitions, wait_p50µs, wait_p99µs, wait_maxµs, hold_p50µs, hold_p99µs,
@@ -115,16 +143,45 @@ impl LockStats {
     /// wall clock during which the engine was locked — which is the number that says whether
     /// the mutex is the ceiling or merely present.
     pub fn snapshot(&self) -> (u64, u64, u64, u64, u64, u64, u64, u64) {
+        let wmax = self.max_wait_ns.load(Relaxed);
+        let hmax = self.max_hold_ns.load(Relaxed);
         (
             self.acquisitions.load(Relaxed),
-            Self::quantile(&self.wait, 0.50),
-            Self::quantile(&self.wait, 0.99),
-            self.max_wait_ns.load(Relaxed) / 1_000,
-            Self::quantile(&self.hold, 0.50),
-            Self::quantile(&self.hold, 0.99),
-            self.max_hold_ns.load(Relaxed) / 1_000,
+            Self::quantile(&self.wait, 0.50, wmax),
+            Self::quantile(&self.wait, 0.99, wmax),
+            wmax / 1_000,
+            Self::quantile(&self.hold, 0.50, hmax),
+            Self::quantile(&self.hold, 0.99, hmax),
+            hmax / 1_000,
             self.hold_ns.load(Relaxed) / 1_000,
         )
+    }
+
+    /// **Zero every counter — the phase boundary these histograms never had.**
+    ///
+    /// `ENGINE_LOCK` and `VIEW_LOCK` are process-global and were never cleared, so a harness
+    /// that printed them after each level of a sweep printed level *n*'s numbers *plus every
+    /// level before it*: a `max` that can only rise, a `p99` weighted by the earliest and
+    /// least loaded phase, and an occupancy total spanning phases that were supposed to be
+    /// compared. `SLOW_READS` was given a reset in cycle 8 for exactly this reason and these
+    /// two were left; every histogram `run6.sh` has printed is cumulative (F-75, A9-F08).
+    ///
+    /// Not atomic across the whole structure, and it does not need to be: the caller is a
+    /// harness at a quiescent phase boundary, not a concurrent reader. What it must not do is
+    /// pretend — a snapshot taken while traffic is running is a snapshot of a moving
+    /// structure whether or not this function exists.
+    pub fn reset(&self) {
+        for b in &self.wait {
+            b.store(0, Relaxed);
+        }
+        for b in &self.hold {
+            b.store(0, Relaxed);
+        }
+        self.acquisitions.store(0, Relaxed);
+        self.wait_ns.store(0, Relaxed);
+        self.hold_ns.store(0, Relaxed);
+        self.max_wait_ns.store(0, Relaxed);
+        self.max_hold_ns.store(0, Relaxed);
     }
 }
 
@@ -159,6 +216,32 @@ pub static ENGINE_LOCK: LockStats = LockStats::new();
 /// base are directly comparable; the top bucket is about 8.4 seconds, well past the 32 ms
 /// the tail lives under.
 pub static VIEW_LOCK: LockStats = LockStats::new();
+
+/// **The statement boundary: `Session::handle` entered to `Session::handle` returned.**
+///
+/// Not a lock, and the type is reused deliberately — the histogram, the reset and the
+/// clamped quantiles are exactly what is wanted, and `wait` is left at zero because nothing
+/// is waited for. This exists because of what the slow-read table could *not* say. Its four
+/// timestamps are taken inside `answer_from_view`, one after another, so
+/// `total - (base_wait + view_wait + view_hold)` is arithmetic, not a measurement: three
+/// consecutive intervals partition the fourth by construction and the remainder is the
+/// truncation of four microsecond divisions. The audit reported "0–2 µs on everything else"
+/// from that column and it measured nothing at all (A9-F07).
+///
+/// The parts genuinely outside the engine's own section — compiling or looking up the plan,
+/// framing the reply, and everything the connection does around them — are outside those
+/// four timestamps, so they need their own boundaries. This is the inner one.
+pub static STATEMENT: LockStats = LockStats::new();
+
+/// **The connection boundary: a message decoded to its reply written.**
+///
+/// The outer of the two. `WIRE.hold` minus `STATEMENT.hold` is the framing, the socket and
+/// whatever the scheduler did between them — the term that was being *asserted* to be
+/// 0–2 µs and had never been measured. Recorded by `daemon::serve` around one iteration of
+/// its loop, so it includes the durability barrier a reply waits on, which is the point:
+/// a reply that waits 8 ms for an fsync is not a slow engine and the two must be
+/// distinguishable.
+pub static WIRE: LockStats = LockStats::new();
 
 /// Acquire, timing both the wait and the hold, and record on drop.
 ///
@@ -312,6 +395,82 @@ mod tests {
             BUCKETS - 1,
             "anything absurd lands in the last bucket rather than out of bounds"
         );
+    }
+
+    /// **A reported quantile is an upper bound on the band, not its floor — A9-F07.**
+    ///
+    /// A single 3 µs hold lands in the band `[2, 3] µs`. The bound to report is 3. The old
+    /// body returned `1 << (i - 1)` — 2 — and called it "the upper bound of the bucket",
+    /// which is a number no sample in that band can be under. Every published `p50` and
+    /// `p99` from this file was low by up to a factor of two.
+    #[test]
+    fn a_reported_quantile_is_never_below_a_sample_it_summarises() {
+        let s = LockStats::new();
+        s.record(0, 3_000);
+        let (_, _, _, _, p50, p99, max, _) = s.snapshot();
+        assert_eq!(max, 3, "the maximum is exact");
+        assert_eq!(
+            p50, 3,
+            "a 3µs hold is in the [2,3]µs band and its bound is 3; reporting 2 claims a \
+             ceiling under the only sample there is"
+        );
+        assert_eq!(p99, 3);
+        // And the clamp: with one 3µs sample the band's edge is 3, which is also the max.
+        // With a sample at the bottom of a wide band the observed maximum is the tighter
+        // and still-true bound.
+        let t = LockStats::new();
+        t.record(0, 4_000);
+        let (_, _, _, _, tp50, _, tmax, _) = t.snapshot();
+        assert_eq!(tmax, 4);
+        assert_eq!(
+            tp50, 4,
+            "the [4,7]µs band's edge is 7, but nothing over 4µs was seen, so 4 is the \
+             smallest true upper bound"
+        );
+    }
+
+    /// **The open-ended band has no finite edge, and must not be given one.**
+    ///
+    /// The last bucket holds everything from about 4.2 s upward. `1 << (BUCKETS - 2)` is its
+    /// *floor*, and returning it says "the p99 was 4.19 s" about a hold that may have been
+    /// an hour. The only true upper bound available is the largest sample seen.
+    #[test]
+    fn the_open_ended_band_reports_the_observed_maximum_rather_than_a_made_up_ceiling() {
+        let s = LockStats::new();
+        s.record(0, 30_000_000_000);
+        let (_, _, _, _, p50, p99, max, _) = s.snapshot();
+        assert_eq!(max, 30_000_000, "thirty seconds, exact");
+        assert_eq!(
+            p50, 30_000_000,
+            "the top band is open-ended; its bound is what was actually seen"
+        );
+        assert_eq!(p99, 30_000_000);
+        assert!(
+            p99 > 1u64 << (BUCKETS - 2),
+            "reporting the band's floor ({}) would understate a {max}µs hold",
+            1u64 << (BUCKETS - 2)
+        );
+    }
+
+    /// **A reset makes a histogram phase-local — F-75.**
+    #[test]
+    fn a_reset_leaves_a_lock_histogram_reporting_only_what_came_after_it() {
+        let s = LockStats::new();
+        for _ in 0..100 {
+            s.record(0, 9_000_000);
+        }
+        assert_eq!(s.snapshot().6, 9_000, "the first phase is in there");
+        s.reset();
+        assert_eq!(s.snapshot().0, 0, "no acquisitions survive a reset");
+        assert_eq!(s.snapshot().6, 0, "no maximum survives a reset");
+        s.record(0, 2_000);
+        let (n, _, _, _, _, _, max, total) = s.snapshot();
+        assert_eq!(n, 1);
+        assert_eq!(
+            max, 2,
+            "the second phase's maximum must not inherit the first phase's 9ms"
+        );
+        assert_eq!(total, 2);
     }
 
     /// **Nearest-rank, and the difference from an interpolated percentile matters here.**

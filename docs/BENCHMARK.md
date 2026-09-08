@@ -219,10 +219,9 @@ mutex (`view_*`) — over the same 24 power-of-two buckets, so a wait on one is 
 comparable with a wait on the other. Percentiles are **bucket boundaries, not interpolated
 values**: `p99 ≤ 2048µs` is honest and `p99 = 1873µs` would not be.
 
-An aggregate cannot attribute a *tail*. A mixed level's read maximum of 12–13 ms against a
-p99 of 246 µs is a handful of reads per run, and a histogram is the wrong instrument for a
-handful. `select nilestream_slow_reads` keeps the slowest sixteen keyed reads this process
-has served, each broken into:
+An aggregate cannot attribute a *tail*. A mixed level's read maximum is a handful of reads per
+run and a histogram is the wrong instrument for a handful. `select nilestream_slow_reads` keeps
+the slowest sixteen keyed reads this process has served, each broken into:
 
 | column | what waited |
 |---|---|

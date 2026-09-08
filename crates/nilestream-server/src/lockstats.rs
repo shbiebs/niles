@@ -206,11 +206,17 @@ pub static ENGINE_LOCK: LockStats = LockStats::new();
 ///
 /// The one lock in this engine that nothing measured. `ENGINE_LOCK` covers the base; the
 /// view is taken inside it by an append (to `advance` the maintained state) and taken
-/// alone by a keyed read, a report and a stats query. A mixed workload's read *maximum* is
-/// 12–13 ms on the reference host while the base's longest wait is 1.7 ms, so the tail is
-/// somewhere the instrumented lock cannot explain — and "somewhere" was as precise as this
-/// project could be about it, because the only other candidates were this mutex and the
-/// scheduler, and one of them had no counter.
+/// alone by a keyed read, a report and a stats query. It was added because a mixed
+/// workload's read maximum was orders of magnitude above its p99 and the instrumented lock
+/// could not explain it, so "somewhere" was as precise as this project could be — the only
+/// other candidates being this mutex and the scheduler, and one of them had no counter.
+///
+/// **Having a counter turned out to exonerate it.** With the harness corrected (one daemon
+/// per replicate, histograms reset per level, level-local counters) and the read split so
+/// the fold no longer runs under this lock, the interleaved two-arm run of C9-06.2 finds
+/// the tail is dominated by `base wait` on both arms and that removing the long view hold
+/// is worth +1.8%. The instrument earned its place by falsifying the guess that motivated
+/// it, which is the only thing an instrument is for.
 ///
 /// Both histograms use the same 24 power-of-two buckets, so a wait here and a wait on the
 /// base are directly comparable; the top bucket is about 8.4 seconds, well past the 32 ms
@@ -666,9 +672,10 @@ mod instrument_cost {
 ///
 /// The histograms above say how long the base and the view were *held and waited for*, in
 /// aggregate. They cannot answer the question the mixed workload actually poses: a read
-/// maximum of 12–13 ms against a p99 of 246 µs is a handful of reads per run, and an
+/// maximum orders of magnitude above the p99 is a handful of reads per run, and an
 /// aggregate is exactly the wrong instrument for a handful. This keeps the slowest few,
-/// whole, with their parts.
+/// whole, with their parts — and it is what showed that those reads are waiting on the
+/// *base*, not on the view, which no aggregate in this file could have said.
 ///
 /// Bounded and cheap: a fixed array behind one mutex, and a relaxed atomic floor read on
 /// every read so the common case — a read faster than the slowest kept — takes no lock at

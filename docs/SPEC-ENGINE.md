@@ -754,14 +754,28 @@ neither has run over a network.
 reconstruction it may need. The lattice's `Pending` state MUST be reachable, and what a
 reader does when it finds one MUST be decided by the anchor.**
 
-*What was built and what was measured.* `Rev::read` took the view, tested the certification
-interval, missed, folded the base **inside the hold**, installed and returned. Every other
-keyed read in the process queued behind that fold whether or not it wanted the same key, and
-the shape is visible in the numbers: a mixed workload's read throughput *fell* from 94,038/s
-at six connections to 20,507/s at twelve, with a view wait reaching 22,160 µs
-(`docs/audit/cycle-8/lc-23-attribution.md`, LC-23). `Slot::Pending` was constructed nowhere,
-and could not be: there was no moment at which a second reader could arrive, because no
-second reader could run.
+*What was built.* `Rev::read` took the view, tested the certification interval, missed, folded
+the base **inside the hold**, installed and returned. Every other keyed read in the process
+queued behind that fold whether or not it wanted the same key, and the hold had no bound.
+`Slot::Pending` was constructed nowhere, and could not be: there was no moment at which a
+second reader could arrive, because no second reader could run.
+
+*What was measured, and what it refuted.* This requirement was written against LC-23's figures
+— a mixed read throughput falling 94,038 → 48,310 → 20,507/s across 6r3w / 9r5w / 12r6w with a
+view wait reaching 22,160 µs — which were **inferred from a document, not measured**. The
+corrected two-arm run (`c9-pending.sh`, one daemon per replicate, histograms reset per level,
+level-local counters, interleaved arms, 5 replicates) measures the *same predecessor build* at
+**147,306 / 156,686 / 160,838** reads/s: rising with concurrency, 7.8× the collapsed figure at
+twelve, slowest-read view wait 788 µs. There was no collapse. The two-phase read is worth
+**+1.8%** at 12r/6w against a 1.25× pass line.
+
+In the slowest-read tables of **both** arms, `base wait` is the dominant term and frequently the
+whole of it. `answer_from_view` holds the base read guard across the fold — deliberately, since
+`RwLock` is not reentrant and a keyed read must take the base exactly once — and a writer
+arriving behind that guard queues, after which every later reader queues behind the writer. **The
+tail is a base-lock tail.** LC-23's attribution to the view mutex is withdrawn and reopened
+against the base. This requirement stands on the two grounds below, and **no performance claim
+rests on it**.
 
 *The protocol.* Three calls, and the lock is held for two of them.
 
@@ -804,11 +818,25 @@ block every append in the process behind another reader's fold.
 `pinned_installs` and `flights_refused`. `select nilestream_lockstats` reports `view_hold_us`
 as the sum of the two holds and not the fold between them.
 
+*The two grounds.* (i) The lattice's fourth state is reachable and counted — on the reference
+host at 12r/6w the served daemon records a median 14,377 joins, 495 uninstalled folds and
+311,921 pinned installs, so the chapter that describes joining describes something the engine
+does. (ii) The hold is bounded: a keyed read owns the view for a decision and an install, never
+for a reconstruction, and that is a structural property rather than a measured one.
+
+*And one measured ratio that is a finding.* Against ~4.9 M reads in a 30-second level, joins are
+0.29% and pinned installs 6.35% — twenty-two reconstructions land pinned for every one shared.
+A pinned entry serves one anchor and is rebuilt by the next reader that needs the key fresh. The
+deferred merge (rule 4 above, `deferred_merges`, zero today) is worth considerably more than the
+join, and this is the evidence for it.
+
 *Acceptance test.* The latch-driven differential
 (`rev::two_phase::a_flight_that_overlaps_an_advance_is_joined_shared_and_installed_pinned`)
 constructs the interleaving rather than waiting for it, and asserts the precondition
-`pinned_installs + deferred_merges + pending_joins > 0`. **Status: Complete in-process; the
-throughput result is a Host C measurement (`c9-pending.sh`) and is not yet taken.**
+`pinned_installs + deferred_merges + pending_joins > 0`. **Status: Complete.** The protocol is
+implemented, guarded and measured at the wire; the throughput claim it was expected to carry did
+not survive its own measurement and has been withdrawn rather than restated
+(`docs/audit/cycle-9/hostc/c9-pending-results.md`).
 
 ---
 

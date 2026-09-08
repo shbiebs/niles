@@ -1407,11 +1407,23 @@ impl RevEngine {
         //
         // This used to be one `Rev::read` call, which took the view lock, missed,
         // folded the base *inside* the hold, installed, and returned. Every other keyed read
-        // in the process queued behind that fold whether or not it wanted the same key, and
-        // an audit measured the resulting tail as the daemon's read maximum: 12–13 ms against
-        // a p99 of 246 µs, with a view wait reaching 22 ms under twelve readers. The hold is
-        // not the fold's fault — a reconstruction *is* expensive — it is the fault of doing
-        // it while holding the one lock every reader needs for microseconds.
+        // in the process queued behind that fold whether or not it wanted the same key. The
+        // hold is not the fold's fault — a reconstruction *is* expensive — it is the fault of
+        // doing it while holding the one lock every reader needs for microseconds, with no
+        // bound on how long that is.
+        //
+        // **The speed argument for this split did not survive its measurement, and the split
+        // stays anyway.** The 12–13 ms read maximum and the 22 ms view wait it was undertaken
+        // against came from an uncorrected harness — one daemon for a whole session, lock
+        // histograms never reset between levels, lifetime counters, and a keyed read folding
+        // the base twice on 87.4% of attempts before the certification interval was repaired.
+        // Re-measured properly (C9-06.2), the predecessor build does not collapse at all: it
+        // rises, 147k/157k/161k reads/s across 6r3w/9r5w/12r6w, and this split is worth
+        // +1.8%. The slowest reads on *both* arms are dominated by `base wait`, not by this
+        // lock. What the split is kept for is on the tin: the reconstruction happens with the
+        // view released, which makes `Slot::Pending` reachable — the lattice's fourth state,
+        // which the thesis describes and nothing could construct — and bounds a hold that had
+        // no bound. See `docs/audit/cycle-9/hostc/c9-pending-results.md`.
         let read_began = std::time::Instant::now();
         let base = self.base();
         let base_ready = std::time::Instant::now();

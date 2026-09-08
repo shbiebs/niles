@@ -10,20 +10,20 @@ The tool lives outside the workspace. `GlobalAlloc` cannot be implemented withou
 
 | Scenario | Unit | Ops | Allocations | per op | Bytes | per op | Live | Peak |
 |---|---|--:|--:|--:|--:|--:|--:|--:|
-| `ledger_seeded` | posting | 40000 | 150254 | 3.8 | 21577722 | 539 | 8871189 | 9856518 |
+| `ledger_seeded` | posting | 40000 | 150254 | 3.8 | 21578010 | 539 | 8871477 | 9856518 |
 | `zset_base_at` | row | 40000 | 46665 | 1.2 | 9583856 | 240 | 9583856 | 9583856 |
 | `served_group_by_cur` | query | 3 | 39 | 13.0 | 5454 | 1818 | 0 | 1664 |
 | `served_group_by_acct` | query | 3 | 37806 | 12602.0 | 11387166 | 3795722 | 0 | 2841312 |
 | `served_top_ten` | query | 3 | 37884 | 12628.0 | 14536794 | 4845598 | 0 | 2841312 |
 | `served_sum_negative` | query | 3 | 36 | 12.0 | 5568 | 1856 | 0 | 1728 |
-| `served_point` | query | 200 | 2200 | 11.0 | 187600 | 938 | 0 | 826 |
+| `served_point` | query | 200 | 2200 | 11.0 | 187600 | 938 | 0 | 842 |
 | `wire_reply_10k` | reply | 5 | 5 | 1.0 | 348160 | 69632 | 0 | 69632 |
 | `wire_reply_100k` | reply | 5 | 5 | 1.0 | 348160 | 69632 | 0 | 69632 |
 | `served_point_conjunct` | query | 200 | 3000 | 15.0 | 427600 | 2138 | 0 | 1792 |
 | `served_having_on_key` | query | 200 | 4200 | 21.0 | 635600 | 3178 | 0 | 1856 |
 | `rev_read_hit` | read | 1000 | 1000 | 1.0 | 16000 | 16 | 0 | 16 |
 | `append_in_memory` | transaction | 500 | 3500 | 7.0 | 266000 | 532 | 76000 | 76232 |
-| `rev_metadata_2x_budget` | key | 5000 | 19164 | 3.8 | 1214712 | 243 | 859352 | 859400 |
+| `rev_metadata_2x_budget` | key | 5000 | 34165 | 6.8 | 1935704 | 387 | 860344 | 860520 |
 | `rev_metadata_per_key` | resident key | 2500 | 5416 | 2.2 | 275360 | 110 | 235360 | 235376 |
 | `idem_admission_index` | identity | 100000 | 100016 | 1.0 | 10153756 | 102 | 6876816 | 6979652 |
 | `idem_window_sealer` | identity | 100000 | 116666 | 1.2 | 9961568 | 100 | 9961568 | 9961568 |
@@ -47,7 +47,7 @@ Allocations per operation, asserted exactly — an allocation count is not a tol
 | `served_having_on_key` | 24.0 | 21.0 | 12% |
 | `rev_read_hit` | 1.2 | 1.0 | 17% |
 | `append_in_memory` | 7.7 | 7.0 | 9% |
-| `rev_metadata_2x_budget` | 5.0 | 3.8 | 23% |
+| `rev_metadata_2x_budget` | 7.5 | 6.8 | 9% |
 | `rev_metadata_per_key` | 2.4 | 2.2 | 10% |
 | `idem_admission_index` | 1.2 | 1.0 | 17% |
 | `idem_window_sealer` | 1.2 | 1.2 | 3% |

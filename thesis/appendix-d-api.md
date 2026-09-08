@@ -53,6 +53,10 @@ pub fn permits_reading(outer: Consistency, inner: Consistency) -> bool
 pub type Key
 pub type Value
 pub struct Anchored
+pub enum ReadOutcome
+pub struct Completion
+pub struct FoldTicket
+pub struct WaitTicket
 pub trait Base
 pub enum Policy
 pub struct Stats

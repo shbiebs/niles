@@ -924,6 +924,26 @@ impl Session {
                     // surface could see it: the front end ran on the serving path and the
                     // only way to notice was a profiler (F-68).
                     Field::int8("schema_parses"),
+                    // **The absence lattice's fourth state, reported.**
+                    //
+                    // `pending_joins` counts keyed reads that found a reconstruction already
+                    // in flight at their own exact anchor and shared it. It was zero by
+                    // construction while the fold ran inside the view lock — there was no
+                    // moment at which a second reader could arrive, because no second reader
+                    // could run — and `MISMATCH-pending-unreachable` stood against every
+                    // sentence describing joining as a mechanism this runtime had.
+                    //
+                    // The other three are what the split costs and what it refuses.
+                    // `uninstalled_folds`: exact answers deliberately not written to the
+                    // view, because a flight at another anchor owned the key or the
+                    // completion was superseded. `pinned_installs`: reconstructions that
+                    // landed below the frontier the view had already applied.
+                    // `flights_refused`: reads the bounded flight table had no room for,
+                    // which folded anyway.
+                    Field::int8("pending_joins"),
+                    Field::int8("uninstalled_folds"),
+                    Field::int8("pinned_installs"),
+                    Field::int8("flights_refused"),
                 ]),
                 Backend::DataRow(vec![
                     Some(s.reads.to_string()),
@@ -936,6 +956,10 @@ impl Session {
                     Some(s.view_metadata_keys.to_string()),
                     Some(s.idem_window_keys.to_string()),
                     Some(self.schema_parses.to_string()),
+                    Some(s.pending_joins.to_string()),
+                    Some(s.uninstalled_folds.to_string()),
+                    Some(s.pinned_installs.to_string()),
+                    Some(s.flights_refused.to_string()),
                 ]),
                 Backend::CommandComplete("SELECT 1".into()),
             ];
@@ -2786,6 +2810,11 @@ schema bank {
             "fallbacks",
             "view_metadata_keys",
             "idem_window_keys",
+            "schema_parses",
+            "pending_joins",
+            "uninstalled_folds",
+            "pinned_installs",
+            "flights_refused",
         ] {
             assert!(
                 names.iter().any(|n| n == wanted),

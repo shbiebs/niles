@@ -180,7 +180,20 @@ pub fn budget(scenario: &str) -> Option<f64> {
         // misses reconstructs and installs, and the two policy maps take an entry each. The
         // budget bounds the values; until T-05 it bounded neither map, so this row is the
         // one that says whether a long-lived view is Theta(budget) or Theta(history).
-        "rev_metadata_2x_budget" => 5.0,
+        //
+        // **Raised from 5.0 to 7.5 by C9-06, deliberately, for three allocations per miss.**
+        // Making the absence lattice's fourth state reachable costs, on the miss path only:
+        // an `Arc<Completion>` (the rendezvous a second reader at the same anchor joins), a
+        // key in the flight table, and that table's own node growth. Two further clones the
+        // first version paid — marking a slot the map already held, and cloning the ticket's
+        // key into `install` rather than moving it — were removed rather than budgeted for.
+        //
+        // What this row exists to catch is unaffected and was checked: `live_delta` moved
+        // from 859,352 to 860,344 bytes, 0.1%, because a flight is torn down when it lands
+        // and nothing it allocates outlives the read. The row asks whether a long-lived view
+        // is Theta(budget) or Theta(history); it still is Theta(budget). The cost that did
+        // move is transient, on a path that also folds hundreds of base rows.
+        "rev_metadata_2x_budget" => 7.5,
         // Metadata per resident key, isolated: every read in the measured region hits, so
         // the only allocations are the policy maps' own. One entry per map, per key.
         "rev_metadata_per_key" => 2.4,

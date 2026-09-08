@@ -11,7 +11,7 @@
 | `nilesc` | The compiler driver: `check`, `verify`, `run` | 0 |
 | `nilestream` | The engine binary: sweep and serve | 0 |
 | `nilestream-consensus` | A single-process, deterministic simulator for replication and cross-shard commit. No sockets, no clock | 21 |
-| `nilestream-core` | REV runtime: resident maps, anchor indices, apply loop, upqueries, contracts | 19 |
+| `nilestream-core` | REV runtime: resident maps, anchor indices, apply loop, upqueries, contracts | 23 |
 | `nilestream-ledger` | Epoch segments, sequencer, hash chain, durability, admission and commit rules | 32 |
 | `nilestream-optimizer` | Plan-time mode selection and the eviction policies (the adaptive optimizer of §4.6 is specified and not built) | 37 |
 | `nilestream-server` | Daemon: sessions, PostgreSQL wire surface, conformance | 78 |

@@ -748,6 +748,70 @@ neither has run over a network.
 
 ---
 
+### E-conc-3 The keyed read holds the view for a decision, not for a reconstruction
+
+**A read of a partially materialised view MUST NOT hold the view's lock across the
+reconstruction it may need. The lattice's `Pending` state MUST be reachable, and what a
+reader does when it finds one MUST be decided by the anchor.**
+
+*What was built and what was measured.* `Rev::read` took the view, tested the certification
+interval, missed, folded the base **inside the hold**, installed and returned. Every other
+keyed read in the process queued behind that fold whether or not it wanted the same key, and
+the shape is visible in the numbers: a mixed workload's read throughput *fell* from 94,038/s
+at six connections to 20,507/s at twelve, with a view wait reaching 22,160 µs
+(`docs/audit/cycle-8/lc-23-attribution.md`, LC-23). `Slot::Pending` was constructed nowhere,
+and could not be: there was no moment at which a second reader could arrive, because no
+second reader could run.
+
+*The protocol.* Three calls, and the lock is held for two of them.
+
+| phase | lock | what it does |
+|---|---|---|
+| `begin_read(k, a)` | **V held** | hit test on `[stamp, effective]`; reap a cancelled flight; join, fold-alone, or take the flight and mark `Pending(a)` |
+| the fold | **nothing** (the base guard the caller already holds) | `reconstruct(k, a)` over the frozen prefix |
+| `finish_fold(t, v, rows)` | **V held** | install iff the view still holds this key's flight at this generation |
+
+*The rules, normatively.*
+
+1. A reader joins an in-flight reconstruction **iff its anchor is equal** to the flight's. A
+   flight at another anchor folds a different prefix; joining it would serve an answer the
+   reader's snapshot excludes.
+2. A reader that does not own the key's flight **installs nothing**. Its answer is exact at
+   its own anchor and is returned; the slot belongs to the owner.
+3. `apply` **skips** a `Pending` slot. There is no value there to fold a delta into, and
+   writing one epoch's delta as the key's value would publish a balance short by its entire
+   history to every reader whose anchor lands in the resulting interval.
+4. A flight that lands below the view's `applied` frontier installs **pinned**: it keeps its
+   own anchor, does not inherit `applied`, and serves only reads at that anchor. Folding the
+   intervening deltas into the landing value instead is sound and better, is reported as
+   `deferred_merges`, and is not done here.
+5. An install is conditioned on an unreused **generation**. A superseded completion answers
+   its own caller and writes nothing: overwriting a newer resident entry moves its stamp
+   backwards and clears a flight record it does not own.
+6. Cancellation restores the **exact** slot the marker replaced, version and all. A `Hole`
+   never degrades to `⊥`.
+7. Flights and waiters are **bounded** (`MAX_FLIGHTS`, `MAX_WAITERS`). Over the bound a read
+   folds alone, exactly, and `flights_refused` is incremented. There is no silent fold under
+   the lock and no second path with different rules.
+
+*The lock order gains one rung.* **O < B < P < V < C**, with a flight's completion condvar
+**F strictly below all of them**, never held while anything is acquired. A joined reader
+waits in the *caller*, holding nothing: `answer_from_view` returns the ticket rather than
+resolving it, because waiting inside the read would park a thread under the base guard and
+block every append in the process behind another reader's fold.
+
+*Surfaces.* `select nilestream_stats` reports `pending_joins`, `uninstalled_folds`,
+`pinned_installs` and `flights_refused`. `select nilestream_lockstats` reports `view_hold_us`
+as the sum of the two holds and not the fold between them.
+
+*Acceptance test.* The latch-driven differential
+(`rev::two_phase::a_flight_that_overlaps_an_advance_is_joined_shared_and_installed_pinned`)
+constructs the interleaving rather than waiting for it, and asserts the precondition
+`pinned_installs + deferred_merges + pending_joins > 0`. **Status: Complete in-process; the
+throughput result is a Host C measurement (`c9-pending.sh`) and is not yet taken.**
+
+---
+
 ### E-conc-2 Durability, and the honest latency statement
 
 **A commit MUST be durable before it is acknowledged. The engine MUST NOT claim a latency

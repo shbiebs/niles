@@ -28,6 +28,23 @@
 
 use proto_engine::{EvictionPolicy, Ledger, Posting, Row, ViewMode};
 
+/// What one attempt at answering a keyed read from the maintained view produced.
+///
+/// Three cases, because the two-phase read has three outcomes and collapsing them into an
+/// `Option` would lose the one that matters: a reader that found a reconstruction already
+/// in flight at its own anchor must **wait holding nothing**, and a function that can only
+/// say "no answer" would have to either wait inside itself — under the base guard, which
+/// blocks every append — or throw the shared fold away and start a second one.
+enum ViewAnswer {
+    /// The view answered, exactly at the anchor asked for.
+    Rows(crate::session::Rows),
+    /// Not a shape this path serves, or the view could not answer it. The fold answers.
+    NotApplicable,
+    /// Someone else is folding this key at this anchor. Wait — with no lock held — and ask
+    /// again; the retry finds the installed entry and hits.
+    Wait(nilestream_core::rev::WaitTicket),
+}
+
 /// What a read cost, in the units that distinguish one parity result from another.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ReadStats {
@@ -66,6 +83,23 @@ pub struct ReadStats {
     /// (cycle 8) neither had a surface.
     pub view_metadata_keys: u64,
     pub idem_window_keys: u64,
+    /// **The absence lattice's fourth state, made askable.**
+    ///
+    /// `pending_joins` counts keyed reads that found a reconstruction already in flight at
+    /// their own exact anchor and shared it instead of starting a second one — the number
+    /// that was zero by construction while the fold happened inside the view lock, and the
+    /// evidence `MISMATCH-pending-unreachable` was raised for.
+    ///
+    /// `uninstalled_folds` counts exact answers that were deliberately not written to the
+    /// view: a flight at another anchor owned the key, or the completion arrived after its
+    /// generation was superseded. `pinned_installs` counts reconstructions that landed
+    /// below the frontier the view had already applied and therefore entered pinned.
+    /// `flights_refused` counts reads the flight table had no room for, which folded
+    /// anyway — an overload that shows up only as latency is one nobody can be asked about.
+    pub pending_joins: u64,
+    pub uninstalled_folds: u64,
+    pub pinned_installs: u64,
+    pub flights_refused: u64,
 }
 
 impl ReadStats {
@@ -709,8 +743,26 @@ impl crate::session::Serving for RevEngine {
             sole,
             serve_path_of(planned.as_ref(), circuit, output),
         ) {
-            if let Some(rows) = self.answer_from_view(p, circuit, output, acct, anchor) {
-                return Ok(rows);
+            // **Bounded, because a retry loop with no ceiling is a spin.** A waiter wakes
+            // when the flight it joined publishes, and the next attempt hits the entry that
+            // flight installed. It can fail to: the owner was cancelled, or the entry was
+            // evicted between the wake and the retry under a budget smaller than the number
+            // of keys in flight. A handful of rounds covers those; past them the fold
+            // answers, which is slower and exact, and never a spin under load.
+            let mut attempts = 0;
+            loop {
+                attempts += 1;
+                match self.answer_from_view(p, circuit, output, acct, anchor) {
+                    ViewAnswer::Rows(rows) => return Ok(rows),
+                    ViewAnswer::NotApplicable => break,
+                    ViewAnswer::Wait(w) => {
+                        // Nothing is held here. This is the whole point of the split.
+                        w.wait();
+                        if attempts >= 8 {
+                            break;
+                        }
+                    }
+                }
             }
         }
         // Counted here rather than on entry: a query the maintained view answered is not a
@@ -958,6 +1010,10 @@ impl crate::session::Serving for RevEngine {
                     fallbacks,
                     view_metadata_keys: v.metadata_len() as u64,
                     idem_window_keys: idem_keys,
+                    pending_joins: s.pending_joins,
+                    uninstalled_folds: s.uninstalled_folds,
+                    pinned_installs: s.pinned_installs,
+                    flights_refused: s.flights_refused,
                 }
             }
             // No runtime: the server has no partial state at all, so nothing is resident
@@ -1293,7 +1349,7 @@ impl RevEngine {
         output: &str,
         acct: u64,
         anchor: u64,
-    ) -> Option<crate::session::Rows> {
+    ) -> ViewAnswer {
         use niles_ir::operator::{Agg, Scalar};
         /// Column positions in `postings`: `txn, acct, cur, amt, idem`.
         const ACCT: u16 = 1;
@@ -1301,22 +1357,24 @@ impl RevEngine {
         const AMT: u16 = 3;
 
         if circuit.outputs.get(output) != Some(&p.node) || !p.filters_only() {
-            return None;
+            return ViewAnswer::NotApplicable;
         }
         if p.aggs() != [(Agg::Sum, Scalar::Column(AMT))] {
-            return None;
+            return ViewAnswer::NotApplicable;
         }
         // `group by acct` and `group by acct, cur` are the two spellings of "this account's
         // balance"; the first is only the same question while there is one currency to mean.
         let with_currency = match p.group_key() {
             [ACCT] => false,
             [ACCT, CUR] => true,
-            _ => return None,
+            _ => return ViewAnswer::NotApplicable,
         };
         if self.currency_count() != 1 {
-            return None;
+            return ViewAnswer::NotApplicable;
         }
-        let cur = self.sole_currency()?;
+        let Some(cur) = self.sole_currency() else {
+            return ViewAnswer::NotApplicable;
+        };
 
         // **The base, and then the view — in that order, because `append` takes them in that
         // order and there is only one safe answer to which comes first.**
@@ -1340,18 +1398,69 @@ impl RevEngine {
         // per run go somewhere, and an aggregate histogram is the wrong instrument for a
         // handful. Four clock reads on a path that already takes two locks, offered to a
         // bounded table that keeps the slowest sixteen.
+        let Some(runtime) = self.runtime.as_ref() else {
+            return ViewAnswer::NotApplicable;
+        };
+        let key = vec![acct as i64, cur as i64];
+
+        // **Phase one: decide under the view, then let go of it.**
+        //
+        // This used to be one `Rev::read` call, which took the view lock, missed,
+        // folded the base *inside* the hold, installed, and returned. Every other keyed read
+        // in the process queued behind that fold whether or not it wanted the same key, and
+        // an audit measured the resulting tail as the daemon's read maximum: 12–13 ms against
+        // a p99 of 246 µs, with a view wait reaching 22 ms under twelve readers. The hold is
+        // not the fold's fault — a reconstruction *is* expensive — it is the fault of doing
+        // it while holding the one lock every reader needs for microseconds.
         let read_began = std::time::Instant::now();
         let base = self.base();
         let base_ready = std::time::Instant::now();
-        let mut rt =
-            crate::lockstats::Timed::acquire(self.runtime.as_ref()?, &crate::lockstats::VIEW_LOCK);
+        let mut rt = crate::lockstats::Timed::acquire(runtime, &crate::lockstats::VIEW_LOCK);
         let view_ready = std::time::Instant::now();
-        let view = rt.view_mut(BALANCE_VIEW)?;
-        let answered = view.read(&*base, &vec![acct as i64, cur as i64], anchor);
-        // The view's own lock is released here: what follows reads the base and the plan,
-        // and holding the view across it would put an unrelated fold's worth of time inside
-        // the one section a keyed read is supposed to hold for microseconds.
+        let outcome = match rt.view_mut(BALANCE_VIEW) {
+            Some(view) => view.begin_read(&key, anchor),
+            None => return ViewAnswer::NotApplicable,
+        };
         drop(rt);
+        let decided = std::time::Instant::now();
+        // The second hold, measured on its own. `view_hold_us` answers "how long did a keyed
+        // read own the view", and the reconstruction between the two holds is not part of
+        // that answer — charging it here would report the very cost this split removes.
+        let mut install_hold = std::time::Duration::ZERO;
+
+        let answered = match outcome {
+            nilestream_core::rev::ReadOutcome::Hit(a) => a,
+            // **A reconstruction for this exact key at this exact anchor is already out.**
+            // Return, which drops the base guard on the way, and let the caller wait holding
+            // nothing at all. Waiting here — under B, and having just released V — would
+            // block every append in the process behind another reader's fold, which is a
+            // worse serialisation than the one this task removes.
+            nilestream_core::rev::ReadOutcome::Join(w) => return ViewAnswer::Wait(w),
+            nilestream_core::rev::ReadOutcome::Fold(t) => {
+                // **The fold, with the view released and the base still held.** B is not
+                // re-acquired — `RwLock` is not reentrant and a keyed read takes it exactly
+                // once — and V is not held, so a concurrent reader of any other key runs
+                // straight through while this one reconstructs.
+                let (value, rows) = {
+                    use nilestream_core::rev::Base as _;
+                    base.reconstruct(t.key(), t.anchor())
+                };
+                let mut rt =
+                    crate::lockstats::Timed::acquire(runtime, &crate::lockstats::VIEW_LOCK);
+                let held_from = std::time::Instant::now();
+                match rt.view_mut(BALANCE_VIEW) {
+                    Some(view) => {
+                        let a = view.finish_fold(t, value, rows);
+                        install_hold = held_from.elapsed();
+                        a
+                    }
+                    // The view went away between the two phases. The ticket is dropped
+                    // un-settled, which cancels the flight and releases anyone who joined
+                    // it to retry; this caller falls back to the fold path.
+                    None => return ViewAnswer::NotApplicable,
+                }
+            }
+        };
         let view_done = std::time::Instant::now();
         let total_ns = view_done.duration_since(read_began).as_nanos() as u64;
         crate::lockstats::SLOW_READS.offer(
@@ -1360,7 +1469,9 @@ impl RevEngine {
                 total_us: total_ns / 1_000,
                 base_wait_us: base_ready.duration_since(read_began).as_micros() as u64,
                 view_wait_us: view_ready.duration_since(base_ready).as_micros() as u64,
-                view_hold_us: view_done.duration_since(view_ready).as_micros() as u64,
+                // **Both holds, and not the fold between them.**
+                view_hold_us: (decided.duration_since(view_ready) + install_hold).as_micros()
+                    as u64,
             },
         );
 
@@ -1384,7 +1495,7 @@ impl RevEngine {
             // concurrent writers. `select nilestream_stats` reports it now.
             self.view_fallbacks
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            return None;
+            return ViewAnswer::NotApplicable;
         }
         self.view_answers
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1398,7 +1509,7 @@ impl RevEngine {
         // group that does not exist must produce no row at all — which is what the fold and
         // the reference evaluator both do, and what this must agree with.
         if base.key_update_count(acct, anchor.min(base.head())) == 0 {
-            return Some(crate::session::Rows {
+            return ViewAnswer::Rows(crate::session::Rows {
                 columns,
                 rows: crate::session::RowSource::Evaluated {
                     z: niles_ir::eval::ZSet::new(),
@@ -1418,7 +1529,7 @@ impl RevEngine {
         row.push(Value::Int(answered.value));
         let mut z = niles_ir::eval::ZSet::new();
         z.insert(row, 1);
-        Some(crate::session::Rows {
+        ViewAnswer::Rows(crate::session::Rows {
             columns,
             rows: crate::session::RowSource::Evaluated { z, anchor },
         })
@@ -3006,6 +3117,15 @@ mod lock_order_tests {
     //! | **P** | the pending barriers, `Mutex<Vec<Pending>>` | `append`, `take_pending` |
     //! | **V** | the read model, `Mutex<Runtime>` | `append`, and every read of the view |
     //! | **C** | the currency set, `RwLock<BTreeSet<u32>>` | `append`; read paths take and release it before V |
+    //! | **F** | one flight's completion, a condvar inside the view | `finish_fold` to publish; a joined reader to receive |
+    //!
+    //! **F is strictly below all of them and is never held while anything is acquired.** A
+    //! keyed read that finds a reconstruction already in flight at its own anchor returns
+    //! from `answer_from_view` — dropping the base guard on the way out — and waits in the
+    //! caller with nothing held at all. Waiting inside the read would park a thread holding
+    //! **B**, which blocks every append in the process behind another reader's fold: a worse
+    //! serialisation than the one the two-phase split removes, and the reason the wait is
+    //! the caller's and not the read's.
     //!
     //! **B < P < V < C**, and every path takes a subsequence of that. The one that did not
     //! was `answer_from_view`, which took V and then reached for B underneath it while
@@ -3073,6 +3193,74 @@ mod lock_order_tests {
             "`answer_from_view` acquires the base more than once. `RwLock` is not reentrant: \
              a writer arriving between the two makes the second acquisition block on a lock \
              this thread already holds."
+        );
+    }
+
+    /// **A reader that joins a flight waits with no lock held.**
+    ///
+    /// The two-phase read's whole benefit is that the reconstruction happens outside the
+    /// view; a waiter parked inside `answer_from_view` would be parked under the base guard,
+    /// which is worse than the hold it replaces. The wait is therefore the caller's: the
+    /// read *returns* a ticket, and the base guard is dropped by that return.
+    #[test]
+    fn a_joined_reader_waits_outside_the_read_and_holds_nothing() {
+        let src = include_str!("rev_engine.rs");
+        let body = src
+            .split("fn answer_from_view(")
+            .nth(1)
+            .expect("the function");
+        let body = &body[..body.find("\n    }").unwrap_or(body.len())];
+        assert!(
+            !body.contains(".wait()"),
+            "`answer_from_view` waits on a flight inside itself. It holds the base for its \
+             whole body, so a thread parked there blocks every append in the process behind \
+             another reader's fold. Return `ViewAnswer::Wait` and let the caller wait."
+        );
+        assert!(
+            body.contains("return ViewAnswer::Wait(w)"),
+            "`answer_from_view` must hand the join out rather than resolving it, or the \
+             `Join` case has nowhere to go but a second fold of the same prefix"
+        );
+        // And the caller waits with nothing held: the ticket is the only thing in scope.
+        let caller = src
+            .split("ViewAnswer::Wait(w) => {")
+            .nth(1)
+            .expect("the caller's wait arm");
+        let caller = &caller[..caller.find("}").unwrap_or(caller.len())];
+        assert!(
+            caller.contains("w.wait();"),
+            "the caller's `Wait` arm must be where the wait happens"
+        );
+    }
+
+    /// **The install is a second, separate hold — and the fold is between them.**
+    ///
+    /// The finding this task repairs is not that the view lock existed; it is that
+    /// `Rev::read` folded the base *inside* it. A single `begin_read`/`finish_fold` pair with
+    /// no `drop` between them would restore that exactly, and pass every behavioural test.
+    #[test]
+    fn the_reconstruction_happens_with_the_view_released() {
+        let src = include_str!("rev_engine.rs");
+        let body = src
+            .split("fn answer_from_view(")
+            .nth(1)
+            .expect("the function");
+        let body = &body[..body.find("\n    }").unwrap_or(body.len())];
+        let begin = body.find("begin_read(").expect("phase one");
+        let dropped = body.find("drop(rt);").expect("the view must be released");
+        let fold = body.find("base.reconstruct(").expect("the fold");
+        let finish = body.find("finish_fold(").expect("phase two");
+        assert!(
+            begin < dropped && dropped < fold && fold < finish,
+            "the keyed read must decide under the view (at {begin}), release it (at \
+             {dropped}), fold (at {fold}) and only then take it again to install (at \
+             {finish}). Folding under the hold is the 12-13 ms read maximum this task \
+             exists to remove, and no answer is ever wrong on the way into it."
+        );
+        assert!(
+            !body.contains("view.read(&*base"),
+            "`Rev::read` folds inside the view lock by construction. The served path must \
+             use the two-phase API."
         );
     }
 
@@ -4209,6 +4397,10 @@ mod fallback_rate_tests {
             resident: after.resident,
             view_answers: after.view_answers - before.view_answers,
             fallbacks: after.fallbacks - before.fallbacks,
+            pending_joins: after.pending_joins - before.pending_joins,
+            uninstalled_folds: after.uninstalled_folds - before.uninstalled_folds,
+            pinned_installs: after.pinned_installs - before.pinned_installs,
+            flights_refused: after.flights_refused - before.flights_refused,
             // Levels, not deltas: both are sizes of a structure, and the difference between
             // two sizes is not a size.
             view_metadata_keys: after.view_metadata_keys,

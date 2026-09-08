@@ -31,6 +31,7 @@ use niles_ir::circuit::{Circuit, NodeId};
 use niles_ir::operator::{Agg, Op};
 use niles_ir::{Consistency, Materialize, Retention};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 /// A view key. Concretely a small tuple of integers, which is what a `(acct, cur)` group
 /// key lowers to.
@@ -49,6 +50,194 @@ pub struct Anchored {
     pub value: Value,
     pub anchor: Epoch,
 }
+
+/// **The lattice's fourth state, and the reason it exists.**
+///
+/// `Slot::Pending(e)` has been in [`crate::absence`] since the lattice was written and no
+/// code path could reach it, because reconstruction happened *inside* `read` while the
+/// caller held the view: there was no moment at which a second reader could arrive and find
+/// a flight to join, because no second reader could run at all. The daemon's tail was that
+/// hold — one mutex serialising every keyed read behind the slowest fold on the machine —
+/// and the lattice's own documentation described a mechanism the runtime did not have.
+///
+/// The repair is a two-phase read. [`Rev::begin_read`] decides, under the view lock, what
+/// this caller must do; the caller then **releases the view** and folds; [`Rev::finish_fold`]
+/// takes the view again and installs. What a second reader finds in between is a
+/// `Pending(e)`, and what it does about it is this enum's three cases.
+pub enum ReadOutcome {
+    /// A resident entry certified across the requested anchor. Nothing else to do.
+    Hit(Anchored),
+    /// Fold the base and come back. The ticket carries an immutable `(key, anchor,
+    /// generation)`; nothing about it can be changed by the time it returns, which is what
+    /// makes a late completion identifiable rather than merely old.
+    Fold(FoldTicket),
+    /// Someone is already folding **this key at this exact anchor**. Wait for their answer.
+    ///
+    /// The join is on the *pair*, never on the key alone. A flight at a different anchor is
+    /// computing a different number over a different prefix, and joining it would be the
+    /// wrong-anchor answer the certification interval exists to make impossible; a reader
+    /// that finds one folds independently and installs nothing.
+    Join(WaitTicket),
+}
+
+/// The published state of one flight. The only lock **below** the view.
+#[derive(Debug, Default)]
+struct CompletionState {
+    answer: Option<Anchored>,
+    /// The owner went away without an answer — a cancelled statement, a dropped session, a
+    /// panicking fold. Waiters wake and retry rather than waiting forever on a thread that
+    /// is not coming back.
+    cancelled: bool,
+    waiters: u32,
+}
+
+/// **The rendezvous between the reader that folds and the readers that joined it.**
+///
+/// A waiter parked here holds no engine lock at all: `begin_read` returns *after* the view
+/// guard is dropped, and the wait re-acquires nothing. That is what makes this lock a leaf.
+/// The engine's documented order — O < B < P < V < C, S a leaf — gains one rung strictly
+/// below the view: **V < F**, taken by `finish_fold` to publish and by a waiter to receive,
+/// and never held while anything else is acquired.
+///
+/// Poisoning is recovered rather than propagated. The guarded state is an `Option`, a flag
+/// and a counter; a panic in a fold leaves them consistent, and turning a reader's panic
+/// into every subsequent reader's panic would convert one failed statement into a dead view.
+#[derive(Debug, Default)]
+pub struct Completion {
+    state: Mutex<CompletionState>,
+    woken: Condvar,
+}
+
+impl Completion {
+    fn lock(&self) -> MutexGuard<'_, CompletionState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn publish(&self, answer: Anchored) {
+        self.lock().answer = Some(answer);
+        self.woken.notify_all();
+    }
+
+    fn cancel(&self) {
+        self.lock().cancelled = true;
+        self.woken.notify_all();
+    }
+
+    /// The owner gave up. The flight is reapable and no waiter will ever be answered by it.
+    fn cancelled(&self) -> bool {
+        self.lock().cancelled
+    }
+
+    /// Block until the owner publishes or gives up. **Holds nothing but this leaf.**
+    fn join(&self) -> Option<Anchored> {
+        let mut s = self.lock();
+        while s.answer.is_none() && !s.cancelled {
+            s = self.woken.wait(s).unwrap_or_else(|e| e.into_inner());
+        }
+        s.waiters = s.waiters.saturating_sub(1);
+        s.answer
+    }
+}
+
+/// A reconstruction this view has authorised and is waiting on.
+struct InFlight {
+    anchor: Epoch,
+    generation: u64,
+    done: Arc<Completion>,
+    /// The slot this flight replaced with `Pending`, so a cancelled flight can put back
+    /// exactly what was there. `None` when the slot was left alone — a `Present` entry stays
+    /// resident and keeps serving its own certification interval while a read at an anchor
+    /// outside that interval is reconstructed, because evicting a good answer to make room
+    /// for a marker would be paying memory pressure for bookkeeping.
+    prior: Option<Slot<Value>>,
+}
+
+/// Permission to fold, and the identity that permission was granted under.
+///
+/// Immutable by construction: `key`, `anchor` and `generation` are set once, in
+/// `begin_read`, under the view lock. `finish_fold` installs only if the view still has a
+/// flight for this key at this generation — so a completion that arrives after its flight
+/// was superseded answers its own caller (its value is exact at its own anchor) and touches
+/// no resident state.
+pub struct FoldTicket {
+    key: Key,
+    anchor: Epoch,
+    generation: u64,
+    /// Whether this caller owns the key's flight. `false` for a fold that found a flight at
+    /// a different anchor, or that was refused a flight under overload: an honest,
+    /// uninstalled reconstruction, which is slower and correct, and never a second writer
+    /// to a slot someone else owns.
+    install: bool,
+    done: Option<Arc<Completion>>,
+    settled: bool,
+}
+
+impl FoldTicket {
+    /// The key to fold. Borrowed, not cloned: the fold does not need to own it.
+    pub fn key(&self) -> &Key {
+        &self.key
+    }
+    /// The anchor to fold at — the one the caller asked for, and the one its answer will
+    /// carry.
+    pub fn anchor(&self) -> Epoch {
+        self.anchor
+    }
+    /// Whether a successful fold will be installed. Reported so a caller can count the
+    /// uninstalled ones without inspecting the view.
+    pub fn installs(&self) -> bool {
+        self.install
+    }
+}
+
+impl Drop for FoldTicket {
+    /// **A fold that never returns must not strand the readers waiting on it.**
+    ///
+    /// A cancelled statement, a dropped connection or a panicking fold destroys the ticket
+    /// without calling `finish_fold`. The waiters are woken with no answer and retry; the
+    /// view's `in_flight` entry and its `Pending` marker are reaped by the next
+    /// `begin_read` for that key, which is the first moment anything holds the view lock
+    /// again. Cancellation cannot take the view here — `Drop` runs wherever the ticket
+    /// died, which may be inside a section that already holds it — and a lock taken in a
+    /// destructor is a deadlock waiting for the one caller who does that.
+    fn drop(&mut self) {
+        if !self.settled {
+            if let Some(d) = &self.done {
+                d.cancel();
+            }
+        }
+    }
+}
+
+/// A reader that found a flight at its own exact anchor and is waiting for that answer.
+pub struct WaitTicket {
+    done: Arc<Completion>,
+    anchor: Epoch,
+}
+
+impl WaitTicket {
+    /// Block until the flight publishes. **The caller must hold no engine lock**: this is
+    /// the whole point of the two-phase read, and holding the view across it would restore
+    /// the serialisation the split exists to remove.
+    ///
+    /// `None` means the owner went away, or published an answer at an anchor this waiter
+    /// did not ask for — neither is an answer, and the caller goes around again.
+    pub fn wait(self) -> Option<Anchored> {
+        self.done.join().filter(|a| a.anchor == self.anchor)
+    }
+}
+
+/// How many reconstructions one view will have outstanding at once.
+///
+/// A bound, not a tuning knob. Each flight costs a `Pending` marker, a map entry and a
+/// condvar; an unbounded flight table is a per-connection allocation with no ceiling, which
+/// is the shape of every memory term this cycle removed. Past the bound `begin_read`
+/// **refuses the flight and folds anyway** — the caller still gets an exact answer, it is
+/// simply not shared — and counts `flights_refused`, because an overload that shows up only
+/// as latency is one nobody can be asked about.
+const MAX_FLIGHTS: usize = 256;
+
+/// How many readers may queue on one flight before the rest fold independently.
+const MAX_WAITERS: u32 = 256;
 
 /// What the runtime needs from a base. Deliberately narrow: three operations, all of them
 /// reads of an immutable, epoch-ordered history.
@@ -119,6 +308,34 @@ pub struct Stats {
     /// result. The correction is recorded in the thesis because the mistake is an easy one
     /// and the corrected figure is the one the phase boundary depends on.
     pub resident_entry_epochs: u64,
+    /// Readers that found a flight at their own exact anchor and shared its fold.
+    ///
+    /// **The counter that says the lattice's fourth state is reachable.** It was zero by
+    /// construction until the read was split in two, and `MISMATCH-pending-unreachable`
+    /// stood against the chapter that described joining as a mechanism the runtime had.
+    pub pending_joins: u64,
+    /// Folds whose result answered their caller and was not installed: a flight at another
+    /// anchor already owned the key, a flight was refused under overload, or the completion
+    /// arrived after its generation had been superseded.
+    ///
+    /// Not waste, and not an error. Each one is an exact answer at its own anchor; what it
+    /// declines to do is write to a slot another anchor owns.
+    pub uninstalled_folds: u64,
+    /// Installs of a reconstruction anchored **below** the view's applied frontier, which
+    /// enter pinned. A flight that overlapped an `advance` lands here, and the pin is what
+    /// stops the entry inheriting a frontier it never saw the deltas for.
+    pub pinned_installs: u64,
+    /// Reads refused a flight because the view already had `MAX_FLIGHTS` outstanding. They
+    /// folded anyway, uninstalled.
+    pub flights_refused: u64,
+    /// Deltas held back during a flight and folded into its result on landing.
+    ///
+    /// **Zero in this commit, and reported so it can be seen to be zero.** The deferred
+    /// merge is the optimisation that would let a flight overlapping an `advance` install
+    /// *current* rather than pinned; the pinned form is what ships first, because it is
+    /// sound with no new invariant, and the merge is a separate change whose guard is the
+    /// difference between these two counters.
+    pub deferred_merges: u64,
 }
 
 impl Stats {
@@ -198,6 +415,18 @@ pub struct Rev {
     /// alternative is a counter that outlives every entry it describes, which is the
     /// unbounded term this replaces.
     meta: BTreeMap<Key, Meta>,
+    /// **Reconstructions this view has authorised and has not yet seen land.**
+    ///
+    /// One entry per key, because a key has at most one *owned* flight: a second reader at
+    /// the same anchor joins it, and a reader at a different anchor folds independently
+    /// without claiming ownership. Bounded by `MAX_FLIGHTS`, and every entry is removed by
+    /// exactly one of three events — its own completion, a supersession, or a reap after
+    /// cancellation.
+    in_flight: BTreeMap<Key, InFlight>,
+    /// Monotone, never reused, and the identity a late completion is checked against. A
+    /// counter rather than a timestamp because the question is only ever "is this still the
+    /// flight the view is waiting for", and equality of a `u64` answers it without a clock.
+    flight_generation: u64,
     clock: u64,
     /// The rung this view promises, and the mode it was planned in. Both are read from the
     /// circuit's checked fields, so an engine that ignored them fails the IR audit.
@@ -243,6 +472,41 @@ impl Rev {
     /// intended outcome: a caller should not have to check that an engine answered the
     /// question it was asked.
     pub fn read(&mut self, base: &dyn Base, key: &Key, anchor: Epoch) -> Anchored {
+        // **The whole read, expressed in the two-phase API, so there is one read path and
+        // not two.** A second implementation of the certification-interval rule would
+        // disagree with this one the first time either changed, and the disagreement would
+        // be between a unit test's engine and the daemon's.
+        //
+        // The loop exists for the `Join` case, which a single-threaded caller cannot reach:
+        // it holds the view for the whole call, so no other flight can have started. It is
+        // written out rather than asserted unreachable because "cannot happen on this path"
+        // is a claim about callers, and this function is public.
+        loop {
+            match self.begin_read(key, anchor) {
+                ReadOutcome::Hit(a) => return a,
+                ReadOutcome::Fold(t) => {
+                    let (value, rows) = base.reconstruct(t.key(), t.anchor());
+                    return self.finish_fold(t, value, rows);
+                }
+                ReadOutcome::Join(w) => {
+                    if let Some(a) = w.wait() {
+                        return a;
+                    }
+                }
+            }
+        }
+    }
+
+    /// **Phase one: decide, under the view lock, and then let go of it.**
+    ///
+    /// Everything that must be atomic with respect to the view happens here — the hit test,
+    /// the flight table, the `Pending` marker — and none of it folds. The caller drops the
+    /// view guard before doing any of the three things this returns.
+    ///
+    /// The counters `reads`, `hits`, `misses` and `upqueries` are charged here, because this
+    /// is where the decision is made; `base_rows_read` is charged in [`finish_fold`], because
+    /// that is where the rows are actually read.
+    pub fn begin_read(&mut self, key: &Key, anchor: Epoch) -> ReadOutcome {
         self.stats.reads += 1;
         self.clock += 1;
         let now = self.clock;
@@ -250,6 +514,166 @@ impl Rev {
         m.reads += 1;
         m.last_read = now;
 
+        if let Some(a) = self.hit(key, anchor) {
+            self.stats.hits += 1;
+            return ReadOutcome::Hit(a);
+        }
+
+        self.stats.misses += 1;
+        self.stats.upqueries += 1;
+
+        // A flight whose owner died leaves its marker behind; the first reader to hold the
+        // view again puts the slot back and takes over. Reaping here rather than in `Drop`
+        // is what keeps the destructor lock-free.
+        self.reap_cancelled(key);
+
+        enum Decision {
+            Join(Arc<Completion>),
+            Alone,
+            Own,
+        }
+        let decision = match self.in_flight.get(key) {
+            Some(f) if f.anchor == anchor => {
+                let mut st = f.done.lock();
+                if st.answer.is_none() && !st.cancelled && st.waiters < MAX_WAITERS {
+                    st.waiters += 1;
+                    drop(st);
+                    Decision::Join(f.done.clone())
+                } else {
+                    Decision::Alone
+                }
+            }
+            // **A flight at a different anchor is a different question.** It folds a
+            // different prefix and will install a value certified at its own anchor;
+            // waiting for it would be answering this caller with someone else's snapshot.
+            Some(_) => Decision::Alone,
+            None if self.in_flight.len() >= MAX_FLIGHTS => {
+                self.stats.flights_refused += 1;
+                Decision::Alone
+            }
+            None => Decision::Own,
+        };
+
+        match decision {
+            Decision::Join(done) => {
+                self.stats.pending_joins += 1;
+                ReadOutcome::Join(WaitTicket { done, anchor })
+            }
+            Decision::Alone => ReadOutcome::Fold(FoldTicket {
+                key: key.clone(),
+                anchor,
+                generation: 0,
+                install: false,
+                done: None,
+                settled: false,
+            }),
+            Decision::Own => {
+                self.flight_generation += 1;
+                let generation = self.flight_generation;
+                let done = Arc::new(Completion::default());
+                // **The marker replaces an absence, never a value.** A `Present` entry that
+                // could not answer *this* anchor can still answer every anchor inside its
+                // own interval, and overwriting it with `Pending` would evict a good answer
+                // to record that somebody is looking for a different one.
+                let prior = match self.slots.get_mut(key) {
+                    Some(Slot::Present(..)) => None,
+                    // In place where the map already holds the key: `insert` would clone it
+                    // and drop the clone, which is a heap allocation per miss for nothing.
+                    Some(slot) => {
+                        let p = std::mem::replace(slot, Slot::Pending(anchor));
+                        Some(p)
+                    }
+                    None => {
+                        self.slots.insert(key.clone(), Slot::Pending(anchor));
+                        Some(Slot::Bottom)
+                    }
+                };
+                self.in_flight.insert(
+                    key.clone(),
+                    InFlight {
+                        anchor,
+                        generation,
+                        done: done.clone(),
+                        prior,
+                    },
+                );
+                ReadOutcome::Fold(FoldTicket {
+                    key: key.clone(),
+                    anchor,
+                    generation,
+                    install: true,
+                    done: Some(done),
+                    settled: false,
+                })
+            }
+        }
+    }
+
+    /// **Phase two: take the view again and install, if this flight is still the one.**
+    ///
+    /// `value` is the fold of `ticket.key()` over the prefix ending at `ticket.anchor()`,
+    /// and `rows` the base rows it read. The answer returned is exact at the ticket's anchor
+    /// whatever the view decides to do with it: an install is an optimisation for the *next*
+    /// reader, never a condition on this one's correctness.
+    ///
+    /// # Why a generation, and what it is not for
+    ///
+    /// The check is not about the value. A ticket's `(key, anchor)` is fixed at
+    /// `begin_read`, so a late completion's value is still the correct value at its own
+    /// anchor, and the certification interval keeps a stale *stamp* from ever answering a
+    /// later anchor. What the generation prevents is a superseded owner writing over the
+    /// entry a newer flight installed — moving a resident stamp backwards, which costs every
+    /// subsequent reader a refold — and clearing an `in_flight` entry it does not own, which
+    /// would strand the successor's `Pending` marker with nobody to publish it.
+    pub fn finish_fold(&mut self, ticket: FoldTicket, value: Value, rows: u64) -> Anchored {
+        let mut ticket = ticket;
+        ticket.settled = true;
+        self.stats.base_rows_read += rows;
+        let answer = Anchored {
+            value,
+            anchor: ticket.anchor,
+        };
+
+        let mine = ticket.install
+            && self
+                .in_flight
+                .get(&ticket.key)
+                .is_some_and(|f| f.generation == ticket.generation);
+        if mine {
+            self.in_flight.remove(&ticket.key);
+            if ticket.anchor < self.applied {
+                self.stats.pinned_installs += 1;
+            }
+            // Moved, not cloned. The ticket owns this key and is about to be dropped.
+            let key = std::mem::take(&mut ticket.key);
+            self.install(key, value, ticket.anchor);
+        } else {
+            self.stats.uninstalled_folds += 1;
+        }
+
+        if let Some(d) = &ticket.done {
+            d.publish(answer);
+        }
+        answer
+    }
+
+    /// The hit test, and the whole of the certification interval, stated once.
+    ///
+    /// # The postcondition
+    ///
+    /// **The returned `Anchored` always carries the anchor that was asked for.** Both paths
+    /// establish it: a hit only fires inside `[stamp, effective]`, where the value is
+    /// unchanged and so is the value at `anchor`; a miss reconstructs over the prefix ending
+    /// at `anchor`. Held by `every_answer_is_stamped_with_the_anchor_it_was_asked_for`.
+    ///
+    /// This was not true before T-02 — a hit reported `effective`, which can be later — and
+    /// every caller in this project independently wrote the same compensating branch:
+    /// *if the anchor came back different, throw the answer away and rebuild*. The daemon
+    /// paid it on 87.4% of keyed reads under concurrent writers; GBS's ledger adapter counted
+    /// it as `as_of_reconstructions`. Those branches are now unreachable, which is the
+    /// intended outcome: a caller should not have to check that an engine answered the
+    /// question it was asked.
+    fn hit(&self, key: &Key, anchor: Epoch) -> Option<Anchored> {
         // The effective version of a resident entry is the later of its own stamp and the
         // view-wide applied epoch: an entry that received no delta in an epoch is still
         // current through that epoch, and rewriting every resident entry's stamp on every
@@ -262,48 +686,62 @@ impl Rev {
         // raced maintenance) has not seen the deltas in between, so promoting it to
         // `applied` would serve a stale value under a fresh anchor. It keeps its own
         // stamp, and a read above that stamp reconstructs.
-        if let Some(Slot::Present(v, e)) = self.slots.get(key) {
-            let effective = if self.certified_through_applied(key, *e) {
-                (*e).max(self.applied)
-            } else {
-                *e
-            };
-            // **The certification interval, and the answer is exact everywhere inside it.**
-            //
-            // The entry holds this key's value as of `stamp`, and it received no delta
-            // between `stamp` and `effective` — that is what `effective` means. So the value
-            // is unchanged across the whole closed interval `[stamp, effective]`, and it is
-            // the correct answer at *every* anchor in it, not merely at `effective`. This is
-            // Theorem 4.1's own step (3), and the read now says so by returning the anchor it
-            // was asked for.
-            //
-            // It used to return `anchor: effective`, which is honest and useless: the caller
-            // wants an answer true at its snapshot, an answer stamped later includes writes
-            // that snapshot excludes *as far as the caller can tell*, and so
-            // `answer_from_view` discarded it and folded the base instead — at roughly a
-            // hundred times the cost, for 24.3% of keyed reads in-process and 87.4% over the
-            // wire under four readers and two writers. The value was right the whole time;
-            // the engine could not tell, because the read reported the wrong end of the
-            // interval.
-            //
-            // The lower bound is not decoration. `anchor < stamp` is a read *below* the
-            // entry — a delta landed in `(anchor, stamp]` that this anchor must not see — and
-            // it has to reconstruct. It used to be served, with `effective` attached, and was
-            // correct only because the caller then threw it away; counting it as a hit is
-            // what made `hits` a count of answers rather than of answers *served*.
-            if *e <= anchor && anchor <= effective {
-                self.stats.hits += 1;
-                return Anchored { value: *v, anchor };
+        let Some(Slot::Present(v, e)) = self.slots.get(key) else {
+            // `Pending`, `Hole` and `Bottom` all reconstruct, and for the same reason: none
+            // of them holds a value. A `Pending` is not an answer-in-progress this reader
+            // may wait on blindly — whether it may wait is decided by the anchor, above.
+            return None;
+        };
+        let effective = if self.certified_through_applied(key, *e) {
+            (*e).max(self.applied)
+        } else {
+            *e
+        };
+        // **The certification interval, and the answer is exact everywhere inside it.**
+        //
+        // The entry holds this key's value as of `stamp`, and it received no delta
+        // between `stamp` and `effective` — that is what `effective` means. So the value
+        // is unchanged across the whole closed interval `[stamp, effective]`, and it is
+        // the correct answer at *every* anchor in it, not merely at `effective`. This is
+        // Theorem 4.1's own step (3), and the read now says so by returning the anchor it
+        // was asked for.
+        //
+        // It used to return `anchor: effective`, which is honest and useless: the caller
+        // wants an answer true at its snapshot, an answer stamped later includes writes
+        // that snapshot excludes *as far as the caller can tell*, and so
+        // `answer_from_view` discarded it and folded the base instead — at roughly a
+        // hundred times the cost, for 24.3% of keyed reads in-process and 87.4% over the
+        // wire under four readers and two writers. The value was right the whole time;
+        // the engine could not tell, because the read reported the wrong end of the
+        // interval.
+        //
+        // The lower bound is not decoration. `anchor < stamp` is a read *below* the
+        // entry — a delta landed in `(anchor, stamp]` that this anchor must not see — and
+        // it has to reconstruct. It used to be served, with `effective` attached, and was
+        // correct only because the caller then threw it away; counting it as a hit is
+        // what made `hits` a count of answers rather than of answers *served*.
+        if *e <= anchor && anchor <= effective {
+            return Some(Anchored { value: *v, anchor });
+        }
+        None
+    }
+
+    /// Put back what a cancelled flight replaced, and let the next reader take over.
+    fn reap_cancelled(&mut self, key: &Key) {
+        let dead = self.in_flight.get(key).is_some_and(|f| f.done.cancelled());
+        if !dead {
+            return;
+        }
+        if let Some(f) = self.in_flight.remove(key) {
+            if let Some(prior) = f.prior {
+                match self.slots.get_mut(key) {
+                    Some(slot) => *slot = prior,
+                    None => {
+                        self.slots.insert(key.clone(), prior);
+                    }
+                }
             }
         }
-
-        self.stats.misses += 1;
-        self.stats.upqueries += 1;
-        // The anchored upquery: one epoch, one frozen prefix, no protocol state.
-        let (value, rows) = base.reconstruct(key, anchor);
-        self.stats.base_rows_read += rows;
-        self.install(key.clone(), value, anchor);
-        Anchored { value, anchor }
     }
 
     /// Is this key's resident entry current through the view's `applied` frontier?
@@ -411,6 +849,21 @@ impl Rev {
                 // Sound because a key's first delta is its whole value: the base is
                 // append-only and this runtime sees every epoch in order, so there is no
                 // earlier history for the new entry to be missing.
+                // **A reconstruction for this key is in flight, and this epoch is not
+                // folded into it here.** There is no value in a `Pending` slot to add a
+                // delta to, and the flight will return a fold over its *own* prefix — which
+                // already contains this epoch if its anchor is at or above `e`, and must not
+                // contain it otherwise. Treating the marker as an entry and writing
+                // `Present(delta, e)` into it publishes one epoch's delta as the key's
+                // balance: every reader whose anchor falls in the resulting interval takes
+                // it as a hit, and the account is wrong by its entire history until the
+                // flight lands.
+                //
+                // Skipping is the same treatment a non-resident key gets, and for the same
+                // reason: the next read that needs the epoch reconstructs and picks it up.
+                Some(Slot::Pending(_)) => {
+                    self.stats.deltas_skipped += 1;
+                }
                 None if self.mode == Materialize::Full => {
                     self.slots.insert(key, Slot::Present(delta, e));
                     self.resident += 1;
@@ -432,6 +885,11 @@ impl Rev {
         self.slots.clear();
         self.pinned.clear();
         self.meta.clear();
+        // Outstanding flights are forgotten, not cancelled: their owners still hold live
+        // tickets and will still answer their own callers exactly, at their own anchors.
+        // What they lose is the right to install — `finish_fold` finds no entry at their
+        // generation — which is precisely the guarantee a wipe is asking for.
+        self.in_flight.clear();
         self.resident = 0;
     }
 
@@ -614,6 +1072,8 @@ impl Runtime {
                 next_to_apply: 0,
                 pinned: BTreeSet::new(),
                 meta: BTreeMap::new(),
+                in_flight: BTreeMap::new(),
+                flight_generation: 0,
                 clock: 0,
                 rung: contract.consistency,
                 mode: contract.materialize,
@@ -686,6 +1146,11 @@ impl Runtime {
             s.maintenance_passes += v.stats.maintenance_passes;
             s.peak_resident = s.peak_resident.max(v.stats.peak_resident);
             s.resident_entry_epochs += v.stats.resident_entry_epochs;
+            s.pending_joins += v.stats.pending_joins;
+            s.uninstalled_folds += v.stats.uninstalled_folds;
+            s.pinned_installs += v.stats.pinned_installs;
+            s.flights_refused += v.stats.flights_refused;
+            s.deferred_merges += v.stats.deferred_merges;
         }
         s
     }
@@ -1692,6 +2157,522 @@ mod tests {
 }
 
 #[cfg(test)]
+mod two_phase {
+    //! **The latch-driven differential for the two-phase read.**
+    //!
+    //! The concurrent differential below runs threads and compares answers, which finds a
+    //! wrong rule only on the interleavings the scheduler happens to produce. This one
+    //! *constructs* the interleaving: an owner is stopped in the middle of its fold, an
+    //! epoch is sealed and applied while it is stopped, and a same-anchor reader and a
+    //! different-anchor reader are each taken to their own path before the owner is
+    //! released. Every step is a latch, so the run is the same on a loaded container and an
+    //! idle laptop, and the three reversions the repair is guarded by each turn it red.
+    //!
+    //! The precondition is asserted rather than assumed: a run in which no flight was
+    //! joined, none landed pinned and none was deferred did not exercise the mechanism, and
+    //! a pass under those conditions would be a pass for the old code.
+
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::RwLock;
+
+    impl Rev {
+        /// Reap this key's flight as if its owner had been cancelled.
+        ///
+        /// It calls exactly the path a real cancellation takes: the point of a guard against
+        /// a stale completion is that the supersession happen the way it happens in
+        /// production, not that a test hand-build a second generation.
+        ///
+        /// **Defined here rather than in `impl Rev` above, and the reason is not style.**
+        /// `thesis/gen-appendix-d.py` reads each crate's public surface by cutting the file
+        /// at its first `#[cfg(test)]`; a test-only method in the middle of `impl Rev` moved
+        /// that cut above `Unsupported` and `Runtime` and silently deleted both from the
+        /// generated appendix. The generator's rule is fragile and this file must not be the
+        /// thing that trips it.
+        fn force_reap(&mut self, key: &Key) {
+            if let Some(f) = self.in_flight.get(key) {
+                f.done.cancel();
+            }
+            self.reap_cancelled(key);
+        }
+    }
+
+    /// A history a test can extend and fold, with no view in the way.
+    #[derive(Default)]
+    struct Hist {
+        rows: RwLock<Vec<(Epoch, Key, Value)>>,
+        head: AtomicU64,
+    }
+
+    impl Hist {
+        fn seal(&self, key: &Key, delta: Value) -> Epoch {
+            let mut rows = self.rows.write().expect("not poisoned");
+            let e = self.head.fetch_add(1, Ordering::SeqCst) + 1;
+            rows.push((e, key.clone(), delta));
+            e
+        }
+        /// The oracle: a fold over the frozen prefix, computed from nothing the view holds.
+        fn fold(&self, key: &Key, anchor: Epoch) -> (Value, u64) {
+            let rows = self.rows.read().expect("not poisoned");
+            let (mut acc, mut read) = (0i128, 0u64);
+            for (e, k, d) in rows.iter() {
+                if *e <= anchor && k == key {
+                    acc += *d;
+                    read += 1;
+                }
+            }
+            (acc, read)
+        }
+    }
+
+    impl Base for Hist {
+        fn frontier(&self) -> Epoch {
+            self.head.load(Ordering::SeqCst)
+        }
+        fn reconstruct(&self, key: &Key, anchor: Epoch) -> (Value, u64) {
+            self.fold(key, anchor)
+        }
+        fn deltas_at(&self, e: Epoch) -> Vec<(Key, Value)> {
+            let rows = self.rows.read().expect("not poisoned");
+            rows.iter()
+                .filter(|(x, _, _)| *x == e)
+                .map(|(_, k, d)| (k.clone(), *d))
+                .collect()
+        }
+    }
+
+    /// A one-shot latch. Deterministic where a sleep would be a guess.
+    #[derive(Default)]
+    struct Gate {
+        open: Mutex<bool>,
+        woken: Condvar,
+    }
+
+    impl Gate {
+        fn open(&self) {
+            *self.open.lock().expect("not poisoned") = true;
+            self.woken.notify_all();
+        }
+        fn wait(&self) {
+            let mut g = self.open.lock().expect("not poisoned");
+            while !*g {
+                g = self.woken.wait(g).expect("not poisoned");
+            }
+        }
+    }
+
+    type Shared = Arc<Mutex<Runtime>>;
+
+    fn view(rt: &Shared) -> std::sync::MutexGuard<'_, Runtime> {
+        rt.lock().expect("not poisoned")
+    }
+
+    fn runtime(budget: Option<u64>) -> Shared {
+        Arc::new(Mutex::new(
+            Runtime::install(
+                super::tests::circuit(Materialize::Demand, Consistency::Snapshot),
+                budget,
+                Policy::Lru,
+            )
+            .expect("installs"),
+        ))
+    }
+
+    /// A whole keyed read done the way the daemon does it: decide under the view, release
+    /// it, fold, take it again to install. Nothing is held across the fold.
+    fn read_split(rt: &Shared, hist: &Hist, key: &Key, anchor: Epoch) -> Anchored {
+        loop {
+            let outcome = view(rt)
+                .view_mut("balance")
+                .expect("installed")
+                .begin_read(key, anchor);
+            match outcome {
+                ReadOutcome::Hit(a) => return a,
+                ReadOutcome::Fold(t) => {
+                    let (v, rows) = hist.fold(t.key(), t.anchor());
+                    return view(rt)
+                        .view_mut("balance")
+                        .expect("installed")
+                        .finish_fold(t, v, rows);
+                }
+                ReadOutcome::Join(w) => {
+                    if let Some(a) = w.wait() {
+                        return a;
+                    }
+                }
+            }
+        }
+    }
+
+    /// **The differential: one flight, one advance, two readers, three claims.**
+    ///
+    /// While a reconstruction anchored at `a0` is stopped mid-fold and an epoch for its own
+    /// key is sealed and applied:
+    ///
+    /// 1. the `Pending` slot absorbs nothing — the epoch is skipped, not written into it;
+    /// 2. a reader at `a0` **joins** the flight and folds nothing;
+    /// 3. a reader at the new frontier folds **independently** and installs nothing;
+    ///
+    /// and when the flight lands it installs **pinned**, so no later anchor is ever served
+    /// from an entry that never saw the epochs in between.
+    #[test]
+    fn a_flight_that_overlaps_an_advance_is_joined_shared_and_installed_pinned() {
+        let hist = Arc::new(Hist::default());
+        let k: Key = vec![7];
+        let other: Key = vec![8];
+        for i in 0..5i128 {
+            hist.seal(&k, 10 + i);
+            hist.seal(&other, 1);
+        }
+        let a0 = hist.frontier();
+        let rt = runtime(Some(64));
+        view(&rt).advance(&*hist, a0);
+
+        let entered = Arc::new(Gate::default());
+        let release = Arc::new(Gate::default());
+
+        // The owner: it takes the flight, announces that it is inside the fold, and waits.
+        let owner = {
+            let (rt, hist, k, entered, release) = (
+                rt.clone(),
+                hist.clone(),
+                k.clone(),
+                entered.clone(),
+                release.clone(),
+            );
+            std::thread::spawn(move || {
+                let t = match view(&rt)
+                    .view_mut("balance")
+                    .expect("installed")
+                    .begin_read(&k, a0)
+                {
+                    ReadOutcome::Fold(t) => t,
+                    _ => panic!("the first reader of a cold key owns its flight"),
+                };
+                assert!(t.installs(), "the owner of a flight installs its result");
+                entered.open();
+                release.wait();
+                let (v, rows) = hist.fold(t.key(), t.anchor());
+                view(&rt)
+                    .view_mut("balance")
+                    .expect("installed")
+                    .finish_fold(t, v, rows)
+            })
+        };
+        entered.wait();
+
+        assert_eq!(
+            view(&rt).view("balance").expect("installed").slot(&k),
+            Slot::Pending(a0),
+            "a key whose reconstruction is in flight is `Pending` at the anchor being folded \
+             — the lattice's fourth state, which no path could reach while the fold happened \
+             inside the view lock"
+        );
+
+        // **An epoch for this very key, sealed and applied while the flight is out.**
+        hist.seal(&k, 1_000_000);
+        let e1 = hist.frontier();
+        view(&rt).advance(&*hist, e1);
+
+        assert_eq!(
+            view(&rt).view("balance").expect("installed").slot(&k),
+            Slot::Pending(a0),
+            "`advance` wrote into a `Pending` slot. There is no value there to fold a delta \
+             into, and publishing one epoch's delta as the key's balance makes every reader \
+             whose anchor falls in the resulting interval take it as a hit: the account is \
+             wrong by its entire history until the flight lands"
+        );
+
+        // **A reader at the flight's own anchor joins it.**
+        let joined = {
+            let outcome = view(&rt)
+                .view_mut("balance")
+                .expect("installed")
+                .begin_read(&k, a0);
+            match outcome {
+                ReadOutcome::Join(w) => std::thread::spawn(move || w.wait()),
+                _ => panic!(
+                    "a reader of the same key at the same anchor must join the flight, not \
+                     start a second fold of the same prefix"
+                ),
+            }
+        };
+
+        // **A reader at a different anchor folds alone and installs nothing.**
+        let at_e1 = {
+            let outcome = view(&rt)
+                .view_mut("balance")
+                .expect("installed")
+                .begin_read(&k, e1);
+            let t = match outcome {
+                ReadOutcome::Fold(t) => t,
+                _ => panic!(
+                    "a flight at another anchor is computing a different number over a \
+                     different prefix; joining it would answer this reader with someone \
+                     else's snapshot"
+                ),
+            };
+            assert!(
+                !t.installs(),
+                "a fold that does not own the key's flight must not write to its slot"
+            );
+            let (v, rows) = hist.fold(t.key(), t.anchor());
+            view(&rt)
+                .view_mut("balance")
+                .expect("installed")
+                .finish_fold(t, v, rows)
+        };
+        assert_eq!(at_e1.anchor, e1);
+        assert_eq!(
+            at_e1.value,
+            hist.fold(&k, e1).0,
+            "the independent fold must equal the oracle at its own anchor"
+        );
+
+        release.open();
+        let owned = owner.join().expect("the owner panicked");
+        let joined = joined
+            .join()
+            .expect("the joiner panicked")
+            .expect("a waiter on a live flight is answered by it");
+
+        assert_eq!(owned.anchor, a0);
+        assert_eq!(
+            owned.value,
+            hist.fold(&k, a0).0,
+            "the owner's fold is exact at `a0`"
+        );
+        assert_eq!(
+            joined, owned,
+            "a joined reader receives the flight's answer, not a second fold's"
+        );
+
+        // **The install is pinned, because the frontier moved under it.**
+        let g = view(&rt);
+        let v = g.view("balance").expect("installed");
+        assert_eq!(
+            v.slot(&k),
+            Slot::Present(owned.value, a0),
+            "the flight installs at its own anchor"
+        );
+        assert_eq!(v.stats.pending_joins, 1, "exactly one reader joined");
+        assert_eq!(
+            v.stats.pinned_installs, 1,
+            "the flight landed below `applied`"
+        );
+        assert!(
+            v.stats.uninstalled_folds >= 1,
+            "the different-anchor fold answered and installed nothing"
+        );
+        assert!(
+            v.stats.pinned_installs + v.stats.deferred_merges + v.stats.pending_joins > 0,
+            "the run did not exercise the mechanism it is named for, so a pass here would \
+             be a pass for the code this replaces"
+        );
+        drop(g);
+
+        // **And the pin is what makes the next reader right.** An unpinned entry would
+        // inherit `applied = e1` and serve the value at `a0` to a reader asking for `e1`.
+        let fresh = read_split(&rt, &hist, &k, e1);
+        assert_eq!(fresh.anchor, e1);
+        assert_eq!(
+            fresh.value,
+            hist.fold(&k, e1).0,
+            "a read at the new frontier was served the value from before the epoch that \
+             landed during the flight. An entry installed at an anchor below `applied` has \
+             not seen the deltas in between and must not inherit the frontier"
+        );
+    }
+
+    /// **A completion that arrives after its flight was superseded installs nothing.**
+    ///
+    /// Not because its value is wrong — a ticket's `(key, anchor)` is fixed at `begin_read`,
+    /// so its answer is exact at its own anchor and it still answers its own caller. What it
+    /// must not do is write over the entry a *newer* flight installed: that moves a resident
+    /// stamp backwards, costing every later reader a reconstruction, and clears an
+    /// `in_flight` entry it does not own, stranding the successor's `Pending` marker with
+    /// nobody left to publish it.
+    #[test]
+    fn a_superseded_completion_never_moves_a_resident_stamp_backwards() {
+        let hist = Hist::default();
+        let k: Key = vec![3];
+        for i in 0..4i128 {
+            hist.seal(&k, 100 + i);
+        }
+        let a0 = hist.frontier();
+        let rt = runtime(Some(64));
+
+        let stale = match view(&rt)
+            .view_mut("balance")
+            .expect("installed")
+            .begin_read(&k, a0)
+        {
+            ReadOutcome::Fold(t) => t,
+            _ => panic!("the first reader owns the flight"),
+        };
+
+        // The owner is cancelled — a dropped connection, a killed statement — and the next
+        // reader through the view reaps its marker and takes over with a new generation.
+        view(&rt)
+            .view_mut("balance")
+            .expect("installed")
+            .force_reap(&k);
+        hist.seal(&k, 500);
+        let a1 = hist.frontier();
+
+        let fresh = match view(&rt)
+            .view_mut("balance")
+            .expect("installed")
+            .begin_read(&k, a1)
+        {
+            ReadOutcome::Fold(t) => t,
+            _ => panic!("the reaped key is free for a new flight"),
+        };
+        let (v1, r1) = hist.fold(fresh.key(), fresh.anchor());
+        let newer = view(&rt)
+            .view_mut("balance")
+            .expect("installed")
+            .finish_fold(fresh, v1, r1);
+        assert_eq!(newer.anchor, a1);
+
+        // Now the superseded owner returns, with an answer that was exact when it started.
+        let (v0, r0) = hist.fold(stale.key(), stale.anchor());
+        let late = view(&rt)
+            .view_mut("balance")
+            .expect("installed")
+            .finish_fold(stale, v0, r0);
+        assert_eq!(
+            late,
+            Anchored {
+                value: hist.fold(&k, a0).0,
+                anchor: a0
+            },
+            "a superseded completion still answers its own caller, exactly, at its own anchor"
+        );
+
+        let g = view(&rt);
+        let v = g.view("balance").expect("installed");
+        assert_eq!(
+            v.slot(&k),
+            Slot::Present(newer.value, a1),
+            "the older completion overwrote the newer resident entry. Its value is right at \
+             its own anchor and wrong as a resident stamp: every read above `{a1}` now \
+             reconstructs, and the flight table entry it cleared belonged to somebody else"
+        );
+        assert!(
+            v.stats.uninstalled_folds >= 1,
+            "a fold that installed nothing must be counted, or the cost is one nobody can \
+             be asked about"
+        );
+    }
+
+    /// **A flight whose owner never returns releases its waiters and puts the slot back.**
+    ///
+    /// Honest absence survives cancellation: what goes back is the exact `Hole(e)` the
+    /// marker replaced, version and all, and not a `⊥` that would make the key look never
+    /// seen.
+    #[test]
+    fn a_cancelled_flight_restores_the_absence_it_replaced_and_frees_its_waiters() {
+        let hist = Hist::default();
+        let (k, filler): (Key, Key) = (vec![1], vec![2]);
+        hist.seal(&k, 42);
+        hist.seal(&filler, 7);
+        let a = hist.frontier();
+        // A budget of one, so reading the filler evicts `k` and leaves a hole with a version.
+        let rt = runtime(Some(1));
+        read_split(&rt, &hist, &k, a);
+        read_split(&rt, &hist, &filler, a);
+        let hole = view(&rt).view("balance").expect("installed").slot(&k);
+        assert_eq!(hole, Slot::Hole(a), "the evicted entry keeps its version");
+
+        let doomed = match view(&rt)
+            .view_mut("balance")
+            .expect("installed")
+            .begin_read(&k, a)
+        {
+            ReadOutcome::Fold(t) => t,
+            _ => panic!("a hole is reconstructed, and the first reader owns the flight"),
+        };
+        let waiter = match view(&rt)
+            .view_mut("balance")
+            .expect("installed")
+            .begin_read(&k, a)
+        {
+            ReadOutcome::Join(w) => std::thread::spawn(move || w.wait()),
+            _ => panic!("the second reader at the same anchor joins"),
+        };
+
+        drop(doomed);
+        assert!(
+            waiter.join().expect("the waiter panicked").is_none(),
+            "a waiter on a flight whose owner died must wake and retry. Waiting on a thread \
+             that is not coming back turns one cancelled statement into a stuck connection"
+        );
+
+        view(&rt)
+            .view_mut("balance")
+            .expect("installed")
+            .force_reap(&k);
+        assert_eq!(
+            view(&rt).view("balance").expect("installed").slot(&k),
+            hole,
+            "a cancelled flight puts back exactly the absence it replaced. A `⊥` here would \
+             say the key was never seen, which is the one thing honest absence exists to \
+             prevent"
+        );
+    }
+
+    /// **Past the ceiling a read folds alone, exactly, and the refusal is counted.**
+    ///
+    /// The flight table is bounded because an unbounded one is a per-connection allocation
+    /// with no ceiling. Over the bound the answer is still exact — it is simply not shared —
+    /// and there is no compensating branch: no silent fold under the view lock, no second
+    /// path with different rules.
+    #[test]
+    fn a_view_past_its_flight_ceiling_folds_alone_and_says_so() {
+        let hist = Hist::default();
+        for i in 0..(MAX_FLIGHTS as i64 + 1) {
+            hist.seal(&vec![i], 1);
+        }
+        let a = hist.frontier();
+        let rt = runtime(None);
+
+        let mut held = Vec::new();
+        for i in 0..MAX_FLIGHTS as i64 {
+            match view(&rt)
+                .view_mut("balance")
+                .expect("installed")
+                .begin_read(&vec![i], a)
+            {
+                ReadOutcome::Fold(t) => held.push(t),
+                _ => panic!("each cold key owns its own flight"),
+            }
+        }
+        let over = match view(&rt)
+            .view_mut("balance")
+            .expect("installed")
+            .begin_read(&vec![MAX_FLIGHTS as i64], a)
+        {
+            ReadOutcome::Fold(t) => t,
+            _ => panic!("a refused flight still folds"),
+        };
+        assert!(
+            !over.installs(),
+            "a read the flight table had no room for must not claim a slot it does not own"
+        );
+        assert_eq!(
+            view(&rt)
+                .view("balance")
+                .expect("installed")
+                .stats
+                .flights_refused,
+            1,
+            "an overload that shows up only as latency is one nobody can be asked about"
+        );
+    }
+}
+
+#[cfg(test)]
 mod concurrent_differential {
     //! **The view's answer, against an independent fold, while a writer moves the frontier.**
     //!
@@ -1839,10 +2820,34 @@ mod concurrent_differential {
                         // The anchor a session would hold: sampled, then used. Everything the
                         // writer does after this sample is outside the read's snapshot.
                         let anchor = base.frontier();
-                        let answered = {
-                            let mut g = rt.lock().expect("not poisoned");
-                            let v = g.view_mut("balance").expect("installed");
-                            v.read(&*base, &key, anchor)
+                        // **Read the way the daemon reads: decide under the view, release
+                        // it, fold, take it again.** Driving `read` here would hold the view
+                        // across the reconstruction, which is exactly the shape this task
+                        // removed — the differential would then be testing a path no server
+                        // takes, and the `Join` case could never arise because no second
+                        // reader could run.
+                        let answered = loop {
+                            let outcome = {
+                                let mut g = rt.lock().expect("not poisoned");
+                                let v = g.view_mut("balance").expect("installed");
+                                v.begin_read(&key, anchor)
+                            };
+                            match outcome {
+                                ReadOutcome::Hit(a) => break a,
+                                ReadOutcome::Fold(t) => {
+                                    let (value, rows) = base.reconstruct(t.key(), t.anchor());
+                                    let mut g = rt.lock().expect("not poisoned");
+                                    let v = g.view_mut("balance").expect("installed");
+                                    break v.finish_fold(t, value, rows);
+                                }
+                                // Nothing is held here, which is the property the whole
+                                // split exists for and the one a deadlock would expose.
+                                ReadOutcome::Join(w) => {
+                                    if let Some(a) = w.wait() {
+                                        break a;
+                                    }
+                                }
+                            }
                         };
                         // The oracle: a fold over the frozen prefix ending at the anchor the
                         // answer says it is true at. Independent of every resident entry.
@@ -1896,6 +2901,17 @@ mod concurrent_differential {
             "{} divergences under concurrent append and read. First: {}",
             divergences.len(),
             divergences.first().expect("non-empty")
+        );
+
+        // **Reported, not asserted.** Whether four readers overlapped on one key at one
+        // anchor is the scheduler's business, and a test that required it would be a test
+        // that fails on an idle machine. The deterministic claim is the latched differential
+        // above; this line says what this run happened to see.
+        let s = rt.lock().expect("not poisoned").stats();
+        eprintln!(
+            "two-phase, under concurrency: {} joins, {} uninstalled folds, {} pinned \
+             installs, {} flights refused, over {} reads",
+            s.pending_joins, s.uninstalled_folds, s.pinned_installs, s.flights_refused, s.reads
         );
     }
 }

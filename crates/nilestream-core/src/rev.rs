@@ -81,10 +81,28 @@ pub enum ReadOutcome {
     Join(WaitTicket),
 }
 
+/// **What a flight publishes**: the answer, and the evidence a joiner needs to shape it.
+///
+/// The answer alone is not enough, and the gap is not academic. A keyed read of an account
+/// the base has never posted to must produce **no row**, not a row containing zero — the
+/// absence lattice's distinction, at the layer where losing it is quietest. The owner learns
+/// that from its own reconstruction, which reports how many base rows it read; a joiner that
+/// received only the value would have to go back to the base to find out, which is a second
+/// acquisition of B for one logical read and the thing T01.2 forbids (A10-04).
+///
+/// So the flight publishes the row count with the value, and the joiner needs no base at all.
+#[derive(Debug, Clone, Copy)]
+pub struct Joined {
+    pub answer: Anchored,
+    /// Base rows the owner's reconstruction read. **Zero means the key has no history in
+    /// this prefix**, which is a different answer from a value of zero.
+    pub base_rows: u64,
+}
+
 /// The published state of one flight. The only lock **below** the view.
 #[derive(Debug, Default)]
 struct CompletionState {
-    answer: Option<Anchored>,
+    answer: Option<Joined>,
     /// The owner went away without an answer — a cancelled statement, a dropped session, a
     /// panicking fold. Waiters wake and retry rather than waiting forever on a thread that
     /// is not coming back.
@@ -187,7 +205,7 @@ impl Completion {
         self.joined.load(Ordering::Acquire)
     }
 
-    fn publish(&self, answer: Anchored) {
+    fn publish(&self, answer: Joined) {
         // **Nobody is waiting, so there is nothing to publish to.** The owner's answer
         // reaches its own caller as `finish_fold`'s return value; the rendezvous exists only
         // for readers who joined, and there are none.
@@ -223,7 +241,7 @@ impl Completion {
     }
 
     /// Block until the owner publishes or gives up. **Holds nothing but this leaf.**
-    fn join(&self) -> Option<Anchored> {
+    fn join(&self) -> Option<Joined> {
         let mut s = self.lock();
         while s.answer.is_none() && !s.cancelled {
             s = self.woken.wait(s).unwrap_or_else(|e| e.into_inner());
@@ -325,9 +343,9 @@ impl WaitTicket {
     ///
     /// `None` means the owner went away, or published an answer at an anchor this waiter
     /// did not ask for — neither is an answer, and the caller goes around again.
-    pub fn wait(mut self) -> Option<Anchored> {
+    pub fn wait(mut self) -> Option<Joined> {
         self.consumed = true;
-        self.done.join().filter(|a| a.anchor == self.anchor)
+        self.done.join().filter(|j| j.answer.anchor == self.anchor)
     }
 }
 
@@ -916,7 +934,10 @@ impl Rev {
         }
 
         if let Some(d) = &ticket.done {
-            d.publish(answer);
+            d.publish(Joined {
+                answer,
+                base_rows: rows,
+            });
             // **Folded into the view's stats as the flight ends**, which is the last moment
             // this completion is reachable from the view. A flight nobody joined contributes
             // zero, and that zero is the whole of the E18 repair (A10-19).
@@ -2587,8 +2608,8 @@ mod two_phase {
                         .finish_fold(t, v, rows);
                 }
                 ReadOutcome::Join(w) => {
-                    if let Some(a) = w.wait() {
-                        return a;
+                    if let Some(j) = w.wait() {
+                        return j.answer;
                     }
                 }
             }
@@ -2734,8 +2755,15 @@ mod two_phase {
             "the owner's fold is exact at `a0`"
         );
         assert_eq!(
-            joined, owned,
+            joined.answer, owned,
             "a joined reader receives the flight's answer, not a second fold's"
+        );
+        // And the evidence that shapes it: the owner's own reconstruction row count, which
+        // is what lets a joined reader tell a key with no history from a balance of zero
+        // without going back to the base (A10-04).
+        assert!(
+            joined.base_rows > 0,
+            "this key has history, and the flight must publish that alongside the value"
         );
 
         // **The install is pinned, because the frontier moved under it.**
@@ -3017,7 +3045,7 @@ mod two_phase {
             .recv_timeout(std::time::Duration::from_secs(10))
             .expect("the waiter is answered within the deadline")
             .expect("and with an answer rather than a cancellation");
-        assert_eq!(joined.value, owner.value);
+        assert_eq!(joined.answer.value, owner.value);
     }
 
     /// **A fold nobody joined never touches its rendezvous — A10-19.**
@@ -3150,11 +3178,11 @@ mod two_phase {
              waiter, so this control is what makes that guard mean what it says."
         );
         assert_eq!(
-            joined_answer.value, owner_answer.value,
+            joined_answer.answer.value, owner_answer.value,
             "a joined reader receives the owner's answer, which is the point of joining"
         );
         assert_eq!(
-            joined_answer.anchor, owner_answer.anchor,
+            joined_answer.answer.anchor, owner_answer.anchor,
             "and at the owner's anchor, which is its own"
         );
     }
@@ -3436,8 +3464,8 @@ mod concurrent_differential {
                                 // Nothing is held here, which is the property the whole
                                 // split exists for and the one a deadlock would expose.
                                 ReadOutcome::Join(w) => {
-                                    if let Some(a) = w.wait() {
-                                        break a;
+                                    if let Some(j) = w.wait() {
+                                        break j.answer;
                                     }
                                 }
                             }

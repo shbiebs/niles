@@ -205,9 +205,40 @@ enum ViewAnswer {
     Rows(crate::session::Rows),
     /// Not a shape this path serves, or the view could not answer it. The fold answers.
     NotApplicable,
-    /// Someone else is folding this key at this anchor. Wait — with no lock held — and ask
-    /// again; the retry finds the installed entry and hits.
-    Wait(nilestream_core::rev::WaitTicket),
+    /// Someone else is folding this key at this anchor. Wait — with no lock held — and then
+    /// **use that flight's answer**, which is exact at this anchor by construction.
+    ///
+    /// Everything the caller needs to shape the reply travels with the ticket, so a joined
+    /// read never re-enters the view and never re-acquires the base. It used to discard the
+    /// answer and go round the loop, which re-took B for the same logical read and turned a
+    /// join — the mechanism whose whole point is that the second reader pays nothing — into
+    /// a wait *plus* a full second pass (A10-04).
+    Wait(WaitPlan),
+}
+
+/// **Bounded, because a retry loop with no ceiling is a spin.** A waiter wakes when the
+/// flight it joined publishes, and the next attempt hits the entry that flight installed. It
+/// can fail to: the owner was cancelled, or the entry was evicted between the wake and the
+/// retry under a budget smaller than the number of keys in flight. A handful of rounds covers
+/// those; past them the fold answers, which is slower and exact, and never a spin under load.
+const MAX_JOIN_ATTEMPTS: u32 = 8;
+
+/// One attempt at a query, and what it needs from its caller.
+enum QueryStep {
+    Done(Result<crate::session::Rows, crate::session::ServeError>),
+    /// A flight is already folding this key at this anchor. The caller waits — holding
+    /// whatever it likes, including nothing — and then calls `resolve_join`.
+    Wait(WaitPlan),
+}
+
+/// A join, and the shape its answer must be given.
+struct WaitPlan {
+    ticket: nilestream_core::rev::WaitTicket,
+    /// The reply's column names, built before the wait so the join costs no work after it.
+    columns: Vec<String>,
+    acct: u64,
+    cur: u32,
+    with_currency: bool,
 }
 
 /// What a read cost, in the units that distinguish one parity result from another.
@@ -804,62 +835,20 @@ impl RevEngine {
         (c.len() == 1).then(|| *c.iter().next().expect("one currency"))
     }
 
-    /// A shared borrow of the base. Every read path goes through here, and every one of
-    /// them is counted, so `select nilestream_lock` describes the structure that is actually
-    /// there rather than the mutex that used to be.
-    fn base(&self) -> crate::lockstats::TimedRead<'_, Ledger> {
-        crate::lockstats::TimedRead::acquire(&self.ledger, &crate::lockstats::ENGINE_LOCK)
-    }
-}
-
-impl crate::session::Serving for RevEngine {
-    fn serve_path_now(
+    /// One attempt at a query: everything the public `query` does, except that a join is
+    /// **returned** rather than waited on.
+    ///
+    /// The split exists so that a caller reaching this engine through a lock can drop that
+    /// lock before it waits — see `query`'s own comment (A10-04). `try_view` is `false` once
+    /// the bounded retries are spent, which sends the read to the fold: slower, exact, and
+    /// never a spin.
+    fn query_step(
         &self,
         circuit: &niles_ir::circuit::Circuit,
         output: &str,
         anchor: u64,
-    ) -> &'static str {
-        self.serve_path_at(circuit, output, anchor).as_str()
-    }
-
-    /// **The frontier a read anchors at, which is the durable one.**
-    ///
-    /// Not `ledger.head()`. The base may hold an epoch whose barrier has not returned; that
-    /// epoch is sealed and not yet visible, and answering a read at it would let a client
-    /// observe a transaction a crash could still erase. In a ledger an observation that is
-    /// later erased is not a stale read — it is a transaction a customer saw succeed and
-    /// that no longer exists.
-    fn frontier(&self) -> u64 {
-        match &self.visible {
-            Some(v) => v.load(std::sync::atomic::Ordering::Acquire),
-            // No durable sink: nothing to be durable *before*, so the base's head is the
-            // frontier and always was.
-            None => self.base().head(),
-        }
-    }
-
-    /// **Evaluate the circuit the client's query compiled to.**
-    ///
-    /// This is what F-16 was about. The old path compiled the query, verified it, and then
-    /// *discarded the circuit*: `pick_view` returned the constant `"__wire_result"`, this
-    /// method ignored the view name entirely, read `key[0]`, and folded `sum(amt)` for
-    /// currency 0. Every query over one account returned the same number, whatever it
-    /// asked for. The compiler was decoration on a hard-coded answer, and the §6.9 claim —
-    /// "a wire protocol is a surface, not a semantics" — was false in the direction that
-    /// matters: the surface was accepting queries the semantics never saw.
-    ///
-    /// The base is materialised as a Z-set at the anchor and the circuit is evaluated over
-    /// it by the same `niles_ir::eval` the golden corpus uses. That is a full fold, and it
-    /// is the honest cost of an arbitrary query against a partial-state engine: the
-    /// partially-materialised view is a *fast path for one shape*, not a general answer, and
-    /// `answer_from_view` below is where it is spent, and it answers through the same REV
-    /// runtime the phase diagram measures rather than through a cache beside it.
-    fn query(
-        &self,
-        circuit: &niles_ir::circuit::Circuit,
-        output: &str,
-        anchor: u64,
-    ) -> Result<crate::session::Rows, crate::session::ServeError> {
+        try_view: bool,
+    ) -> QueryStep {
         // **Predicate pushdown into the source scan.** Without it every query materialises
         // the whole base: the point workload went from ~12,000 ops/s to 68 when the server
         // started evaluating the circuit instead of answering from a hard-coded fold, and
@@ -917,7 +906,7 @@ impl crate::session::Serving for RevEngine {
         // the server will answer without narrowing what a caller can ask.
         if let Some(p) = planned.as_ref() {
             if let Some(offending) = self.cross_currency_fold(p) {
-                return Err(crate::session::ServeError::CrossCurrency(offending));
+                return QueryStep::Done(Err(crate::session::ServeError::CrossCurrency(offending)));
             }
         }
         // **A report first**, because a fully maintained view answers one without touching
@@ -926,46 +915,25 @@ impl crate::session::Serving for RevEngine {
             if let Some(rows) = self.report_from_view(p, circuit, output, anchor) {
                 self.served
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                return Ok(rows);
+                return QueryStep::Done(Ok(rows));
             }
         }
         let sole = planned
             .as_ref()
             .and_then(|p| p.sole_account_filter(ACCT_COL));
-        if let (Some(p), Some(acct), ServePath::View) = (
+        if let (true, Some(p), Some(acct), ServePath::View) = (
+            try_view,
             planned.as_ref(),
             sole,
             serve_path_of(planned.as_ref(), circuit, output),
         ) {
-            // **Bounded, because a retry loop with no ceiling is a spin.** A waiter wakes
-            // when the flight it joined publishes, and the next attempt hits the entry that
-            // flight installed. It can fail to: the owner was cancelled, or the entry was
-            // evicted between the wake and the retry under a budget smaller than the number
-            // of keys in flight. A handful of rounds covers those; past them the fold
-            // answers, which is slower and exact, and never a spin under load.
-            let mut attempts = 0;
-            loop {
-                attempts += 1;
-                match self.answer_from_view(p, circuit, output, acct, anchor) {
-                    ViewAnswer::Rows(rows) => return Ok(rows),
-                    ViewAnswer::NotApplicable => break,
-                    ViewAnswer::Wait(w) => {
-                        // **Nothing is held here.** This is the whole point of the split, and
-                        // the counters say which way the wait ended: an answered join shared
-                        // another reader's fold, a retried one woke to find that flight gone
-                        // and pays for its own.
-                        let answered = w.wait().is_some();
-                        let counter = if answered {
-                            &self.joins_answered
-                        } else {
-                            &self.joins_retried
-                        };
-                        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        if attempts >= 8 {
-                            break;
-                        }
-                    }
-                }
+            match self.answer_from_view(p, circuit, output, acct, anchor) {
+                ViewAnswer::Rows(rows) => return QueryStep::Done(Ok(rows)),
+                // The fold below answers it.
+                ViewAnswer::NotApplicable => {}
+                // **Handed out, not waited on here.** This function may be running under a
+                // caller's lock; the wait belongs where nothing is held.
+                ViewAnswer::Wait(plan) => return QueryStep::Wait(plan),
             }
         }
         // Counted here rather than on entry: a query the maintained view answered is not a
@@ -1004,13 +972,17 @@ impl crate::session::Serving for RevEngine {
                 } else {
                     let mut given = std::collections::BTreeMap::new();
                     given.insert(p.node, folded);
-                    let (z, w2) = niles_ir::eval::try_run_with(
+                    let r = niles_ir::eval::try_run_with(
                         circuit,
                         output,
                         &std::collections::BTreeMap::new(),
                         &given,
                     )
-                    .map_err(|e| crate::session::ServeError::Eval(e.to_string()))?;
+                    .map_err(|e| crate::session::ServeError::Eval(e.to_string()));
+                    let (z, w2) = match r {
+                        Ok(v) => v,
+                        Err(e) => return QueryStep::Done(Err(e)),
+                    };
                     (z, w + w2)
                 }
             }
@@ -1026,8 +998,12 @@ impl crate::session::Serving for RevEngine {
                     sources.values().map(|z| z.len() as u64).sum::<u64>(),
                     std::sync::atomic::Ordering::Relaxed,
                 );
-                niles_ir::eval::try_run(circuit, output, &sources)
-                    .map_err(|e| crate::session::ServeError::Eval(e.to_string()))?
+                match niles_ir::eval::try_run(circuit, output, &sources)
+                    .map_err(|e| crate::session::ServeError::Eval(e.to_string()))
+                {
+                    Ok(v) => v,
+                    Err(e) => return QueryStep::Done(Err(e)),
+                }
             }
         };
         self.scan_work
@@ -1057,10 +1033,149 @@ impl crate::session::Serving for RevEngine {
         // already integers, immediately before the wire layer parsed them back. The framer
         // reads them where they lie; `Rows::text` is still there for a caller that wants the
         // text form, and the tests use it.
-        Ok(crate::session::Rows {
+        QueryStep::Done(Ok(crate::session::Rows {
             columns,
             rows: crate::session::RowSource::Evaluated { z, anchor },
-        })
+        }))
+    }
+
+    /// Count how a join ended. Split out so an implementation that waits outside its own
+    /// lock can still report the outcome through a short, separate acquisition.
+    fn note_join(&self, answered: bool) {
+        let counter = if answered {
+            &self.joins_answered
+        } else {
+            &self.joins_retried
+        };
+        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if answered {
+            self.view_answers
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// Wait for a joined flight with **nothing held**, and turn its answer into the reply.
+    ///
+    /// `None` means the flight went away or published at another anchor; the caller tries
+    /// again, and past [`MAX_JOIN_ATTEMPTS`] the fold answers.
+    fn resolve_join(&self, plan: WaitPlan, anchor: u64) -> Option<crate::session::Rows> {
+        let WaitPlan {
+            ticket,
+            columns,
+            acct,
+            cur,
+            with_currency,
+        } = plan;
+        match ticket.wait() {
+            Some(joined) => {
+                self.note_join(true);
+                // **The joined answer is the answer.** It is exact at this caller's anchor —
+                // `WaitTicket::wait` returns `None` for a completion published at any other —
+                // so returning it is not an optimisation over asking again; it is the only
+                // reading in which joining costs the second reader less than folding.
+                //
+                // No base read: `base_rows` travelled with the answer, which is what lets
+                // this distinguish "no such account" from "a balance of zero" without
+                // acquiring B a second time for one logical read.
+                Some(Self::rows_from_answer(
+                    columns,
+                    acct,
+                    cur,
+                    with_currency,
+                    joined,
+                    anchor,
+                ))
+            }
+            None => {
+                self.note_join(false);
+                None
+            }
+        }
+    }
+
+    /// A shared borrow of the base. Every read path goes through here, and every one of
+    /// them is counted, so `select nilestream_lock` describes the structure that is actually
+    /// there rather than the mutex that used to be.
+    fn base(&self) -> crate::lockstats::TimedRead<'_, Ledger> {
+        crate::lockstats::TimedRead::acquire(&self.ledger, &crate::lockstats::ENGINE_LOCK)
+    }
+}
+
+impl crate::session::Serving for RevEngine {
+    fn serve_path_now(
+        &self,
+        circuit: &niles_ir::circuit::Circuit,
+        output: &str,
+        anchor: u64,
+    ) -> &'static str {
+        self.serve_path_at(circuit, output, anchor).as_str()
+    }
+
+    /// **The frontier a read anchors at, which is the durable one.**
+    ///
+    /// Not `ledger.head()`. The base may hold an epoch whose barrier has not returned; that
+    /// epoch is sealed and not yet visible, and answering a read at it would let a client
+    /// observe a transaction a crash could still erase. In a ledger an observation that is
+    /// later erased is not a stale read — it is a transaction a customer saw succeed and
+    /// that no longer exists.
+    fn frontier(&self) -> u64 {
+        match &self.visible {
+            Some(v) => v.load(std::sync::atomic::Ordering::Acquire),
+            // No durable sink: nothing to be durable *before*, so the base's head is the
+            // frontier and always was.
+            None => self.base().head(),
+        }
+    }
+
+    /// **Evaluate the circuit the client's query compiled to.**
+    ///
+    /// This is what F-16 was about. The old path compiled the query, verified it, and then
+    /// *discarded the circuit*: `pick_view` returned the constant `"__wire_result"`, this
+    /// method ignored the view name entirely, read `key[0]`, and folded `sum(amt)` for
+    /// currency 0. Every query over one account returned the same number, whatever it
+    /// asked for. The compiler was decoration on a hard-coded answer, and the §6.9 claim —
+    /// "a wire protocol is a surface, not a semantics" — was false in the direction that
+    /// matters: the surface was accepting queries the semantics never saw.
+    ///
+    /// The base is materialised as a Z-set at the anchor and the circuit is evaluated over
+    /// it by the same `niles_ir::eval` the golden corpus uses. That is a full fold, and it
+    /// is the honest cost of an arbitrary query against a partial-state engine: the
+    /// partially-materialised view is a *fast path for one shape*, not a general answer, and
+    /// `query_step` below is where it is spent; it answers through the same REV runtime the
+    /// phase diagram measures rather than through a cache beside it.
+    ///
+    /// **The retry loop is out here, and one attempt is one call — A10-04.**
+    ///
+    /// It used to live inside the body, which meant a caller reaching this engine *through a
+    /// lock* held that lock for every attempt, including the wait.
+    /// `Serving for RwLock<RevEngine>` does exactly that: `self.read()`, then delegate. The
+    /// benchmark's hosted daemon builds one, and its sweep calls `reseed`, which takes the
+    /// same lock **exclusively** — so a session parked on another reader's fold held O shared
+    /// while a reseed queued behind it, and `std::sync::RwLock` is writer-preferring on both
+    /// hosts this project measures (170/200 on Linux, `c10-rwlock.sh`), which puts every
+    /// later reader behind that writer.
+    ///
+    /// With one attempt per call, the outer implementation drops its guard, waits, and takes
+    /// the guard again. Re-deriving the plan per attempt is the cost: bounded, and paid only
+    /// on the rare join that has to retry at all.
+    fn query(
+        &self,
+        circuit: &niles_ir::circuit::Circuit,
+        output: &str,
+        anchor: u64,
+    ) -> Result<crate::session::Rows, crate::session::ServeError> {
+        let mut attempts = 0u32;
+        loop {
+            attempts += 1;
+            match self.query_step(circuit, output, anchor, attempts <= MAX_JOIN_ATTEMPTS) {
+                QueryStep::Done(r) => return r,
+                QueryStep::Wait(plan) => {
+                    if let Some(rows) = self.resolve_join(plan, anchor) {
+                        return Ok(rows);
+                    }
+                }
+            }
+        }
     }
 
     fn append(
@@ -1281,15 +1396,67 @@ impl crate::session::Serving for std::sync::RwLock<RevEngine> {
     fn frontier(&self) -> u64 {
         self.read().expect("not poisoned").frontier()
     }
+    /// **The outer lock is dropped before the wait — A10-04.**
+    ///
+    /// This was `self.read().expect(..).query(..)`, one call, so the shared acquisition of
+    /// **O** was held for the whole of the inner retry loop *including* the wait on another
+    /// reader's fold. Nothing deadlocks on that on its own; what it does is hold O shared for
+    /// the length of somebody else's reconstruction. The benchmark's hosted daemon builds one
+    /// of these and its sweep calls `reseed`, which takes O **exclusively** — and
+    /// `std::sync::RwLock` is writer-preferring on both hosts this project measures (170/200
+    /// on Linux, `c10-rwlock.sh`), so the queued reseed then stops every reader that arrives
+    /// behind it, for as long as one parked reader's flight takes.
+    ///
+    /// One attempt per acquisition. The guard is taken, a step is run, the guard is dropped —
+    /// and only then does this wait. `query_step` re-derives the plan each time, which is the
+    /// price of not holding a lock across another thread's work.
     fn query(
         &self,
         circuit: &niles_ir::circuit::Circuit,
         output: &str,
         anchor: u64,
     ) -> Result<crate::session::Rows, crate::session::ServeError> {
-        self.read()
-            .expect("not poisoned")
-            .query(circuit, output, anchor)
+        let mut attempts = 0u32;
+        loop {
+            attempts += 1;
+            // The guard's scope is this statement and nothing more.
+            let step = self.read().expect("not poisoned").query_step(
+                circuit,
+                output,
+                anchor,
+                attempts <= MAX_JOIN_ATTEMPTS,
+            );
+            match step {
+                QueryStep::Done(r) => return r,
+                QueryStep::Wait(plan) => {
+                    // **O is released before the wait, and taken again only to count.**
+                    // Destructuring here is what makes that possible: the ticket, the
+                    // columns and the key are owned values, so nothing in the wait borrows
+                    // through a guard.
+                    let WaitPlan {
+                        ticket,
+                        columns,
+                        acct,
+                        cur,
+                        with_currency,
+                    } = plan;
+                    let joined = ticket.wait();
+                    self.read()
+                        .expect("not poisoned")
+                        .note_join(joined.is_some());
+                    if let Some(j) = joined {
+                        return Ok(RevEngine::rows_from_answer(
+                            columns,
+                            acct,
+                            cur,
+                            with_currency,
+                            j,
+                            anchor,
+                        ));
+                    }
+                }
+            }
+        }
     }
     fn append(
         &self,
@@ -1759,7 +1926,19 @@ impl RevEngine {
                         gap_finish: 0,
                     },
                 );
-                return ViewAnswer::Wait(w);
+                // **The shape travels with the ticket.** Built here, where `with_currency`
+                // and the sole currency are already known and the columns are already the
+                // ones the fold would have produced, so the joined reader does no work after
+                // its wait and touches neither the view nor the base again.
+                let mut columns: Vec<String> = (0..p.width()).map(|i| format!("c{i}")).collect();
+                columns.push("anchor".into());
+                return ViewAnswer::Wait(WaitPlan {
+                    ticket: w,
+                    columns,
+                    acct,
+                    cur,
+                    with_currency,
+                });
             }
             nilestream_core::rev::ReadOutcome::Fold(t) => {
                 // **The fold, with the view released and the base still held.** B is not
@@ -1870,18 +2049,59 @@ impl RevEngine {
         // The same shape the fold would have produced, so the two paths are
         // indistinguishable to everything above them — including the framer, which appends
         // the anchor itself rather than being handed it as a cell.
+        ViewAnswer::Rows(Self::rows_from_answer(
+            columns,
+            acct,
+            cur,
+            with_currency,
+            nilestream_core::rev::Joined {
+                answer: answered,
+                // The owner reached this line through a hit or its own fold, and the
+                // no-such-account case was decided above from the base. One row.
+                base_rows: 1,
+            },
+            anchor,
+        ))
+    }
+
+    /// **One shaping, used by the reader that folded and by the reader that joined it.**
+    ///
+    /// Two spellings of this would disagree the first time either changed, and the
+    /// disagreement would be between a read that waited and a read that did not — the one
+    /// difference a client must never be able to see.
+    ///
+    /// `base_rows == 0` is "this key has no history in this prefix", which produces **no
+    /// row**. A joined reader has no other way to know that: the value it receives is zero
+    /// either way, and a zero balance and a missing account are different answers.
+    fn rows_from_answer(
+        columns: Vec<String>,
+        acct: u64,
+        cur: u32,
+        with_currency: bool,
+        joined: nilestream_core::rev::Joined,
+        anchor: u64,
+    ) -> crate::session::Rows {
         use niles_ir::value::Value;
+        if joined.base_rows == 0 {
+            return crate::session::Rows {
+                columns,
+                rows: crate::session::RowSource::Evaluated {
+                    z: niles_ir::eval::ZSet::new(),
+                    anchor,
+                },
+            };
+        }
         let mut row = vec![Value::Int(acct as i128)];
         if with_currency {
             row.push(Value::Int(cur as i128));
         }
-        row.push(Value::Int(answered.value));
+        row.push(Value::Int(joined.answer.value));
         let mut z = niles_ir::eval::ZSet::new();
         z.insert(row, 1);
-        ViewAnswer::Rows(crate::session::Rows {
+        crate::session::Rows {
             columns,
             rows: crate::session::RowSource::Evaluated { z, anchor },
-        })
+        }
     }
 
     /// **The base's posting records, in the schema a lowered circuit indexes into** —
@@ -3892,6 +4112,90 @@ mod lock_order_tests {
         );
     }
 
+    /// **A joined read takes the base once, and uses the answer it waited for — A10-04.**
+    ///
+    /// The `Wait` arm discarded `w.wait()`'s value and went round the loop. The retry
+    /// re-entered `answer_from_view`, which acquires the base — so one logical keyed read
+    /// acquired B twice, and a join, whose whole point is that the second reader pays
+    /// nothing, cost a wait *plus* a full second pass. The answer it threw away was already
+    /// exact at its own anchor: `WaitTicket::wait` returns `None` for a completion published
+    /// at any other, so there was nothing left to check.
+    ///
+    /// Two things are asserted, and the second is the one that makes the first safe. The
+    /// joined reader's rows must equal the owner's — a client must not be able to tell
+    /// whether its read waited — and a joined value of **zero must not become a row** for an
+    /// account the base has never posted to. That distinction cannot be re-derived after the
+    /// wait without going back to the base, which is the acquisition being removed, so the
+    /// flight publishes its `base_rows` alongside the value and the joiner reads it there.
+    #[test]
+    fn a_joined_read_answers_from_the_flight_and_never_reopens_the_base() {
+        // **`resolve_join` is where a join becomes an answer**, so that is what is scanned.
+        // The `Wait` arm is now one line in each of two implementations and the substance is
+        // in the shared resolver.
+        let src = include_str!("rev_engine.rs");
+        let arm = src
+            .split("\n    fn resolve_join(")
+            .nth(1)
+            .expect("`resolve_join` is where a join becomes an answer");
+        let arm = &arm[..arm.find("\n    }").unwrap_or(arm.len())];
+        assert!(
+            arm.contains("rows_from_answer"),
+            "the joined answer must be shaped and returned here. Discarding it and going \
+             round the loop re-enters `query_step`, which acquires the base a second time \
+             for one logical read (A10-04): {arm}"
+        );
+        assert!(
+            !arm.contains("self.base()") && !arm.contains("key_update_count"),
+            "the joined path must not consult the base. `base_rows` travels with the \
+             answer precisely so that it does not have to: {arm}"
+        );
+
+        // **And the behaviour, not only the shape of the source.** A key with no history
+        // must produce no row whether the reader folded it or joined someone who did.
+        use nilestream_core::rev::Joined;
+        let columns = vec!["c0".to_string(), "c1".to_string(), "anchor".to_string()];
+        let missing = RevEngine::rows_from_answer(
+            columns.clone(),
+            4242,
+            0,
+            false,
+            Joined {
+                answer: nilestream_core::rev::Anchored {
+                    value: 0,
+                    anchor: 7,
+                },
+                base_rows: 0,
+            },
+            7,
+        );
+        assert!(
+            missing.text().is_empty(),
+            "an account with no history in this prefix has no balance, and that is not a \
+             balance of zero. A joined reader learns the difference from `base_rows`; \
+             without it, every unknown account would come back as a row containing 0."
+        );
+        let present = RevEngine::rows_from_answer(
+            columns,
+            4242,
+            0,
+            false,
+            Joined {
+                answer: nilestream_core::rev::Anchored {
+                    value: 0,
+                    anchor: 7,
+                },
+                base_rows: 3,
+            },
+            7,
+        );
+        assert_eq!(
+            present.text().len(),
+            1,
+            "an account whose history sums to zero DOES have a balance, and it is zero. \
+             The two cases differ only in `base_rows`, which is why it is published."
+        );
+    }
+
     /// **A reader that joins a flight waits with no lock held.**
     ///
     /// The two-phase read's whole benefit is that the reconstruction happens outside the
@@ -3913,36 +4217,53 @@ mod lock_order_tests {
              another reader's fold. Return `ViewAnswer::Wait` and let the caller wait."
         );
         assert!(
-            body.contains("return ViewAnswer::Wait(w)"),
+            body.contains("return ViewAnswer::Wait(WaitPlan {"),
             "`answer_from_view` must hand the join out rather than resolving it, or the \
-             `Join` case has nowhere to go but a second fold of the same prefix"
+             `Join` case has nowhere to go but a second fold of the same prefix. It hands \
+             out a `WaitPlan`: a bare ticket sends the joined reader back through this \
+             function, which re-acquires the base for the same logical read (A10-04)."
         );
-        // And the caller waits with nothing held: the ticket is the only thing in scope.
-        //
-        // The arm is delimited by its own closing brace at the arm's indentation rather than
-        // by the first `}` in the text, which cycle 10 walked into: counting the join
-        // outcomes put a braced `if` before the end of the arm, so the old slice stopped
-        // four lines early and the guard failed on a change that did not touch the wait.
-        let caller = src
-            .split("ViewAnswer::Wait(w) => {")
+        // And the wait itself holds nothing. Two implementations of `Serving` reach it and
+        // both must be clean, so both are checked: `resolve_join`, which the engine's own
+        // loop calls, and the `RwLock` wrapper, which must drop its outer guard before
+        // waiting (A10-04).
+        let resolver = src
+            .split("\n    fn resolve_join(")
             .nth(1)
-            .expect("the caller's wait arm");
-        let caller = &caller[..caller
-            .find("\n                    }")
-            .unwrap_or(caller.len())];
+            .expect("`resolve_join` exists");
+        let resolver = &resolver[..resolver.find("\n    }").unwrap_or(resolver.len())];
         assert!(
-            caller.contains("w.wait()"),
-            "the caller's `Wait` arm must be where the wait happens"
+            resolver.contains("ticket.wait()"),
+            "`resolve_join` must be where the wait happens"
         );
-        // Nothing acquired around it: a lock taken in this arm would be held across another
-        // thread's whole reconstruction, which is the hold the two-phase read removes.
         for forbidden in ["Timed::acquire", "self.base()", ".read()", ".write()"] {
             assert!(
-                !caller.contains(forbidden),
-                "the caller's `Wait` arm contains `{forbidden}`: the wait is only cheap \
-                 because it is taken holding nothing"
+                !resolver.contains(forbidden),
+                "`resolve_join` contains `{forbidden}`: the wait is only cheap because it \
+                 is taken holding nothing"
             );
         }
+
+        // The wrapper's arm: its guard's scope must close before `ticket.wait()`.
+        let wrapper = src
+            .split("impl crate::session::Serving for std::sync::RwLock<RevEngine> {")
+            .nth(1)
+            .expect("the RwLock implementation");
+        let arm = wrapper
+            .split("QueryStep::Wait(plan) => {")
+            .nth(1)
+            .expect("the wrapper's wait arm");
+        let arm = &arm[..arm.find("\n                }").unwrap_or(arm.len())];
+        let wait_at = arm
+            .find("ticket.wait()")
+            .expect("the wrapper waits on the ticket");
+        assert!(
+            arm[..wait_at].find(".read()").is_none(),
+            "the `RwLock` wrapper takes its own lock and then waits. O would be held shared \
+             for the length of another reader's fold, and a `reseed` queued behind it stops \
+             every later reader — `std::sync::RwLock` is writer-preferring on both hosts \
+             this project measures."
+        );
     }
 
     /// **The install is a second, separate hold — and the fold is between them.**

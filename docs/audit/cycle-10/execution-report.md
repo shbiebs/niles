@@ -795,3 +795,135 @@ of which it did in this cycle — and it is **not** a Darwin execution environme
 work order that assigns a Darwin-specific check to the executor rather than to the author is
 assigning it to a machine that cannot run it.
 
+
+---
+
+## T02 — Make public query and conservation claims truthful
+
+Branch `c10/02-read-safety`, commit `73fe782`. Closes A10-06 and A10-07; narrows LC-41.
+
+**Target T02.1 (verbatim):** *Runtime installation refuses every unsupported reachable graph in
+the guard corpus while all supported keyed balance circuits still agree with an independent fold
+after advance and eviction.* — **done.**
+`nilestream_core::rev::tests::every_unsupported_reachable_graph_is_refused_at_install` and
+`a_supported_keyed_balance_still_agrees_with_an_independent_fold_after_advance_and_eviction`.
+
+**Target T02.2 (verbatim):** *Every accepted conserve declaration has the grouping semantics
+admission actually enforces, and unsupported or conflicting partition declarations are refused
+with a named diagnostic instead of being silently overwritten or ignored.* — **done.**
+`niles_lang::resolve::conserve_grouping_tests`, nine cases.
+
+### What A10-06 actually was
+
+`Runtime::install` read `circuit.outputs` and stopped. An output that was a keyed `sum` with a
+key installed, **whatever fed it**.
+
+The reason this is not an ordinary missing refusal is what happens after `install` returns:
+nothing reads the circuit again. Every answer comes from `Base::reconstruct`, whose whole
+signature is a key and an epoch — the production implementation
+(`proto_engine::ledger`) sums every posting for `(acct, cur)` and has no way to be told about a
+predicate. So a `Source → Filter → Aggregate` circuit did not execute the filter badly. It did
+not execute it at all, and the view answered as though the filter were absent: no error, no
+approximation, the unfiltered sum. **That is exactly the number an answer-level assertion
+expects**, which is why the defect survived four audit cycles with the whole suite green.
+
+`install` now walks every node reachable from each output and accepts only one keyed
+`sum`/`count` directly over one immutable base source. Two new refusals name the node and the
+reason: `Unsupported::Upstream` for a stage that would be dropped, `Unsupported::DerivedSource`
+for a source this runtime does not hold.
+
+**A documented claim that the code did not make true.** `thesis_drift::theorem_4_1_names_its_fragment`
+asserts that Theorem 4.1's fragment is a property of the artifact, and its evidence is that
+`Runtime::install` refuses a join. It read `install`'s doc comment, which said so. The function
+refused a join *as an output* and installed one *under an aggregate*. The comment was true of
+what the function meant; the test was checking the comment.
+
+**Cost, recorded rather than tuned away.** The walk allocates a `BTreeSet` and a `Vec` per
+output: `ledger_seeded` moves 150,254 → 150,263 allocations in `E18-counts.csv`, nine per
+install. Per operation it is unchanged at 3.8. Both figures reproduce exactly — HEAD measured
+150,254 three times in a detached worktree, this tree 150,263 three times.
+
+### What A10-07 actually was
+
+`conserve per (..)` was parsed, its columns name-checked against the relation, and then
+`conserve_keys` reached **no consumer anywhere below the compiler**. Admission conserves per
+(transaction, currency) unconditionally. So `conserve per (txn, desk)` compiled clean, reads as
+a promise of per-desk segregation, and bought nothing at all.
+
+A repeated clause was worse. `relation_info` assigned each `Conserve` rule over the last, so
+`conserve per (txn, cur); conserve per (desk);` compiled and the rule a reader would name as
+the ledger's was the one discarded — silently, with no diagnostic and no record.
+
+- **NL0224** refuses a second `conserve` clause and points at the first.
+- **NL0225** refuses a grouping the seal does not enforce, and says what it does enforce.
+
+The accepted set is the enforced set: exactly the relation's sole `TxnId` column and its sole
+`Currency` column, compared **as a set**, because `(cur, txn)` names the same partition and
+refusing it would be a statement about writing order. A ledger with no `Currency` column, or
+with two, is refused by shape rather than by key — the keys may be exactly what the author
+meant on a relation that cannot carry the rule.
+
+**The check is on types, not spellings, and that is load-bearing.** The H-S8 falsifier of
+§9.11.1 conserves a non-monetary quantity through a `Currency` column that is not called `cur`.
+A rule keyed on the literal name would refuse the one file in the corpus that tests whether
+this machinery is general. The fixture in `conserve_grouping_tests` is deliberately
+domain-neutral for the same reason: the falsifier's standing claim is that no source file under
+`crates/niles-lang`, `crates/niles-ir` or `crates/nilestream-core` contains a word from its
+domain, and the first draft of that test broke it. The existing guard caught it.
+
+**This refuses; it does not implement segregation.** Per-group zero sums are weaker than
+forbidding cross-group flow — two opposite cross-group legs in one transaction cancel inside
+each group and the partition is still violated. A real rule needs an admissible-edge policy
+with a stated allowance for FX and linked legs, which is LC-41 and the author's to choose. The
+work order's instruction was followed exactly: refuse the unsupported declarations first, and
+do not invent a policy.
+
+### Revert witnesses
+
+Every guard was proved to fail on the reverted change in a disposable `git worktree`, and every
+witness is an assertion failure rather than a compile error.
+
+| Reverted | Guard | What it printed |
+|---|---|---|
+| the graph walk in `install` | `every_unsupported_reachable_graph_is_refused_at_install` | `installed a circuit with a filter between the source and the aggregate` |
+| W3b (the grouping check) | four `conserve_grouping_tests` | `` `conserve per (txn, acct)` … must not compile. got [] `` |
+| the silent overwrite restored | `a_second_conservation_rule_is_refused…` | `` got ["NL0225"] `` — NL0224 goes silent and the *wrong* rule is checked |
+| the derived exclusion hand-written | `the_reproduce_diff_excludes_exactly_what_the_manifest_says_is_incomparable` | three separate refusals (no variable; literal `:!`; class unselected) |
+
+---
+
+## Correction to §"1. Flights never fall behind" — dated 2026-09-08
+
+**The paragraph above that says the deferred-merge window "is empty by construction" is wrong,
+and this correction supersedes it.** The original sentence is left standing as written; this is
+the amendment, per the audit protocol.
+
+The error was reading two counters as one.
+
+- **`flights_that_fell_behind`** increments when the view's `applied` moves *between* a
+  flight's begin and its landing.
+- **`pinned_installs`** increments when the landing anchor is below `applied` **at all**, which
+  includes every flight that *began* behind and never moved.
+
+The suffix a deferred merge folds is `(anchor, applied]` **at landing** — the second counter,
+not the first. The zero is real and structural, and it means no flight falls behind *while
+folding*. It says nothing about whether there is a suffix to merge.
+
+Fact 3 of this same report already recorded the number and the earlier paragraph did not carry
+it: **45,282 pinned installs against 45,681 installs — 99.1% — with an arrival gap of four to
+five epochs.** The merge window is open on essentially every install. It is opened by *arrival
+lag*, not by fold duration: readers sample a frontier a few epochs behind the view's applied
+point. Different mechanism, different cost model, and a real non-empty suffix.
+
+So **T04.1 is buildable** and the disposition offered to the author on the strength of the
+original paragraph — record T04 as a negative experiment — was withdrawn before it was acted
+on.
+
+**One thing the original zero could not have told anyone, and now can.** Nothing in the tree
+ever asserted `flights_that_fell_behind` could be non-zero. An instrument reading zero because
+it is dead reads exactly like an instrument reading zero because the event does not occur, and
+the baseline reported that zero across 28 replicates on two hosts with no evidence of which it
+was. `nilestream_core::rev::deferred_merge_window_tests` closes that: one test drives the
+interleaving through the two-phase API directly and requires the counter to move; the other
+states the served path's exclusion as arithmetic over `applied` rather than as an observed
+schedule. Both land in this commit, and they are worth having whatever T04 becomes.

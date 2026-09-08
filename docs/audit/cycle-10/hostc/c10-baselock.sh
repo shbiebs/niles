@@ -92,14 +92,39 @@ skip()  { SKIPPED="${SKIPPED}
 # in the transcript names a build that does not exist.
 check_clean_repo() {
   repo="$1"
-  dirty="$(git -C "$repo" status --porcelain 2>/dev/null)"
+  # **Tracked files only, and the reason is not leniency.** Each arm is built in a detached
+  # worktree at a resolved SHA, so nothing in the author's working tree reaches the binary
+  # either way; what the check is protecting is the transcript's *label*, which says "the
+  # checked-out build". A modified tracked file makes that label name a build that exists
+  # nowhere. An untracked file cannot: it is in no commit and in no worktree.
+  #
+  # This matters concretely. Host C's `niles` checkout permanently carries five untracked
+  # files — `.DS_Store`, `AGENTS.md`, `niles/.DS_Store`, `thesis/.DS_Store` and
+  # `thesis/Niles-Thesis.pdf` — which the audit protocol says are never to be touched. A
+  # check that refused on those would refuse every run on the machine the run is for, and the
+  # obvious way out would have been to delete them.
+  dirty="$(git -C "$repo" status --porcelain --untracked-files=no 2>/dev/null)"
   if [ -n "$dirty" ]; then
-    note "REFUSED: $repo has uncommitted changes, so the SHA below would name a build that"
+    note "REFUSED: $repo has modified tracked files, so the SHA below would name a build that"
     note "         is not the one measured:"
     printf '%s\n' "$dirty" | head -20 | sed 's/^/           /'
     return 1
   fi
   return 0
+}
+
+# Untracked files are not a refusal, but they are not invisible either: they are counted and
+# named in the preflight so a reader can see what is in the tree that is in no commit.
+report_untracked() {
+  repo="$1"
+  u="$(git -C "$repo" ls-files --others --exclude-standard 2>/dev/null)"
+  if [ -z "$u" ]; then
+    note "untracked       : none"
+    return 0
+  fi
+  n="$(printf '%s\n' "$u" | wc -l | tr -d ' ')"
+  note "untracked       : $n file(s), in no commit and in no built worktree:"
+  printf '%s\n' "$u" | head -12 | sed 's/^/                  /'
 }
 
 # A worktree left over from an earlier run sits at whatever commit that run built. Reusing it
@@ -268,8 +293,13 @@ if [ "$SELF_TEST" -eq 1 ]; then
     && echo one > a.txt && git add a.txt && git commit -qm one ) >/dev/null 2>&1
   expect_accept "a clean repository"                     check_clean_repo "$TD/rep"
   echo two >> "$TD/rep/a.txt"
-  expect_refusal "a dirty repository"                    check_clean_repo "$TD/rep"
+  expect_refusal "a repository with a modified tracked file" check_clean_repo "$TD/rep"
   ( cd "$TD/rep" && git checkout -q -- . )
+  # An untracked file must NOT be a refusal: Host C's checkout permanently carries five, and
+  # a check that refused on those would refuse every run on the machine it was written for.
+  echo scratch > "$TD/rep/untracked-thing.txt"
+  expect_accept "a repository with only untracked files"  check_clean_repo "$TD/rep"
+  rm -f "$TD/rep/untracked-thing.txt"
 
   # stale worktree, and a matching one
   SHA="$(git -C "$TD/rep" rev-parse HEAD)"
@@ -394,6 +424,7 @@ if ! command -v cargo >/dev/null 2>&1; then
 fi
 
 check_clean_repo "$REPO" || exit 3
+report_untracked "$REPO"
 
 if [ -z "$BASELINE_REF" ]; then
   BASELINE_REF="$(git -C "$REPO" rev-parse --abbrev-ref HEAD 2>/dev/null)"

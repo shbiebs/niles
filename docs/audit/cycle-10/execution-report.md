@@ -218,8 +218,13 @@ leftover worktree at whatever commit that worktree happened to be at, swallowed 
 failures, never checked the port, never bounded a replicate, and never noticed a level with no
 writer progress or a column the server does not have.
 
-* The baseline is the checked-out build, resolved to a full SHA and printed. A dirty
-  repository is refused; a worktree whose HEAD is not the SHA under test is refused.
+* The baseline is the checked-out build, resolved to a full SHA and printed. A repository
+  with **modified tracked files** is refused; a worktree whose HEAD is not the SHA under test
+  is refused. Untracked files are counted and named in the preflight but are not a refusal —
+  each arm is built in a detached worktree at a resolved SHA, so an untracked file reaches no
+  binary, and Host C's checkout permanently carries the five files the protocol forbids
+  touching. A check that refused on those would have refused every run on the machine it was
+  written for, and the obvious way out would have been to delete them.
 * **Two working points per level, labelled.** The historical 2,000 accounts / 2,500 budget —
   a budget above the distinct key count, so the view is effectively full — and 2,000 / 400,
   which is genuinely partial. Cycle 9 measured only the first and wrote about partial

@@ -2,7 +2,7 @@
 # Audit preflight — run this FIRST, in whatever container you are auditing from, and paste
 # its entire output at the top of your work order.
 #
-#   bash docs/audit/cycle-8/preflight.sh            # from a clone of `niles`
+#   bash docs/audit/cycle-9/preflight.sh            # from a clone of `niles`
 #   bash preflight.sh /path/to/niles /path/to/gbs   # or name both trees
 #
 # It writes nothing outside its own scratch directory and touches no tracked file. It
@@ -135,6 +135,9 @@ say "psql             : $(psql --version 2>/dev/null || echo ABSENT)"
 say "postgres         : $(postgres --version 2>/dev/null || pg_config --version 2>/dev/null || echo ABSENT)"
 if command -v pg_isready >/dev/null 2>&1; then
   say "pg_isready       : $(pg_isready 2>&1 | tail -1)"
+  # The benchmark's own PostgreSQL is a second server on 5433, not the test suite's on 5432.
+  # `run6.sh` sections B and C, and therefore the E16/E19 republish, refuse without it.
+  say "bench PostgreSQL : $(pg_isready -h 127.0.0.1 -p 5433 2>&1 | tail -1)"
 else
   say "pg_isready       : ABSENT"
 fi

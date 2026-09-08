@@ -95,10 +95,18 @@ pick_toolchain() {
   # pin makes rustup try to *download* the toolchain — which is a network access at execution
   # time, and this cycle's standing rule is that no task requires one.
   export RUSTUP_AUTO_INSTALL=0
+  # **Probe the pin, not whatever the caller already exported.** This asked `rustc --version`
+  # with the inherited environment and then, on success, concluded that the *tree's pin*
+  # resolves and unset the override. A shell that already had `RUSTUP_TOOLCHAIN=stable` set —
+  # which is how the executor's container has to build at all, the pinned 1.95.0 being
+  # unfetchable without egress — therefore reported "the tree's pin resolves on this host",
+  # removed the very override that made it true, and every `cargo` below failed with
+  # `toolchain 1.95.0 is not installed`. The probe has to measure the thing it is deciding
+  # about, so the override is cleared before it rather than after.
+  unset RUSTUP_TOOLCHAIN
   if rustc --version >/dev/null 2>&1; then
     TOOLCHAIN_USED="$(rustc --version 2>&1)"
     TOOLCHAIN_HOW="the tree's pin, which resolves on this host"
-    unset RUSTUP_TOOLCHAIN
   else
     export RUSTUP_TOOLCHAIN=stable
     TOOLCHAIN_USED="$(rustc --version 2>&1)"

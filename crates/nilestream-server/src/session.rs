@@ -20,6 +20,74 @@
 use crate::pg_wire::{self, Backend, Field, Frontend};
 use niles_lang::diagnostics::Severity;
 
+/// **`select nilestream_slow_reads`, declared once.**
+///
+/// The name a client is told, the wire type it is told, and the value it is sent, in one
+/// list, because keeping them in two lists is a defect this cycle actually shipped: six
+/// phase columns were added to the `DataRow` and the `RowDescription` was left at five, so
+/// eleven values arrived under six names. Nothing in the build objects to that — a row wider
+/// than its description is well-formed on the wire — and the only symptom is a client that
+/// reads `rounding_us` under the heading `view_hold_us` and believes it.
+///
+/// Written as a table rather than guarded by a test, because the test that would have caught
+/// it is vacuous whenever the table happens to be empty: it iterates the rows, and there are
+/// no rows to be wrong. Equal width is now a property of the code, not of the run.
+///
+/// The third element takes the row's index as well as the trace, which is what `rank` needs
+/// and every other column ignores.
+type SlowReadColumn = (
+    &'static str,
+    fn(&str) -> Field,
+    fn(&crate::lockstats::ReadTrace, usize) -> String,
+);
+
+const SLOW_READ_COLUMNS: &[SlowReadColumn] = &[
+    ("rank", Field::int8, |_, i| i.to_string()),
+    ("total_us", Field::int8, |t, _| t.total_us.to_string()),
+    ("base_wait_us", Field::int8, |t, _| t.base_wait_us.to_string()),
+    ("view_wait_us", Field::int8, |t, _| t.view_wait_us.to_string()),
+    // The *first* hold. The second is its own column below: adding them made one number out
+    // of two questions, and the install's wait was in neither (A10-08).
+    ("view_hold_us", Field::int8, |t, _| t.view_hold_us.to_string()),
+    ("view_wait2_us", Field::int8, |t, _| {
+        t.view_wait2_us.to_string()
+    }),
+    ("view_hold2_us", Field::int8, |t, _| {
+        t.view_hold2_us.to_string()
+    }),
+    ("fold_us", Field::int8, |t, _| t.fold_us.to_string()),
+    // Which phases a given row even ran: a hit has no fold, a joined read returns before the
+    // second view acquisition, and averaging the three together is how a tail gets blamed on
+    // a lock that a third of the rows never took.
+    ("outcome", Field::text, |t, _| t.outcome.as_str().to_string()),
+    ("gap_begin", Field::int8, |t, _| t.gap_begin.to_string()),
+    ("gap_finish", Field::int8, |t, _| t.gap_finish.to_string()),
+    // **Rounding, and the slivers between phases — nothing else.** This column was called
+    // `unaccounted_us` and described as "what the engine cannot see: the wire, the framing,
+    // and whatever the scheduler did between them". It is none of those. Every timestamp it
+    // is computed from is taken inside `answer_from_view`, so the six named phases partition
+    // the total up to (a) the truncation of six microsecond divisions and (b) the two
+    // un-timed hand-offs between them. Cycle 8's attribution quoted this column as evidence
+    // that everything outside the view wait was under 2 µs; it was evidence of integer
+    // division (A9-F07), and it was computed against three phases while three more existed
+    // unmeasured (A10-08).
+    //
+    // The wire and the framing are measured now, by `STATEMENT` and `WIRE` in
+    // `select nilestream_lockstats`, which have boundaries that actually contain them.
+    ("rounding_us", Field::int8, |t, _| {
+        t.total_us
+            .saturating_sub(
+                t.base_wait_us
+                    + t.view_wait_us
+                    + t.view_hold_us
+                    + t.fold_us
+                    + t.view_wait2_us
+                    + t.view_hold2_us,
+            )
+            .to_string()
+    }),
+];
+
 /// What the session can serve from. Kept as a trait so the session can be tested without a
 /// running engine, and so the same code serves the in-memory prototype and a durable one.
 /// **An applied epoch and the receipt for its barrier.**
@@ -1154,68 +1222,23 @@ impl Session {
         if lower.starts_with("select") && lower.contains("nilestream_slow_reads") {
             let mut rows = Vec::new();
             for (i, t) in crate::lockstats::SLOW_READS.snapshot().iter().enumerate() {
-                rows.push(Backend::DataRow(vec![
-                    Some(i.to_string()),
-                    Some(t.total_us.to_string()),
-                    Some(t.base_wait_us.to_string()),
-                    Some(t.view_wait_us.to_string()),
-                    Some(t.view_hold_us.to_string()),
-                    Some(t.view_wait2_us.to_string()),
-                    Some(t.view_hold2_us.to_string()),
-                    Some(t.fold_us.to_string()),
-                    Some(t.outcome.as_str().to_string()),
-                    Some(t.gap_begin.to_string()),
-                    Some(t.gap_finish.to_string()),
-                    // **Rounding, and the slivers between phases — nothing else.** This
-                    // column was called `unaccounted_us` and described as "what the engine
-                    // cannot see: the wire, the framing, and whatever the scheduler did
-                    // between them". It is none of those. Every timestamp it is computed
-                    // from is taken inside `answer_from_view`, so the six named phases
-                    // partition the total up to (a) the truncation of six microsecond
-                    // divisions and (b) the two un-timed hand-offs between them — the
-                    // instruction between `decided` and the fold's start, and the one
-                    // between the install hold ending and `view_done`. Cycle 8's
-                    // attribution quoted this column as evidence that everything outside
-                    // the view wait was under 2 µs; it was evidence of integer division
-                    // (A9-F07), and it was computed against three phases while three more
-                    // existed unmeasured (A10-08), which is why it is not evidence of
-                    // anything on its own.
-                    //
-                    // The wire and the framing are measured now, by `STATEMENT` and `WIRE`
-                    // in `select nilestream_lockstats`, which have boundaries that actually
-                    // contain them.
-                    Some(
-                        t.total_us
-                            .saturating_sub(
-                                t.base_wait_us
-                                    + t.view_wait_us
-                                    + t.view_hold_us
-                                    + t.fold_us
-                                    + t.view_wait2_us
-                                    + t.view_hold2_us,
-                            )
-                            .to_string(),
-                    ),
-                ]));
+                rows.push(Backend::DataRow(
+                    SLOW_READ_COLUMNS
+                        .iter()
+                        .map(|(_, _, value)| Some(value(t, i)))
+                        .collect(),
+                ));
             }
             if lower.contains("reset") {
                 crate::lockstats::SLOW_READS.reset();
             }
             let n = rows.len();
-            let mut out = vec![Backend::RowDescription(vec![
-                Field::int8("rank"),
-                Field::int8("total_us"),
-                Field::int8("base_wait_us"),
-                Field::int8("view_wait_us"),
-                Field::int8("view_hold_us"),
-                Field::int8("view_wait2_us"),
-                Field::int8("view_hold2_us"),
-                Field::int8("fold_us"),
-                Field::text("outcome"),
-                Field::int8("gap_begin"),
-                Field::int8("gap_finish"),
-                Field::int8("rounding_us"),
-            ])];
+            let mut out = vec![Backend::RowDescription(
+                SLOW_READ_COLUMNS
+                    .iter()
+                    .map(|(name, declare, _)| declare(name))
+                    .collect(),
+            )];
             out.extend(rows);
             out.push(Backend::CommandComplete(format!("SELECT {n}")));
             return out;
@@ -2948,25 +2971,23 @@ schema bank {
 
     /// **Every slow-read column is declared, and the declaration matches the row — T00.2.**
     ///
-    /// This guard exists because the failure it catches happened. The six phase columns
-    /// added this cycle were emitted as `DataRow` values while the `RowDescription` still
-    /// declared five: a `psql` reading the table would have shown eleven values under six
-    /// names, silently shifting every column's meaning by five positions — the residual
-    /// read as `view_hold_us`, and so on. Nothing in the build objects to a row that is
-    /// wider than its description; only a client does, and only by lying.
+    /// This guard exists because the failure it describes happened in this cycle's own tree:
+    /// six phase columns were emitted as `DataRow` values while the `RowDescription` still
+    /// declared five, so a client would have shown eleven values under six names — the
+    /// remainder read as `view_hold_us`, and every column after it off by five. Nothing in
+    /// the build objects to a row wider than its description; only a client does, and only
+    /// by lying.
     ///
-    /// So the assertion is not "the names I want are present" but "the description and
-    /// the row have the same width", which is the property that was actually violated.
+    /// The repair was not this test. A test that iterates the emitted rows asserts nothing
+    /// at all when the table is empty, which it is on any run where no keyed read reached
+    /// the view — and the first draft of this guard passed against a deliberately broken
+    /// build for exactly that reason. Both sides are now generated from `SLOW_READ_COLUMNS`,
+    /// so equal width is a property of the code; what is left to check is that the list
+    /// still names what the benchmark and the audit read it for, and that the generation
+    /// really is driving both.
     #[test]
     fn the_slow_read_table_declares_every_column_it_emits() {
         let (mut s, e) = (session(), engine());
-        // A read that reaches the view, so the table has at least one row to be wrong about.
-        for i in 0..8u64 {
-            let _ = s.handle(
-                Frontend::Query(format!("select bal from balances where acct = {}", i % 3)),
-                &e,
-            );
-        }
         let out = s.handle(Frontend::Query("select nilestream_slow_reads".into()), &e);
         let names: Vec<String> = out
             .iter()
@@ -2975,6 +2996,15 @@ schema bank {
                 _ => None,
             })
             .expect("a row description");
+        assert_eq!(
+            names,
+            SLOW_READ_COLUMNS
+                .iter()
+                .map(|(n, _, _)| n.to_string())
+                .collect::<Vec<_>>(),
+            "the row description must be generated from the column table and not written \
+             out beside it"
+        );
         for wanted in [
             "rank",
             "total_us",
@@ -2994,7 +3024,33 @@ schema bank {
                 "`select nilestream_slow_reads` must name `{wanted}`; got {names:?}"
             );
         }
-        for (i, row) in rows_of(&out).iter().enumerate() {
+        // **A row, produced on purpose rather than hoped for.** The table is process-global
+        // and a run in which no keyed read reached the view leaves it empty, which is how
+        // the width check in the first draft of this guard passed against a build that
+        // emitted eleven values under six names. Offering a trace directly makes the check
+        // about the wire shape and not about what else happened to run.
+        crate::lockstats::SLOW_READS.offer(
+            u64::MAX,
+            crate::lockstats::ReadTrace {
+                total_us: 999_999,
+                base_wait_us: 1,
+                view_wait_us: 2,
+                view_hold_us: 3,
+                view_wait2_us: 4,
+                view_hold2_us: 5,
+                fold_us: 6,
+                outcome: crate::lockstats::ReadOutcome::FoldOwned,
+                gap_begin: 7,
+                gap_finish: 8,
+            },
+        );
+        let out = s.handle(Frontend::Query("select nilestream_slow_reads".into()), &e);
+        let rows = rows_of(&out);
+        assert!(
+            !rows.is_empty(),
+            "a trace offered with the largest possible total must be in the slowest-N table"
+        );
+        for (i, row) in rows.iter().enumerate() {
             assert_eq!(
                 row.len(),
                 names.len(),

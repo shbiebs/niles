@@ -442,9 +442,10 @@ note "that table between levels, so this is run FIRST: a baseline that can hang 
 note "baseline, and a hang here means the run is blocked, not slow."
 DW_LOG="$OUT/deadlock-witness.log"
 ( cd "$REPO" && RUSTUP_TOOLCHAIN=stable RUSTUP_AUTO_INSTALL=0 CARGO_NET_OFFLINE=true \
-    cargo test --offline -p nilestream-server --lib \
+    cargo test --offline -p nilestream-server --lib -- \
       a_stats_snapshot_and_a_concurrent_append_both_finish \
-      the_base_is_acquired_before_the_view_on_every_path_that_takes_both ) \
+      the_base_is_acquired_before_the_view_on_every_path_that_takes_both \
+      the_read_path_takes_the_base_shared_and_the_append_takes_it_exclusively ) \
   >"$DW_LOG" 2>&1
 DW_RC=$?
 if [ "$DW_RC" -eq 0 ]; then

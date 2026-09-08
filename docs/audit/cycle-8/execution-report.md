@@ -46,8 +46,11 @@ are in §5.
 [x] T-12.2 — the mixed report prints, for the slowest 16 reads of the phase, a per-read breakdown: B wait, V wait, compute, wire.
       as `select nilestream_slow_reads`: base wait, view wait, view hold, and `unaccounted_us`
       — the remainder, which is the column that decides whether any lock is implicated.
-[ ] T-12.3 — run6.sh reproduces run 4's three shapes with the breakdown; the report states which of {B, V, scheduler/barrier, wire} the ≥ 10 ms reads sit in. (needs the author)
-      not done: needs Host C. The first attempt failed for a defect in my own script (§5).
+[x] T-12.3 — run6.sh reproduces run 4's three shapes with the breakdown; the report states which of {B, V, scheduler/barrier, wire} the ≥ 10 ms reads sit in. (needs the author)
+      done, on the third attempt (two script defects, §5). **The answer is V, then B, and
+      neither the scheduler nor the wire**: `unaccounted_us` is 0–2 µs in all 160 recorded
+      reads. The work order's own hypothesis is refuted.
+      `docs/audit/cycle-8/lc-23-attribution.md`, and §11 below.
 [x] T-13.1 — nilesc time FILE prints, per item, lexing, parsing, resolving, typing, lowering and verifying in instructions under callgrind and in µs otherwise, one line per item, one summary line.
       done in µs per *phase* with a per-item summary. Instructions under callgrind are **not
       available as a deterministic figure** and that is a result, not an omission: §3.
@@ -422,10 +425,6 @@ No author-side uncommitted edit was contained in any incoming commit this cycle,
 
 ## §10 What was not done, in the words of its target line
 
-* **T-12.3** — "`run6.sh` reproduces run 4's three shapes with the breakdown; the report
-  states which of {B, V, scheduler/barrier, wire} the ≥ 10 ms reads sit in." The instrument
-  is built and the script is fixed; the run is the author's, and the first attempt failed on
-  the missing `--nls-only`.
 * **T-15.1** — "`bench --run --baseline <sha> --baseline-bin <path>` runs both arms in one
   process, interleaved…" Structural, not an omission: §1 and `docs/BENCHMARK.md` carry the
   reason and the design.
@@ -438,12 +437,56 @@ No author-side uncommitted edit was contained in any incoming commit this cycle,
 
 ### For the next work order
 
-* **LC-23 is now answerable** and should be answered before anything is changed about the
-  base guard: `nilestream_slow_reads` exists, and its `unaccounted_us` column decides whether
-  any lock is implicated at all.
+* **LC-23 is answered — see §11.** The next cycle's first task is `Slot::Pending`: the
+  lattice's third state, which the runtime has never entered, and which is what lets a
+  reconstruction happen outside the view's lock.
 * **The plan cache's bound is FIFO at 256 and nobody has measured its hit rate.** The policy
   question — FIFO, LRU, or a larger limit — should be decided by a measurement, not by
   another comment.
 * **The idempotency window's default is "none declared, keep everything."** The daemon says
   so in its banner, and the shipped schema declares 1,000,000 epochs. Whether an undeclared
   window should be a refusal rather than a default belongs beside LC-16.
+
+---
+
+## §11 LC-23, answered — and the work order's hypothesis refuted
+
+The full write-up is `docs/audit/cycle-8/lc-23-attribution.md`. In short, from Host C at
+`d8ad061`:
+
+* `unaccounted_us` — everything a server-side keyed read does that is not waiting for the
+  base guard, waiting for the view mutex, or holding the view — is **0 to 2 µs in all 160 of
+  the slowest reads recorded, at every shape.** The tail is entirely inside the engine's two
+  locks. Work order 8 predicted the opposite: "the tail is the Mac's `F_FULLFSYNC` and a core
+  count, not the engine." It is the engine.
+* Read throughput **falls** as readers are added: 94,038/s at six connections, 48,310 at
+  nine, 20,507 at twelve, with p50 rising 37 → 176 → 596 µs. A queue, not a saturation curve.
+* The slowest read at twelve connections waited **22,160 µs on the view mutex**. Several
+  reads *held* the view for over a millisecond, where a keyed read against resident state is
+  microseconds.
+
+The mechanism is in `Rev::read`: on a miss it calls `base.reconstruct(key, anchor)` — a fold
+whose cost is the key's history — **while its caller holds the view mutex**. With a residency
+budget of 2,500 against 10,000 accounts, three keys in four are evicted at any moment, so
+this is the steady state rather than a rare event. It explains the millisecond holds (one
+reconstruction), the twenty-millisecond waits (the queue behind them), and the decay within
+each level as the base grows.
+
+**The lattice already contains the repair and the runtime has never reached it.**
+`Slot::Pending` — the third of chapter 3's four states, whose stated purpose is that "a second
+reader arriving during an upquery must join it rather than start a second one" — is
+constructed nowhere in `nilestream-core`. The engine implements three states and the thesis
+describes four. Marked `MISMATCH-pending-unreachable` in chapter 3.
+
+This is not a change to make at the end of a cycle. It touches the certification interval,
+which is the central object of the thesis, and it must be measured before and after on this
+host. It is cycle 9's first task, and it displaces the base-guard question: `append` holding
+the base write guard across `advance` does contribute — the worst 9r/5w read waited 3.3 ms on
+it — but the view mutex is both larger and structurally avoidable, and changing the lock
+order to chase the smaller of the two would be the wrong order of work.
+
+One instrument defect, fixed in the same commit: `SLOW_READS` was never emptied, so each
+level's table was the previous level's with a few rows added — the first Host C run printed
+ten tables of which six were identical, and the shape a reader most needed (how the tail
+*grows* with connections) was the one thing they could not show. `select nilestream_slow_reads
+reset` now empties it on the way out, and each table is stamped with its level's shape.

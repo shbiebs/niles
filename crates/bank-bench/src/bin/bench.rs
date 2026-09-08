@@ -2258,7 +2258,7 @@ fn run_nilestream_level(
             m.lock_wait_p99_us = wait;
             m.base_epochs = nls_frontier(nls_port);
             report_mixed(&m);
-            report_slow_reads(nls_port);
+            report_slow_reads(nls_port, &format!("{}r/{}w", m.readers, m.writers));
             out_mixed.push(m);
         }
     }
@@ -2329,15 +2329,18 @@ fn report_mixed(m: &workloads::MixedSample) {
 /// into base wait, view wait, view hold, and the remainder — which is the wire, the framing
 /// and whatever the scheduler did between them. A tail that is all remainder is not a lock
 /// this engine holds, and saying so needs the column rather than an argument.
-fn report_slow_reads(port: u16) {
+fn report_slow_reads(port: u16, shape: &str) {
     let Ok(mut c) = bank_bench::wire::Client::connect("127.0.0.1", port, "bench", "bank") else {
         return;
     };
-    let Ok(r) = c.simple("select nilestream_slow_reads") else {
+    // `reset` empties the table on the way out, so the next level's is the next level's.
+    let Ok(r) = c.simple("select nilestream_slow_reads reset") else {
         return;
     };
     if r.rows.is_empty() {
-        eprintln!("  slowest keyed reads: none recorded (no keyed read reached the view)");
+        eprintln!(
+            "  slowest keyed reads at {shape}: none recorded (no keyed read reached the view)"
+        );
         return;
     }
     let at = |row: &Vec<Option<String>>, name: &str| -> u64 {
@@ -2347,7 +2350,7 @@ fn report_slow_reads(port: u16) {
             .and_then(|i| row.get(i)?.as_ref()?.trim().parse().ok())
             .unwrap_or(0)
     };
-    eprintln!("  slowest keyed reads (server-side), µs:");
+    eprintln!("  slowest keyed reads at {shape} (server-side), µs:");
     eprintln!("    rank | total | base wait | view wait | view hold | unaccounted");
     for (i, row) in r.rows.iter().enumerate() {
         eprintln!(

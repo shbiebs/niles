@@ -386,6 +386,41 @@ mod view_lock_tests {
     /// and zeros read exactly like a lock nobody waits for — which is the answer this
     /// experiment is trying to distinguish from. So the guard is a deliberate 5 ms hold,
     /// asserted to appear.
+    /// A table that is not emptied is the previous level's table with a few rows added.
+    #[test]
+    fn a_reset_table_reports_only_what_came_after_it() {
+        SLOW_READS.reset();
+        SLOW_READS.offer(
+            9_000_000,
+            ReadTrace {
+                total_us: 9_000,
+                ..Default::default()
+            },
+        );
+        assert_eq!(SLOW_READS.snapshot().len(), 1);
+        SLOW_READS.reset();
+        assert!(
+            SLOW_READS.snapshot().is_empty(),
+            "a reset table must report nothing, or every level after the first is mostly a \
+             copy of the one before it"
+        );
+        // And the floor comes down with it: a 9 ms sample left behind would keep every
+        // ordinary read out of the next level's table.
+        SLOW_READS.offer(
+            50_000,
+            ReadTrace {
+                total_us: 50,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            SLOW_READS.snapshot().len(),
+            1,
+            "the floor must reset with the table"
+        );
+        SLOW_READS.reset();
+    }
+
     #[test]
     fn a_long_hold_on_the_view_lands_in_the_view_histogram() {
         let m = std::sync::Mutex::new(0u32);
@@ -540,6 +575,21 @@ impl SlowReads {
         if *len == Self::KEEP {
             self.floor_ns
                 .store(buf[Self::KEEP - 1].total_us * 1_000, Relaxed);
+        }
+    }
+
+    /// Forget everything kept so far.
+    ///
+    /// **A level's table must be that level's.** Without this the table is cumulative over
+    /// the process, so a 12-connection level's worst reads sit in the 6-connection level's
+    /// output and every table after the first is mostly a copy of the one before it. The
+    /// first Host C run printed ten tables of which six were identical, and the shape a
+    /// reader needed — how the tail *grows* with connections — was the one thing they could
+    /// not show.
+    pub fn reset(&self) {
+        self.floor_ns.store(0, Relaxed);
+        if let Ok(mut g) = self.samples.lock() {
+            g.1 = 0;
         }
     }
 

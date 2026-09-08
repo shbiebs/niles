@@ -920,6 +920,8 @@ impl Session {
         // reads: an aggregate cannot say whether that handful waited for the base, waited
         // for the view, or waited for nothing this process can see — which is the difference
         // between a lock to fix and a scheduler to stop blaming the engine for.
+        // `select nilestream_slow_reads reset` empties the table after reading it, so the
+        // next level's table is the next level's.
         if lower.starts_with("select") && lower.contains("nilestream_slow_reads") {
             let mut rows = Vec::new();
             for (i, t) in crate::lockstats::SLOW_READS.snapshot().iter().enumerate() {
@@ -938,6 +940,9 @@ impl Session {
                             .to_string(),
                     ),
                 ]));
+            }
+            if lower.contains("reset") {
+                crate::lockstats::SLOW_READS.reset();
             }
             let n = rows.len();
             let mut out = vec![Backend::RowDescription(vec![

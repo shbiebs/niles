@@ -44,11 +44,17 @@ type SlowReadColumn = (
 const SLOW_READ_COLUMNS: &[SlowReadColumn] = &[
     ("rank", Field::int8, |_, i| i.to_string()),
     ("total_us", Field::int8, |t, _| t.total_us.to_string()),
-    ("base_wait_us", Field::int8, |t, _| t.base_wait_us.to_string()),
-    ("view_wait_us", Field::int8, |t, _| t.view_wait_us.to_string()),
+    ("base_wait_us", Field::int8, |t, _| {
+        t.base_wait_us.to_string()
+    }),
+    ("view_wait_us", Field::int8, |t, _| {
+        t.view_wait_us.to_string()
+    }),
     // The *first* hold. The second is its own column below: adding them made one number out
     // of two questions, and the install's wait was in neither (A10-08).
-    ("view_hold_us", Field::int8, |t, _| t.view_hold_us.to_string()),
+    ("view_hold_us", Field::int8, |t, _| {
+        t.view_hold_us.to_string()
+    }),
     ("view_wait2_us", Field::int8, |t, _| {
         t.view_wait2_us.to_string()
     }),
@@ -59,7 +65,9 @@ const SLOW_READ_COLUMNS: &[SlowReadColumn] = &[
     // Which phases a given row even ran: a hit has no fold, a joined read returns before the
     // second view acquisition, and averaging the three together is how a tail gets blamed on
     // a lock that a third of the rows never took.
-    ("outcome", Field::text, |t, _| t.outcome.as_str().to_string()),
+    ("outcome", Field::text, |t, _| {
+        t.outcome.as_str().to_string()
+    }),
     ("gap_begin", Field::int8, |t, _| t.gap_begin.to_string()),
     ("gap_finish", Field::int8, |t, _| t.gap_finish.to_string()),
     // **Rounding, and the slivers between phases — nothing else.** This column was called
@@ -3121,22 +3129,39 @@ schema bank {
             "six scopes: the aggregate base, its two modes, then the nested scopes \
              outermost last"
         );
-        // **The split must add up to the aggregate it splits.** If a `TimedRead` or a
-        // `TimedWrite` stopped feeding both histograms, the modes would silently under-count
-        // and every attribution drawn from them would be wrong by an unknown amount.
-        let acq = |name: &str| -> u64 {
-            rows_of(&out)
-                .iter()
-                .find(|r| r.first().cloned().flatten().as_deref() == Some(name))
-                .and_then(|r| r[1].clone())
-                .and_then(|v| v.parse().ok())
-                .unwrap_or_else(|| panic!("the {name} row carries an acquisition count"))
-        };
-        assert_eq!(
-            acq("base_read") + acq("base_write"),
-            acq("base"),
-            "every base acquisition is either shared or exclusive and is counted once in \
-             each of the two places"
+        // **The split must be the aggregate's own declaration, not a coincidence.**
+        //
+        // The first draft of this check summed the two modes' acquisition counts and
+        // compared them to the aggregate's. It passed against a build with the shared-mode
+        // recording deleted, twice over: this test drives a `MemoryEngine`, which never
+        // takes `ENGINE_LOCK` at all, so the three counters it compared were whatever the
+        // rest of the process had left in them — and even given traffic, `0 + n == n` holds
+        // for a build that counts no shared acquisition.
+        //
+        // What is checked instead is the thing that makes the sum true by arithmetic: the
+        // base declares which histograms its two modes are recorded into, and the wire
+        // reports those two under the names the audit reads. `TimedRead` and `TimedWrite`
+        // record into whatever the lock declares, so a mode cannot be silently dropped by
+        // an edit to a `Drop` impl.
+        assert!(
+            std::ptr::eq(
+                crate::lockstats::ENGINE_LOCK
+                    .shared_mode()
+                    .expect("the base declares a shared-mode histogram"),
+                &crate::lockstats::BASE_READ
+            ),
+            "`base_read` must be the histogram a shared acquisition of the base is recorded \
+             into, or the column named `base_read` is not the shared mode"
+        );
+        assert!(
+            std::ptr::eq(
+                crate::lockstats::ENGINE_LOCK
+                    .exclusive_mode()
+                    .expect("the base declares an exclusive-mode histogram"),
+                &crate::lockstats::BASE_WRITE
+            ),
+            "`base_write` must be the histogram an exclusive acquisition of the base is \
+             recorded into"
         );
         let statement_before: u64 = rows_of(&out)
             .iter()

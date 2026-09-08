@@ -52,6 +52,23 @@ pub struct LockStats {
     hold_ns: AtomicU64,
     max_wait_ns: AtomicU64,
     max_hold_ns: AtomicU64,
+    /// **Where a shared acquisition of this lock is *also* recorded**, and where an
+    /// exclusive one is.
+    ///
+    /// A reader-writer lock reported as one histogram gives a p99 over a shared mode and an
+    /// exclusive mode that belongs to neither (A10-08). The split is declared here, on the
+    /// aggregate, rather than decided at the recording site: the first attempt tested for
+    /// the aggregate's address inside `TimedRead::drop` and `TimedWrite::drop`, which made
+    /// "the modes sum to the aggregate" a property of two `if`s in two `Drop` impls and
+    /// therefore a property a test had to check — and the test that checked it passed
+    /// against a build with the shared arm deleted, because the run it checked happened to
+    /// contain no shared acquisition.
+    ///
+    /// Declared, the sum is arithmetic: every `record` on the aggregate goes to exactly one
+    /// of these when the acquisition's mode is known, and to neither when it is not (a plain
+    /// mutex has no modes and leaves both `None`).
+    shared: Option<&'static LockStats>,
+    exclusive: Option<&'static LockStats>,
 }
 
 #[allow(clippy::declare_interior_mutable_const)]
@@ -67,7 +84,37 @@ impl LockStats {
             hold_ns: ZERO,
             max_wait_ns: ZERO,
             max_hold_ns: ZERO,
+            shared: None,
+            exclusive: None,
         }
+    }
+
+    /// A lock whose two modes are counted apart as well as together.
+    pub const fn with_modes(
+        shared: &'static LockStats,
+        exclusive: &'static LockStats,
+    ) -> LockStats {
+        LockStats {
+            wait: [ZERO; BUCKETS],
+            hold: [ZERO; BUCKETS],
+            acquisitions: ZERO,
+            wait_ns: ZERO,
+            hold_ns: ZERO,
+            max_wait_ns: ZERO,
+            max_hold_ns: ZERO,
+            shared: Some(shared),
+            exclusive: Some(exclusive),
+        }
+    }
+
+    /// The histogram a shared acquisition of this lock is also recorded into, if any.
+    pub fn shared_mode(&self) -> Option<&'static LockStats> {
+        self.shared
+    }
+
+    /// The histogram an exclusive acquisition of this lock is also recorded into, if any.
+    pub fn exclusive_mode(&self) -> Option<&'static LockStats> {
+        self.exclusive
     }
 
     fn bucket(ns: u64) -> usize {
@@ -200,7 +247,7 @@ impl Default for LockStats {
 /// the base held, and how long does a connection wait for it. A shared acquisition that
 /// waits for nothing records a zero wait, which is the shape a working reader-writer lock
 /// produces and the shape a mutex cannot.
-pub static ENGINE_LOCK: LockStats = LockStats::new();
+pub static ENGINE_LOCK: LockStats = LockStats::with_modes(&BASE_READ, &BASE_WRITE);
 
 /// **The base lock's two modes, separately — `base_read` and `base_write`.**
 ///
@@ -355,13 +402,20 @@ impl<T> Drop for TimedRead<'_, T> {
         let held = self.since.elapsed().as_nanos() as u64;
         drop(self.guard.take());
         self.stats.record(self.waited_ns, held);
-        // **The mode scope, beside the scope the caller named.** A shared acquisition of the
-        // base lands in `base_read` as well as in `ENGINE_LOCK`, so the aggregate keeps the
-        // meaning every prior cycle read it with and the two modes are separable for the first
-        // time. Recorded here rather than at the call site because a guard that returns early
-        // must still be counted, which is why this type exists at all.
-        if std::ptr::eq(self.stats, &ENGINE_LOCK) {
-            BASE_READ.record(self.waited_ns, held);
+        // **The mode scope, beside the scope the caller named.** A shared acquisition of a
+        // lock that declares its modes lands in the shared one as well as in the aggregate,
+        // so the aggregate keeps the meaning every prior cycle read it with and the two
+        // modes are separable for the first time.
+        //
+        // The lock says which histogram that is; this code does not test for a particular
+        // static's address. Two consequences, and both are the point: a second reader-writer
+        // lock gets the split by declaring it rather than by editing this `Drop`, and "the
+        // modes sum to the aggregate" stops being a claim about the branch below.
+        //
+        // Recorded here rather than at the call site because a guard that returns early must
+        // still be counted, which is why this type exists at all.
+        if let Some(mode) = self.stats.shared_mode() {
+            mode.record(self.waited_ns, held);
         }
     }
 }
@@ -407,8 +461,8 @@ impl<T> Drop for TimedWrite<'_, T> {
         let held = self.since.elapsed().as_nanos() as u64;
         drop(self.guard.take());
         self.stats.record(self.waited_ns, held);
-        if std::ptr::eq(self.stats, &ENGINE_LOCK) {
-            BASE_WRITE.record(self.waited_ns, held);
+        if let Some(mode) = self.stats.exclusive_mode() {
+            mode.record(self.waited_ns, held);
         }
     }
 }
@@ -416,6 +470,63 @@ impl<T> Drop for TimedWrite<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A declared mode is recorded into, and the aggregate is recorded into as well.**
+    ///
+    /// Deterministic because the lock it exercises is this test's own: `ENGINE_LOCK` is
+    /// process-global and every other test in the binary contributes to it, so a check
+    /// written against it either races or — as the first draft of this guard did — compares
+    /// three numbers that the run under test never touched and passes for that reason.
+    ///
+    /// The property: one shared acquisition and one exclusive acquisition leave the
+    /// aggregate at two and each mode at one. That is what makes `base_read + base_write ==
+    /// base` arithmetic rather than a hope, and what a `Drop` impl that stopped routing
+    /// would break.
+    #[test]
+    fn a_shared_acquisition_is_counted_in_the_aggregate_and_in_the_shared_mode() {
+        static AGG_SHARED: LockStats = LockStats::new();
+        static AGG_EXCLUSIVE: LockStats = LockStats::new();
+        static AGG: LockStats = LockStats::with_modes(&AGG_SHARED, &AGG_EXCLUSIVE);
+
+        let lock = std::sync::RwLock::new(0u32);
+        drop(TimedRead::acquire(&lock, &AGG));
+        drop(TimedWrite::acquire(&lock, &AGG));
+
+        let (agg, ..) = AGG.snapshot();
+        let (shared, ..) = AGG_SHARED.snapshot();
+        let (exclusive, ..) = AGG_EXCLUSIVE.snapshot();
+        assert_eq!(
+            shared, 1,
+            "the shared acquisition reached `base_read`'s analogue"
+        );
+        assert_eq!(
+            exclusive, 1,
+            "the exclusive acquisition reached `base_write`'s analogue"
+        );
+        assert_eq!(
+            agg, 2,
+            "both acquisitions are still in the aggregate, so a cycle that quoted the \
+             aggregate is quoting the same number it always was"
+        );
+        assert_eq!(
+            shared + exclusive,
+            agg,
+            "the modes partition the aggregate; this is the identity the wire's `base`, \
+             `base_read` and `base_write` columns are read with"
+        );
+    }
+
+    /// A lock with no declared modes records into itself and nowhere else.
+    #[test]
+    fn a_lock_without_modes_records_only_the_aggregate() {
+        static PLAIN: LockStats = LockStats::new();
+        assert!(PLAIN.shared_mode().is_none());
+        assert!(PLAIN.exclusive_mode().is_none());
+        let lock = std::sync::RwLock::new(0u32);
+        drop(TimedRead::acquire(&lock, &PLAIN));
+        let (n, ..) = PLAIN.snapshot();
+        assert_eq!(n, 1);
+    }
 
     #[test]
     fn a_bucket_is_the_power_of_two_microsecond_band_the_duration_falls_in() {

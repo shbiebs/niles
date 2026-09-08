@@ -944,6 +944,25 @@ impl Session {
                     Field::int8("uninstalled_folds"),
                     Field::int8("pinned_installs"),
                     Field::int8("flights_refused"),
+                    // **A counter that reads zero and a counter that is absent are different
+                    // claims, and only one of them can be checked.** `deferred_merges` was
+                    // absent from every surface while the thesis described the mechanism it
+                    // counts (A10-08). `waiters_refused` is the *other* capacity refusal:
+                    // reporting it under `flights_refused` is a refusal nobody can act on.
+                    Field::int8("deferred_merges"),
+                    Field::int8("waiters_refused"),
+                    // How a join ended. A retried join is not an error and is not free.
+                    Field::int8("joins_answered"),
+                    Field::int8("joins_retried"),
+                    // **The two anchor gaps, kept apart.** The first is the lag a read
+                    // started with; the second is the lag it ended with. Their difference is
+                    // the only part the fold itself caused, and one number could not say
+                    // which — the measurement the merge decision turns on (A10-11).
+                    Field::int8("gap_at_begin_total"),
+                    Field::int8("gap_at_finish_total"),
+                    Field::int8("gap_at_finish_max"),
+                    Field::int8("flights_behind_at_begin"),
+                    Field::int8("flights_that_fell_behind"),
                 ]),
                 Backend::DataRow(vec![
                     Some(s.reads.to_string()),
@@ -960,6 +979,15 @@ impl Session {
                     Some(s.uninstalled_folds.to_string()),
                     Some(s.pinned_installs.to_string()),
                     Some(s.flights_refused.to_string()),
+                    Some(s.deferred_merges.to_string()),
+                    Some(s.waiters_refused.to_string()),
+                    Some(s.joins_answered.to_string()),
+                    Some(s.joins_retried.to_string()),
+                    Some(s.gap_at_begin_total.to_string()),
+                    Some(s.gap_at_finish_total.to_string()),
+                    Some(s.gap_at_finish_max.to_string()),
+                    Some(s.flights_behind_at_begin.to_string()),
+                    Some(s.flights_that_fell_behind.to_string()),
                 ]),
                 Backend::CommandComplete("SELECT 1".into()),
             ];
@@ -1052,17 +1080,30 @@ impl Session {
         // `ENGINE_LOCK` and `VIEW_LOCK` were process-global and never cleared, so a sweep
         // that printed them after each level printed that level *plus every level before
         // it*: a maximum that can only rise, and a p99 weighted by the lightest phase
-        // (F-75). `select nilestream_lockstats reset` zeroes all four after reading, so the
+        // (F-75). `select nilestream_lockstats reset` zeroes all six after reading, so the
         // next level's table is the next level's — the same contract
         // `nilestream_slow_reads reset` has had since cycle 8.
         //
-        // Four scopes, nested: `wire` (a message decoded to its reply written) contains
-        // `statement` (`Session::handle`), which contains `base` and `view`. A reader can
+        // Nested: `wire` (a message decoded to its reply written) contains `statement`
+        // (`Session::handle`), which contains `base` — reported whole and again split into
+        // `base_read` and `base_write` — and `view`. A reader can
         // subtract to get the framing and the barrier wait, which is what the slow-read
         // table's residual column was wrongly believed to give.
         if lower.starts_with("select") && lower.contains("nilestream_lockstats") {
-            let scopes: [(&str, &crate::lockstats::LockStats); 4] = [
+            // **Six scopes, and two of them are the same lock in its two modes.** `base` is
+            // the aggregate every prior cycle read, kept so its meaning does not change under
+            // a reader; `base_read` and `base_write` are the split the design question of
+            // cycle 10 needs, because one histogram over a shared mode and an exclusive mode
+            // reports a p99 that belongs to neither (A10-08 / F-10-02).
+            //
+            // A caution that travels with the rows: summing overlapping shared holds is
+            // reader-lock-time, not exclusive occupancy. N readers holding for one microsecond
+            // each add N microseconds to `hold_total` while occupying the lock for one, so a
+            // ratio of the two totals is not a statement about which mode causes a tail.
+            let scopes: [(&str, &crate::lockstats::LockStats); 6] = [
                 ("base", &crate::lockstats::ENGINE_LOCK),
+                ("base_read", &crate::lockstats::BASE_READ),
+                ("base_write", &crate::lockstats::BASE_WRITE),
                 ("view", &crate::lockstats::VIEW_LOCK),
                 ("statement", &crate::lockstats::STATEMENT),
                 ("wire", &crate::lockstats::WIRE),
@@ -1119,22 +1160,40 @@ impl Session {
                     Some(t.base_wait_us.to_string()),
                     Some(t.view_wait_us.to_string()),
                     Some(t.view_hold_us.to_string()),
-                    // **Rounding, and nothing else.** This column was called
-                    // `unaccounted_us` and described as "what the engine cannot see: the
-                    // wire, the framing, and whatever the scheduler did between them". It is
-                    // none of those. The four timestamps it is computed from are taken one
-                    // after another *inside* `answer_from_view`, so the three parts partition
-                    // the total by construction and the remainder is the truncation of four
-                    // microsecond divisions — bounded by 2 µs whatever the wire does. Cycle
-                    // 8's attribution quoted it as evidence that everything outside the view
-                    // wait was under 2 µs; it was evidence of integer division (A9-F07).
+                    Some(t.view_wait2_us.to_string()),
+                    Some(t.view_hold2_us.to_string()),
+                    Some(t.fold_us.to_string()),
+                    Some(t.outcome.as_str().to_string()),
+                    Some(t.gap_begin.to_string()),
+                    Some(t.gap_finish.to_string()),
+                    // **Rounding, and the slivers between phases — nothing else.** This
+                    // column was called `unaccounted_us` and described as "what the engine
+                    // cannot see: the wire, the framing, and whatever the scheduler did
+                    // between them". It is none of those. Every timestamp it is computed
+                    // from is taken inside `answer_from_view`, so the six named phases
+                    // partition the total up to (a) the truncation of six microsecond
+                    // divisions and (b) the two un-timed hand-offs between them — the
+                    // instruction between `decided` and the fold's start, and the one
+                    // between the install hold ending and `view_done`. Cycle 8's
+                    // attribution quoted this column as evidence that everything outside
+                    // the view wait was under 2 µs; it was evidence of integer division
+                    // (A9-F07), and it was computed against three phases while three more
+                    // existed unmeasured (A10-08), which is why it is not evidence of
+                    // anything on its own.
                     //
                     // The wire and the framing are measured now, by `STATEMENT` and `WIRE`
                     // in `select nilestream_lockstats`, which have boundaries that actually
                     // contain them.
                     Some(
                         t.total_us
-                            .saturating_sub(t.base_wait_us + t.view_wait_us + t.view_hold_us)
+                            .saturating_sub(
+                                t.base_wait_us
+                                    + t.view_wait_us
+                                    + t.view_hold_us
+                                    + t.fold_us
+                                    + t.view_wait2_us
+                                    + t.view_hold2_us,
+                            )
                             .to_string(),
                     ),
                 ]));
@@ -1149,6 +1208,12 @@ impl Session {
                 Field::int8("base_wait_us"),
                 Field::int8("view_wait_us"),
                 Field::int8("view_hold_us"),
+                Field::int8("view_wait2_us"),
+                Field::int8("view_hold2_us"),
+                Field::int8("fold_us"),
+                Field::text("outcome"),
+                Field::int8("gap_begin"),
+                Field::int8("gap_finish"),
                 Field::int8("rounding_us"),
             ])];
             out.extend(rows);
@@ -2815,6 +2880,18 @@ schema bank {
             "uninstalled_folds",
             "pinned_installs",
             "flights_refused",
+            // **Cycle 10's instruments (T00.2).** Each is read by the baseline script by
+            // name; a dropped column renders as `n/a` rather than failing, so the name is
+            // the contract and this list is where it is kept.
+            "deferred_merges",
+            "waiters_refused",
+            "joins_answered",
+            "joins_retried",
+            "gap_at_begin_total",
+            "gap_at_finish_total",
+            "gap_at_finish_max",
+            "flights_behind_at_begin",
+            "flights_that_fell_behind",
         ] {
             assert!(
                 names.iter().any(|n| n == wanted),
@@ -2869,12 +2946,78 @@ schema bank {
         );
     }
 
-    /// **`select nilestream_lockstats` names four nested scopes and can be reset — F-75.**
+    /// **Every slow-read column is declared, and the declaration matches the row — T00.2.**
+    ///
+    /// This guard exists because the failure it catches happened. The six phase columns
+    /// added this cycle were emitted as `DataRow` values while the `RowDescription` still
+    /// declared five: a `psql` reading the table would have shown eleven values under six
+    /// names, silently shifting every column's meaning by five positions — the residual
+    /// read as `view_hold_us`, and so on. Nothing in the build objects to a row that is
+    /// wider than its description; only a client does, and only by lying.
+    ///
+    /// So the assertion is not "the names I want are present" but "the description and
+    /// the row have the same width", which is the property that was actually violated.
+    #[test]
+    fn the_slow_read_table_declares_every_column_it_emits() {
+        let (mut s, e) = (session(), engine());
+        // A read that reaches the view, so the table has at least one row to be wrong about.
+        for i in 0..8u64 {
+            let _ = s.handle(
+                Frontend::Query(format!("select bal from balances where acct = {}", i % 3)),
+                &e,
+            );
+        }
+        let out = s.handle(Frontend::Query("select nilestream_slow_reads".into()), &e);
+        let names: Vec<String> = out
+            .iter()
+            .find_map(|m| match m {
+                Backend::RowDescription(f) => Some(f.iter().map(|x| x.name.clone()).collect()),
+                _ => None,
+            })
+            .expect("a row description");
+        for wanted in [
+            "rank",
+            "total_us",
+            "base_wait_us",
+            "view_wait_us",
+            "view_hold_us",
+            "view_wait2_us",
+            "view_hold2_us",
+            "fold_us",
+            "outcome",
+            "gap_begin",
+            "gap_finish",
+            "rounding_us",
+        ] {
+            assert!(
+                names.iter().any(|n| n == wanted),
+                "`select nilestream_slow_reads` must name `{wanted}`; got {names:?}"
+            );
+        }
+        for (i, row) in rows_of(&out).iter().enumerate() {
+            assert_eq!(
+                row.len(),
+                names.len(),
+                "row {i} carries {} values under {} declared names — a client would read \
+                 every column after the first extra one as the wrong quantity",
+                row.len(),
+                names.len()
+            );
+        }
+    }
+
+    /// **`select nilestream_lockstats` names six nested scopes and can be reset — F-75,
+    /// A10-08.**
     ///
     /// The reset is the point. Both lock histograms are process-global and a sweep that
     /// prints them per level was printing every earlier level with each one.
+    ///
+    /// Six, not four: `base` is one histogram over an `RwLock` taken in two modes, and a
+    /// p99 over a shared hold and an exclusive hold belongs to neither. `base_read` and
+    /// `base_write` are the same acquisitions counted apart; `base` is kept unchanged so
+    /// that a number quoted by an earlier cycle still means what it meant.
     #[test]
-    fn the_lock_histograms_name_four_scopes_and_a_reset_empties_them() {
+    fn the_lock_histograms_name_six_scopes_and_a_reset_empties_them() {
         let (mut s, e) = (session(), engine());
         // Something in every scope: a statement through `handle` fills `STATEMENT`, and the
         // query it runs takes the base.
@@ -2911,8 +3054,33 @@ schema bank {
             .collect();
         assert_eq!(
             scopes,
-            vec!["base", "view", "statement", "wire"],
-            "four nested scopes, outermost last"
+            vec![
+                "base",
+                "base_read",
+                "base_write",
+                "view",
+                "statement",
+                "wire"
+            ],
+            "six scopes: the aggregate base, its two modes, then the nested scopes \
+             outermost last"
+        );
+        // **The split must add up to the aggregate it splits.** If a `TimedRead` or a
+        // `TimedWrite` stopped feeding both histograms, the modes would silently under-count
+        // and every attribution drawn from them would be wrong by an unknown amount.
+        let acq = |name: &str| -> u64 {
+            rows_of(&out)
+                .iter()
+                .find(|r| r.first().cloned().flatten().as_deref() == Some(name))
+                .and_then(|r| r[1].clone())
+                .and_then(|v| v.parse().ok())
+                .unwrap_or_else(|| panic!("the {name} row carries an acquisition count"))
+        };
+        assert_eq!(
+            acq("base_read") + acq("base_write"),
+            acq("base"),
+            "every base acquisition is either shared or exclusive and is counted once in \
+             each of the two places"
         );
         let statement_before: u64 = rows_of(&out)
             .iter()

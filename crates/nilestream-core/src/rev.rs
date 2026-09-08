@@ -170,6 +170,9 @@ pub struct FoldTicket {
     install: bool,
     done: Option<Arc<Completion>>,
     settled: bool,
+    /// `applied − anchor` at authorisation, carried so `finish_fold` can separate the lag a
+    /// read started with from the lag its own fold introduced.
+    gap_begin: u64,
 }
 
 impl FoldTicket {
@@ -186,6 +189,10 @@ impl FoldTicket {
     /// uninstalled ones without inspecting the view.
     pub fn installs(&self) -> bool {
         self.install
+    }
+    /// `applied − anchor` when this flight was authorised.
+    pub fn gap_begin(&self) -> u64 {
+        self.gap_begin
     }
 }
 
@@ -330,12 +337,27 @@ pub struct Stats {
     pub flights_refused: u64,
     /// Deltas held back during a flight and folded into its result on landing.
     ///
-    /// **Zero in this commit, and reported so it can be seen to be zero.** The deferred
-    /// merge is the optimisation that would let a flight overlapping an `advance` install
-    /// *current* rather than pinned; the pinned form is what ships first, because it is
-    /// sound with no new invariant, and the merge is a separate change whose guard is the
-    /// difference between these two counters.
+    /// **Zero until the merge lands, and reported so it can be seen to be zero.** A counter
+    /// that is absent from the wire and a counter that reads zero are different claims, and
+    /// only one of them can be checked; this one was absent (A10-08).
     pub deferred_merges: u64,
+    /// Readers turned away from an existing flight because its waiter list was full. They
+    /// folded alone, exactly. Counted apart from `flights_refused`, which is the *other*
+    /// capacity: a refusal with one cause reported under another is a refusal nobody can act
+    /// on (A10-05).
+    pub waiters_refused: u64,
+    /// **The two anchor gaps, kept apart.** `gap_at_begin_total` sums `applied − anchor` at
+    /// the moment a flight is authorised: the read was already behind before it folded.
+    /// `gap_at_finish_total` sums it again when the flight lands. Their difference is the
+    /// only part the fold itself caused, and one number could not distinguish them — which
+    /// is the measurement the merge decision turns on (A10-11).
+    pub gap_at_begin_total: u64,
+    pub gap_at_finish_total: u64,
+    pub gap_at_finish_max: u64,
+    /// Flights that were already behind when they began, and flights that fell further
+    /// behind while folding.
+    pub flights_behind_at_begin: u64,
+    pub flights_that_fell_behind: u64,
 }
 
 impl Stats {
@@ -540,6 +562,14 @@ impl Rev {
                     drop(st);
                     Decision::Join(f.done.clone())
                 } else {
+                    // **A full waiter list is a different refusal from a full flight
+                    // table**, and reporting one under the other is a refusal nobody can
+                    // act on. A settled flight is not a refusal at all: this reader simply
+                    // arrived after the answer and folds its own.
+                    if st.answer.is_none() && !st.cancelled {
+                        drop(st);
+                        self.stats.waiters_refused += 1;
+                    }
                     Decision::Alone
                 }
             }
@@ -566,10 +596,20 @@ impl Rev {
                 install: false,
                 done: None,
                 settled: false,
+                gap_begin: self.applied.saturating_sub(anchor),
             }),
             Decision::Own => {
                 self.flight_generation += 1;
                 let generation = self.flight_generation;
+                // **The lag this read started with, before it folded anything.** A flight
+                // authorised at an anchor already below `applied` was behind on arrival; one
+                // authorised level with `applied` falls behind only if the frontier moves
+                // under it. `finish_fold` subtracts to say which happened (A10-11).
+                let gap_begin = self.applied.saturating_sub(anchor);
+                self.stats.gap_at_begin_total += gap_begin;
+                if gap_begin > 0 {
+                    self.stats.flights_behind_at_begin += 1;
+                }
                 let done = Arc::new(Completion::default());
                 // **The marker replaces an absence, never a value.** A `Present` entry that
                 // could not answer *this* anchor can still answer every anchor inside its
@@ -604,6 +644,7 @@ impl Rev {
                     install: true,
                     done: Some(done),
                     settled: false,
+                    gap_begin,
                 })
             }
         }
@@ -634,6 +675,18 @@ impl Rev {
             anchor: ticket.anchor,
         };
 
+        // **The gap again, at landing.** Recorded for every fold that owned its flight,
+        // installed or not, because a superseded completion is exactly the case where the
+        // frontier moved furthest and dropping it would bias the distribution towards the
+        // fast reads.
+        if ticket.install {
+            let gap_finish = self.applied.saturating_sub(ticket.anchor);
+            self.stats.gap_at_finish_total += gap_finish;
+            self.stats.gap_at_finish_max = self.stats.gap_at_finish_max.max(gap_finish);
+            if gap_finish > ticket.gap_begin {
+                self.stats.flights_that_fell_behind += 1;
+            }
+        }
         let mine = ticket.install
             && self
                 .in_flight
@@ -1151,6 +1204,12 @@ impl Runtime {
             s.pinned_installs += v.stats.pinned_installs;
             s.flights_refused += v.stats.flights_refused;
             s.deferred_merges += v.stats.deferred_merges;
+            s.waiters_refused += v.stats.waiters_refused;
+            s.gap_at_begin_total += v.stats.gap_at_begin_total;
+            s.gap_at_finish_total += v.stats.gap_at_finish_total;
+            s.gap_at_finish_max = s.gap_at_finish_max.max(v.stats.gap_at_finish_max);
+            s.flights_behind_at_begin += v.stats.flights_behind_at_begin;
+            s.flights_that_fell_behind += v.stats.flights_that_fell_behind;
         }
         s
     }

@@ -202,6 +202,23 @@ impl Default for LockStats {
 /// produces and the shape a mutex cannot.
 pub static ENGINE_LOCK: LockStats = LockStats::new();
 
+/// **The base lock's two modes, separately — `base_read` and `base_write`.**
+///
+/// `ENGINE_LOCK` above is the sum, and the sum is what could not answer the question cycle 10
+/// opened. A `RwLock` is held shared by every keyed read across its reconstruction and
+/// exclusively by every append across its apply; one histogram over both reports a p99 and a
+/// maximum that belong to neither, and the design question — *is the base wait caused by
+/// readers' folds or by the writer's section* — is unanswerable from it (A10-08 / F-10-02).
+///
+/// **What the split is not.** Summing overlapping shared holds is reader-lock-time, not
+/// exclusive occupancy: N readers holding the lock for one microsecond each contribute N
+/// microseconds to `hold_total` while occupying the lock for one. A ratio of the two totals is
+/// therefore not a statement about which mode causes a tail, and the audit that first reported
+/// 2.9× said so. What the split *can* do is show that a wait arrived while the exclusive mode
+/// was held, or that it did not — which is the falsification the aggregate could not offer.
+pub static BASE_READ: LockStats = LockStats::new();
+pub static BASE_WRITE: LockStats = LockStats::new();
+
 /// **The view mutex — `V` in the lock order `O < B < P < V < C`.**
 ///
 /// The one lock in this engine that nothing measured. `ENGINE_LOCK` covers the base; the
@@ -338,6 +355,14 @@ impl<T> Drop for TimedRead<'_, T> {
         let held = self.since.elapsed().as_nanos() as u64;
         drop(self.guard.take());
         self.stats.record(self.waited_ns, held);
+        // **The mode scope, beside the scope the caller named.** A shared acquisition of the
+        // base lands in `base_read` as well as in `ENGINE_LOCK`, so the aggregate keeps the
+        // meaning every prior cycle read it with and the two modes are separable for the first
+        // time. Recorded here rather than at the call site because a guard that returns early
+        // must still be counted, which is why this type exists at all.
+        if std::ptr::eq(self.stats, &ENGINE_LOCK) {
+            BASE_READ.record(self.waited_ns, held);
+        }
     }
 }
 
@@ -382,6 +407,9 @@ impl<T> Drop for TimedWrite<'_, T> {
         let held = self.since.elapsed().as_nanos() as u64;
         drop(self.guard.take());
         self.stats.record(self.waited_ns, held);
+        if std::ptr::eq(self.stats, &ENGINE_LOCK) {
+            BASE_WRITE.record(self.waited_ns, held);
+        }
     }
 }
 
@@ -699,6 +727,51 @@ pub struct ReadTrace {
     pub base_wait_us: u64,
     pub view_wait_us: u64,
     pub view_hold_us: u64,
+    /// The **second** view acquisition — the one `finish_fold` takes to install. The
+    /// two-phase read takes V twice and the old table counted one of them, so a read that
+    /// waited to install was reported as a read that waited for nothing (A10-08).
+    pub view_wait2_us: u64,
+    pub view_hold2_us: u64,
+    /// The reconstruction itself, with no lock on the view. Named rather than left in a
+    /// residual, because "the fold" is the term every design question this cycle is about.
+    pub fold_us: u64,
+    /// How this read was answered: [`ReadOutcome`] as a small integer. A joined read is
+    /// offered to this table now; it never was, so the one path whose cost is *another
+    /// thread's* fold could not appear in the tail at all.
+    pub outcome: ReadOutcome,
+    /// `applied − anchor` when the flight was authorised, and again when it landed. The
+    /// first says the read started behind; the difference says the frontier moved under it.
+    /// One number could not tell those apart, and the merge decision turns on which it is.
+    pub gap_begin: u64,
+    pub gap_finish: u64,
+}
+
+/// How a keyed read was answered. Ordered so a larger number is a costlier path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReadOutcome {
+    #[default]
+    Hit,
+    /// Folded and owned the key's flight.
+    FoldOwned,
+    /// Folded because another anchor owned the key, or the flight table was full. Exact,
+    /// unshared, and installed nothing.
+    FoldAlone,
+    /// Shared another reader's fold at the same anchor.
+    Joined,
+    /// Joined a flight that went away, and went round again.
+    JoinRetried,
+}
+
+impl ReadOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReadOutcome::Hit => "hit",
+            ReadOutcome::FoldOwned => "fold_owned",
+            ReadOutcome::FoldAlone => "fold_alone",
+            ReadOutcome::Joined => "joined",
+            ReadOutcome::JoinRetried => "join_retried",
+        }
+    }
 }
 
 impl SlowReads {
@@ -713,6 +786,12 @@ impl SlowReads {
                     base_wait_us: 0,
                     view_wait_us: 0,
                     view_hold_us: 0,
+                    view_wait2_us: 0,
+                    view_hold2_us: 0,
+                    fold_us: 0,
+                    outcome: ReadOutcome::Hit,
+                    gap_begin: 0,
+                    gap_finish: 0,
                 }; SlowReads::KEEP],
                 0,
             )),

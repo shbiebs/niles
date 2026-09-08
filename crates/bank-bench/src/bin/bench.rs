@@ -2274,6 +2274,8 @@ fn run_nilestream_level(
             m.base_epochs = nls_frontier(nls_port);
             report_mixed(&m);
             report_slow_reads(nls_port, &format!("{}r/{}w", m.readers, m.writers));
+            // Read before the next level's reset, so the histogram belongs to this level.
+            report_lockstats(nls_port, &format!("{}r/{}w", m.readers, m.writers));
             out_mixed.push(m);
         }
     }
@@ -2357,9 +2359,22 @@ fn report_mixed(m: &workloads::MixedSample) {
 /// **Where the slowest keyed reads went**, printed after a mixed level.
 ///
 /// The client can see only its own total. This asks the server for the same reads broken
-/// into base wait, view wait, view hold, and the remainder — which is the wire, the framing
-/// and whatever the scheduler did between them. A tail that is all remainder is not a lock
-/// this engine holds, and saying so needs the column rather than an argument.
+/// into every phase `answer_from_view` actually has: the base wait, the first view wait and
+/// hold, the fold, the *second* view wait and hold that the install takes, and the outcome
+/// that says which of those a given row even ran.
+///
+/// Three corrections travel with this table, and each was a wrong number printed with
+/// confidence:
+///
+/// * The last column was read from the server under the name `unaccounted_us`. The server
+///   renamed it `rounding_us` in cycle 9 and this reader kept asking for the old name, so
+///   `at` returned its `unwrap_or(0)` default and every cycle-9 table printed a zero
+///   remainder — which was then read as "nothing outside the measured phases", the exact
+///   claim A9-F07 had already retired. A name this reader asks for and the server does not
+///   have is now `n/a`, never `0`.
+/// * The remainder was computed against three phases while three more existed unmeasured
+///   (A10-08), so it was the fold's cost wearing the name of rounding.
+/// * `view_hold` was the *first* hold only, and the install's wait was in no column at all.
 fn report_slow_reads(port: u16, shape: &str) {
     let Ok(mut c) = bank_bench::wire::Client::connect("127.0.0.1", port, "bench", "bank") else {
         return;
@@ -2374,24 +2389,112 @@ fn report_slow_reads(port: u16, shape: &str) {
         );
         return;
     }
-    let at = |row: &Vec<Option<String>>, name: &str| -> u64 {
-        r.columns
-            .iter()
-            .position(|c| c == name)
-            .and_then(|i| row.get(i)?.as_ref()?.trim().parse().ok())
-            .unwrap_or(0)
+    // **A column this build asks for and the server does not have prints `n/a`.** The
+    // previous helper defaulted a missing name to `0`, which is how a renamed column became
+    // four cycles of "the remainder is zero".
+    let at = |row: &Vec<Option<String>>, name: &str| -> String {
+        match r.columns.iter().position(|c| c == name) {
+            Some(i) => row
+                .get(i)
+                .and_then(|v| v.clone())
+                .map(|v| v.trim().to_string())
+                .unwrap_or_else(|| "null".into()),
+            None => "n/a".into(),
+        }
     };
+    for wanted in [
+        "total_us",
+        "base_wait_us",
+        "view_wait_us",
+        "view_hold_us",
+        "view_wait2_us",
+        "view_hold2_us",
+        "fold_us",
+        "outcome",
+        "gap_begin",
+        "gap_finish",
+        "rounding_us",
+    ] {
+        if !r.columns.iter().any(|c| c == wanted) {
+            eprintln!(
+                "  WARNING: the server's slow-read table has no `{wanted}` column; this \
+                 build's table is reading a server that predates it, and that column is \
+                 `n/a` below rather than a zero pretending to be a measurement"
+            );
+        }
+    }
     eprintln!("  slowest keyed reads at {shape} (server-side), µs:");
-    eprintln!("    rank | total | base wait | view wait | view hold | unaccounted");
+    eprintln!(
+        "    rank | outcome      | total | b wait | v wait | v hold |   fold | v wait2 | \
+         v hold2 | gap b | gap f | round"
+    );
     for (i, row) in r.rows.iter().enumerate() {
         eprintln!(
-            "    {:>4} | {:>5} | {:>9} | {:>9} | {:>9} | {:>11}",
+            "    {:>4} | {:<12} | {:>5} | {:>6} | {:>6} | {:>6} | {:>6} | {:>7} | {:>7} | \
+             {:>5} | {:>5} | {:>5}",
             i,
+            at(row, "outcome"),
             at(row, "total_us"),
             at(row, "base_wait_us"),
             at(row, "view_wait_us"),
             at(row, "view_hold_us"),
-            at(row, "unaccounted_us"),
+            at(row, "fold_us"),
+            at(row, "view_wait2_us"),
+            at(row, "view_hold2_us"),
+            at(row, "gap_begin"),
+            at(row, "gap_finish"),
+            at(row, "rounding_us"),
+        );
+    }
+}
+
+/// **The lock histograms for this level, printed where the level's other numbers are.**
+///
+/// `nls_lockstats_reset` has emptied them at the level's start since cycle 9, so this table
+/// is this level's — but nothing printed it, and a histogram that is reset and never read is
+/// a measurement taken and thrown away. The six scopes are the aggregate base, its shared
+/// and exclusive modes apart (A10-08: one p99 over two modes belongs to neither), the view,
+/// the statement and the wire.
+///
+/// A caution the table carries in its own text: summed shared holds overlap. N readers each
+/// holding for a microsecond add N microseconds of `hold_total` while occupying the lock for
+/// one, so `base_read`'s total is reader-lock-time and is not comparable to `base_write`'s
+/// as occupancy.
+fn report_lockstats(port: u16, shape: &str) {
+    let Ok(mut c) = bank_bench::wire::Client::connect("127.0.0.1", port, "bench", "bank") else {
+        return;
+    };
+    let Ok(r) = c.simple("select nilestream_lockstats") else {
+        eprintln!("  lock histograms at {shape}: n/a (the server does not report them)");
+        return;
+    };
+    let at = |row: &Vec<Option<String>>, name: &str| -> String {
+        match r.columns.iter().position(|c| c == name) {
+            Some(i) => row
+                .get(i)
+                .and_then(|v| v.clone())
+                .map(|v| v.trim().to_string())
+                .unwrap_or_else(|| "null".into()),
+            None => "n/a".into(),
+        }
+    };
+    eprintln!("  lock histograms at {shape} (this level only), µs:");
+    eprintln!("    scope      | acquisitions | wait p99 | hold p99 | hold max | hold total");
+    for row in &r.rows {
+        eprintln!(
+            "    {:<10} | {:>12} | {:>8} | {:>8} | {:>8} | {:>10}",
+            at(row, "scope"),
+            at(row, "acquisitions"),
+            at(row, "wait_p99_us"),
+            at(row, "hold_p99_us"),
+            at(row, "hold_max_us"),
+            at(row, "hold_total_us"),
+        );
+    }
+    if !r.rows.iter().any(|row| at(row, "scope") == "base_read") {
+        eprintln!(
+            "    (no `base_read`/`base_write` split: this server reports the base as one \
+             histogram over two lock modes, and its `base` p99 belongs to neither)"
         );
     }
 }
@@ -2408,22 +2511,36 @@ fn report_slow_reads(port: u16, shape: &str) {
 /// delta for the same reason the fallback rate is: cumulative counters are dominated by
 /// whatever ran first and drift towards a constant, which is the opposite of what a
 /// connection sweep is asking.
-fn nls_flight_counters(port: u16) -> Option<[u64; 4]> {
+fn nls_flight_counters(port: u16) -> Option<[u64; 13]> {
     let mut c = bank_bench::wire::Client::connect("127.0.0.1", port, "bench", "bank").ok()?;
     let r = c.simple("select nilestream_stats").ok()?;
     let at = |name: &str| -> Option<u64> {
         let i = r.columns.iter().position(|c| c == name)?;
         r.rows.first()?.get(i)?.as_ref()?.trim().parse().ok()
     };
+    // **Every one required, and none defaulted.** `?` on a missing name makes the whole
+    // reading `None`, which prints `n/a` — a server that does not report a counter must not
+    // be indistinguishable from a server that reports it as zero. `deferred_merges` is in
+    // this list precisely because it is expected to be zero on the current build, and a
+    // zero that was never asked for is the finding A10-16 is about.
     Some([
         at("pending_joins")?,
         at("uninstalled_folds")?,
         at("pinned_installs")?,
         at("flights_refused")?,
+        at("deferred_merges")?,
+        at("waiters_refused")?,
+        at("joins_answered")?,
+        at("joins_retried")?,
+        at("gap_at_begin_total")?,
+        at("gap_at_finish_total")?,
+        at("gap_at_finish_max")?,
+        at("flights_behind_at_begin")?,
+        at("flights_that_fell_behind")?,
     ])
 }
 
-fn report_flights(before: Option<[u64; 4]>, after: Option<[u64; 4]>, shape: &str) {
+fn report_flights(before: Option<[u64; 13]>, after: Option<[u64; 13]>, shape: &str) {
     // `n/a` and not zeroes: "no read joined a flight" and "this server does not report
     // flights" are different claims, and a build predating the two-phase read makes the
     // second one.
@@ -2434,8 +2551,48 @@ fn report_flights(before: Option<[u64; 4]>, after: Option<[u64; 4]>, shape: &str
     let d: Vec<u64> = a.iter().zip(b).map(|(x, y)| x.saturating_sub(y)).collect();
     eprintln!(
         "  flights at {shape}: pending_joins {}, uninstalled_folds {}, pinned_installs {}, \
-         flights_refused {}",
-        d[0], d[1], d[2], d[3]
+         flights_refused {}, deferred_merges {}, waiters_refused {}",
+        d[0], d[1], d[2], d[3], d[4], d[5]
+    );
+    // **The joins, by how they ended.** `pending_joins` counts the reads that found a flight;
+    // it says nothing about whether joining paid. A join answered shared another reader's
+    // fold; a join retried woke to find that flight gone and folded anyway, which is the
+    // wait plus the work.
+    let (answered, retried) = (d[6], d[7]);
+    let ended = answered + retried;
+    eprintln!(
+        "    joins ended: {answered} answered, {retried} retried{}",
+        if ended == 0 {
+            String::new()
+        } else {
+            format!(
+                " ({:.1}% of joins paid off)",
+                answered as f64 * 100.0 / ended as f64
+            )
+        }
+    );
+    // **Reconciliation, printed rather than assumed.** A join that was counted on entry and
+    // never counted on exit is a waiter this process lost; the two totals are defined to
+    // agree and a run where they do not is a finding, not a rounding difference.
+    if ended != d[0] {
+        eprintln!(
+            "    WARNING: {} joins entered and {ended} ended — the counters are defined to \
+             agree, so one of the two is not counting the event it names",
+            d[0]
+        );
+    }
+    // **The anchor gap, in the two phases it is different in.** A flight that begins n
+    // epochs behind and finishes further behind is one whose install is pinned or stale;
+    // the mean is over installs, and the maximum is a level, not a delta.
+    let installs = d[0].max(1);
+    eprintln!(
+        "    anchor gap: mean {:.1} at begin, mean {:.1} at finish, max at finish {} \
+         (epochs); {} flights began behind, {} fell further behind",
+        d[8] as f64 / installs as f64,
+        d[9] as f64 / installs as f64,
+        a[10],
+        d[11],
+        d[12]
     );
 }
 

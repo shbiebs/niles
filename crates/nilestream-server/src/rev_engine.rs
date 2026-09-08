@@ -100,6 +100,21 @@ pub struct ReadStats {
     pub uninstalled_folds: u64,
     pub pinned_installs: u64,
     pub flights_refused: u64,
+    /// **The counters the wire could not be asked for.** `deferred_merges` reads zero until
+    /// the merge lands and is reported anyway, because an absent counter and a zero counter
+    /// are different claims and only one of them is checkable. `waiters_refused` is the
+    /// *other* capacity refusal, kept apart from `flights_refused`. The two gap totals are
+    /// the lag a read started with and the lag it ended with; their difference is the only
+    /// part its own fold caused (A10-08, A10-11).
+    pub deferred_merges: u64,
+    pub waiters_refused: u64,
+    pub joins_answered: u64,
+    pub joins_retried: u64,
+    pub gap_at_begin_total: u64,
+    pub gap_at_finish_total: u64,
+    pub gap_at_finish_max: u64,
+    pub flights_behind_at_begin: u64,
+    pub flights_that_fell_behind: u64,
 }
 
 impl ReadStats {
@@ -194,6 +209,14 @@ pub struct RevEngine {
     /// view was never asked about, which are a different fact and belong to `serve_path`.
     view_answers: std::sync::atomic::AtomicU64,
     view_fallbacks: std::sync::atomic::AtomicU64,
+    /// **How a join ended.** The wait happens in the query loop with no lock held, which is
+    /// the whole point of the split and also the reason these are atomics on the engine
+    /// rather than fields on the view: counting them there would cost a third view
+    /// acquisition on the one path that exists to avoid holding it. A join that wakes to
+    /// find its flight gone is not an error and is not free; the old surface reported
+    /// neither outcome (A10-04, A10-08).
+    joins_answered: std::sync::atomic::AtomicU64,
+    joins_retried: std::sync::atomic::AtomicU64,
     /// The durable sink, when the daemon was started with one. `None` for the in-memory
     /// engine the tests and the benchmark's warm-up use.
     ///
@@ -526,6 +549,8 @@ impl RevEngine {
             currencies: std::sync::RwLock::new(std::collections::BTreeSet::from([0])),
             view_answers: std::sync::atomic::AtomicU64::new(0),
             view_fallbacks: std::sync::atomic::AtomicU64::new(0),
+            joins_answered: std::sync::atomic::AtomicU64::new(0),
+            joins_retried: std::sync::atomic::AtomicU64::new(0),
             durable: None,
             visible: None,
         }
@@ -756,8 +781,17 @@ impl crate::session::Serving for RevEngine {
                     ViewAnswer::Rows(rows) => return Ok(rows),
                     ViewAnswer::NotApplicable => break,
                     ViewAnswer::Wait(w) => {
-                        // Nothing is held here. This is the whole point of the split.
-                        w.wait();
+                        // **Nothing is held here.** This is the whole point of the split, and
+                        // the counters say which way the wait ended: an answered join shared
+                        // another reader's fold, a retried one woke to find that flight gone
+                        // and pays for its own.
+                        let answered = w.wait().is_some();
+                        let counter = if answered {
+                            &self.joins_answered
+                        } else {
+                            &self.joins_retried
+                        };
+                        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         if attempts >= 8 {
                             break;
                         }
@@ -1014,6 +1048,19 @@ impl crate::session::Serving for RevEngine {
                     uninstalled_folds: s.uninstalled_folds,
                     pinned_installs: s.pinned_installs,
                     flights_refused: s.flights_refused,
+                    deferred_merges: s.deferred_merges,
+                    waiters_refused: s.waiters_refused,
+                    joins_answered: self
+                        .joins_answered
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                    joins_retried: self
+                        .joins_retried
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                    gap_at_begin_total: s.gap_at_begin_total,
+                    gap_at_finish_total: s.gap_at_finish_total,
+                    gap_at_finish_max: s.gap_at_finish_max,
+                    flights_behind_at_begin: s.flights_behind_at_begin,
+                    flights_that_fell_behind: s.flights_that_fell_behind,
                 }
             }
             // No runtime: the server has no partial state at all, so nothing is resident
@@ -1435,10 +1482,17 @@ impl RevEngine {
         };
         drop(rt);
         let decided = std::time::Instant::now();
-        // The second hold, measured on its own. `view_hold_us` answers "how long did a keyed
-        // read own the view", and the reconstruction between the two holds is not part of
-        // that answer — charging it here would report the very cost this split removes.
+        // **Every phase named, because a residual is not a measurement.** The old table had
+        // four timestamps taken consecutively inside this function, so its fifth column was
+        // integer-division truncation wearing the name of the wire (A9-F07), and the second
+        // view acquisition — the one this read takes to *install* — was outside all of them
+        // (A10-08). These are the phases the design questions of cycle 10 are about.
+        let mut view_wait2 = std::time::Duration::ZERO;
         let mut install_hold = std::time::Duration::ZERO;
+        let mut fold_time = std::time::Duration::ZERO;
+        let mut trace_outcome = crate::lockstats::ReadOutcome::Hit;
+        let mut gap_begin = 0u64;
+        let mut gap_finish = 0u64;
 
         let answered = match outcome {
             nilestream_core::rev::ReadOutcome::Hit(a) => a,
@@ -1447,21 +1501,56 @@ impl RevEngine {
             // nothing at all. Waiting here — under B, and having just released V — would
             // block every append in the process behind another reader's fold, which is a
             // worse serialisation than the one this task removes.
-            nilestream_core::rev::ReadOutcome::Join(w) => return ViewAnswer::Wait(w),
+            nilestream_core::rev::ReadOutcome::Join(w) => {
+                // **Offered to the tail table before it goes, so a joined read can appear in
+                // it at all.** The path whose cost is *another thread's* fold was the one
+                // path the slowest-16 could never show; the caller reports the wait when it
+                // returns, and this row says the read reached a join and how long deciding
+                // that took.
+                let now = std::time::Instant::now();
+                let total_ns = now.duration_since(read_began).as_nanos() as u64;
+                crate::lockstats::SLOW_READS.offer(
+                    total_ns,
+                    crate::lockstats::ReadTrace {
+                        total_us: total_ns / 1_000,
+                        base_wait_us: base_ready.duration_since(read_began).as_micros() as u64,
+                        view_wait_us: view_ready.duration_since(base_ready).as_micros() as u64,
+                        view_hold_us: decided.duration_since(view_ready).as_micros() as u64,
+                        view_wait2_us: 0,
+                        view_hold2_us: 0,
+                        fold_us: 0,
+                        outcome: crate::lockstats::ReadOutcome::Joined,
+                        gap_begin: 0,
+                        gap_finish: 0,
+                    },
+                );
+                return ViewAnswer::Wait(w);
+            }
             nilestream_core::rev::ReadOutcome::Fold(t) => {
                 // **The fold, with the view released and the base still held.** B is not
                 // re-acquired — `RwLock` is not reentrant and a keyed read takes it exactly
                 // once — and V is not held, so a concurrent reader of any other key runs
                 // straight through while this one reconstructs.
+                trace_outcome = if t.installs() {
+                    crate::lockstats::ReadOutcome::FoldOwned
+                } else {
+                    crate::lockstats::ReadOutcome::FoldAlone
+                };
+                gap_begin = t.gap_begin();
+                let fold_from = std::time::Instant::now();
                 let (value, rows) = {
                     use nilestream_core::rev::Base as _;
                     base.reconstruct(t.key(), t.anchor())
                 };
+                fold_time = fold_from.elapsed();
+                let asked2 = std::time::Instant::now();
                 let mut rt =
                     crate::lockstats::Timed::acquire(runtime, &crate::lockstats::VIEW_LOCK);
                 let held_from = std::time::Instant::now();
+                view_wait2 = held_from.duration_since(asked2);
                 match rt.view_mut(BALANCE_VIEW) {
                     Some(view) => {
+                        gap_finish = view.applied_through().saturating_sub(t.anchor());
                         let a = view.finish_fold(t, value, rows);
                         install_hold = held_from.elapsed();
                         a
@@ -1481,9 +1570,15 @@ impl RevEngine {
                 total_us: total_ns / 1_000,
                 base_wait_us: base_ready.duration_since(read_began).as_micros() as u64,
                 view_wait_us: view_ready.duration_since(base_ready).as_micros() as u64,
-                // **Both holds, and not the fold between them.**
-                view_hold_us: (decided.duration_since(view_ready) + install_hold).as_micros()
-                    as u64,
+                // **The first hold only.** The second is its own column: adding them made
+                // one number out of two questions, and the install's wait was in neither.
+                view_hold_us: decided.duration_since(view_ready).as_micros() as u64,
+                view_wait2_us: view_wait2.as_micros() as u64,
+                view_hold2_us: install_hold.as_micros() as u64,
+                fold_us: fold_time.as_micros() as u64,
+                outcome: trace_outcome,
+                gap_begin,
+                gap_finish,
             },
         );
 
@@ -3234,15 +3329,31 @@ mod lock_order_tests {
              `Join` case has nowhere to go but a second fold of the same prefix"
         );
         // And the caller waits with nothing held: the ticket is the only thing in scope.
+        //
+        // The arm is delimited by its own closing brace at the arm's indentation rather than
+        // by the first `}` in the text, which cycle 10 walked into: counting the join
+        // outcomes put a braced `if` before the end of the arm, so the old slice stopped
+        // four lines early and the guard failed on a change that did not touch the wait.
         let caller = src
             .split("ViewAnswer::Wait(w) => {")
             .nth(1)
             .expect("the caller's wait arm");
-        let caller = &caller[..caller.find("}").unwrap_or(caller.len())];
+        let caller = &caller[..caller
+            .find("\n                    }")
+            .unwrap_or(caller.len())];
         assert!(
-            caller.contains("w.wait();"),
+            caller.contains("w.wait()"),
             "the caller's `Wait` arm must be where the wait happens"
         );
+        // Nothing acquired around it: a lock taken in this arm would be held across another
+        // thread's whole reconstruction, which is the hold the two-phase read removes.
+        for forbidden in ["Timed::acquire", "self.base()", ".read()", ".write()"] {
+            assert!(
+                !caller.contains(forbidden),
+                "the caller's `Wait` arm contains `{forbidden}`: the wait is only cheap \
+                 because it is taken holding nothing"
+            );
+        }
     }
 
     /// **The install is a second, separate hold — and the fold is between them.**
@@ -4413,6 +4524,19 @@ mod fallback_rate_tests {
             uninstalled_folds: after.uninstalled_folds - before.uninstalled_folds,
             pinned_installs: after.pinned_installs - before.pinned_installs,
             flights_refused: after.flights_refused - before.flights_refused,
+            deferred_merges: after.deferred_merges - before.deferred_merges,
+            waiters_refused: after.waiters_refused - before.waiters_refused,
+            joins_answered: after.joins_answered - before.joins_answered,
+            joins_retried: after.joins_retried - before.joins_retried,
+            gap_at_begin_total: after.gap_at_begin_total - before.gap_at_begin_total,
+            gap_at_finish_total: after.gap_at_finish_total - before.gap_at_finish_total,
+            flights_behind_at_begin: after.flights_behind_at_begin - before.flights_behind_at_begin,
+            flights_that_fell_behind: after.flights_that_fell_behind
+                - before.flights_that_fell_behind,
+            // A maximum over the window is not a difference of two maxima — the larger of
+            // the two could belong entirely to the run before this one. Reported as the
+            // level it is, and read as "the largest gap this process has ever installed at".
+            gap_at_finish_max: after.gap_at_finish_max,
             // Levels, not deltas: both are sizes of a structure, and the difference between
             // two sizes is not a size.
             view_metadata_keys: after.view_metadata_keys,

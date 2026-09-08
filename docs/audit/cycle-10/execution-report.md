@@ -569,6 +569,145 @@ the sink and returns a window disagreement rather than a clean duplicate).
 
 ---
 
+## T01 — Repair served certification and wait ownership
+
+> **Target T01.1:** Stats, append, full-report and mixed legacy/two-phase reads complete under their forced interleavings, and every returned row equals the independent fold at its stated visible anchor.
+
+> **Target T01.2:** Every logical keyed read acquires B at most once, every joined reader waits with no O/B/P/V/C/S guard, and a successful join consumes its own exact-anchor result without a second reconstruction.
+
+> **Target T01.3:** Cancelling owners or abandoning wait tickets releases bounded sharing capacity and counts every capacity refusal while preserving the exact prior absence and generation ownership.
+
+> **Target T01.4:** The Pending proof distinguishes served-value correctness, certification and generation ownership, and each reversion transcript claims only the hazard it actually witnesses.
+
+### Status
+
+A10-02, A10-03, A10-04, A10-05 and A10-12 landed on `c10/02-read-safety`. A10-01 landed
+earlier, inside T00, because the baseline depends on it. Container gate at `0ff16a4`: **1,059
+pass / 0 fail / 7 ignored**, clippy and fmt clean, `make reproduce` exit 0.
+
+| SHA | What |
+|---|---|
+| `12d87dd` | three read-path hazards, each witnessed rather than argued (A10-02/03/05) |
+| `c7d3955` | a joined read uses the answer it waited for, and waits holding nothing (A10-04) |
+| `0ff16a4` | A10-12's claim separated, and three defects Host C's run exposed |
+
+### A10-02 — a report certified at one anchor and copied at another
+
+The split is along the line between what moves and what does not: a plan's shape is a property
+of the circuit and is decided without a lock; whether the view is full and how far it has been
+advanced changes on every append, so `report_certified_at` is called only with the guard held
+and its answer used without releasing it.
+
+**Two tests, and they witness different things — T01.4.** The unlatched one shows that a build
+deciding the path from `is_full()` alone claims `report-from-view` for an anchor the view has
+passed; it does **not** witness a value divergence, because in that build the certification
+simply fails and the fold answers correctly. The latched one does. `report_race_hook` parks the
+reporting thread between the shape decision and the guard, and the append lands while it is
+parked:
+
+```
+assertion `left == right` failed: the report answered at anchor 15 with the values the view
+holds AFTER an append that moved it past 15 ...
+  left: [.., [Some("1"), Some("777209"), Some("15")], [Some("2"), Some("-776789"), Some("15")], ..]
+ right: [.., [Some("1"), Some("209"),    Some("15")], [Some("2"), Some("211"),     Some("15")], ..]
+```
+
+A 777,000 transfer visible inside a reply stamped with an anchor before it.
+
+### A10-03 — the legacy read could join a flight it was blocking
+
+`Rev::read` takes `&mut self` for its whole body; waiting on another reader's flight parks a
+thread holding the view exclusively, and the owner needs that same `&mut Rev` to publish. The
+old code looped on `Join` with a comment arguing the case was unreachable — true of a
+single-threaded caller, false of a public function reached through a shared `Mutex<Runtime>`.
+`ReadMode::Alone` says the caller cannot wait, and the `Join` arm is **gone rather than made
+unreachable**, because "cannot happen on this path" was the claim that was wrong. Reverting:
+
+```
+`Rev::read` did not return within 10s ... it is waiting for a `finish_fold` that needs the
+very view it is holding — the deadlock of A10-03. It must fold alone instead.: Timeout
+```
+
+### A10-04 — the joined answer was discarded, and the outer lock was held across the wait
+
+The `Wait` arm threw away `w.wait()`'s value and went round the loop; the retry re-entered
+`answer_from_view`, which acquires the base — one logical read, two acquisitions of B, and a
+join costing a wait *plus* a full second pass. Using the answer needs one thing it did not
+carry: a key the base has never posted to must produce **no row**, not a row containing zero,
+and a joined reader that received only the value would have to go back to the base to learn
+which. A flight now publishes `Joined { answer, base_rows }`.
+
+The second half was going to be a deletion. `Serving for RwLock<RevEngine>` holds O shared
+across the wait, and `main.rs` serves from `Arc<RevEngine>` — so I removed it as dead and
+corrected `SPEC-ENGINE.md`, which claims that type "is what the daemon serves every session
+from". **The build corrected me**: `bench.rs` constructs one for the hosted daemon, and the
+sweep calls `reseed`, which takes the same lock exclusively. The hazard is live. So the retry
+loop moved out of `query` into its callers — `query_step` is one attempt and returns a join
+rather than waiting on it — and the wrapper takes its guard, runs a step, drops the guard, and
+only then waits.
+
+Three reversions, each on a different assertion: discarding the answer fails the source guard
+on `resolve_join`; not publishing `base_rows` makes an account with no history come back as a
+row containing zero; taking the wrapper's guard before the wait fails the scan that requires
+the guard's scope to close first.
+
+### A10-05 — an abandoned wait ticket kept its place
+
+`begin_read` reserves a place under the completion's lock and `join` gives it back; a dropped
+ticket gave nothing back, so `MAX_WAITERS` abandoned readers refuse every later join against a
+queue that is empty. Taking that lock in a destructor is safe here and nowhere else in this
+engine — **F is a leaf** and is never held while anything is acquired, which is why
+`FoldTicket`'s destructor deliberately does not take the view. A declined join is counted under
+its own reason, `joins_declined_by_caller`: an overloaded flight table, a full waiter list and a
+caller whose lock discipline forbids the wait are three findings with three remedies.
+
+### A10-12 — the Pending claim, separated
+
+"Between `begin_read` and `finish_fold` the slot is `Pending`" is a property of one case. A key
+whose entry is `Present` at an anchor that cannot answer this reader keeps that entry, so the
+slot holds a value during the flight and a third reader inside that interval is served a hit
+while the reconstruction is out. The three claims are now asserted separately: the slot, the
+certification (a hit equal to an independent fold), and the flight's own answer.
+
+---
+
+## The Host C baseline — the A=A control
+
+Run at `e29a0256`, 5 measured replicates per arm, both working points, AB/BA balanced, 28
+replicates at about 105 s each. Every section ran; both arms completed 5/5.
+
+| point | level | baseline | control | Δ | rel | pooled MAD | MADs |
+|---|---|--:|--:|--:|--:|--:|--:|
+| full | 6r3w | 152,826 | 153,485 | +659 | 0.43% | 637 | 1.04 |
+| full | 9r5w | 160,955 | 160,843 | −112 | −0.07% | 415 | 0.27 |
+| full | 12r6w | 163,752 | 163,982 | +230 | 0.14% | 1,436 | 0.16 |
+| partial | 6r3w | 143,367 | 143,114 | −253 | −0.18% | 872 | 0.29 |
+| partial | 9r5w | 145,439 | 146,640 | +1,201 | 0.83% | 1,732 | 0.69 |
+| partial | 12r6w | 149,104 | 148,705 | −399 | −0.27% | 733 | 0.54 |
+
+**The harness's noise floor on Host C is 0.83% at worst, about one pooled MAD.** The gate fires
+at ≥10% *and* ≥3 MADs, so it has roughly an order of magnitude of headroom. This stage has no
+pass line; the table above is what every later C10 result is scored against.
+
+Three findings from the run itself:
+
+* **`flights_that_fell_behind` is 0 in every level of every replicate**, on a 10-core machine
+  as in the container. `answer_from_view` holds the base shared across the fold and `append`
+  needs it exclusively, so no epoch can be applied while a keyed read is in flight. The anchor
+  gap is entirely `applied − anchor` at arrival, 4.6–5.7 epochs, and none of it is caused by
+  folding. **T04's deferred merge is being asked about a window that is empty by construction
+  on this build**, which is a result the phase diagram has to carry.
+* **`c10-rwlock` on Darwin: 200/200 writer-preferring**, against 170/200 in the container.
+* **The partial point contends differently.** At the full point the tails are `b wait`; at
+  partial 12r6w they are `v wait` — one replicate has seven consecutive `hit` rows waiting
+  3,500–5,900 µs on the view with zero base wait. Invisible at the 2,500 budget, which is the
+  only point cycle 9 measured.
+
+**A10-19 is confirmed repaired on the machine that found it**: `rev_metadata_2x_budget` reads
+34,165 allocations on Host C, exactly the committed budget, against 44,165 before.
+
+---
+
 ## Material facts not covered by the work order
 
 Recorded as they are found; these are not restatements of A10-01…20 or F-10-01…13.
@@ -621,6 +760,32 @@ connect failed and the check correctly reported a port it could not reach as fre
 class caught the executor twice more in one session — the deadlock witness's reverted form
 hung rather than failing, and the completion control's reverted form hung too. Each was code
 written against the platform in front of it and true only there.
+
+**MF-7 — a toolchain override that is invisible where it is written.** Both Host C scripts
+exported `RUSTUP_TOOLCHAIN=stable`. In the cloud container that is a no-op: the pinned 1.95.0
+cannot be resolved without egress, and `stable` *is* 1.95.0. On Host C the pin resolves and
+`stable` is 1.97.1, so the override silently swapped the compiler — **the whole cycle-10
+baseline and every gate the author ran were built with a toolchain the tree does not pin**, and
+no line of output said so. The general shape: an environment override written on the machine
+where it changes nothing is untested by construction, and the first host it reaches is the one
+it changes. All three scripts now prefer the pin, fall back to `stable`, and print which.
+
+**MF-8 — `make reproduce` compared columns its own manifest says are not comparable.**
+`results/MANIFEST.csv` classifies E18 as `toolchain-scoped` and defines that as "allocation
+*counts* are exact across hosts, allocation *bytes* are not". The gate is
+`git diff --exit-code -- results/`, which compares every byte of every file, so Host C failed on
+the byte columns every time it ran — masked, until this cycle, by a louder failure in the same
+file. The counts are now in a `byte-deterministic` file that is diffed; the byte columns stay,
+labelled with their host, excluded. **A classification nothing enforces is a comment.**
+
+**MF-9 — the executor wrote the same class of bug it was repairing.** The A10-12 test matched
+on `view(&rt)...begin_read(..)` directly. A temporary in a `match` scrutinee lives to the end
+of the whole `match`, so the view guard was held inside every arm, and an arm that took the
+view again self-deadlocked on a non-reentrant `Mutex`. It hung the container suite until it was
+killed. `read_split`, three hundred lines above it, binds the outcome to a local first for
+exactly this reason and says so. Recorded because the repair is not "be more careful": it is
+that a `match` on a lock-taking expression is a hazard the codebase has already met, and
+nothing in the tree prevents the next one.
 
 **MF-6 — the device bridge to Host C is a Linux VM, so it cannot validate Darwin behaviour.**
 The `mcp__remote-devices__device_bash` shell reports `platform.system() == "Linux"` and

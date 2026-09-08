@@ -2929,6 +2929,24 @@ schema bank {
                 "`select nilestream_stats` must name `{wanted}` — the benchmark looks it up                  by name and renders `n/a` when it is missing, so dropping it here would                  quietly unmeasure the column rather than break anything. Got: {names:?}"
             );
         }
+        // **And the row is as wide as the description.** This table's names and its values
+        // are still two lists — a `Field` per column and a `Some` per column, side by side —
+        // which is the arrangement that produced eleven values under six names in the
+        // slow-read table this cycle. That one is generated from a single list now; this one
+        // is not, because its values come from a struct's fields and the same treatment
+        // would put twenty-two closures where twenty-two field reads are. The check is
+        // cheap and never vacuous instead: `nilestream_stats` returns exactly one row, so
+        // there is always a row to be the wrong width.
+        for row in rows_of(&out) {
+            assert_eq!(
+                row.len(),
+                names.len(),
+                "`select nilestream_stats` emitted {} values under {} declared names; a \
+                 client reads every column after the first extra one as the wrong quantity",
+                row.len(),
+                names.len()
+            );
+        }
     }
 
     /// **The schema is compiled once per epoch, not once per `INSERT` — F-68, C9-05.1.**

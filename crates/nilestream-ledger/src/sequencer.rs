@@ -302,17 +302,43 @@ impl Sequencer {
     /// this one holds *at least* `window` epochs' worth of identities and not a fixed count:
     /// the bound is on age, which is what the declaration says.
     pub fn start_bounded(
+        segment: Segment,
+        frontier: Arc<Frontier>,
+        policy: SyncPolicy,
+        recovered_seen: std::collections::BTreeMap<String, u64>,
+        window: Option<u64>,
+    ) -> Sequencer {
+        Self::start_gated(segment, frontier, policy, recovered_seen, window, None)
+    }
+
+    /// `start_bounded`, with an optional gate the sealer waits on before its first drain.
+    ///
+    /// **The gate exists so that group commit can be a property rather than a race.** The
+    /// tests for it submitted from sixteen threads and asserted `max_batch > 1`, which is
+    /// true only if two submitters happen to queue before the sealer drains — a fact the
+    /// scheduler decides. On a host that hands the sealer a core between every send, that
+    /// assertion fails, and the failure looks exactly like group commit being broken. With
+    /// the gate the test states the actual claim: *if N transactions are waiting when the
+    /// sealer wakes, it seals them as one epoch behind one barrier.* Nothing about
+    /// production changes — `start_bounded` passes `None`, and a `None` gate is not waited
+    /// on — but the property becomes observable without asking the operating system for a
+    /// favour.
+    fn start_gated(
         mut segment: Segment,
         frontier: Arc<Frontier>,
         policy: SyncPolicy,
         recovered_seen: std::collections::BTreeMap<String, u64>,
         window: Option<u64>,
+        gate: Option<Arc<std::sync::Barrier>>,
     ) -> Sequencer {
         let (tx, rx): (Sender<Request>, Receiver<Request>) = channel();
         let stats = Arc::new(Mutex::new(SequencerStats::default()));
         let (f, s) = (Arc::clone(&frontier), Arc::clone(&stats));
 
         let sealer = std::thread::spawn(move || {
+            if let Some(g) = gate {
+                g.wait();
+            }
             // The idempotency window, recovered from the segment at start-up rather than
             // starting empty. `BTreeMap`, not `HashMap`: the window decides which epoch a
             // duplicate is told it committed at, and an epoch is a hashed, audited value
@@ -673,14 +699,80 @@ mod tests {
         }
         let st = s.stats();
         assert_eq!(st.txns_committed, 1600);
-        assert!(
-            st.max_batch > 1,
-            "under 16 concurrent submitters the sealer must have batched at least once: {st:?}"
-        );
-        assert!(
-            st.txns_per_fsync() > 1.0,
-            "group commit must beat one transaction per fsync: {:.2}",
+        // **Reported, not asserted.** Whether sixteen threads happen to queue two requests
+        // before the sealer drains is the scheduler's decision, and asserting on it made
+        // this test fail on hosts that schedule the sealer eagerly. The claim it was trying
+        // to make is asserted deterministically by
+        // `every_transaction_waiting_when_the_sealer_wakes_commits_in_one_epoch` below; what
+        // survives here is the load-shaped observation, printed so a run that batches nothing
+        // is visible without being called a defect.
+        eprintln!(
+            "  group_commit_amortises_the_fsync: max_batch={} txns/fsync={:.2} (load-shaped, \
+             not asserted)",
+            st.max_batch,
             st.txns_per_fsync()
+        );
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// **Group commit, as a property: what is waiting when the sealer wakes is one epoch.**
+    ///
+    /// The deterministic half of the claim `group_commit_amortises_the_fsync` used to assert
+    /// by racing. The sealer is held behind a gate while thirty-two transactions are queued
+    /// with `submit_pending`, which returns without waiting; when the gate opens, the drain
+    /// finds all of them. `max_batch` must then be exactly thirty-two, one epoch must have
+    /// been sealed, and the whole batch must have cost one barrier — the three numbers group
+    /// commit is *for*, none of them decided by the operating system.
+    #[test]
+    fn every_transaction_waiting_when_the_sealer_wakes_commits_in_one_epoch() {
+        const N: usize = 32;
+        let p = tmp("gated-batch");
+        let (segment, _rec) = Segment::open(&p, SyncPolicy::Always).unwrap();
+        // Two parties: this thread and the sealer.
+        let gate = Arc::new(std::sync::Barrier::new(2));
+        let s = Sequencer::start_gated(
+            segment,
+            Frontier::new(),
+            SyncPolicy::Always,
+            Default::default(),
+            None,
+            Some(Arc::clone(&gate)),
+        );
+        let mut waiting = Vec::with_capacity(N);
+        for i in 0..N {
+            waiting.push(
+                s.submit_pending(Txn {
+                    idem_key: format!("gated-{i:03}"),
+                    payload: vec![i as u8; 16],
+                })
+                .expect("queued"),
+            );
+        }
+        // Everything is in the channel and the sealer has not looked at it yet.
+        gate.wait();
+        let mut epochs = Vec::with_capacity(N);
+        for rx in waiting {
+            epochs.push(rx.recv().expect("the sealer replied").expect("committed"));
+        }
+        let st = s.shutdown();
+        assert_eq!(
+            st.max_batch, N as u64,
+            "every transaction waiting when the sealer woke had to seal as one batch: \
+             max_batch={} over {N} queued",
+            st.max_batch
+        );
+        assert_eq!(st.epochs_sealed, 1, "one batch is one epoch: {st:?}");
+        assert_eq!(
+            epochs
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            1,
+            "every transaction in one batch commits at the same epoch: {epochs:?}"
+        );
+        assert_eq!(
+            st.fsyncs, 1,
+            "one epoch is one barrier — that is what group commit amortises: {st:?}"
         );
         let _ = std::fs::remove_file(&p);
     }
@@ -1079,11 +1171,19 @@ mod recovery_tests {
             "epochs must be a set drawn from the commits: {} distinct",
             all.len()
         );
-        assert!(
-            st.max_batch > 1,
-            "no batch ever held more than one transaction under {THREADS} concurrent \
-             submitters. Group commit is then built and unreachable, which is the defect \
-             cycle 7 found by reading `max_batch` off a benchmark rather than a test"
+        // **Reported, not asserted — and the reason matters.** Whether any two of these
+        // sixteen sends land in one drain is the scheduler's call: each thread waits for its
+        // own reply before sending again, so on a host that runs the sealer between every
+        // send, every batch is legitimately one. Asserting `max_batch > 1` here made a green
+        // property depend on the machine's load. What this test *does* establish without the
+        // operating system's help is above: every submitter gets a reply, every transaction
+        // commits, and the epochs are drawn from the commits. The batching claim is asserted
+        // deterministically by `every_transaction_waiting_when_the_sealer_wakes_commits_in_
+        // one_epoch`.
+        eprintln!(
+            "  eight_concurrent_submitters: max_batch={} over {THREADS} submitters \
+             (load-shaped, not asserted)",
+            st.max_batch
         );
         let _ = std::fs::remove_file(&p);
     }

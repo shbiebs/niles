@@ -177,9 +177,26 @@ mod tests {
 
         let (fr, dr) = (Arc::clone(&f), Arc::clone(&durable));
         let reader = thread::spawn(move || {
+            // **Bounded by the writer's progress, not by a fixed spin count.** This loop was
+            // `for _ in 0..200_000`, and on a two-core host running the suite at
+            // `--test-threads=8` the writer thread was not scheduled once before the reader
+            // finished all 200,000 iterations: the run then failed its own precondition —
+            // "the reader saw nothing at all" — and reported it as this property being
+            // violated. The verdict changed with the machine's load, which makes the test an
+            // instrument for the scheduler rather than for the frontier.
+            //
+            // The experiment is "what a reader observes while a writer publishes", so it ends
+            // when the writer has actually published, and the ceiling exists only so a
+            // genuinely stuck writer fails rather than hangs. The distinction the old loop
+            // could not draw — property violated vs. precondition unmet — is now two
+            // different assertion messages.
+            const WANT: u64 = 150;
+            const CEILING: u64 = 200_000_000;
             let mut observed = 0u64;
             let mut last = 0u64;
-            for _ in 0..200_000 {
+            let mut spins = 0u64;
+            while observed < WANT && spins < CEILING {
+                spins += 1;
                 let v = fr.visible();
                 assert!(v >= last, "the frontier went backwards: {last} -> {v}");
                 last = v;
@@ -191,14 +208,17 @@ mod tests {
                     observed = observed.max(v);
                 }
             }
-            observed
+            (observed, spins)
         });
 
         writer.join().unwrap();
-        let observed = reader.join().unwrap();
+        let (observed, spins) = reader.join().unwrap();
         assert!(
             observed > 0,
-            "the reader saw nothing at all; the test proved nothing"
+            "PRECONDITION UNMET: the writer published nothing the reader could see in \
+             {spins} spins, so no publication was observed and this run tested nothing. This \
+             is not the durable-before-visible property failing; it is the experiment not \
+             having happened."
         );
     }
 }

@@ -3105,8 +3105,12 @@ mod lock_order_tests {
             }
         }
         done.store(true, Ordering::Relaxed);
-        for t in threads {
-            let _ = t.join();
+        // **A panic inside one of these threads is a result, not noise.** `let _ = t.join()`
+        // discarded it: a reader that panicked mid-run left the deadline satisfied — it had,
+        // after all, finished — and the test passed while one of its five participants died.
+        for (i, t) in threads.into_iter().enumerate() {
+            t.join()
+                .unwrap_or_else(|_| panic!("thread {i} panicked during the deadlock probe"));
         }
     }
 }
@@ -4012,7 +4016,7 @@ mod fallback_rate_tests {
 
     /// Run four readers and two writers over one engine and return the delta in
     /// `ReadStats` across the run.
-    fn mixed_full(readers: usize, writers: usize) -> ReadStats {
+    fn mixed_full(readers: usize, writers: usize) -> (ReadStats, u64) {
         let engine = std::sync::Arc::new(RevEngine::seeded(
             ACCOUNTS,
             3,
@@ -4021,6 +4025,12 @@ mod fallback_rate_tests {
             EvictionPolicy::Lru,
         ));
         let before = engine.read_stats();
+        // **How far the writers moved the base while the readers ran.** Every keyed read
+        // that has to reconstruct needs an epoch that landed between the view's applied
+        // point and the read's anchor, so this is the term any honest bound on misses is
+        // written against. Sampled before the threads start and after they join, which is
+        // exactly the interval the reads happened in.
+        let frontier_before = crate::session::Serving::frontier(&*engine);
         let stop = std::sync::Arc::new(AtomicBool::new(false));
         let done = std::sync::Arc::new(AtomicU64::new(0));
 
@@ -4084,8 +4094,10 @@ mod fallback_rate_tests {
             t.join().expect("a writer panicked");
         }
 
+        let epochs_sealed =
+            crate::session::Serving::frontier(&*engine).saturating_sub(frontier_before);
         let after = engine.read_stats();
-        ReadStats {
+        let delta = ReadStats {
             reads: after.reads - before.reads,
             hits: after.hits - before.hits,
             misses: after.misses - before.misses,
@@ -4097,11 +4109,12 @@ mod fallback_rate_tests {
             // two sizes is not a size.
             view_metadata_keys: after.view_metadata_keys,
             idem_window_keys: after.idem_window_keys,
-        }
+        };
+        (delta, epochs_sealed)
     }
 
     fn mixed(readers: usize, writers: usize) -> (u64, u64) {
-        let s = mixed_full(readers, writers);
+        let (s, _epochs) = mixed_full(readers, writers);
         (s.view_answers, s.fallbacks)
     }
 
@@ -4111,11 +4124,15 @@ mod fallback_rate_tests {
     /// it. So this reports the whole picture, and asserts on the part that would hide.
     #[test]
     fn the_reads_that_stopped_falling_back_are_served_and_not_reconstructed() {
-        let s = mixed_full(4, 2);
+        let (s, epochs) = mixed_full(4, 2);
         let keyed = s.view_answers + s.fallbacks;
-        assert!(keyed > 1_000, "the measurement must have reached the view");
+        assert!(
+            keyed > 1_000,
+            "PRECONDITION UNMET: only {keyed} keyed reads reached the view"
+        );
         eprintln!(
-            "  4r/2w: reads={} hits={} misses={} rows_touched={} view_answers={}              fallbacks={} ({:.1}%)",
+            "  4r/2w: reads={} hits={} misses={} rows_touched={} view_answers={} \
+             fallbacks={} ({:.1}%) epochs_sealed={epochs}",
             s.reads,
             s.hits,
             s.misses,
@@ -4124,13 +4141,29 @@ mod fallback_rate_tests {
             s.fallbacks,
             s.fallbacks as f64 / keyed as f64 * 100.0
         );
-        // The keyed reads are of one account, seeded with three postings and touched by the
-        // writers, so a reconstruction is cheap here in absolute terms. The claim is the
-        // ratio: the great majority of keyed reads must be answered from a resident entry
-        // rather than rebuilt from the base.
+        // **The bound the code actually promises, against a measured write count.**
+        //
+        // This asserted `hits * 4 > keyed * 3` — three quarters of keyed reads must hit —
+        // which is not a property of the engine at all: it is a property of the *ratio of
+        // reads to writes the scheduler produced*. Two writers that get a great deal of CPU
+        // move the frontier past more anchors, every one of which is a legitimate
+        // reconstruction, and the test fails for the engine behaving correctly under a
+        // different load.
+        //
+        // What the engine promises is narrower and does not mention load: a keyed read
+        // reconstructs only when an epoch landed between the view's applied point and the
+        // read's anchor. Each such epoch can cost at most one miss per reader — a reader
+        // that misses installs the value at its own anchor — so misses are bounded by
+        // `readers × epochs_sealed`, and hits by the complement. With no writers the bound
+        // collapses to "every keyed read hits", which is the control below.
+        const READERS: u64 = 4;
+        let allowed = READERS.saturating_mul(epochs);
         assert!(
-            s.hits * 4 > keyed * 3,
-            "at least three quarters of the keyed reads must be view hits, or the fallback              rate fell because reads became reconstructions: {} hits over {keyed} keyed reads",
+            s.hits + allowed >= keyed,
+            "keyed reads that did not hit exceed what the writers can explain: {} hits over \
+             {keyed} keyed reads with {epochs} epochs sealed by 2 writers ({READERS} readers \
+             × {epochs} epochs = {allowed} reconstructions accounted for). A miss beyond that \
+             is a resident entry being rebuilt for no reason a write can justify.",
             s.hits
         );
     }
@@ -4152,16 +4185,25 @@ mod fallback_rate_tests {
         let r = rate(answers, fallbacks);
         assert!(
             answers + fallbacks > 1_000,
-            "the measurement must actually have reached the view: {answers} answered, \
+            "PRECONDITION UNMET: the measurement did not reach the view: {answers} answered, \
              {fallbacks} fell back"
         );
-        assert!(
-            r <= 0.05,
-            "keyed reads fell back to the fold {:.1}% of the time ({fallbacks} of {}). The \
-             view holds a value that is exact for every anchor in [stamp, effective] and the \
-             read must serve it at the anchor it was asked for",
-            r * 100.0,
-            answers + fallbacks
+        // **Zero, not a rate.** This asserted `<= 5%`, a threshold chosen when the rate was
+        // 87.4% and the repair had just landed. Since T-12.3 the number cannot be anything
+        // but zero: `Rev::read` returns the anchor it was asked for on both the hit and the
+        // miss path, so `answer_from_view`'s `answered.anchor != anchor` branch — the only
+        // thing that increments this counter — is unreachable. A tolerance around an
+        // unreachable event is a threshold nobody can breach and nobody can learn from; an
+        // equality is a witness that the branch is still unreachable, and it fails the moment
+        // a change puts a compensating fold back on the read path.
+        assert_eq!(
+            fallbacks,
+            0,
+            "a keyed read fell back to the fold {fallbacks} times of {} ({:.1}%). `Rev::read` \
+             answers at the anchor it was asked for, so this branch is unreachable; reaching \
+             it means a caller reintroduced the compensating fold the read exists to remove",
+            answers + fallbacks,
+            r * 100.0
         );
     }
 
@@ -4170,12 +4212,35 @@ mod fallback_rate_tests {
     /// so this is a control rather than a second measurement.
     #[test]
     fn readers_alone_never_fall_back() {
-        let (answers, fallbacks) = mixed(4, 0);
-        assert!(answers > 1_000, "the readers must have reached the view");
+        let (s, epochs) = mixed_full(4, 0);
+        let keyed = s.view_answers + s.fallbacks;
+        assert!(
+            s.view_answers > 1_000,
+            "PRECONDITION UNMET: the readers did not reach the view"
+        );
         assert_eq!(
-            fallbacks, 0,
+            epochs, 0,
+            "PRECONDITION UNMET: no writer was started, so the frontier must not have moved: \
+             {epochs} epochs sealed"
+        );
+        assert_eq!(
+            s.fallbacks, 0,
             "with no writer moving the frontier, every entry is exact at every anchor asked \
              for, and a fallback here would mean the read is refusing its own state"
+        );
+        // **The sharp half of the pair, and the one that is load-free.** The mixed test can
+        // only bound its misses by what the writers did, because that is all the engine
+        // promises under concurrency. With no writer there is nothing to explain a
+        // reconstruction with: after the first read of the key, every later read of it must
+        // be served from the resident entry. This is what "the reads that stopped falling
+        // back are served and not reconstructed" was really trying to say, and here it can be
+        // said exactly.
+        assert!(
+            s.misses <= 1,
+            "with no writer, at most the first keyed read may reconstruct; {} of {keyed} \
+             keyed reads rebuilt the value from the base, which means resident entries are \
+             being discarded rather than served",
+            s.misses
         );
     }
 }

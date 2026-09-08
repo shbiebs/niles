@@ -19,20 +19,83 @@ use std::path::PathBuf;
 use std::process::Command;
 
 /// A scratch file that removes itself.
+///
+/// **The name is owned, not hoped for.** This used to be `nilesc-run-{name}-{nanos}-{pid}`
+/// created with `File::create`, and every test in this file asks for the same `{name}`
+/// (`args`). Two tests running in one process inside one clock tick therefore chose the same
+/// path, `File::create` *truncated* the first one's file, and the first `Temp` to drop deleted
+/// a file the other was still using. On the author's Mac that lost a race in one run of three:
+/// `an_account_is_named_by_the_rendering_of_what_was_passed` read another test's arguments and
+/// then found no file at all. The verdict changed with the scheduler, which makes the gate an
+/// instrument that reports the machine's load as a defect in the code.
+///
+/// Three things fix it and each is load-bearing. A process-local counter makes two `Temp`s in
+/// one process distinct whatever the clock says. `create_new` makes the file's *creation* the
+/// claim on the name, so a leftover from an earlier process with a recycled pid is a collision
+/// this sees rather than data it silently overwrites. And a bounded retry means a collision
+/// is answered by taking the next name instead of by failing or by clobbering.
 struct Temp(PathBuf);
+
+/// Distinct for every `Temp` this process makes. `Relaxed` is enough: the only property
+/// required is that no two reads return the same value, which `fetch_add` gives on its own.
+static TEMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 impl Temp {
     fn new(name: &str, contents: &str) -> Temp {
-        let mut p = std::env::temp_dir();
-        let salt = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        p.push(format!("nilesc-run-{name}-{salt}-{}", std::process::id()));
-        let mut f = std::fs::File::create(&p).expect("create the scratch file");
-        f.write_all(contents.as_bytes()).expect("write it");
-        Temp(p)
+        Temp::with_clock(name, contents, || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        })
     }
+
+    /// `new`, with the clock injected, so a test can hold it still.
+    ///
+    /// A stuck clock is exactly the condition the old construction could not survive, and it
+    /// is not reachable through `new` — a guard that cannot state its adversary is not a
+    /// guard. With the clock frozen the counter and `create_new` must still produce two
+    /// distinct, independently owned files.
+    fn with_clock(name: &str, contents: &str, mut clock: impl FnMut() -> u128) -> Temp {
+        let salt = clock();
+        let pid = std::process::id();
+        for attempt in 0..64u64 {
+            let seq = TEMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let p = Temp::candidate(name, salt, pid, seq);
+            // `create_new`: the file must not exist. `File::create` would truncate whatever is
+            // there, which is how one test's fixture became another's.
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&p)
+            {
+                Ok(mut f) => {
+                    f.write_all(contents.as_bytes()).expect("write it");
+                    return Temp(p);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    // Someone else owns this name. Take the next one rather than the file.
+                    let _ = attempt;
+                    continue;
+                }
+                Err(e) => panic!("cannot create the scratch file {}: {e}", p.display()),
+            }
+        }
+        panic!("64 scratch names in a row were taken; the temp directory is not usable")
+    }
+
+    /// The path a given `(name, salt, pid, seq)` names.
+    ///
+    /// One function, used by `with_clock` and by the guard below, so the guard squats the
+    /// name the constructor will actually try. A guard that computed the name itself would
+    /// stop being a guard the moment the naming changed — which is exactly what it is
+    /// supposed to notice.
+    fn candidate(name: &str, salt: u128, pid: u32, seq: u64) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!("nilesc-run-{name}-{salt}-{pid}-{seq}"));
+        p
+    }
+
     fn path(&self) -> &str {
         self.0.to_str().expect("a utf-8 path")
     }
@@ -40,8 +103,92 @@ impl Temp {
 
 impl Drop for Temp {
     fn drop(&mut self) {
+        // Only ever this `Temp`'s own path, which `create_new` proved was unclaimed when it
+        // was taken. The old code removed a path it might have shared with a live fixture.
         let _ = std::fs::remove_file(&self.0);
     }
+}
+
+/// **Two fixtures made in one clock tick are two files — the F-63/A9-F06 guard.**
+///
+/// The adversary is a clock that does not move, which is what a nanosecond timestamp is on a
+/// machine whose two tests reach this function inside one tick. Under the old construction
+/// both `Temp`s named the same path, the second `File::create` truncated the first, and the
+/// first drop deleted the survivor's file: this test then fails twice over, once on the
+/// contents and once on the read after the drop.
+#[test]
+fn two_fixtures_made_in_one_clock_tick_own_different_files() {
+    let frozen = || 1_700_000_000_000_000_000u128;
+    let a = Temp::with_clock(
+        "guard",
+        "acct a.usd
+",
+        frozen,
+    );
+    let b = Temp::with_clock(
+        "guard",
+        "acct b.usd
+",
+        frozen,
+    );
+    assert_ne!(
+        a.path(),
+        b.path(),
+        "two fixtures made inside one clock tick took the same name, so one truncated the other"
+    );
+    assert_eq!(
+        std::fs::read_to_string(a.path()).expect("a is readable"),
+        "acct a.usd
+",
+        "the second fixture overwrote the first"
+    );
+    assert_eq!(
+        std::fs::read_to_string(b.path()).expect("b is readable"),
+        "acct b.usd
+"
+    );
+    let b_path = b.path().to_string();
+    drop(a);
+    assert_eq!(
+        std::fs::read_to_string(&b_path).expect("b survives a's drop"),
+        "acct b.usd
+",
+        "dropping one fixture deleted another that was still in use"
+    );
+}
+
+/// A name already on disk is not taken, and not overwritten.
+///
+/// The pid-recycling case: a previous process left `nilesc-run-taken-<salt>-<pid>-0` behind.
+/// The new process must not adopt its bytes.
+#[test]
+fn a_scratch_name_already_on_disk_is_stepped_over_rather_than_truncated() {
+    const SALT: u128 = 1_700_000_000_000_000_001;
+    let frozen = || SALT;
+    // The name the next `Temp` will try, computed by the constructor's own function.
+    let seq = TEMP_SEQ.load(std::sync::atomic::Ordering::Relaxed);
+    let squatted = Temp::candidate("taken", SALT, std::process::id(), seq);
+    std::fs::write(&squatted, "not mine").expect("squat the name");
+    let t = Temp::with_clock(
+        "taken", "mine
+", frozen,
+    );
+    assert_ne!(
+        t.path(),
+        squatted.to_str().unwrap(),
+        "it took the taken name"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&squatted).expect("the squatted file is still there"),
+        "not mine",
+        "the squatted file was truncated"
+    );
+    drop(t);
+    assert!(
+        squatted.exists(),
+        "dropping the new fixture deleted a file it never owned"
+    );
+    let _ = std::fs::remove_file(&squatted);
 }
 
 struct Out {

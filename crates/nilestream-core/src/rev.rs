@@ -1273,6 +1273,16 @@ pub enum Unsupported {
     NoKey { node: NodeId },
     /// The aggregate is not one the runtime maintains.
     Aggregate { node: NodeId, agg: &'static str },
+    /// A node the output depends on is outside the fragment, even though the output itself
+    /// is inside it.
+    Upstream {
+        output: NodeId,
+        node: NodeId,
+        op: &'static str,
+    },
+    /// The aggregate reads a derived source: a view this runtime does not hold, and whose
+    /// rows no `Base` can fold.
+    DerivedSource { node: NodeId, relation: String },
 }
 
 impl Unsupported {
@@ -1290,6 +1300,18 @@ impl Unsupported {
             Unsupported::Aggregate { node, agg } => {
                 format!("node {node} aggregates with `{agg}`, which this runtime does not maintain")
             }
+            Unsupported::Upstream { output, node, op } => format!(
+                "output node {output} is a keyed aggregate this runtime maintains, but it \
+                 reads node {node}, a `{op}`. Every answer comes from `Base::reconstruct`, \
+                 which is told a key and an epoch and nothing else, so a stage between the \
+                 source and the aggregate is not executed — it is dropped, and the view \
+                 answers as though it were not there"
+            ),
+            Unsupported::DerivedSource { node, relation } => format!(
+                "node {node} reads `{relation}`, which is derived rather than a base. This \
+                 runtime folds a base through `Base::reconstruct`; it does not hold the \
+                 intermediate a derived source names"
+            ),
         }
     }
 }
@@ -1322,6 +1344,29 @@ impl Runtime {
     /// for absent keys (which is full materialization under another name). Refusing here is
     /// what keeps Chapter 9 inside the fragment the theorem covers; Open case 4.1.α states
     /// the general case as a conjecture rather than pretending it is proved.
+    ///
+    /// # What is checked, and where it used to stop
+    ///
+    /// **The whole graph reachable from each output**, and until cycle 10 it was the output
+    /// node alone (A10-07's sibling, A10-06). The paragraph above was true of what this
+    /// function *meant* and false of what it did: `Source → Join → Aggregate(sum)` presented
+    /// a keyed `sum` as its output and installed, and `Q_lin` was a claim in a doc comment
+    /// rather than a property of the artifact. `thesis_drift::theorem_4_1_names_its_fragment`
+    /// asserted the restriction was true of the code on the strength of this comment.
+    ///
+    /// It matters more than a missing refusal usually would, because of what happens after
+    /// this function returns: nothing reads the circuit again. Every answer comes from
+    /// `Base::reconstruct`, which is given a key and an epoch. So an unsupported stage is not
+    /// executed badly — it is not executed at all, and the view answers as though the stage
+    /// were absent. A `Filter` under the aggregate is the sharpest case: no error, no
+    /// approximation, just the unfiltered sum, which is precisely what an answer-level test
+    /// expects to see.
+    ///
+    /// The accepted fragment is therefore stated as what a `Base` can actually answer: one
+    /// keyed `sum`/`count` directly over one immutable base source. The server's planner
+    /// (`nilestream_server::scan_fold::plan`) walks the same shape and returns `None` rather
+    /// than folding what it cannot; this is the other door into the same runtime, the one a
+    /// hand-built `Circuit` comes through, and the two now agree.
     pub fn install(
         circuit: Circuit,
         budget: Option<u64>,
@@ -1355,6 +1400,56 @@ impl Runtime {
             }
             if n.key.is_none() {
                 return Err(Unsupported::NoKey { node: id });
+            }
+
+            // **The whole reachable graph, not only the output node — A10-06.**
+            //
+            // This function used to look at `circuit.outputs` and stop. An output that was a
+            // keyed `sum` installed, whatever fed it — and after `install` returns, the
+            // circuit is never consulted again: every answer comes from `Base::reconstruct`,
+            // which is handed a key and an epoch and is told nothing about the graph. So a
+            // `Source → Filter → Aggregate` circuit installed happily and then answered as
+            // if the filter were not there. Not a crash, not a refusal: a well-formed wrong
+            // number from a public API, and no answer-level test could catch it, because the
+            // answer is exactly what the *unfiltered* circuit should give.
+            //
+            // The server has a planner that walks this properly (`scan_fold::plan`) and
+            // returns `None` on anything it cannot fold. This is the other door into the
+            // same runtime — the one a hand-built `Circuit` comes through — and it had no
+            // such check.
+            //
+            // The accepted fragment is therefore stated as what `Base` can actually answer:
+            // one keyed aggregate directly over one immutable base. A `Filter` or `Map`
+            // between them is not "nearly supported"; it is a stage nothing executes.
+            let mut seen = BTreeSet::new();
+            let mut stack = vec![id];
+            while let Some(cur) = stack.pop() {
+                if !seen.insert(cur) {
+                    continue;
+                }
+                let m = circuit.node(cur);
+                match &m.op {
+                    // The output aggregate itself, already checked above.
+                    Op::Aggregate { .. } if cur == id => {}
+                    Op::Source {
+                        is_base, relation, ..
+                    } => {
+                        if !*is_base {
+                            return Err(Unsupported::DerivedSource {
+                                node: cur,
+                                relation: relation.clone(),
+                            });
+                        }
+                    }
+                    other => {
+                        return Err(Unsupported::Upstream {
+                            output: id,
+                            node: cur,
+                            op: other.name(),
+                        })
+                    }
+                }
+                stack.extend(m.inputs.iter().copied());
             }
             // Read the checked fields. This is not incidental: the IR's accessed-field
             // audit fails if a consumer plans without consulting them, and a runtime that
@@ -1491,7 +1586,7 @@ mod tests {
     /// order depends on a hash seed. GC-12's rule is "no `HashMap` in this file", and a rule
     /// with an exception for the parts a reader is least likely to check is not a rule.
     #[derive(Default)]
-    struct FoldBase {
+    pub(super) struct FoldBase {
         /// (epoch, key, delta)
         rows: Vec<(Epoch, Key, Value)>,
         head: Epoch,
@@ -1503,13 +1598,13 @@ mod tests {
     }
 
     impl FoldBase {
-        fn new(interval: usize) -> Self {
+        pub(super) fn new(interval: usize) -> Self {
             FoldBase {
                 interval,
                 ..Default::default()
             }
         }
-        fn seal(&mut self, key: Key, delta: Value) -> Epoch {
+        pub(super) fn seal(&mut self, key: Key, delta: Value) -> Epoch {
             self.head += 1;
             self.rows.push((self.head, key.clone(), delta));
             let c = self.counts.entry(key.clone()).or_insert(0);
@@ -2391,6 +2486,237 @@ mod tests {
         assert!(
             bounded <= 16.0,
             "with C=16 the fold must be bounded near C/2+1 = 9, measured {bounded}"
+        );
+    }
+
+    /// **The guard corpus: every unsupported reachable graph, refused at the public door.**
+    ///
+    /// A10-06. `install` inspected `circuit.outputs` and stopped, so a keyed `sum` was
+    /// enough to install *whatever fed it*. That is not a near-miss. After `install`
+    /// returns, nothing reads the circuit again — `Base::reconstruct` is handed a key and an
+    /// epoch — so an intervening `Filter` is not approximated or partially applied, it is
+    /// dropped, and the view answers the question the circuit does **not** ask. The failure
+    /// is a well-formed correct-looking number, which is why it survived four audit cycles:
+    /// every answer-level assertion in the tree passes, because the answer is exactly what
+    /// the graph-without-the-filter should produce.
+    ///
+    /// Each entry below is a graph that lowers and verifies. `Join` and `Fixpoint` are the
+    /// cases Theorem 4.1's fragment excludes for a stated reason; `Filter`, `Map` and
+    /// `Distinct` are the ones that look harmless and are not.
+    #[test]
+    fn every_unsupported_reachable_graph_is_refused_at_install() {
+        use niles_ir::operator::{JoinKind, ScalarOp};
+
+        fn src(c: &mut Circuit, relation: &str, is_base: bool) -> NodeId {
+            c.add(
+                Op::Source {
+                    relation: relation.into(),
+                    is_base,
+                    anchor_key: vec![0],
+                    confidential: Vec::new(),
+                },
+                vec![],
+                internal_contract(),
+                relation,
+            )
+        }
+        fn agg_over(c: &mut Circuit, input: NodeId) -> NodeId {
+            c.add(
+                Op::Aggregate {
+                    group_key: vec![0],
+                    aggs: vec![(Agg::Sum, Scalar::Column(1))],
+                },
+                vec![input],
+                internal_contract(),
+                "balance",
+            )
+        }
+
+        // Each case builds a circuit and names the op the refusal must point at: what the
+        // graph is, the `Op::name()` the refusal must carry, and how to build it.
+        type Case = (&'static str, &'static str, Box<dyn Fn() -> Circuit>);
+        let cases: Vec<Case> = vec![
+            (
+                "a filter between the source and the aggregate",
+                "filter",
+                Box::new(|| {
+                    let mut c = Circuit::new();
+                    let s = src(&mut c, "postings", true);
+                    let f = c.add(
+                        Op::Filter {
+                            predicate: Scalar::Binary {
+                                op: ScalarOp::Eq,
+                                lhs: Box::new(Scalar::Column(0)),
+                                rhs: Box::new(Scalar::LitInt(4242)),
+                            },
+                        },
+                        vec![s],
+                        internal_contract(),
+                        "where",
+                    );
+                    let a = agg_over(&mut c, f);
+                    c.set_output("balance", a);
+                    c
+                }),
+            ),
+            (
+                "a map between the source and the aggregate",
+                "map",
+                Box::new(|| {
+                    let mut c = Circuit::new();
+                    let s = src(&mut c, "postings", true);
+                    let m = c.add(
+                        Op::Map {
+                            exprs: vec![
+                                Scalar::Column(0),
+                                Scalar::Neg(Box::new(Scalar::Column(1))),
+                            ],
+                        },
+                        vec![s],
+                        internal_contract(),
+                        "map",
+                    );
+                    let a = agg_over(&mut c, m);
+                    c.set_output("balance", a);
+                    c
+                }),
+            ),
+            (
+                "a join under the aggregate",
+                "join",
+                Box::new(|| {
+                    let mut c = Circuit::new();
+                    let l = src(&mut c, "postings", true);
+                    let r = src(&mut c, "accounts", true);
+                    let j = c.add(
+                        Op::Join {
+                            kind: JoinKind::Inner,
+                            left_key: vec![0],
+                            right_key: vec![0],
+                            residual: None,
+                        },
+                        vec![l, r],
+                        internal_contract(),
+                        "join",
+                    );
+                    let a = agg_over(&mut c, j);
+                    c.set_output("balance", a);
+                    c
+                }),
+            ),
+            (
+                "a distinct under the aggregate",
+                "distinct",
+                Box::new(|| {
+                    let mut c = Circuit::new();
+                    let s = src(&mut c, "postings", true);
+                    let dd = c.add(Op::Distinct, vec![s], internal_contract(), "distinct");
+                    let a = agg_over(&mut c, dd);
+                    c.set_output("balance", a);
+                    c
+                }),
+            ),
+            (
+                "a guarded fixpoint under the aggregate",
+                "fixpoint",
+                Box::new(|| {
+                    let mut c = Circuit::new();
+                    let s = src(&mut c, "postings", true);
+                    let fx = c.add(
+                        Op::Fixpoint {
+                            measure: Scalar::Column(1),
+                            max_rounds: 4,
+                        },
+                        vec![s],
+                        internal_contract(),
+                        "fix",
+                    );
+                    let a = agg_over(&mut c, fx);
+                    c.set_output("balance", a);
+                    c
+                }),
+            ),
+        ];
+
+        for (what, op, build) in cases {
+            match Runtime::install(build(), None, Policy::Lru) {
+                Ok(_) => panic!(
+                    "installed a circuit with {what}. Nothing below `install` reads the \
+                     circuit again, so that stage would be silently dropped and the view \
+                     would answer a question it was not asked"
+                ),
+                Err(Unsupported::Upstream { op: got, .. }) => assert_eq!(
+                    got, op,
+                    "the refusal for {what} must name the node it refused"
+                ),
+                Err(other) => panic!("{what}: refused for the wrong reason: {other:?}"),
+            }
+        }
+
+        // A derived source is refused with its own reason: not "a stage was dropped" but
+        // "this runtime does not hold the thing you are reading".
+        let mut c = Circuit::new();
+        let s = src(&mut c, "some_view", false);
+        let a = agg_over(&mut c, s);
+        c.set_output("balance", a);
+        match Runtime::install(c, None, Policy::Lru) {
+            Err(Unsupported::DerivedSource { relation, .. }) => assert_eq!(relation, "some_view"),
+            Err(other) => panic!("a derived source must be refused by name: {other:?}"),
+            Ok(_) => panic!("a derived source installed: nothing here can fold a view's rows"),
+        }
+    }
+
+    /// The other half of T02.1, and the half that makes the refusals worth having: the
+    /// supported shape still installs, and still agrees with a fold that shares no state with
+    /// it — **after** an advance and after eviction, which is where a partial view could
+    /// diverge without any refusal noticing.
+    #[test]
+    fn a_supported_keyed_balance_still_agrees_with_an_independent_fold_after_advance_and_eviction()
+    {
+        const BUDGET: u64 = 4;
+        const KEYS: i64 = 12;
+
+        let mut base = FoldBase::new(0);
+        // An independent adder: the same rows, summed by something that is not the runtime.
+        let mut expected: BTreeMap<Key, Value> = BTreeMap::new();
+        for round in 0..3 {
+            for k in 0..KEYS {
+                let delta = 100 + k as i128 + round * 7;
+                base.seal(vec![k], delta);
+                *expected.entry(vec![k]).or_insert(0) += delta;
+            }
+        }
+
+        let mut rt = Runtime::install(
+            circuit(Materialize::Demand, Consistency::Snapshot),
+            Some(BUDGET),
+            Policy::Lru,
+        )
+        .expect("the keyed balance circuit is inside the fragment");
+        let head = base.frontier();
+        rt.advance(&base, head);
+
+        // Read every key twice, in opposite orders. With a budget of 4 against 12 keys the
+        // view evicts continuously, so most of these answers are reconstructions rather than
+        // resident reads — which is the case the agreement has to hold in.
+        let order: Vec<i64> = (0..KEYS).chain((0..KEYS).rev()).collect();
+        for k in order {
+            let got = rt
+                .view_mut("balance")
+                .expect("balance")
+                .read(&base, &vec![k], head);
+            assert_eq!(
+                got.value,
+                expected[&vec![k]],
+                "key {k} disagreed with an independent fold at epoch {head}"
+            );
+        }
+
+        let v = rt.view("balance").expect("balance");
+        assert!(
+            v.stats.evictions > 0,
+            "the agreement was measured without ever evicting, so it says nothing about \
+             reconstruction: budget {BUDGET} against {KEYS} keys"
         );
     }
 
@@ -3668,6 +3994,140 @@ mod concurrent_differential {
             "two-phase, under concurrency: {} joins, {} uninstalled folds, {} pinned \
              installs, {} flights refused, over {} reads",
             s.pending_joins, s.uninstalled_folds, s.pinned_installs, s.flights_refused, s.reads
+        );
+    }
+}
+
+/// **Two counters that answer different questions, and were read as one.**
+///
+/// `flights_that_fell_behind` increments when the view's `applied` epoch moves *between* a
+/// flight's begin and its landing. `pinned_installs` increments when the landing anchor is
+/// below `applied` at all — which includes every flight that **began** behind and never moved
+/// an inch. They are not two views of the same event, and the cycle-10 baseline separates
+/// them sharply: `flights_that_fell_behind` is 0 in every level of every replicate on both
+/// hosts, while pinned installs are 45,282 of 45,681 — **99.1% of installs** — with an
+/// arrival gap of four to five epochs.
+///
+/// The zero is structural and this module proves it: on the served path a fold holds the base
+/// shared for its whole duration and `append` needs it exclusively, so no epoch can be applied
+/// inside a flight. Nothing falls behind while folding.
+///
+/// What that zero does **not** say is that a deferred merge has nothing to merge. The suffix
+/// a merge would fold is `(anchor, applied]` at landing, and that interval is non-empty for
+/// almost every install here — not because folds are slow, but because readers arrive with a
+/// frontier already a few epochs behind the view's. So the merge window is wide open; it is
+/// simply opened by arrival lag rather than by fold duration, which is a different mechanism
+/// with a different cost model and a different bound.
+///
+/// The first test below is the half that was missing before any of this could be reported:
+/// **nothing asserted the counter could ever be non-zero.** An instrument reading zero
+/// because it is dead reads exactly like an instrument reading zero because the event does
+/// not occur. The second states the structural exclusion as arithmetic rather than as a
+/// schedule that happened to be observed.
+///
+/// The separate question of whether the shared hold across the fold should be released at all
+/// is A10-10, and it is not answered here: releasing it lets a fold span an append, which
+/// needs the fold to be provably strict-serialisable at its anchor rather than merely bounded
+/// by `[stamp, effective]` — a snapshot or a per-key version, not a lock release.
+#[cfg(test)]
+mod deferred_merge_window_tests {
+    use super::tests::{circuit, FoldBase};
+    use super::*;
+
+    /// The instrument is live: when a view *does* advance under a flight, the counter says so.
+    ///
+    /// Driven through the two-phase API directly, because that interleaving is the one the
+    /// served path structurally prevents — the only way to produce it is to be the thing the
+    /// served path is not.
+    #[test]
+    fn a_flight_that_the_view_outruns_is_counted() {
+        let mut base = FoldBase::new(0);
+        for k in 0..4 {
+            base.seal(vec![k], 100);
+        }
+        let early = base.frontier();
+        let mut rt = Runtime::install(
+            circuit(Materialize::Demand, Consistency::Snapshot),
+            None,
+            Policy::Lru,
+        )
+        .unwrap();
+        rt.advance(&base, early);
+
+        // Begin a fold at the epoch the view is at.
+        let v = rt.view_mut("balance").expect("balance");
+        let ticket = match v.begin_read_with(&vec![0], early, ReadMode::Alone) {
+            ReadOutcome::Fold(t) => t,
+            ReadOutcome::Hit(_) => panic!("a cold key must fold, not hit"),
+            ReadOutcome::Join(_) => panic!("`Alone` does not produce a join"),
+        };
+
+        // The view moves on while the fold is outstanding. This is what the served path
+        // cannot do, and what a released base hold would make possible.
+        for k in 0..4 {
+            base.seal(vec![k], 5);
+        }
+        let later = base.frontier();
+        rt.advance(&base, later);
+
+        let (value, rows) = base.reconstruct(&vec![0], early);
+        let v = rt.view_mut("balance").expect("balance");
+        let answer = v.finish_fold(ticket, value, rows);
+
+        assert_eq!(
+            answer.anchor, early,
+            "a late landing must certify at the anchor it folded, not at the view's epoch"
+        );
+        assert_eq!(
+            v.stats.flights_that_fell_behind, 1,
+            "the counter the merge decision rests on must be able to move; if this is 0 the \
+             zeroes measured in the baseline mean nothing"
+        );
+        assert!(
+            v.stats.pinned_installs >= 1,
+            "the late landing is pinned at its anchor, which is the policy a deferred merge \
+             would replace"
+        );
+    }
+
+    /// The structural exclusion, stated as arithmetic rather than as an observed schedule.
+    ///
+    /// `flights_that_fell_behind` increments exactly when `applied` at landing exceeds
+    /// `applied` at begin. `applied` moves only in `advance`, which the served path calls
+    /// while holding the base exclusively, and a flight holds it shared from begin to
+    /// landing. So on that path the two values are equal at every landing — and a run of
+    /// folds interleaved with nothing shows it: the counter stays at zero however many
+    /// epochs the base has, because none of them arrive *during* a fold.
+    #[test]
+    fn a_flight_that_nothing_advances_under_never_falls_behind() {
+        let mut base = FoldBase::new(0);
+        let mut rt = Runtime::install(
+            circuit(Materialize::Demand, Consistency::Snapshot),
+            Some(2),
+            Policy::Lru,
+        )
+        .unwrap();
+        for round in 0..8 {
+            for k in 0..6 {
+                base.seal(vec![k], 10 + round);
+            }
+            let head = base.frontier();
+            // Advance and read, never overlapping: the serialisation the base guard imposes.
+            rt.advance(&base, head);
+            for k in 0..6 {
+                rt.view_mut("balance").unwrap().read(&base, &vec![k], head);
+            }
+        }
+        let v = rt.view("balance").expect("balance");
+        assert!(
+            v.stats.reads >= 48 && v.stats.evictions > 0,
+            "the run must actually fold and evict, or it excludes nothing: {:?}",
+            (v.stats.reads, v.stats.evictions)
+        );
+        assert_eq!(
+            v.stats.flights_that_fell_behind, 0,
+            "with no append inside a flight there is no suffix to merge, which is why T04 is \
+             recorded as a negative experiment rather than built"
         );
     }
 }

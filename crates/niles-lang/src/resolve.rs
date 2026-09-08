@@ -24,7 +24,7 @@ use crate::ast::*;
 use crate::diagnostics::{closest, Applicability, Diagnostic, Diagnostics};
 use crate::effects::Rung;
 use crate::lexer::{Span, TimeUnit};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 /// The epoch a catalog was read at. A resolution is a statement about the schema *as of*
 /// this epoch and no other.
@@ -58,6 +58,8 @@ pub struct RelationInfo {
     /// The conservation grouping, if any. Present exactly on ledgers (W2).
     pub conserve_keys: Vec<String>,
     pub conserve_span: Option<Span>,
+    /// The spans of every `conserve` clause after the first, which W2b refuses.
+    pub extra_conserve_spans: Vec<Span>,
     pub retain_forever: bool,
     pub bitemporal: bool,
     /// Anchor-indexed column sets on this relation (W12).
@@ -493,6 +495,7 @@ fn relation_info(r: &RelDecl) -> RelationInfo {
         columns: Vec::new(),
         conserve_keys: Vec::new(),
         conserve_span: None,
+        extra_conserve_spans: Vec::new(),
         retain_forever: false,
         bitemporal: false,
         anchor_indices: Vec::new(),
@@ -552,8 +555,18 @@ fn relation_info(r: &RelDecl) -> RelationInfo {
     for rule in &r.rules {
         match rule {
             RelRule::Conserve { keys, span } => {
-                info.conserve_keys = keys.iter().map(|k| k.text.clone()).collect();
-                info.conserve_span = Some(*span);
+                // **First wins, and a second is a refusal rather than a replacement.** This
+                // used to assign unconditionally, so `conserve per (txn, cur); conserve per
+                // (desk);` compiled clean and the *first* rule — the one a reader would say
+                // the ledger declares — was the one thrown away. The refusal is raised in
+                // `check_relation` where the diagnostics live; recording the first span is
+                // what lets it point at both.
+                if info.conserve_span.is_none() {
+                    info.conserve_keys = keys.iter().map(|k| k.text.clone()).collect();
+                    info.conserve_span = Some(*span);
+                } else {
+                    info.extra_conserve_spans.push(*span);
+                }
             }
             RelRule::Retain { mode, .. } if mode.text == "forever" => info.retain_forever = true,
             RelRule::Bitemporal { .. } => info.bitemporal = true,
@@ -606,6 +619,23 @@ fn check_schema_item(si: &SchemaItem, cat: &Catalog, d: &mut Diagnostics) {
             unknown_name(d, &ix.on, "relation", cat.relation_names());
         }
         _ => {}
+    }
+}
+
+/// The single column of `r` whose declared type names `ty`, if there is exactly one.
+///
+/// `Err(n)` when there are `n != 1`: zero means the ledger cannot be conserved the way
+/// admission conserves, and more than one means "the transaction column" does not name
+/// anything in particular, so neither can be silently chosen.
+fn sole_column_of_type<'a>(info: &'a RelationInfo, ty: &str) -> Result<&'a ColumnInfo, usize> {
+    let hits: Vec<&ColumnInfo> = info
+        .columns
+        .iter()
+        .filter(|c| matches!(&c.ty, Ty::Path { path, .. } if path.last().text == ty))
+        .collect();
+    match hits.len() {
+        1 => Ok(hits[0]),
+        n => Err(n),
     }
 }
 
@@ -739,6 +769,152 @@ fn check_relation(r: &RelDecl, cat: &Catalog, d: &mut Diagnostics) {
                 );
             }
             d.push(diag);
+        }
+    }
+
+    // W2b: a ledger declares its conservation rule once.
+    //
+    // The parser accepts any number of `conserve` clauses and `relation_info` used to assign
+    // the last one over the first, silently. So a ledger could carry two contradictory rules,
+    // compile clean, and be conserved by neither the rule a reader would name nor a rule
+    // anyone wrote down.
+    for extra in &info.extra_conserve_spans {
+        let mut diag = Diagnostic::error(
+            "NL0224",
+            format!("`{}` declares more than one conservation rule", r.name.text),
+        )
+        .primary(*extra, "a second `conserve per (..)` on the same ledger")
+        .note(
+            "a ledger has one conservation rule; two rules are two different claims about \
+             what a sealed epoch must satisfy, and nothing decides between them",
+        );
+        if let Some(first) = info.conserve_span {
+            diag = diag.secondary(first, "the first rule is declared here");
+        }
+        d.push(diag);
+    }
+
+    // W3b: the declared grouping must be the grouping admission enforces.
+    //
+    // **A10-07.** `conserve per (..)` parsed, name-checked its columns, and then reached
+    // nothing: `conserve_keys` had no consumer anywhere below the compiler, while admission
+    // conserves per (transaction, currency) unconditionally — `crates/niles-interp/src/
+    // ledger.rs` sums each open transaction's legs by currency and refuses a non-zero
+    // residual. So `conserve per (txn, desk)` compiled, read as a promise of per-desk
+    // segregation, and bought nothing at all.
+    //
+    // The refusal is deliberately narrow, and the narrowness is the point. Per-group zero
+    // sums are *weaker* than forbidding cross-group flow: two opposite cross-desk transfers
+    // in one transaction cancel within each desk and the partition is still violated. A real
+    // segregation rule needs an admissible-edge policy with a stated allowance for FX and
+    // linked legs, and that policy is the author's to choose (LC-41). Until it exists, the
+    // honest thing is to accept exactly what is enforced and refuse the rest by name —
+    // not to invent a policy here, and not to keep accepting a declaration that means
+    // nothing.
+    //
+    // The keys are compared as a *set*: `(cur, txn)` and `(txn, cur)` describe the same
+    // partition, and refusing one of them would be a statement about writing order rather
+    // than about conservation.
+    if r.kind == RelKind::Ledger && !info.conserve_keys.is_empty() {
+        let span = info.conserve_span.unwrap_or(r.name.span);
+        let every_key_exists = info.conserve_keys.iter().all(|k| info.column(k).is_some());
+        // W3 has already reported an unknown column; a second diagnostic about the same
+        // typo would be noise.
+        if every_key_exists {
+            let txn = sole_column_of_type(info, "TxnId");
+            let cur = sole_column_of_type(info, "Currency");
+            let enforced: Option<Vec<&str>> = match (&txn, &cur) {
+                (Ok(t), Ok(c)) => Some(vec![t.name.as_str(), c.name.as_str()]),
+                _ => None,
+            };
+            let declared: BTreeSet<&str> = info.conserve_keys.iter().map(|k| k.as_str()).collect();
+
+            match enforced {
+                Some(e)
+                    if declared == e.iter().copied().collect::<BTreeSet<&str>>()
+                        && declared.len() == info.conserve_keys.len() =>
+                {
+                    // The declared rule is the enforced rule. Nothing to say.
+                }
+                Some(e) => {
+                    let repeated = declared.len() != info.conserve_keys.len();
+                    let mut diag = Diagnostic::error(
+                        "NL0225",
+                        format!(
+                            "`{}` declares a conservation grouping that is not enforced",
+                            r.name.text
+                        ),
+                    )
+                    .primary(
+                        span,
+                        if repeated {
+                            "a column is named twice in the conservation key"
+                        } else {
+                            "this grouping has no admission rule behind it"
+                        },
+                    )
+                    .note(format!(
+                        "the seal enforces exactly one grouping: per transaction, per \
+                         currency — here `conserve per ({}, {})`",
+                        e[0], e[1]
+                    ))
+                    .note(
+                        "a grouping the seal does not check is a promise the ledger does not \
+                         keep. Per-group zero sums would also be weaker than they look: two \
+                         opposite cross-group legs in one transaction cancel inside each \
+                         group, so segregation needs an admissible-edge rule that does not \
+                         exist yet",
+                    );
+                    if !repeated {
+                        diag = diag.suggest(
+                            span,
+                            format!("conserve per ({}, {});", e[0], e[1]),
+                            "declare the rule the seal enforces",
+                            Applicability::MachineApplicable,
+                        );
+                    }
+                    d.push(diag);
+                }
+                None => {
+                    let why = match (txn, cur) {
+                        (Err(n), _) if n != 1 => format!(
+                            "`{}` has {} columns of type `TxnId`",
+                            r.name.text,
+                            if n == 0 {
+                                "no".to_string()
+                            } else {
+                                n.to_string()
+                            }
+                        ),
+                        (_, Err(n)) => format!(
+                            "`{}` has {} columns of type `Currency`",
+                            r.name.text,
+                            if n == 0 {
+                                "no".to_string()
+                            } else {
+                                n.to_string()
+                            }
+                        ),
+                        _ => unreachable!("enforced is None only when a lookup failed"),
+                    };
+                    d.push(
+                        Diagnostic::error(
+                            "NL0225",
+                            format!(
+                                "`{}` cannot be conserved the way the seal conserves",
+                                r.name.text
+                            ),
+                        )
+                        .primary(span, "no enforceable grouping for this ledger")
+                        .note(format!("{why}, so \"per transaction, per currency\" does not name a grouping of it"))
+                        .note(
+                            "the seal sums each open transaction's legs by currency; a ledger \
+                             it can check declares exactly one `TxnId` column and exactly one \
+                             `Currency` column",
+                        ),
+                    );
+                }
+            }
         }
     }
 
@@ -1043,6 +1219,150 @@ mod idem_window_tests {
             codes(&ledger_with("idem: IdemKey default \"x\"")).contains(&"NL0215".to_string()),
             "an `IdemKey` with a `default` and no window must still be refused: a default is \
              not a window, and reading one as the other made the check vacuous"
+        );
+    }
+}
+
+/// **The conservation grouping: that it is declared once, and that it is the one enforced.**
+///
+/// A10-07. Before cycle 10 `conserve per (..)` was parsed, its columns were name-checked, and
+/// then `conserve_keys` reached no consumer anywhere below the compiler. Admission conserves
+/// per (transaction, currency) unconditionally, so `conserve per (txn, desk)` compiled clean,
+/// read as a promise of per-desk segregation, and bought nothing. A repeated clause was worse
+/// still: the second overwrote the first in silence, and neither rule was the one enforced.
+///
+/// The refusals here are narrow on purpose. Refusing an unenforced grouping is not the same
+/// as implementing segregation, and this cycle does not implement it: per-group zero sums are
+/// weaker than forbidding cross-group flow (two opposite cross-group legs in one transaction
+/// cancel inside each group), so a real rule needs an admissible-edge policy with a stated
+/// allowance for FX and linked legs. That policy is the author's to choose — LC-41 — and the
+/// honest position until it exists is to accept exactly what the seal checks.
+#[cfg(test)]
+mod conserve_grouping_tests {
+    use crate::{parser, resolve};
+
+    fn codes(src: &str) -> Vec<String> {
+        let (prog, mut d) = parser::parse_program(src);
+        let (_cat, rd) = resolve::resolve_program(&prog, 0);
+        d.extend(rd);
+        d.items
+            .iter()
+            .filter(|x| x.severity == crate::diagnostics::Severity::Error)
+            .map(|x| x.code.to_string())
+            .collect()
+    }
+
+    /// A ledger whose columns are the usual four, with `rule` as its conservation clause(s).
+    fn with_rule(rule: &str) -> String {
+        format!(
+            "schema s {{ currency usd {{ scale: 2 }}\n\
+             ledger postings {{ txn: TxnId, acct: Id<Account>, cur: Currency, amt: Money, \
+             idem: IdemKey window 1_000_000.epochs, {rule} retain forever; }}\n\
+             index ix on postings (acct) anchor; }}"
+        )
+    }
+
+    #[test]
+    fn the_enforced_grouping_is_accepted() {
+        assert!(
+            codes(&with_rule("conserve per (txn, cur);")).is_empty(),
+            "the rule the seal enforces must compile"
+        );
+    }
+
+    /// The grouping is a set. `(cur, txn)` and `(txn, cur)` are the same partition, and
+    /// refusing one would be a statement about writing order rather than about conservation.
+    #[test]
+    fn the_enforced_grouping_is_accepted_in_either_order() {
+        assert!(codes(&with_rule("conserve per (cur, txn);")).is_empty());
+    }
+
+    /// **The column names are not what is checked — the *types* are.**
+    ///
+    /// The conserved quantity is a graded abelian group, and a grade is declared with
+    /// `currency` because that is the domain the notation was designed in. Nothing requires
+    /// the column holding it to be spelled `cur`, and a rule keyed on that spelling would
+    /// refuse the one file in the corpus that tests whether this machinery is general at all
+    /// — the H-S8 falsifier of §9.11.1, which conserves a non-monetary quantity and whose
+    /// standing claim is that no source file under `crates/niles-lang`, `crates/niles-ir` or
+    /// `crates/nilestream-core` contains a word from its domain. Hence a neutral fixture
+    /// here — the test in `crates/conservation-suite` that enforces that claim reads this
+    /// file, and naming the domain in this comment would break it, which is the claim
+    /// working.
+    #[test]
+    fn the_currency_column_need_not_be_called_cur() {
+        assert!(
+            codes(
+                "schema s { currency aaa { scale: 0 }\n\
+                 ledger movements { txn: TxnId, place: Id<Account>, grade: Currency, qty: Money, \
+                 conserve per (txn, grade); retain forever; }\n\
+                 index ix on movements (place) anchor; }"
+            )
+            .is_empty(),
+            "the enforced grouping is (the TxnId column, the Currency column), whatever they \
+             are named"
+        );
+    }
+
+    #[test]
+    fn a_grouping_the_seal_does_not_enforce_is_refused() {
+        let c = codes(&with_rule("conserve per (txn, acct);"));
+        assert!(
+            c.contains(&"NL0225".to_string()),
+            "`conserve per (txn, acct)` promises per-account segregation and the seal checks \
+             per-currency zero sums; it must not compile. got {c:?}"
+        );
+    }
+
+    #[test]
+    fn a_grouping_of_the_wrong_arity_is_refused() {
+        assert!(codes(&with_rule("conserve per (txn);")).contains(&"NL0225".to_string()));
+        assert!(codes(&with_rule("conserve per (txn, cur, acct);")).contains(&"NL0225".to_string()));
+    }
+
+    /// Naming the same column twice is not the enforced grouping either, and the diagnostic
+    /// says which of the two things went wrong rather than offering a rewrite that would
+    /// silently drop a key.
+    #[test]
+    fn a_repeated_key_inside_one_clause_is_refused() {
+        assert!(codes(&with_rule("conserve per (txn, txn);")).contains(&"NL0225".to_string()));
+    }
+
+    /// **The silent overwrite.** `resolve` assigned the last clause over the first, so this
+    /// program used to compile and be conserved by neither rule in it.
+    #[test]
+    fn a_second_conservation_rule_is_refused_rather_than_replacing_the_first() {
+        let c = codes(&with_rule("conserve per (txn, cur); conserve per (acct);"));
+        assert!(
+            c.contains(&"NL0224".to_string()),
+            "two conservation rules are two claims about what a sealed epoch satisfies, and \
+             nothing decides between them. got {c:?}"
+        );
+    }
+
+    /// A ledger with no `Currency` column has no grouping the seal can check, and saying so
+    /// is better than reporting the *keys* as wrong — they may be exactly what the author
+    /// meant, on a relation that cannot carry the rule.
+    #[test]
+    fn a_ledger_with_no_currency_column_is_refused_by_shape_not_by_key() {
+        let c = codes(
+            "schema s { ledger m { txn: TxnId, acct: Id<Account>, n: Int, \
+             conserve per (txn, acct); retain forever; }\n\
+             index ix on m (acct) anchor; }",
+        );
+        assert!(c.contains(&"NL0225".to_string()), "got {c:?}");
+    }
+
+    /// An unknown column is W3's diagnostic (NL0213) and must not also draw W3b's: two
+    /// errors for one typo is noise, and the second one would recommend a rewrite of a rule
+    /// the author has not finished writing.
+    #[test]
+    fn an_unknown_column_reports_once() {
+        let c = codes(&with_rule("conserve per (txn, nope);"));
+        assert!(c.contains(&"NL0213".to_string()), "got {c:?}");
+        assert!(
+            !c.contains(&"NL0225".to_string()),
+            "a typo must not also be reported as an unenforced grouping: {c:?}"
         );
     }
 }

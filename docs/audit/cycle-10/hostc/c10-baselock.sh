@@ -131,11 +131,60 @@ check_clean_repo() {
   # `thesis/Niles-Thesis.pdf` — which the audit protocol says are never to be touched. A
   # check that refused on those would refuse every run on the machine the run is for, and the
   # obvious way out would have been to delete them.
+  #
+  # **One further exemption, and it is derived rather than listed.** `make reproduce`
+  # regenerates a few files under `results/` whose bytes are a property of the host or the
+  # toolchain rather than of this code — E18's allocation *byte* columns, the `psql` version
+  # that drove the wire transcript. On Host C running the reproduction gate therefore leaves
+  # them modified, permanently, and a check that refused on them would refuse every run on
+  # the machine the run is for: the same failure mode the untracked exemption above exists to
+  # avoid, and with the same obvious wrong way out. They are exempt for the same reason too —
+  # each arm is built in a detached worktree at a resolved SHA, so a modified working-tree
+  # copy reaches no binary.
+  #
+  # The exempt set is read out of `results/MANIFEST.csv`, never written here. A second list
+  # of the same files in a second file is how the reproduction diff came to disagree with the
+  # class it claimed to follow; repeating that mistake in the script that gates the
+  # measurement would be worse, because this one refuses rather than reports. A repository
+  # with no manifest exempts nothing, which is the right answer for `gbs`.
+  manifest="$repo/results/MANIFEST.csv"
+  exempt=""
+  if [ -f "$manifest" ]; then
+    exempt="$(awk -F, '$2=="toolchain-scoped"||$2=="host-scoped" {print "results/" $1}' \
+      "$manifest")"
+  fi
+
   dirty="$(git -C "$repo" status --porcelain --untracked-files=no 2>/dev/null)"
-  if [ -n "$dirty" ]; then
+  kept=""
+  waived=""
+  # `status --porcelain` prints two status columns, a space, then the path.
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    path="${line#???}"
+    if [ -n "$exempt" ] && printf '%s\n' "$exempt" | grep -qxF "$path"; then
+      waived="${waived}${path}
+"
+    else
+      kept="${kept}${line}
+"
+    fi
+  done <<EOF
+$dirty
+EOF
+
+  # A waived file is named, not hidden. The point of the exemption is that these differ; a
+  # reader of the transcript should see which ones did.
+  if [ -n "$waived" ]; then
+    note "waived          : $(printf '%s' "$waived" | grep -c .) modified results file(s) whose"
+    note "                  class in results/MANIFEST.csv says their bytes are not comparable"
+    note "                  across hosts, so the reproduction gate is expected to change them:"
+    printf '%s' "$waived" | sed 's/^/                    /'
+  fi
+
+  if [ -n "$kept" ]; then
     note "REFUSED: $repo has modified tracked files, so the SHA below would name a build that"
     note "         is not the one measured:"
-    printf '%s\n' "$dirty" | head -20 | sed 's/^/           /'
+    printf '%s' "$kept" | head -20 | sed 's/^/           /'
     return 1
   fi
   return 0
@@ -328,6 +377,24 @@ if [ "$SELF_TEST" -eq 1 ]; then
   echo scratch > "$TD/rep/untracked-thing.txt"
   expect_accept "a repository with only untracked files"  check_clean_repo "$TD/rep"
   rm -f "$TD/rep/untracked-thing.txt"
+
+  # The manifest-derived waiver, both ways round. A fixture repository gets a two-row
+  # manifest and the two files it classes, and the check must waive the incomparable one and
+  # still refuse the byte-deterministic one — otherwise the waiver is a hole rather than an
+  # exemption, and it would swallow exactly the diffs the gate exists to catch.
+  mkdir -p "$TD/rep/results"
+  printf 'path,class,regenerated_by\nE18-memory.csv,toolchain-scoped,cmd\nE18-counts.csv,byte-deterministic,cmd\n' \
+    > "$TD/rep/results/MANIFEST.csv"
+  echo counts > "$TD/rep/results/E18-counts.csv"
+  echo bytes  > "$TD/rep/results/E18-memory.csv"
+  ( cd "$TD/rep" && git add results && git commit -qm results ) >/dev/null 2>&1
+  echo "bytes changed" > "$TD/rep/results/E18-memory.csv"
+  expect_accept  "a modified results file the manifest classes toolchain-scoped" \
+    check_clean_repo "$TD/rep"
+  echo "counts changed" > "$TD/rep/results/E18-counts.csv"
+  expect_refusal "a modified results file the manifest classes byte-deterministic" \
+    check_clean_repo "$TD/rep"
+  ( cd "$TD/rep" && git checkout -q -- . )
 
   # stale worktree, and a matching one
   SHA="$(git -C "$TD/rep" rev-parse HEAD)"

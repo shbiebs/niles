@@ -1,5 +1,5 @@
 scenario,unit,operations,allocations,allocations_per_op
-ledger_seeded,posting,40000,150254,3.8
+ledger_seeded,posting,40000,150263,3.8
 zset_base_at,row,40000,46665,1.2
 served_group_by_cur,query,3,39,13.0
 served_group_by_acct,query,3,37806,12602.0

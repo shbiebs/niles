@@ -27,14 +27,17 @@ fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-/// The four classes, and what each promises a reader.
-const CLASSES: [&str; 4] = [
+/// The five classes, and what each promises a reader.
+const CLASSES: [&str; 5] = [
     // Same bytes on any host with the pinned toolchain. `make reproduce` regenerates it, so
     // the diff means something.
     "byte-deterministic",
     // Same bytes within one toolchain and target. Allocation *counts* are exact across
     // hosts; allocation *bytes* are not.
     "toolchain-scoped",
+    // A fact about the machine that ran the gate rather than about this code: the version of
+    // an external client, an OS name.
+    "host-scoped",
     // Acquired by measurement. Regenerating it elsewhere is expected to differ, so
     // `make reproduce` must NOT regenerate it and `--publish` is required to write it.
     "machine-dependent",
@@ -145,7 +148,7 @@ fn every_results_file_is_classified_and_every_classified_file_exists() {
 }
 
 #[test]
-fn every_class_is_one_of_the_four_and_carries_a_producer() {
+fn every_class_is_one_of_the_five_and_carries_a_producer() {
     for e in manifest() {
         assert!(
             CLASSES.contains(&e.class.as_str()),
@@ -218,4 +221,92 @@ fn the_reproduce_recipe_regenerates_no_machine_dependent_result() {
         "`make reproduce` passes `--publish`, so running the gate overwrites committed \
          measurements"
     );
+}
+
+/// The classes `make reproduce` regenerates and must **not** compare across hosts.
+///
+/// Stated once, here, and enforced against the Makefile below. `byte-deterministic` is
+/// compared; `machine-dependent` and `historical` are never written by the recipe, so
+/// excluding them would weaken the diff for nothing.
+const INCOMPARABLE: [&str; 2] = ["toolchain-scoped", "host-scoped"];
+
+/// **The reproduction diff's exclusions come from the manifest, not from a hand-kept list.**
+///
+/// Cycle 10 spent two Host C runs on this. The first excluded E18's byte columns by writing
+/// two pathspecs into the recipe; the run then failed on `wire-protocol-session.md`, whose
+/// entire diff was the `psql` version banner — a third file of exactly the same kind, which
+/// a hand-kept list had no way to know about. A list that must be edited whenever a class is
+/// assigned will disagree with the class eventually, and the disagreement shows up as a red
+/// gate on a machine that did nothing wrong.
+///
+/// So the recipe reads `results/MANIFEST.csv`. This test does not re-derive the list — that
+/// would only duplicate the awk. It checks that the derivation is still the mechanism: that
+/// the recipe carries no literal exclusion, that the selector names every incomparable class
+/// and no other, and that every file so classed is one the recipe actually writes.
+#[test]
+fn the_reproduce_diff_excludes_exactly_what_the_manifest_says_is_incomparable() {
+    let mk = std::fs::read_to_string(repo_root().join("Makefile")).expect("Makefile");
+
+    let selector = mk
+        .lines()
+        .find(|l| l.starts_with("INCOMPARABLE_RESULTS"))
+        .expect(
+            "no `INCOMPARABLE_RESULTS` in the Makefile: the reproduction diff must derive its \
+             exclusions from results/MANIFEST.csv",
+        );
+    assert!(
+        selector.contains("results/MANIFEST.csv"),
+        "`INCOMPARABLE_RESULTS` does not read results/MANIFEST.csv: {selector}"
+    );
+
+    let recipe: String = mk
+        .lines()
+        .skip_while(|l| !l.starts_with("reproduce:"))
+        .take_while(|l| l.starts_with("reproduce:") || l.starts_with('\t'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let diff = recipe
+        .lines()
+        .find(|l| l.contains("git diff --exit-code"))
+        .expect("no `git diff --exit-code` in the `reproduce` recipe");
+    assert!(
+        diff.contains("$(INCOMPARABLE_RESULTS)"),
+        "the reproduction diff does not use the derived exclusion list: {diff}"
+    );
+    assert!(
+        !diff.contains(":!"),
+        "the reproduction diff carries a literal pathspec exclusion: {diff}\n\
+         Every exclusion comes from results/MANIFEST.csv. A hand-written one is a second \
+         source of truth for the same question, and it is the one that goes stale."
+    );
+
+    for c in CLASSES {
+        let named = selector.contains(&format!("\"{c}\""));
+        assert_eq!(
+            named,
+            INCOMPARABLE.contains(&c),
+            "`INCOMPARABLE_RESULTS` {} class `{c}`, and {}",
+            if named { "selects" } else { "does not select" },
+            if INCOMPARABLE.contains(&c) {
+                "it must: the recipe writes these files and their bytes are not comparable"
+            } else {
+                "it must not: excluding it would drop a comparison the gate is for"
+            }
+        );
+    }
+
+    for e in manifest() {
+        if !INCOMPARABLE.contains(&e.class.as_str()) {
+            continue;
+        }
+        assert!(
+            recipe.contains(&e.regenerated_by),
+            "`{}` is `{}`, so the diff excludes it, but `make reproduce` never runs `{}` to \
+             write it. An excluded file the recipe does not regenerate is exempt from a \
+             comparison nothing was making — reclassify it or wire its producer in.",
+            e.path,
+            e.class,
+            e.regenerated_by
+        );
+    }
 }

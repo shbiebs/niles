@@ -1,5 +1,11 @@
 .PHONY: gate check test fmt lint reproduce bootstrap
 
+# The results files `make reproduce` regenerates but must not compare across hosts, read out
+# of results/MANIFEST.csv rather than listed here, so the exclusion set cannot drift from the
+# class it claims to follow. `crates/bank-bench/tests/results_manifest.rs` checks that this is
+# still how the recipe gets the list.
+INCOMPARABLE_RESULTS := $(shell awk -F, '$$2=="toolchain-scoped"||$$2=="host-scoped" {print ":!results/" $$1}' results/MANIFEST.csv)
+
 check:
 	cargo check --workspace
 
@@ -143,12 +149,16 @@ reproduce:
 	cargo run -q --release --manifest-path tools/memprobe/Cargo.toml
 	./target/release/nilestream sweep examples/demo_bank.niles ledger_balance > results/e12_phase_compiled.csv
 	python3 thesis/include-results.py
-	git diff --exit-code -- results/ thesis/ docs/SPEC-LANGUAGE.md docs/keywords.md \
-	  ':!results/E18-memory.csv' ':!results/E18-memory.md'
-	@echo "  (E18's byte columns are excluded above and gated by results/E18-counts.csv instead:"
-	@echo "   allocation counts are a property of this code and reproduce on any host; byte"
-	@echo "   totals include the standard library's own per-platform type sizes and do not."
-	@echo "   Host C reads 16 more bytes per key on rev_metadata_2x_budget than Linux, which"
-	@echo "   is Completion at 112 bytes there against 96 here — identical counts, different"
-	@echo "   sizes. The per-op allocation budgets in tools/memprobe/src/alloc.rs are what"
-	@echo "   A10-19 was about and they are unchanged.)"
+	git diff --exit-code -- results/ thesis/ docs/SPEC-LANGUAGE.md docs/keywords.md $(INCOMPARABLE_RESULTS)
+	@echo "  (Excluded from the diff above, read out of results/MANIFEST.csv and not listed here:"
+	@echo "   $(INCOMPARABLE_RESULTS)"
+	@echo "   Each is a file the recipe regenerates whose bytes are a property of the host or"
+	@echo "   the toolchain rather than of this code, and each has a byte-deterministic file"
+	@echo "   beside it carrying what every host must still reproduce exactly. For E18 that is"
+	@echo "   results/E18-counts.csv: allocation counts are a property of this code and hold on"
+	@echo "   any host, while byte totals include the standard library's own per-platform type"
+	@echo "   sizes and do not — Host C reads 16 more bytes per key on rev_metadata_2x_budget"
+	@echo "   than Linux, which is Completion at 112 bytes there against 96 here. For the wire"
+	@echo "   transcript it is results/wire-protocol-session.md itself, which is compared: only"
+	@echo "   the psql version banner moved out. The per-op allocation budgets in"
+	@echo "   tools/memprobe/src/alloc.rs are what A10-19 was about and they are unchanged.)"

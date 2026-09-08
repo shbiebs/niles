@@ -927,3 +927,153 @@ was. `nilestream_core::rev::deferred_merge_window_tests` closes that: one test d
 interleaving through the two-phase API directly and requires the counter to move; the other
 states the served path's exclusion as arithmetic over `applied` rather than as an observed
 schedule. Both land in this commit, and they are worth having whatever T04 becomes.
+
+---
+
+## T04 — Bounded, certified deferred merge
+
+Branch `c10/02-read-safety`, commits `7b6b704`, `dfac93f`, `bca7907`. **The author chose to
+build it, after the correction above withdrew the negative-experiment disposition.**
+
+**Target T04.1 (verbatim):** *Every eligible generation-owned late landing within the
+preregistered epoch and physical-work caps merges exactly the keyed deltas in (a,e], every
+owner and same-anchor waiter still receives the answer at a, and unavailable or over-budget
+suffixes remain honestly pinned or uninstalled.* — **done.**
+`nilestream_core::rev::deferred_merge_tests`, nine cases, plus
+`a_merged_entry_answers_the_frontier_it_landed_at` beside the pin it replaces.
+
+**Target T04.2 (verbatim):** *Against the measured pinned-control figures from c10-merge.sh,
+deferred merging reports its gap, visited-row, reuse, writer and memory costs and makes a
+performance claim only when the preregistered ≥10% and ≥3 pooled-MAD gate passes.* —
+**instrument landed and smoke-run end to end; the measurement is the author's.** No
+performance claim is made in this report.
+
+### What the merge is
+
+A flight folds the prefix ending at its anchor `a`. If the view advanced to `e > a` while it
+was out, the landing entry has not seen `(a, e]`, so `install` **pins** it: it serves only
+`[a, a]`, and the next reader at the frontier reconstructs the whole key. The merge folds this
+key's deltas over `(a, e]` into the landing value and installs at `e`, so the entry lands
+current.
+
+**What does not change is what anybody is told.** The owner and every same-anchor waiter
+receive the fold's own value at `a`. The merge writes the view; it does not answer the reader.
+Reverting that single line fails four tests, one of them — `f01_stale_hit_is_not_promoted` —
+several cycles older than this work.
+
+### Preregistered bounds, and three refusals kept apart
+
+`MergeCaps` is fixed in code before anything was measured: **32 epochs** (the measured arrival
+gap is 4.6–5.7 with a maximum of 17, so this covers the distribution about twice over and
+still refuses a genuinely historical read) and **4,096 rows** (an epoch is not a constant
+amount of reading — a delta list is the whole epoch's rows across every key — so the physical
+work is bounded separately).
+
+Over either cap the landing **pins**. It is not partially merged: a partial merge installed at
+`e` is a value missing part of its own history under a current stamp, which is exactly what
+the pin exists to prevent.
+
+The third refusal is the one that would have been silent. **`deltas_at` reports an epoch the
+base no longer holds as *empty*, which is indistinguishable from an epoch in which nothing
+happened**, so a merge across a compacted prefix would drop real money and report success.
+`Base::deltas_available_from` makes it a refusal instead. It defaults to `0` because every
+base in this repository is fully retained — which is what F4 promises — and a base that
+compacts must override it.
+
+The three are counted apart: an over-budget suffix is a tuning question, an unretained one a
+retention question, and merging switched off is neither.
+
+### The ablation is one build and two settings
+
+`NILESTREAM_MERGE_CAPS` selects the arm, so a difference between the arms cannot be a
+difference between two compilations. That is also the risk — nothing about the *build*
+distinguishes them — so `--merge-arms` refuses any replicate whose transcript does not carry
+the merge line with the caps that replicate was launched with. **A run whose arm rests on the
+flag having been typed correctly is not an ablation.** The selector refuses an unparseable
+value rather than defaulting, for the same reason.
+
+`c10-merge.sh` is seven lines and a page of reasons: every other refusal the measurement needs
+is already in `c10-baselock.sh` and already proved by its `--self-test`, and a second script
+would be a second source of truth for questions that have one answer. Four new self-test arms
+cover the merge line — the merging log, the control's log, a caps mismatch, and a build that
+does not report the merge at all.
+
+### The container smoke run — not a result
+
+`--warmups 0 --measured 1 --seconds 3` on a 2-core VM. Exit 0, both arms labelled, every
+section ran. The counters are what it exists to show:
+
+```
+merge arm   : 28219 merged of 28219 late landing(s) (100.0%); rows visited 236816,
+              epochs merged 118408; refused 0/0/0; caps 32 epochs / 4096 rows
+                per merge: 8.4 rows, 4.2 epochs
+              flights: pinned_installs 0, deferred_merges 28219
+pinned arm  : 0 merged of 38946 late landing(s); refused 38946 over-epochs;
+              caps 0 epochs / 0 rows  [PINNED CONTROL: merging off]
+```
+
+Three things a reader should take from it, none of them a performance claim:
+
+* **Every late landing is eligible.** 100% merged, zero refusals of any kind, and
+  `pinned_installs` falls to **0** in the merge arm. The suffix is 4.2 epochs against a cap of
+  32, so the epoch cap is not binding on this workload — which is the cap doing its job, since
+  it exists to refuse the historical read rather than the late-arriving one.
+* **The merge is cheap in the units it spends.** 8.4 delta rows per merge, which is 4.2 epochs
+  at the two conserved legs each epoch seals. That is the number to compare against a
+  reconstruction, and the comparison is the author's run.
+* **The price is paid under V.** The suffix is walked inside the second view hold, which is
+  why `install_hold` is measured around it. `v hold2` in the slow-read table is where a cost
+  would appear.
+
+### Revert witnesses
+
+Five, each an assertion failure in a disposable worktree, none a compile error.
+
+| Reverted | What fired |
+|---|---|
+| the merge not attempted | four merge tests; `the landing was eligible` |
+| the merged value returned to the caller | both clause-2 tests, `a_merged_entry_answers…`, **and `f01_stale_hit_is_not_promoted`** |
+| the row cap removed | `a_suffix_over_the_row_cap_pins_and_still_reports_what_it_read` |
+| the retention boundary removed | `a_suffix_below_the_retention_boundary_pins_rather_than_dropping_money` |
+| ownership ignored | `a landing that owns nothing must not merge` |
+
+### A test that changed, and why that is a finding rather than an adjustment
+
+`a_pinned_entry_read_above_its_stamp_still_reconstructs` went red when the merge landed. On
+its fixture the landing is two epochs behind, so it now merges: the entry installs current and
+the following read is served from it. **The value is right in both arms** — 100 at `a`, 500 at
+`e` — so this is a change of policy, not of correctness, and the fixture was written when
+pinning was the only landing. It now sets `MergeCaps::OFF` and asserts the pin it is named
+for; `a_merged_entry_answers_the_frontier_it_landed_at` is the same fixture with merging on.
+The two together are the smallest statement of what T04 does.
+
+---
+
+## Further material facts
+
+**MF-10 — the executor wrote MF-4's bug, having written MF-4.** The arm selector's first test
+set `NILESTREAM_MERGE_CAPS` to each bad value in turn and read it back through the function
+under test. `cargo test` runs in parallel, so an unrelated test built a `RevEngine`, saw
+`"8:64:2"`, and was killed by the refusal — which was behaving correctly. MF-4 states the rule
+this broke: *a guard that reads process-wide state must be able to isolate it.* The repair is
+structural rather than careful — the environment is read in exactly one place and the decision
+is a pure function of a string — because "be more careful" is not a repair.
+
+**MF-11 — a probe that measured the value it was about to overwrite.** `pick_toolchain`, added
+this cycle to fix MF-7, asked `rustc --version` with the *inherited* environment and, on
+success, concluded that the tree's pin resolves and unset `RUSTUP_TOOLCHAIN`. A shell that
+already had the override set — which is how the container builds at all, the pinned 1.95.0
+being unfetchable without egress — reported "the tree's pin resolves on this host", removed
+the override that made it true, and every `cargo` below failed with `toolchain 1.95.0 is not
+installed`. **On Host C the reported answer is unchanged, so only the container could find
+it**, which is the mirror image of MF-7, where only Host C could. A fix for a
+host-dependence defect acquired a host-dependence of its own in the opposite direction.
+
+**MF-12 — an edit script that asserts late and writes late loses the edits before the
+assertion.** The repair for MF-11 was written in the same script as an unrelated correction;
+that second edit's assertion failed, the script exited before its single `write`, and the
+first repair was silently lost. The commit describing the repair therefore did not contain it,
+and the container reproduced the original failure with the original message. Recorded because
+the shape is general and this cycle's edits are all of this form: **a multi-edit script must
+write each edit as it makes it, or verify afterwards that every edit is present.** Nothing in
+the working method currently requires either.

@@ -455,6 +455,22 @@ pub struct Session {
     /// Emptied by [`Session::take_receipts`] once per wire message, immediately before the
     /// reply for that message is written.
     receipts: Vec<crate::rev_engine::Pending>,
+    /// **The declared currencies and their scales, compiled once per schema epoch.**
+    ///
+    /// `Some((key, table))` once this session has resolved its schema; the `key` is
+    /// `schema_key()`, the same identity the plan cache uses, so a `set schema` invalidates
+    /// both by the same rule. `Some((key, None))` records that the schema at that key does
+    /// *not* resolve — an answer worth caching, because the alternative is re-parsing a
+    /// broken schema on every statement to rediscover that it is broken.
+    ///
+    /// Before this, `insert` called `declared_currencies(&self.schema)`, which runs
+    /// `parse_program` and `resolve_program` over the whole schema text. 61% of the insert
+    /// path's instructions were spent re-deriving a table the session had already compiled
+    /// (F-68).
+    currencies: Option<(u64, Option<std::collections::BTreeMap<u32, u32>>)>,
+    /// How many times this session has parsed its schema. A `nilestream_stats` column,
+    /// because the defect above was invisible from every surface the server had.
+    pub schema_parses: u64,
 }
 
 /// How many compiled statements one session holds before the oldest is evicted.
@@ -483,6 +499,8 @@ impl Session {
             compile_misses: 0,
             queries_served: 0,
             receipts: Vec::new(),
+            currencies: None,
+            schema_parses: 0,
         }
     }
 
@@ -615,6 +633,24 @@ impl Session {
     pub fn observe(&mut self, frontier: u64) -> u64 {
         self.anchor = self.anchor.max(frontier);
         self.anchor
+    }
+
+    /// **The declared currencies and their scales for this session's current schema.**
+    ///
+    /// Compiled on first use at a given schema epoch and reused until that epoch changes.
+    /// `None` when the schema does not resolve, which is cached too: a broken schema is a
+    /// fact about the schema, not about the statement that happened to notice.
+    fn currencies(&mut self) -> Option<std::collections::BTreeMap<u32, u32>> {
+        let key = self.schema_key();
+        match &self.currencies {
+            Some((k, table)) if *k == key => table.clone(),
+            _ => {
+                self.schema_parses += 1;
+                let table = declared_currencies(&self.schema);
+                self.currencies = Some((key, table.clone()));
+                table
+            }
+        }
     }
 
     /// **The durability receipts for the appends this message made.**
@@ -882,6 +918,12 @@ impl Session {
                     // whole process.
                     Field::int8("view_metadata_keys"),
                     Field::int8("idem_window_keys"),
+                    // **How many times this session has parsed its own schema.**
+                    //
+                    // One per schema epoch is the contract. It was one per `INSERT`, and no
+                    // surface could see it: the front end ran on the serving path and the
+                    // only way to notice was a profiler (F-68).
+                    Field::int8("schema_parses"),
                 ]),
                 Backend::DataRow(vec![
                     Some(s.reads.to_string()),
@@ -893,6 +935,7 @@ impl Session {
                     Some(s.fallbacks.to_string()),
                     Some(s.view_metadata_keys.to_string()),
                     Some(s.idem_window_keys.to_string()),
+                    Some(self.schema_parses.to_string()),
                 ]),
                 Backend::CommandComplete("SELECT 1".into()),
             ];
@@ -1407,9 +1450,18 @@ impl Session {
     /// and the narrowness is *stated* — a wider parser would be inventing a DML surface the
     /// language has not specified, and thesis §11.3's rule is to narrow publicly.
     fn insert(&mut self, sql: &str, engine: &dyn Serving) -> Vec<Backend> {
-        // The declared currencies and their scales, read once: the ingress check below needs
-        // the set, and the amount parser needs each code's scale.
-        let declared = match declared_currencies(&self.schema) {
+        // The declared currencies and their scales — **from the session's cache, compiled
+        // once per schema epoch.** The ingress check below needs the set and the amount
+        // parser needs each code's scale, and this used to obtain both by running
+        // `parse_program` and `resolve_program` over the *entire schema text* on every
+        // `INSERT`. Measured on E16's `oltp` statement with callgrind: 74,500 of the insert
+        // path's 113,500 instructions, 61%, spent re-deriving a table the session had
+        // already compiled and holds a key for (F-68).
+        //
+        // The refusals are unchanged, and that is the point of caching rather than eliding:
+        // 22023 still fires when the schema does not resolve — now from the cached absence
+        // instead of a fresh parse — and 22003 and 0A000 still act on the statement.
+        let declared = match self.currencies() {
             Some(d) => d,
             None => {
                 self.failed = true;
@@ -2740,6 +2792,52 @@ schema bank {
                 "`select nilestream_stats` must name `{wanted}` — the benchmark looks it up                  by name and renders `n/a` when it is missing, so dropping it here would                  quietly unmeasure the column rather than break anything. Got: {names:?}"
             );
         }
+    }
+
+    /// **The schema is compiled once per epoch, not once per `INSERT` — F-68, C9-05.1.**
+    ///
+    /// `insert` needed the declared currencies and their scales, and obtained them by running
+    /// `parse_program` and `resolve_program` over the whole schema text every time. Callgrind
+    /// on E16's `oltp` statement: 74,500 of 113,500 instructions per insert, 61%, spent
+    /// re-deriving a table the session had already compiled and holds a key for. The compiler
+    /// was right; the engine did not trust it.
+    #[test]
+    fn the_schema_is_parsed_once_per_epoch_and_not_once_per_insert() {
+        let (mut s, e) = (session(), engine());
+        const N: u64 = 2_000;
+        for i in 0..N {
+            let out = s.handle(
+                Frontend::Query(format!(
+                    "insert into postings values ({}, 1, 0, -1), ({}, 2, 0, 1)",
+                    900_000 + i,
+                    900_000 + i
+                )),
+                &e,
+            );
+            assert!(
+                out.iter().any(|m| matches!(
+                    m,
+                    Backend::CommandComplete(t) if t.starts_with("INSERT")
+                )),
+                "insert {i} must be accepted for this measurement to mean anything: {out:?}"
+            );
+        }
+        assert_eq!(
+            s.schema_parses, 1,
+            "{N} inserts at one schema epoch parsed the schema {} times",
+            s.schema_parses
+        );
+
+        // A schema change invalidates it, by the same key the plan cache uses.
+        s.schema.push('\n');
+        let _ = s.handle(
+            Frontend::Query("insert into postings values (990001, 1, 0, 0)".into()),
+            &e,
+        );
+        assert_eq!(
+            s.schema_parses, 2,
+            "a changed schema must be compiled again rather than answered from a stale table"
+        );
     }
 
     /// **`select nilestream_lockstats` names four nested scopes and can be reset — F-75.**

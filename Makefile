@@ -105,6 +105,28 @@ fsync-proof:
 	  || { echo "FAILED: a durable commit issued no fdatasync — the record barrier named by storage::BARRIER never reached the kernel"; exit 1; }
 	@echo "fsync-proof: the record barrier (fdatasync) reached the kernel and returned 0."
 
+# **What the engine re-establishes that the compiler already proved.**
+#
+# A counting tool, not a benchmark: instruction counts attributed *per function*, which are
+# stable where a whole-process total is not. `oltp` is E16's two-leg transfer, `point` a keyed
+# read whose plan is cached, `point-cold` the same read over the whole key space so the front
+# end runs; `seed` is the same binary with no statements, and subtracting it gives the
+# workload's own instructions rather than the process's.
+#
+# Needs valgrind. Prints nothing that belongs in a results file — read it, do not publish it.
+checked-twice:
+	cargo build --release -p nilestream-server --bin checked-twice
+	@for shape in seed oltp point point-cold; do \
+	  valgrind --tool=callgrind --callgrind-out-file=/tmp/ct-$$shape.out \
+	    ./target/release/checked-twice $$shape 2000 2>&1 | grep -E "^==.*Collected|statements"; \
+	done
+	@echo "--- per function, oltp (inclusive):"
+	@callgrind_annotate --inclusive=yes /tmp/ct-oltp.out | \
+	  grep -E "Session::insert|Serving>::append|Ledger::submit|parse_program|resolve_program" | head -6
+	@echo "--- per function, point-cold (inclusive):"
+	@callgrind_annotate --inclusive=yes /tmp/ct-point-cold.out | \
+	  grep -E "compile_cached|parse_program|lower_program|check_program|verify::verify" | head -6
+
 reproduce:
 	python3 thesis/gen-appendix-d.py map > thesis/appendix-d-map.md
 	python3 thesis/gen-appendix-d.py api > thesis/appendix-d-api.md

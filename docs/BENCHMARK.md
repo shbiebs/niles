@@ -145,6 +145,39 @@ if they do not, the comparison is between machines and the ratio is not about th
 with no `--baseline` says in its header that it is an absolute measurement rather than an A/B —
 which is the case E16 was quoted as for two cycles.
 
+### `make checked-twice` — what the engine re-establishes that the compiler proved
+
+Instruction counts, attributed **per function**, for three statement shapes through
+`Session::handle`. A counting tool and not a benchmark: nothing it prints belongs in a results
+file, and no figure from it is a contract result. It exists because a whole-process instruction
+total moves with allocator luck by a few tenths of a percent while a per-function inclusive
+count does not, so a question like "how much of an `INSERT` is spent re-deriving something the
+compiler already knew" needs the second and cannot be answered by the first.
+
+```
+make checked-twice                   # needs valgrind; ~2 minutes
+```
+
+Four shapes. `seed` runs the same binary with no statements, so subtracting its total gives the
+workload's own instructions rather than the process's. `oltp` is E16's two-leg transfer;
+`point` is a keyed read over a hot set of a hundred accounts, so the plan cache hits; and
+`point-cold` is the same read over the whole ten-thousand-account key space, so it misses and
+the front end runs — the difference between those two is what a cached plan is worth.
+
+What it found in cycle 9 (F-68), on the container, at 2,000 statements per shape:
+
+| shape | instructions per statement | of which |
+|---|--:|---|
+| `oltp` **before** | 121,600 | `Session::insert` 113,500, and **74,500 of that (61%) re-running `parse_program` and `resolve_program` over the whole schema text to learn the declared currencies** |
+| `oltp` **after** | 35,466 | `Session::insert` 27,197; `parse_program` and `resolve_program` do not appear on the insert path at all |
+| `point` | 30,441 | `compile_cached` 10,485 averaged over a 5% miss rate; `Serving::query` 7,092 |
+| `point-cold` | 194,509 | `compile_cached` 170,287 per statement at a 97.6% miss rate: lexer and parser 103,020, `lower_program` 18,705, `check_program` 10,972, the IR verifier 4,364 |
+
+The `point` and `point-cold` rows are the plan cache's value stated as a number rather than as
+an argument, and they are also what LC-33 has to be decided on: the cache keys on the
+statement's literal text, so E16's `where acct = {k}` makes every distinct account a distinct
+plan.
+
 ## The oltp row, and the concurrency the design needs
 
 `SPEC-ENGINE.md` Part 0 states "5–10× PostgreSQL" for oltp without a concurrency qualifier,

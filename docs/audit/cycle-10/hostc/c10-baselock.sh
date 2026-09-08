@@ -612,7 +612,7 @@ note "working points  : full  = $ACCOUNTS accounts / $BUDGET_FULL budget (budget
 note "                : part  = $ACCOUNTS accounts / $BUDGET_PARTIAL budget (genuinely partial)"
 note "per level       : ${SECONDS_PER_LEVEL}s mixed, $WARMUPS warm-up + $MEASURED measured per arm"
 ARMS=1
-if [ "$BASELINE_ONLY" -eq 0 ] || [ "$NEUTRAL" -eq 1 ]; then ARMS=2; fi
+if [ "$BASELINE_ONLY" -eq 0 ] || [ "$NEUTRAL" -eq 1 ] || [ "$MERGE_ARMS" -eq 1 ]; then ARMS=2; fi
 REPLICATES_TOTAL=$(( (WARMUPS + MEASURED) * ARMS * 2 ))
 note "replicate cap   : ${REPLICATE_TIMEOUT}s, after which the replicate is killed and counted as not run"
 note "replicates      : $REPLICATES_TOTAL total = ($WARMUPS warm-up + $MEASURED measured) x $ARMS arm(s) x 2 working points"
@@ -620,7 +620,16 @@ note "                : each is 3 levels of ${SECONDS_PER_LEVEL}s mixed plus thi
 note "                : point/fold/durable phases. The first \`replicate elapsed\` line below"
 note "                : times one; multiply by $REPLICATES_TOTAL for the run. Two working"
 note "                : points is what doubles it, and it is the half cycle 9 never measured."
-note "neutral A=A     : $( [ "$NEUTRAL" -eq 1 ] && echo 'yes, before anything is scored' || echo 'SKIPPED by --no-neutral' )"
+if [ "$MERGE_ARMS" -eq 1 ]; then
+  note "arms            : one build, two settings — merge (caps 32 epochs / 4096 rows) against"
+  note "                : the pinned control (merging off). A second worktree would add a"
+  note "                : confound and buy nothing: the change under test is a value the"
+  note "                : daemon reads at start-up, not a difference in the source."
+  note "noise floor     : the A=A control from the --baseline-only run on this host. It is not"
+  note "                : re-measured here; the gate below is scored against it."
+else
+  note "neutral A=A     : $( [ "$NEUTRAL" -eq 1 ] && echo 'yes, before anything is scored' || echo 'SKIPPED by --no-neutral' )"
+fi
 
 mkdir -p "$OUT" || { note "FATAL: cannot create $OUT"; exit 3; }
 
@@ -904,8 +913,17 @@ if [ "$ok_b" -lt "$MEASURED" ]; then skip "the $ARM_B arm completed $ok_b of $ME
 if [ "$TWO_ARMS" -eq 1 ] && [ "$ok_c" -lt "$MEASURED" ]; then
   skip "the $ARM_C arm completed $ok_c of $MEASURED replicates"
 fi
-if [ "$BASELINE_ONLY" -eq 1 ] && [ "$NEUTRAL" -eq 0 ]; then
+if [ "$BASELINE_ONLY" -eq 1 ] && [ "$NEUTRAL" -eq 0 ] && [ "$MERGE_ARMS" -eq 0 ]; then
   skip "the neutral A=A control was skipped by --no-neutral; nothing here establishes a noise floor"
+fi
+if [ "$MERGE_ARMS" -eq 1 ]; then
+  note ""
+  note "The noise floor this comparison is scored against was measured by the --baseline-only"
+  note "run on this host and is NOT re-measured here: worst separation 0.83%, about one pooled"
+  note "MAD, against a gate of >=10% relative AND >=3 pooled MADs. If the difference above does"
+  note "not clear both, the merge makes no performance claim. That is a result and it is the"
+  note "one to report; the correctness targets of T04.1 stand on their own and do not depend"
+  note "on it."
 fi
 
 head2 "6. status"

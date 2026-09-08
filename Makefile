@@ -143,4 +143,12 @@ reproduce:
 	cargo run -q --release --manifest-path tools/memprobe/Cargo.toml
 	./target/release/nilestream sweep examples/demo_bank.niles ledger_balance > results/e12_phase_compiled.csv
 	python3 thesis/include-results.py
-	git diff --exit-code -- results/ thesis/ docs/SPEC-LANGUAGE.md docs/keywords.md
+	git diff --exit-code -- results/ thesis/ docs/SPEC-LANGUAGE.md docs/keywords.md \
+	  ':!results/E18-memory.csv' ':!results/E18-memory.md'
+	@echo "  (E18's byte columns are excluded above and gated by results/E18-counts.csv instead:"
+	@echo "   allocation counts are a property of this code and reproduce on any host; byte"
+	@echo "   totals include the standard library's own per-platform type sizes and do not."
+	@echo "   Host C reads 16 more bytes per key on rev_metadata_2x_budget than Linux, which"
+	@echo "   is Completion at 112 bytes there against 96 here — identical counts, different"
+	@echo "   sizes. The per-op allocation budgets in tools/memprobe/src/alloc.rs are what"
+	@echo "   A10-19 was about and they are unchanged.)"

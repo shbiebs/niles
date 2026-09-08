@@ -113,8 +113,50 @@ fn main() {
 
     let dir = root().join("results");
     std::fs::create_dir_all(&dir).expect("results/");
+
+    // **The counts are portable; the byte totals are not, and the gate now says which is
+    // which.**
+    //
+    // Every column here was committed as if it were a property of the code. The allocation
+    // *counts* are: the same source counts the same calls on any host. The *byte* totals are
+    // not, because the sizes of the standard library's own types are per-platform, and
+    // `make reproduce` on Host C proves it — identical counts in every row, and byte totals
+    // that differ by amounts matching those size differences. `rev_metadata_2x_budget` reads
+    // 80,000 bytes more over 5,000 keys, which is exactly 16 per key: `Completion` is 96
+    // bytes on Linux and 112 on Darwin, where `Mutex` and `Condvar` are a different shape.
+    //
+    // Two files, then. `E18-counts.csv` holds what any host must reproduce byte-for-byte and
+    // is what the drift gate compares. `E18-memory.{csv,md}` keep the byte columns and carry
+    // the host and toolchain that produced them, because a byte total without a host is a
+    // number nobody can check. Raising a budget to make a row pass is still forbidden; the
+    // per-op allocation budgets in `alloc.rs` are untouched and are what A10-19 was about.
+    let host = format!(
+        "{} {} / {}",
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        option_env!("CARGO_PKG_RUST_VERSION").unwrap_or("rustc version not recorded")
+    );
+    let mut counts = String::from("scenario,unit,operations,allocations,allocations_per_op\n");
+    for r in &rows {
+        counts.push_str(&format!(
+            "{},{},{},{},{:.1}\n",
+            r.scenario,
+            r.unit,
+            r.operations,
+            r.counted.allocations,
+            r.allocations_per_op()
+        ));
+    }
+    std::fs::write(dir.join("E18-counts.csv"), &counts).expect("write counts");
+
+    let banner = format!(
+        "*Byte totals below are host-shaped and were produced on **{host}**. The allocation \
+         counts are not host-shaped and are gated separately in `results/E18-counts.csv`; a \
+         byte column that differs on another host is a difference in the standard library's \
+         own type sizes, not in this code.*\n\n"
+    );
     std::fs::write(dir.join("E18-memory.csv"), &csv).expect("write csv");
-    std::fs::write(dir.join("E18-memory.md"), &md).expect("write md");
+    std::fs::write(dir.join("E18-memory.md"), format!("{banner}{md}")).expect("write md");
 
     let mut over = 0;
     for r in &rows {

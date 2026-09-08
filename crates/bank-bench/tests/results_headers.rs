@@ -47,6 +47,13 @@ fn expected(path: &str) -> Option<Option<&'static str>> {
         // `make reproduce`.
         "E23-scaling/E23-scaling.csv"
         | "E18-memory.csv"
+        // The portable half of E18: allocation counts only, which any host must reproduce
+        // exactly. The byte columns stay in `E18-memory.csv`, which carries the host that
+        // produced them and is excluded from `make reproduce`'s diff — a byte total includes
+        // the standard library's own per-platform type sizes and is not a property of this
+        // code (proved on Host C: identical counts, byte totals apart by exactly the size
+        // difference of `Completion`).
+        | "E18-counts.csv"
         | "e1_correctness.csv"
         | "e2_duality.csv"
         | "e3_memory_vs_skew.csv"

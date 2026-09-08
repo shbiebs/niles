@@ -104,15 +104,25 @@ echo "=== c10-rwlock: $(date -u +%Y-%m-%dT%H:%M:%SZ) on $(uname -srm) ==="
 # which named the override this script uses and not what the tree asks for — so a reader
 # could not tell whether the two agree, and the audit that ran this on two Mac toolchains
 # had no line to distinguish them by.
-echo "toolchain (tree pin)  : $(rustc --version 2>&1 | head -1)"
-echo "toolchain (used here) : $(RUSTUP_TOOLCHAIN=stable rustc --version 2>&1 | head -1)"
-echo "                        The probe is built and run with the second. If they differ,"
-echo "                        this result is about the second and must be labelled with it."
+# **The pin when it resolves, `stable` only when it does not.** This forced `stable`, which
+# is invisible in the container (where `stable` *is* the pin) and swaps the compiler on Host C
+# (where the pin resolves and `stable` is a newer release). The probe is about
+# `std::sync::RwLock`'s scheduling, which is a property of the standard library the compiler
+# ships — so which compiler built it is part of the result, not an implementation detail.
+export RUSTUP_AUTO_INSTALL=0
+if rustc --version >/dev/null 2>&1; then
+  PROBE_HOW="the tree's pin, which resolves on this host"
+else
+  export RUSTUP_TOOLCHAIN=stable
+  PROBE_HOW="RUSTUP_TOOLCHAIN=stable, because the tree's pin does not resolve here"
+fi
+echo "toolchain             : $(rustc --version 2>&1 | head -1)"
+echo "selected by           : $PROBE_HOW"
 
 # **A deadline, because a probe about lock scheduling can be the thing that hangs.** 200
 # trials of three threads should take a second or two; without a bound, a scheduling
 # pathology here stops the audit instead of reporting one.
-( cd "$SCRATCH" && RUSTUP_TOOLCHAIN=stable RUSTUP_AUTO_INSTALL=0 cargo run -q --release --offline 2>&1 ) &
+( cd "$SCRATCH" && cargo run -q --release --offline 2>&1 ) &
 probe=$!
 waited=0
 while kill -0 "$probe" 2>/dev/null; do

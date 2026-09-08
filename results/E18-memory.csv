@@ -1,5 +1,5 @@
 scenario,unit,operations,allocations,bytes,live_delta,peak_delta,allocations_per_op,bytes_per_op
-ledger_seeded,posting,40000,150254,21578298,8871765,9856518,3.8,539.5
+ledger_seeded,posting,40000,150254,21578330,8871797,9856518,3.8,539.5
 zset_base_at,row,40000,46665,9583856,9583856,9583856,1.2,239.6
 served_group_by_cur,query,3,39,5454,0,1664,13.0,1818.0
 served_group_by_acct,query,3,37806,11387166,0,2841312,12602.0,3795722.0
@@ -12,7 +12,7 @@ served_point_conjunct,query,200,3000,427600,0,1792,15.0,2138.0
 served_having_on_key,query,200,4200,635600,0,1856,21.0,3178.0
 rev_read_hit,read,1000,1000,16000,0,16,1.0,16.0
 append_in_memory,transaction,500,3500,266000,76000,76232,7.0,532.0
-rev_metadata_2x_budget,key,5000,34165,1935704,860344,860520,6.8,387.1
+rev_metadata_2x_budget,key,5000,34165,2015704,860344,860536,6.8,403.1
 rev_metadata_per_key,resident key,2500,5416,275360,235360,235376,2.2,110.1
 idem_admission_index,identity,100000,100016,10153756,6876816,6979652,1.0,101.5
 idem_window_sealer,identity,100000,116666,9961568,9961568,9961568,1.2,99.6

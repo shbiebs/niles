@@ -1,0 +1,18 @@
+scenario,unit,operations,allocations,allocations_per_op
+ledger_seeded,posting,40000,150254,3.8
+zset_base_at,row,40000,46665,1.2
+served_group_by_cur,query,3,39,13.0
+served_group_by_acct,query,3,37806,12602.0
+served_top_ten,query,3,37884,12628.0
+served_sum_negative,query,3,36,12.0
+served_point,query,200,2200,11.0
+wire_reply_10k,reply,5,5,1.0
+wire_reply_100k,reply,5,5,1.0
+served_point_conjunct,query,200,3000,15.0
+served_having_on_key,query,200,4200,21.0
+rev_read_hit,read,1000,1000,1.0
+append_in_memory,transaction,500,3500,7.0
+rev_metadata_2x_budget,key,5000,34165,6.8
+rev_metadata_per_key,resident key,2500,5416,2.2
+idem_admission_index,identity,100000,100016,1.0
+idem_window_sealer,identity,100000,116666,1.2

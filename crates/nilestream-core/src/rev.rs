@@ -838,6 +838,24 @@ impl Rev {
                 // could not answer *this* anchor can still answer every anchor inside its
                 // own interval, and overwriting it with `Pending` would evict a good answer
                 // to record that somebody is looking for a different one.
+                //
+                // **So "the slot is `Pending` for the duration of a flight" is false, and it
+                // was claimed** — A10-12. A flight over a key whose entry is `Present` at
+                // some other anchor leaves that entry exactly where it is: `prior` is `None`
+                // precisely because there is nothing to put back. Anything reasoning from
+                // "a key in flight is a key whose slot is `Pending`" is reasoning about the
+                // other case.
+                //
+                // The three properties this arm actually establishes, which the one sentence
+                // ran together:
+                //
+                //   * **the answer** returned to *this* reader is exact at *its* anchor,
+                //     which follows from the fold's precondition and not from any slot;
+                //   * **the certification** of whatever is resident is unchanged — a
+                //     retained `Present` keeps its own stamp and its own interval, and a
+                //     read inside that interval is still a hit while the flight is out;
+                //   * **the ownership** of the slot, which is what `generation` decides, and
+                //     which is about who may *write* it, not about what it holds.
                 let prior = match self.slots.get_mut(key) {
                     Some(Slot::Present(..)) => None,
                     // In place where the map already holds the key: `insert` would clone it
@@ -2882,6 +2900,123 @@ mod two_phase {
             v.stats.uninstalled_folds >= 1,
             "a fold that installed nothing must be counted, or the cost is one nobody can \
              be asked about"
+        );
+    }
+
+    /// **A flight over a resident key leaves the entry resident, and it still answers —
+    /// A10-12.**
+    ///
+    /// "Between `begin_read` and `finish_fold` the slot is `Pending`" was stated as a
+    /// property of a flight. It is a property of *one* case. A key whose entry is `Present`
+    /// at an anchor that cannot answer this reader keeps that entry — `prior` is `None`
+    /// because there is nothing to put back — so during the flight the slot holds a value,
+    /// and a third reader inside that entry's certification interval is served a **hit**
+    /// while the reconstruction is still out.
+    ///
+    /// That is correct behaviour and it is worth having a test say so, because the sentence
+    /// it replaces would have made this run look like a bug. The three claims are asserted
+    /// separately, which is the whole of the repair:
+    ///
+    ///   * **the slot** — still `Present`, at its own stamp, not `Pending`;
+    ///   * **the certification** — a read inside that interval hits, and the value it gets
+    ///     equals an independent fold of the base at that anchor;
+    ///   * **the flight** — outstanding the whole time, and its own answer exact at its own
+    ///     anchor when it lands.
+    #[test]
+    fn a_flight_over_a_resident_key_leaves_the_entry_present_and_answering() {
+        let rt = runtime(Some(64));
+        let hist = Hist::default();
+        let k: Key = vec![11];
+        hist.seal(&k, 5);
+        let a0 = hist.frontier();
+
+        // Install an entry at `a0` the ordinary way.
+        //
+        // **The outcome is bound to a local before it is matched**, and that is not style.
+        // A temporary in a `match` scrutinee lives until the end of the whole `match`, so
+        // `match view(&rt)...begin_read(..) { .. }` holds the view guard inside every arm —
+        // and an arm that calls `view(&rt)` again self-deadlocks on a `Mutex` that is not
+        // reentrant. The first draft of this test did exactly that and hung the suite until
+        // it was killed, which is the same mistake, in a test, that this cycle is repairing
+        // in the engine. `read_split` above binds first for the same reason.
+        let outcome = view(&rt)
+            .view_mut("balance")
+            .expect("installed")
+            .begin_read(&k, a0);
+        let first = match outcome {
+            ReadOutcome::Fold(t) => {
+                let (v, rows) = hist.fold(t.key(), t.anchor());
+                view(&rt)
+                    .view_mut("balance")
+                    .expect("installed")
+                    .finish_fold(t, v, rows)
+            }
+            _ => panic!("a cold key folds"),
+        };
+        assert_eq!(first.value, hist.fold(&k, a0).0);
+
+        // Move the base and start a flight at the newer anchor. The entry at `a0` cannot
+        // answer it, so a reconstruction is authorised — and the entry stays.
+        hist.seal(&k, 7);
+        let a1 = hist.frontier();
+        let outcome = view(&rt)
+            .view_mut("balance")
+            .expect("installed")
+            .begin_read(&k, a1);
+        let ticket = match outcome {
+            ReadOutcome::Fold(t) => t,
+            _ => panic!("the newer anchor is outside the entry's interval, so it folds"),
+        };
+
+        // **The slot**, stated on its own.
+        {
+            let g = view(&rt);
+            let v = g.view("balance").expect("installed");
+            assert_eq!(
+                v.slot(&k),
+                Slot::Present(first.value, a0),
+                "a flight over a key that already has a good answer must not evict it to \
+                 record that somebody is looking for a different one. The claim that the \
+                 slot is `Pending` for the duration of a flight is false here, and it was \
+                 stated without this case in view (A10-12)."
+            );
+        }
+
+        // **The certification**, stated on its own: the retained entry still answers inside
+        // its own interval, and what it answers equals an independent fold.
+        let outcome = view(&rt)
+            .view_mut("balance")
+            .expect("installed")
+            .begin_read(&k, a0);
+        let hit = match outcome {
+            ReadOutcome::Hit(a) => a,
+            _ => panic!(
+                "the retained entry must still serve a read inside its own certification \
+                 interval while the flight for a later anchor is outstanding"
+            ),
+        };
+        assert_eq!(
+            hit.anchor, a0,
+            "a hit answers at the anchor it was asked for"
+        );
+        assert_eq!(
+            hit.value,
+            hist.fold(&k, a0).0,
+            "and its value is the one an independent fold of the base gives at that anchor"
+        );
+
+        // **The flight**, stated on its own: still outstanding, and exact when it lands.
+        let (v, rows) = hist.fold(ticket.key(), ticket.anchor());
+        let landed = view(&rt)
+            .view_mut("balance")
+            .expect("installed")
+            .finish_fold(ticket, v, rows);
+        assert_eq!(landed.anchor, a1);
+        assert_eq!(
+            landed.value,
+            hist.fold(&k, a1).0,
+            "the flight's own answer is exact at its own anchor, which follows from the \
+             fold's precondition and not from anything about the slot"
         );
     }
 

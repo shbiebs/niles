@@ -712,7 +712,15 @@ change and needs a matching commit in the other repository recording this tree's
 | trait | crate | out-of-tree implementor |
 |---|---|---|
 | `nilestream_core::rev::Base` | `nilestream-core` | `gbs-nilestream::JournalBase` (GBS) |
-| `nilestream_server::session::Serving` | `nilestream-server` | none out of tree today. In tree: `RwLock<RevEngine>` (`rev_engine.rs`), which is what the daemon serves every session from, and the benchmark's swappable adapter. Listed because any embedder implements it, and because the in-tree implementor is what a change to the trait actually breaks |
+| `nilestream_server::session::Serving` | `nilestream-server` | none out of tree today. In tree: `RevEngine` itself, which is what **the daemon** serves every session from (`main.rs` builds an `Arc<RevEngine>`), and `RwLock<RevEngine>`, which is what **the benchmark's hosted daemon** uses because its sweep reseeds the engine between levels. Listed because any embedder implements it, and because the in-tree implementors are what a change to the trait actually breaks |
+
+**A correction, cycle 10.** This row said `RwLock<RevEngine>` "is what the daemon serves every
+session from". It is not: `main.rs` builds an `Arc<RevEngine>`, and the only `RwLock<RevEngine>`
+in the workspace is the benchmark's, which needs the exclusive acquisition for `reseed`. The
+distinction is not bookkeeping — it decides whether a wait inside `query` is taken under a
+lock somebody else may need exclusively, which is A10-04. An implementor that wraps this trait
+in a lock must run one `query_step` per acquisition and wait with the guard dropped; the
+`RwLock` implementation shows the shape.
 
 This section exists because the pair was broken for a cycle and neither gate could see it. T-06
 turned `Base::reconstruct` and `deltas_at` from `&mut self` to `&self` — the right change, for a

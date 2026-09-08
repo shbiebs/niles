@@ -54,9 +54,11 @@ pub type Key
 pub type Value
 pub struct Anchored
 pub enum ReadOutcome
+pub struct Joined
 pub struct Completion
 pub struct FoldTicket
 pub struct WaitTicket
+pub enum ReadMode
 pub trait Base
 pub enum Policy
 pub struct Stats

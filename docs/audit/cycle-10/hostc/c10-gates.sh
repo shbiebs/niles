@@ -35,6 +35,34 @@ GBS="${C10_GBS:-$HOME/Documents/GBS}"
 FAILED=0
 NOTRUN=""
 
+# **The toolchain: the tree's pin when it resolves, `stable` only when it does not.**
+#
+# Both of this cycle's scripts exported `RUSTUP_TOOLCHAIN=stable` unconditionally. That was
+# written for the cloud container, where the pinned 1.95.0 cannot be resolved (no egress to
+# static.rust-lang.org) and `stable` *is* 1.95.0 — so the override was invisible there. On
+# Host C the pin resolves and `stable` is 1.97.1, so the override silently swapped the
+# compiler: every gate and the whole cycle-10 baseline were built with a toolchain the tree
+# does not specify, and nothing said so.
+#
+# The rule now: use the pin if it resolves, fall back to `stable` if it does not, and print
+# which happened. A measurement built with a compiler other than the one the tree pins is not
+# wrong, but it is a different measurement and it must be labelled.
+pick_toolchain() {
+  # **Refusal before probing.** Without this, asking `rustc --version` under an unresolvable
+  # pin makes rustup try to *download* the toolchain — which is a network access at execution
+  # time, and this cycle's standing rule is that no task requires one.
+  export RUSTUP_AUTO_INSTALL=0
+  if rustc --version >/dev/null 2>&1; then
+    TOOLCHAIN_USED="$(rustc --version 2>&1)"
+    TOOLCHAIN_HOW="the tree's pin, which resolves on this host"
+    unset RUSTUP_TOOLCHAIN
+  else
+    export RUSTUP_TOOLCHAIN=stable
+    TOOLCHAIN_USED="$(rustc --version 2>&1)"
+    TOOLCHAIN_HOW="RUSTUP_TOOLCHAIN=stable, because the tree's pin does not resolve here"
+  fi
+}
+
 note()  { printf '%s\n' "$*"; }
 hdr()   { printf '\n=== %s ===\n' "$*"; }
 notrun(){ NOTRUN="${NOTRUN}
@@ -52,8 +80,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-export RUSTUP_TOOLCHAIN=stable
-export RUSTUP_AUTO_INSTALL=0
+pick_toolchain
 export CARGO_NET_OFFLINE=true
 export GIT_TERMINAL_PROMPT=0
 
@@ -66,7 +93,8 @@ note "gbs         : $GBS"
 [ -d "$GBS/.git" ]   || { note "FATAL: $GBS is not a git checkout."; exit 3; }
 note "niles HEAD  : $(git -C "$NILES" rev-parse --short HEAD) on $(git -C "$NILES" rev-parse --abbrev-ref HEAD)"
 note "gbs HEAD    : $(git -C "$GBS" rev-parse --short HEAD) on $(git -C "$GBS" rev-parse --abbrev-ref HEAD)"
-note "rustc       : $(rustc --version 2>&1)"
+note "rustc       : $TOOLCHAIN_USED"
+note "            : $TOOLCHAIN_HOW"
 if [ -n "${NILES_NO_GBS:-}" ]; then
   note ""
   note "REFUSED: NILES_NO_GBS is set in this environment. It is an opt-out from the paired"

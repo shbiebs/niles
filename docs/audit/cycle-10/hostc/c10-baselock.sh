@@ -77,6 +77,34 @@ REPLICATE_TIMEOUT=900
 FAILED=0
 SKIPPED=""
 
+# **The toolchain: the tree's pin when it resolves, `stable` only when it does not.**
+#
+# Both of this cycle's scripts exported `RUSTUP_TOOLCHAIN=stable` unconditionally. That was
+# written for the cloud container, where the pinned 1.95.0 cannot be resolved (no egress to
+# static.rust-lang.org) and `stable` *is* 1.95.0 — so the override was invisible there. On
+# Host C the pin resolves and `stable` is 1.97.1, so the override silently swapped the
+# compiler: every gate and the whole cycle-10 baseline were built with a toolchain the tree
+# does not specify, and nothing said so.
+#
+# The rule now: use the pin if it resolves, fall back to `stable` if it does not, and print
+# which happened. A measurement built with a compiler other than the one the tree pins is not
+# wrong, but it is a different measurement and it must be labelled.
+pick_toolchain() {
+  # **Refusal before probing.** Without this, asking `rustc --version` under an unresolvable
+  # pin makes rustup try to *download* the toolchain — which is a network access at execution
+  # time, and this cycle's standing rule is that no task requires one.
+  export RUSTUP_AUTO_INSTALL=0
+  if rustc --version >/dev/null 2>&1; then
+    TOOLCHAIN_USED="$(rustc --version 2>&1)"
+    TOOLCHAIN_HOW="the tree's pin, which resolves on this host"
+    unset RUSTUP_TOOLCHAIN
+  else
+    export RUSTUP_TOOLCHAIN=stable
+    TOOLCHAIN_USED="$(rustc --version 2>&1)"
+    TOOLCHAIN_HOW="RUSTUP_TOOLCHAIN=stable, because the tree's pin does not resolve here"
+  fi
+}
+
 note()  { printf '%s\n' "$*"; }
 head2() { printf '\n=== %s ===\n' "$*"; }
 skip()  { SKIPPED="${SKIPPED}
@@ -419,6 +447,8 @@ if [ "$BASELINE_ONLY" -eq 0 ] && [ -z "$CANDIDATE_REF" ]; then
   exit 2
 fi
 
+pick_toolchain
+
 head2 "0. preflight"
 note "date            : $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 note "uname           : $(uname -a)"
@@ -461,9 +491,9 @@ note "baseline        : $BASELINE_REF -> $BASELINE_SHA  $BASELINE_LABEL"
 if [ "$BASELINE_ONLY" -eq 0 ]; then
 note "candidate       : $CANDIDATE_REF -> $CANDIDATE_SHA  $CANDIDATE_LABEL"
 fi
-note "toolchain       : RUSTUP_TOOLCHAIN=stable, RUSTUP_AUTO_INSTALL=0 (never let rustup download)"
-note "rustc           : $(RUSTUP_TOOLCHAIN=stable rustc --version 2>&1)"
-note "cargo           : $(RUSTUP_TOOLCHAIN=stable cargo --version 2>&1)"
+note "rustc           : $TOOLCHAIN_USED"
+note "toolchain       : $TOOLCHAIN_HOW"
+note "cargo           : $(cargo --version 2>&1)"
 note "governor        : $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo 'n/a')"
 note "nproc           : $(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo '?')"
 note "levels          : $LEVELS readers (writers = ceil(readers/2): 6r3w, 9r5w, 12r6w)"
@@ -489,7 +519,7 @@ note "append that holds the base while it waits for the view. The mixed sweep be
 note "that table between levels, so this is run FIRST: a baseline that can hang is not a"
 note "baseline, and a hang here means the run is blocked, not slow."
 DW_LOG="$OUT/deadlock-witness.log"
-( cd "$REPO" && RUSTUP_TOOLCHAIN=stable RUSTUP_AUTO_INSTALL=0 CARGO_NET_OFFLINE=true \
+( cd "$REPO" && CARGO_NET_OFFLINE=true \
     cargo test --offline -p nilestream-server --lib -- \
       a_stats_snapshot_and_a_concurrent_append_both_finish \
       the_base_is_acquired_before_the_view_on_every_path_that_takes_both \
@@ -530,7 +560,7 @@ build_arm() {
       return 1
     fi
   fi
-  ( cd "$wt" && RUSTUP_TOOLCHAIN=stable RUSTUP_AUTO_INSTALL=0 CARGO_NET_OFFLINE=true \
+  ( cd "$wt" && CARGO_NET_OFFLINE=true \
       cargo build --offline --release -p nilestream-server -p bank-bench >"$OUT/build-$arm.log" 2>&1 ) || {
     note "  build failed for $arm; see $OUT/build-$arm.log"; return 1; }
   built="$(git -C "$wt" rev-parse HEAD)"
@@ -589,7 +619,7 @@ replicate() {
   # subshell instead. Host C is a Mac and this script is written for it.
   run_one() {
     cd "$wt" || return 3
-    RUSTUP_TOOLCHAIN=stable RUSTUP_AUTO_INSTALL=0 CARGO_NET_OFFLINE=true \
+    CARGO_NET_OFFLINE=true \
       "$wt/target/release/bench" \
         --run --nls-only --scaling-only --host-nls --nls-port "$port" \
         --connections "$LEVELS" --mixed-seconds "$SECONDS_PER_LEVEL" \

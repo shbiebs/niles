@@ -183,10 +183,6 @@ pub struct RevEngine {
     ///
     /// `None` when there is no durable sink, where head and visible are the same thing.
     visible: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
-    /// Epochs applied to the base whose barrier has not yet returned.
-    ///
-    /// Drained by the daemon after it releases the lock; see [`Serving::take_pending`].
-    pending: std::sync::Mutex<Vec<Pending>>,
 }
 
 /// An applied-but-not-yet-durable epoch, and what makes it visible.
@@ -214,6 +210,69 @@ impl Pending {
         self.visible
             .fetch_max(self.epoch, std::sync::atomic::Ordering::AcqRel);
         Ok(e)
+    }
+}
+
+/// **A receipt whose barrier can never return — the failure `serve` must not acknowledge.**
+///
+/// Test-only. A sealer that dies between a submission and its `fsync` looks exactly like this
+/// to the caller: the sender end of the reply channel is gone, so `recv` fails and `wait`
+/// reports it. There is no way to ask real storage to fail on demand, and a durability test
+/// that cannot produce a failing barrier is a test of the happy path wearing the name of the
+/// guarantee.
+#[cfg(test)]
+pub(crate) fn a_barrier_that_will_never_return(epoch: u64) -> Pending {
+    let (tx, rx) = std::sync::mpsc::channel();
+    drop(tx);
+    Pending {
+        epoch,
+        token: rx,
+        visible: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+    }
+}
+
+/// A receipt that has already succeeded, for the same reason.
+#[cfg(test)]
+pub(crate) fn a_barrier_that_has_returned(epoch: u64) -> Pending {
+    let (tx, rx) = std::sync::mpsc::channel();
+    tx.send(Ok(epoch)).expect("the receiver is alive");
+    Pending {
+        epoch,
+        token: rx,
+        visible: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+    }
+}
+
+/// **Test-only shorthands for the two things `serve` does with an append.**
+///
+/// `serve` calls `Serving::append`, keeps the receipt on its own session, and waits on it
+/// before writing the reply. A test that wants a durable epoch wants that whole sequence, and
+/// a test that wants to inspect the barrier wants the receipt. Naming both keeps the receipt's
+/// ownership visible at every call site: there is no list to drain and nothing to take that
+/// another caller could have taken first (A9-F01).
+#[cfg(test)]
+impl RevEngine {
+    /// Append and wait for **this append's own** barrier, returning the epoch.
+    pub(crate) fn append_durable(
+        &self,
+        rows: Vec<Row>,
+        txn_id: &str,
+    ) -> Result<u64, crate::session::ServeError> {
+        let a = <Self as crate::session::Serving>::append(self, rows, txn_id)?;
+        if let Some(r) = a.receipt {
+            r.wait().map_err(crate::session::ServeError::NotDurable)?;
+        }
+        Ok(a.epoch)
+    }
+
+    /// Append without waiting, handing back the epoch and its receipt.
+    pub(crate) fn append_pending(
+        &self,
+        rows: Vec<Row>,
+        txn_id: &str,
+    ) -> Result<(u64, Option<Pending>), crate::session::ServeError> {
+        let a = <Self as crate::session::Serving>::append(self, rows, txn_id)?;
+        Ok((a.epoch, a.receipt))
     }
 }
 
@@ -435,7 +494,6 @@ impl RevEngine {
             view_fallbacks: std::sync::atomic::AtomicU64::new(0),
             durable: None,
             visible: None,
-            pending: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -750,7 +808,11 @@ impl crate::session::Serving for RevEngine {
         })
     }
 
-    fn append(&self, rows: Vec<Row>, txn_id: &str) -> Result<u64, crate::session::ServeError> {
+    fn append(
+        &self,
+        rows: Vec<Row>,
+        txn_id: &str,
+    ) -> Result<crate::session::Appended, crate::session::ServeError> {
         // **The write guard, taken once and held across the apply.** It serialises
         // submitters, which is what makes the epoch ids it assigns contiguous, and it is
         // released before the barrier is waited on — the whole of what T-05 established.
@@ -775,10 +837,11 @@ impl crate::session::Serving for RevEngine {
         // concurrent submitters — never formed a batch. `select nilestream_sealer` reported
         // `max_batch` 1 and 1.00 transactions per fsync at every connection count.
         //
-        // The submission is non-blocking; the token goes to `pending`, and the daemon waits
+        // The submission is non-blocking; the token is returned to the caller, which waits
         // on it *after* releasing the lock and before writing the reply. So the
         // acknowledgement still follows the barrier — the client is told "committed" only
         // once it is — while the lock is held for the apply alone.
+        let mut receipt: Option<Pending> = None;
         if let Some(sink) = self.durable.as_ref() {
             // **The payload is the epoch, not its number.** `parent ‖ hash ‖ canon(rows)`:
             // the rows, so a restart can rebuild the base, and the ledger's own chain link,
@@ -799,17 +862,17 @@ impl crate::session::Serving for RevEngine {
             let token = sink
                 .record_pending(txn_id, payload)
                 .map_err(crate::session::ServeError::NotDurable)?;
-            self.pending
-                .lock()
-                .expect("the pending list is not poisoned")
-                .push(Pending {
-                    epoch,
-                    token,
-                    visible: self
-                        .visible
-                        .clone()
-                        .expect("a durable sink implies a visible frontier"),
-                });
+            // **To the caller, not to a list on the engine.** The list was drained by
+            // whichever connection asked next (A9-F01); a value returned from this call
+            // belongs to the call.
+            receipt = Some(Pending {
+                epoch,
+                token,
+                visible: self
+                    .visible
+                    .clone()
+                    .expect("a durable sink implies a visible frontier"),
+            });
         }
         // The maintained view moves with the ledger, or the next read answers at an anchor
         // the base has already passed. `advance` touches only *resident* entries, which is
@@ -830,20 +893,11 @@ impl crate::session::Serving for RevEngine {
                 }
             }
         }
-        Ok(epoch)
+        Ok(crate::session::Appended { epoch, receipt })
     }
 
     fn views(&self) -> Vec<(String, u32)> {
         self.views.clone()
-    }
-
-    fn take_pending(&self) -> Vec<Pending> {
-        std::mem::take(
-            &mut *self
-                .pending
-                .lock()
-                .expect("the pending list is not poisoned"),
-        )
     }
 
     fn sealer_stats(&self) -> Option<(u64, u64, u64, u64, u64)> {
@@ -941,7 +995,11 @@ impl crate::session::Serving for std::sync::RwLock<RevEngine> {
             .expect("not poisoned")
             .query(circuit, output, anchor)
     }
-    fn append(&self, rows: Vec<Row>, txn_id: &str) -> Result<u64, crate::session::ServeError> {
+    fn append(
+        &self,
+        rows: Vec<Row>,
+        txn_id: &str,
+    ) -> Result<crate::session::Appended, crate::session::ServeError> {
         self.read().expect("not poisoned").append(rows, txn_id)
     }
     fn views(&self) -> Vec<(String, u32)> {
@@ -955,9 +1013,6 @@ impl crate::session::Serving for std::sync::RwLock<RevEngine> {
     }
     fn sealer_stats(&self) -> Option<(u64, u64, u64, u64, u64)> {
         self.read().expect("not poisoned").sealer_stats()
-    }
-    fn take_pending(&self) -> Vec<Pending> {
-        self.read().expect("not poisoned").take_pending()
     }
     fn serve_path_now(
         &self,
@@ -2880,7 +2935,7 @@ mod sealer_stats_tests {
         );
 
         let before = e.sealer_stats().expect("durable").2;
-        let epoch = e
+        let applied = e
             .append(
                 vec![proto_engine::Row::Post(proto_engine::Posting {
                     txn: 77,
@@ -2892,6 +2947,7 @@ mod sealer_stats_tests {
                 "sealer-stats-1",
             )
             .expect("appends");
+        let applied_epoch = applied.epoch;
 
         // **`append` no longer waits for the barrier, so this must.**
         //
@@ -2900,14 +2956,13 @@ mod sealer_stats_tests {
         // the caller applies, takes the token, releases the lock, and *then* waits — which is
         // what the daemon does between framing a reply and writing it. A test that skipped
         // the wait would be asserting on a barrier that had not happened yet.
-        let pending = crate::session::Serving::take_pending(&e);
-        assert_eq!(pending.len(), 1, "one append, one outstanding barrier");
-        for p in pending {
-            p.wait().expect("the epoch reaches stable storage");
-        }
+        let receipt = applied
+            .receipt
+            .expect("a durable engine hands the append its own barrier receipt");
+        receipt.wait().expect("the epoch reaches stable storage");
         assert_eq!(
             e.frontier(),
-            epoch,
+            applied_epoch,
             "the visible frontier advances to the epoch once, and only once, it is durable"
         );
 
@@ -3169,7 +3224,7 @@ mod visibility_tests {
         let (e, seg) = engine_at("not-visible-yet");
         let before = e.frontier();
 
-        let epoch = e.append(post(1, 1), "v-1").expect("applies");
+        let (epoch, receipt) = e.append_pending(post(1, 1), "v-1").expect("applies");
         assert!(
             epoch > before,
             "the base advanced: epoch {epoch} follows {before}"
@@ -3182,14 +3237,75 @@ mod visibility_tests {
              client can observe a transaction a crash would erase."
         );
 
-        for p in e.take_pending() {
-            p.wait().expect("durable");
-        }
+        receipt
+            .expect("a durable engine returns a receipt")
+            .wait()
+            .expect("durable");
         assert_eq!(
             e.frontier(),
             epoch,
             "and only now, after the barrier, is it visible"
         );
+        let _ = std::fs::remove_file(&seg);
+    }
+
+    /// **A receipt belongs to the connection that made the append — A9-F01, C9-02.1.**
+    ///
+    /// The theft window, reproduced and then closed. Connection A appends and has not yet
+    /// waited; connection B handles a read and drains what it is entitled to. Under the old
+    /// design both drained one engine-wide vector, so B took A's token: B then waited on a
+    /// barrier it had not caused (and could be told 58030 for a write it never made), while A
+    /// found the list empty and wrote `INSERT 0 2` with its own record still in flight.
+    ///
+    /// Nothing about timing is needed to show it. The property is that the receipt is
+    /// *reachable* only from the session that made the append, and a session is one
+    /// connection's.
+    #[test]
+    fn a_receipt_is_reachable_only_from_the_session_that_appended() {
+        let (e, seg) = engine_at("receipt-ownership");
+        let schema = crate::daemon::DEFAULT_SCHEMA.to_string();
+        let mut a = crate::session::Session::new("a".into(), "bank".into(), schema.clone());
+        let mut b = crate::session::Session::new("b".into(), "bank".into(), schema);
+
+        let replies = a.handle(
+            crate::pg_wire::Frontend::Query(
+                "insert into postings values (910001, 1, 0, -5), (910001, 2, 0, 5)".into(),
+            ),
+            &e,
+        );
+        assert!(
+            replies.iter().any(|m| matches!(
+                m,
+                crate::pg_wire::Backend::CommandComplete(t) if t.starts_with("INSERT")
+            )),
+            "the append must have been accepted for this test to mean anything: {replies:?}"
+        );
+
+        // B runs *while A's barrier is outstanding* — the whole of the window.
+        let _ = b.handle(
+            crate::pg_wire::Frontend::Query(
+                "select acct, sum(amt) from postings where acct = 1 group by acct".into(),
+            ),
+            &e,
+        );
+        let stolen = b.take_receipts();
+        assert!(
+            stolen.is_empty(),
+            "a connection that appended nothing took {} outstanding barrier(s); under the \
+             engine-wide list this is where another connection's receipt went",
+            stolen.len()
+        );
+
+        let mine = a.take_receipts();
+        assert_eq!(
+            mine.len(),
+            1,
+            "the appending connection must still hold its own receipt after another \
+             connection has served a whole statement"
+        );
+        for p in mine {
+            p.wait().expect("durable");
+        }
         let _ = std::fs::remove_file(&seg);
     }
 
@@ -3203,12 +3319,14 @@ mod visibility_tests {
     fn a_barrier_that_is_never_awaited_never_publishes_its_epoch() {
         let (e, seg) = engine_at("never-awaited");
         let before = e.frontier();
-        let epoch = e.append(post(2, 2), "v-2").expect("applies");
+        let (epoch, receipt) = e.append_pending(post(2, 2), "v-2").expect("applies");
 
-        // The injection: take the tokens and drop them unread.
-        let pending = e.take_pending();
-        assert_eq!(pending.len(), 1);
-        drop(pending);
+        // The injection: drop this append's own receipt unread.
+        assert!(
+            receipt.is_some(),
+            "a durable engine hands the append its receipt; there is nothing else to drop"
+        );
+        drop(receipt);
 
         assert_eq!(
             e.frontier(),
@@ -3228,13 +3346,10 @@ mod visibility_tests {
     #[test]
     fn the_visible_frontier_never_names_an_epoch_the_base_has_not_applied() {
         let (e, seg) = engine_at("no-gap");
+        // Each append waits on its own receipt before the next, as `serve` does per statement.
         for i in 0..8u64 {
-            e.append(post(100 + i, i % 4), &format!("g-{i}"))
+            e.append_durable(post(100 + i, i % 4), &format!("g-{i}"))
                 .expect("applies");
-        }
-        // Wait in submission order, as the daemon does.
-        for p in e.take_pending() {
-            p.wait().expect("durable");
         }
         let visible = e.frontier();
         assert!(
@@ -3261,11 +3376,13 @@ mod visibility_tests {
     #[test]
     fn waiting_out_of_order_cannot_move_the_frontier_backwards() {
         let (e, seg) = engine_at("monotone");
+        let mut pending = Vec::new();
         for i in 0..6u64 {
-            e.append(post(200 + i, i), &format!("m-{i}"))
+            let (_epoch, receipt) = e
+                .append_pending(post(200 + i, i), &format!("m-{i}"))
                 .expect("applies");
+            pending.extend(receipt);
         }
-        let mut pending = e.take_pending();
         pending.reverse(); // newest first: the order the argument does not rely on
         let mut seen = e.frontier();
         for p in pending {
@@ -3368,13 +3485,11 @@ mod recovery_tests {
             let e = engine(&path);
             seeded = balance(&e, 3);
             for i in 1..=40u64 {
+                // The barrier, waited on exactly as `serve` waits on it: on this append's
+                // own receipt, before the next statement.
                 let epoch = e
-                    .append(pair(700_000 + i, 3, 7), &format!("t-{i}"))
+                    .append_durable(pair(700_000 + i, 3, 7), &format!("t-{i}"))
                     .unwrap();
-                // The barrier, waited on exactly as `serve` waits on it.
-                for p in e.take_pending() {
-                    p.wait().expect("durable");
-                }
                 acked += 7;
                 assert!(epoch > 0);
             }
@@ -3401,13 +3516,10 @@ mod recovery_tests {
         {
             let e = engine(&path);
             e.append(pair(700_001, 4, 5), "t-1").unwrap();
-            for p in e.take_pending() {
-                p.wait().expect("durable");
-            }
         }
         let after = engine(&path);
         let before = balance(&after, 4);
-        let again = after.append(pair(700_001, 4, 5), "t-1");
+        let again = after.append_durable(pair(700_001, 4, 5), "t-1");
         assert!(
             matches!(again, Err(crate::session::ServeError::Duplicate(_))),
             "a retried transaction must be refused as a duplicate after a restart, not taken \
@@ -3427,9 +3539,6 @@ mod recovery_tests {
             for i in 1..=3u64 {
                 e.append(pair(700_100 + i, 5, 11), &format!("t-{i}"))
                     .unwrap();
-                for p in e.take_pending() {
-                    p.wait().expect("durable");
-                }
             }
         }
         // Flip one byte of the last record's row bytes. The segment's own CRC covers the
@@ -3549,9 +3658,6 @@ mod chain_verification_tests {
                     &format!("t{i}"),
                 )
                 .expect("balanced");
-            }
-            for pend in e.take_pending() {
-                pend.wait().expect("durable");
             }
         }
         // Truncate the *payload* of the last record while leaving the framing intact: the
@@ -3688,9 +3794,6 @@ mod chain_verification_tests {
                     &format!("t-{i}"),
                 )
                 .unwrap();
-                for p in e.take_pending() {
-                    p.wait().expect("durable");
-                }
             }
         }
 
@@ -3794,8 +3897,8 @@ mod anchor_after_barrier_tests {
         .with_durable(&path)
         .expect("durable sink");
 
-        let applied = e
-            .append(
+        let (applied, receipt) = e
+            .append_pending(
                 vec![
                     proto_engine::Row::Post(proto_engine::Posting {
                         txn: 900_001,
@@ -3827,9 +3930,10 @@ mod anchor_after_barrier_tests {
             e.frontier()
         );
 
-        for p in e.take_pending() {
-            p.wait().expect("durable");
-        }
+        receipt
+            .expect("a durable engine returns a receipt")
+            .wait()
+            .expect("durable");
         assert_eq!(
             e.frontier(),
             applied,

@@ -59,6 +59,40 @@ pub fn accept_loop(
     }
 }
 
+/// **Wait for every receipt this message's statements produced, in submission order.**
+///
+/// The receipts belong to one connection's `Session`, so this waits for that connection's own
+/// barriers and for nobody else's (A9-F01). Extracted from `serve` so the failure path can be
+/// tested directly: a barrier that does not return is not something a test can arrange by
+/// asking the storage nicely.
+///
+/// Stops at the first failure. A message whose first statement did not reach stable storage is
+/// answered with that failure whatever its later statements did, because the reply is one
+/// reply and a partial acknowledgement is the thing this whole path exists to prevent.
+fn await_all(receipts: Vec<crate::rev_engine::Pending>) -> Result<(), String> {
+    for p in receipts {
+        p.wait()?;
+    }
+    Ok(())
+}
+
+/// The reply for a transaction the storage did not take.
+///
+/// `58030 io_error`: the transaction was well formed and the storage did not take it. It
+/// replaces the framed reply entirely — the rows are in the base but the visible frontier has
+/// not moved past them, so no read can observe them and recovery will not carry them.
+fn not_durable(why: &str) -> Vec<pg_wire::Backend> {
+    vec![
+        pg_wire::Backend::ErrorResponse {
+            severity: "ERROR".into(),
+            code: "58030".into(),
+            message: "the transaction was not made durable".into(),
+            detail: Some(why.to_string()),
+        },
+        pg_wire::Backend::ReadyForQuery(b'I'),
+    ]
+}
+
 pub fn serve(
     stream: TcpStream,
     schema: String,
@@ -147,7 +181,11 @@ pub fn serve(
         // nothing outside `answer_from_view` (A9-F07).
         let wire_began = std::time::Instant::now();
         let replies = session.handle(msg, &*engine);
-        let pending = crate::session::Serving::take_pending(&*engine);
+        // **This connection's own receipts.** The engine used to own one list of outstanding
+        // barriers and this loop drained *the list*, so a concurrent connection could take
+        // this one's token and this one would then acknowledge with nothing to wait on
+        // (A9-F01). `Session` belongs to this connection and to no other.
+        let pending = session.take_receipts();
 
         // **A failed barrier must not be acknowledged as a commit.**
         //
@@ -156,22 +194,9 @@ pub fn serve(
         // but the visible frontier has not moved past them, so no read can observe them and
         // recovery will not carry them.
         let mut replies = replies;
-        for p in pending {
-            if let Err(why) = p.wait() {
-                eprintln!("nilestreamd: {peer} append not durable: {why}");
-                replies = vec![
-                    pg_wire::Backend::ErrorResponse {
-                        severity: "ERROR".into(),
-                        // `58030 io_error`: the transaction was well formed and the storage
-                        // did not take it.
-                        code: "58030".into(),
-                        message: "the transaction was not made durable".into(),
-                        detail: Some(why),
-                    },
-                    pg_wire::Backend::ReadyForQuery(b'I'),
-                ];
-                break;
-            }
+        if let Err(why) = await_all(pending) {
+            eprintln!("nilestreamd: {peer} append not durable: {why}");
+            replies = not_durable(&why);
         }
         if replies.is_empty() {
             break;
@@ -213,6 +238,9 @@ mod ordering_guard {
     //! visible until its barrier returns — in `rev_engine::visibility_tests`. Together: the
     //! frontier cannot publish early, and the reply cannot be written early.
 
+    use super::{await_all, not_durable};
+    use crate::pg_wire;
+
     #[test]
     fn the_reply_is_written_only_after_every_outstanding_barrier_is_awaited() {
         let src = include_str!("daemon.rs");
@@ -229,12 +257,18 @@ mod ordering_guard {
             .expect("`serve` must have a message loop");
         let body = &serve[loop_start..];
 
-        let takes = body.find("take_pending").expect(
-            "`serve` must take the outstanding barriers from the engine; without that the \
-             tokens are dropped with the guard and the reply is written before the fsync",
+        let takes = body.find("take_receipts").expect(
+            "`serve` must take the outstanding barriers from its own session; without that \
+             the tokens are dropped with the guard and the reply is written before the fsync",
+        );
+        assert!(
+            !body.contains("take_pending"),
+            "`serve` must not drain a list the engine owns: another connection's receipt \
+             can be in it, and taking it acknowledges this connection's write against \
+             somebody else's barrier (A9-F01)"
         );
         let waits = body
-            .find(".wait()")
+            .find("await_all(")
             .expect("`serve` must wait on the barriers it took");
         let writes = body
             .find("pg_wire::write_all")
@@ -245,6 +279,51 @@ mod ordering_guard {
             "the order in `serve` must be take ({takes}), wait ({waits}), write ({writes}). \
              Writing before waiting acknowledges a transaction that is not yet durable."
         );
+    }
+
+    /// **A failed barrier answers the statement that caused it — C9-02.2.**
+    ///
+    /// The reply was framed while the epoch was merely applied. If its record never reached
+    /// stable storage the client is told so instead, and the tag it would have got is
+    /// discarded rather than sent.
+    #[test]
+    fn a_barrier_that_never_returns_replaces_the_reply_with_58030() {
+        let framed = vec![
+            pg_wire::Backend::CommandComplete("INSERT 0 2".into()),
+            pg_wire::Backend::ReadyForQuery(b'I'),
+        ];
+        let receipts = vec![crate::rev_engine::a_barrier_that_will_never_return(7)];
+        let why = await_all(receipts).expect_err("the barrier cannot return");
+        let replies = not_durable(&why);
+        assert!(
+            !replies.iter().any(|m| matches!(
+                m,
+                pg_wire::Backend::CommandComplete(t) if t.starts_with("INSERT")
+            )),
+            "a commit tag must not survive a failed barrier: {framed:?}"
+        );
+        match replies.first() {
+            Some(pg_wire::Backend::ErrorResponse { code, detail, .. }) => {
+                assert_eq!(code, "58030", "io_error is the code a client acts on");
+                assert!(detail.is_some(), "the client is told why");
+            }
+            other => panic!("expected an ErrorResponse, got {other:?}"),
+        }
+    }
+
+    /// **A message with no appends waits for nothing — C9-02.1's other half.**
+    ///
+    /// A reader's reply must not be delayed by, or rewritten because of, somebody else's
+    /// barrier. With receipts owned by the session there is nothing for a read to wait on:
+    /// the list it drains is its own and it is empty.
+    #[test]
+    fn a_message_that_appended_nothing_has_no_barrier_to_wait_for() {
+        assert!(
+            await_all(Vec::new()).is_ok(),
+            "a read must not be able to fail on durability"
+        );
+        // And a receipt that did return leaves the reply alone.
+        assert!(await_all(vec![crate::rev_engine::a_barrier_that_has_returned(3)]).is_ok());
     }
 
     /// The barrier must not be awaited under any lock — and after T-06 `serve` holds none.

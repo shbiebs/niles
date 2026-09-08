@@ -22,6 +22,20 @@ use niles_lang::diagnostics::Severity;
 
 /// What the session can serve from. Kept as a trait so the session can be tested without a
 /// running engine, and so the same code serves the in-memory prototype and a durable one.
+/// **An applied epoch and the receipt for its barrier.**
+///
+/// One value, so an append's epoch and the token that says the epoch reached stable storage
+/// cannot become separated — which is exactly what happened when the token went to a vector
+/// on the engine and the epoch went to the caller (A9-F01).
+///
+/// `receipt` is `None` when the server has no durable sink: there is no barrier to be after,
+/// and `None` says so rather than an empty list that could equally mean "someone else took
+/// it".
+pub struct Appended {
+    pub epoch: u64,
+    pub receipt: Option<crate::rev_engine::Pending>,
+}
+
 pub trait Serving {
     /// The current visibility frontier.
     fn frontier(&self) -> u64;
@@ -44,8 +58,21 @@ pub trait Serving {
         anchor: u64,
     ) -> Result<Rows, ServeError>;
 
-    /// Append rows as one sealed epoch, returning the epoch **after** it is durable.
-    fn append(&self, rows: Vec<proto_engine::Row>, txn_id: &str) -> Result<u64, ServeError>;
+    /// Append rows as one sealed epoch, returning the epoch and **this append's own
+    /// durability receipt**.
+    ///
+    /// The receipt is the whole of A9-F01. It used to be pushed onto a vector owned by the
+    /// *engine*, and the connection loop drained the vector — not its own token — after
+    /// `Session::handle` returned. Between one connection's append and its drain, another
+    /// connection's drain took the first one's receipt: the first was then acknowledged with
+    /// nothing to wait on, while its record's barrier was still in flight, and a barrier that
+    /// failed was reported to whichever connection happened to be draining. Visibility was
+    /// still gated by the token, so no read observed the epoch; what was wrong was the
+    /// acknowledgement, which is the thing a client acts on.
+    ///
+    /// Returning it makes the ownership a type fact. A caller cannot take another's receipt
+    /// because it never has a reference to one.
+    fn append(&self, rows: Vec<proto_engine::Row>, txn_id: &str) -> Result<Appended, ServeError>;
 
     /// The views this server knows, and the scale each one's money column carries.
     fn views(&self) -> Vec<(String, u32)>;
@@ -78,17 +105,6 @@ pub trait Serving {
     /// could read it.
     fn sealer_stats(&self) -> Option<(u64, u64, u64, u64, u64)> {
         None
-    }
-
-    /// **Epochs applied to the base whose barrier has not yet returned.**
-    ///
-    /// Taken by the caller *after* it releases the engine's lock, waited on there, and only
-    /// then is the reply written. That ordering is the whole of what moved: the
-    /// acknowledgement still follows the barrier, and the lock no longer spans it.
-    ///
-    /// Empty for a server with no durable sink, where there is no barrier to be after.
-    fn take_pending(&self) -> Vec<crate::rev_engine::Pending> {
-        Vec::new()
     }
 
     /// **What this server would do with this circuit, right now**, as one short class name.
@@ -427,6 +443,18 @@ pub struct Session {
     pub compile_hits: u64,
     pub compile_misses: u64,
     pub queries_served: u64,
+    /// **Durability receipts for the appends this session has made and not yet answered.**
+    ///
+    /// One `Session` belongs to one connection, so a receipt placed here can be taken by
+    /// exactly one caller: the connection that made the append. The receipts used to live in
+    /// a `Mutex<Vec<Pending>>` on the *engine*, drained by whichever connection called
+    /// `take_pending` next — so a connection could acknowledge its insert while its own
+    /// barrier was still in flight on somebody else's thread, and a failed barrier could be
+    /// reported as an error to a connection that had only read (A9-F01).
+    ///
+    /// Emptied by [`Session::take_receipts`] once per wire message, immediately before the
+    /// reply for that message is written.
+    receipts: Vec<crate::rev_engine::Pending>,
 }
 
 /// How many compiled statements one session holds before the oldest is evicted.
@@ -454,6 +482,7 @@ impl Session {
             compile_hits: 0,
             compile_misses: 0,
             queries_served: 0,
+            receipts: Vec::new(),
         }
     }
 
@@ -588,6 +617,16 @@ impl Session {
         self.anchor
     }
 
+    /// **The durability receipts for the appends this message made.**
+    ///
+    /// Called once per wire message, after `handle` and before the reply is written. Its
+    /// contract is the one the engine-wide list could not offer: what comes back was put
+    /// here by *this* session, so waiting on it waits for this connection's own barriers and
+    /// for no others (A9-F01).
+    pub fn take_receipts(&mut self) -> Vec<crate::rev_engine::Pending> {
+        std::mem::take(&mut self.receipts)
+    }
+
     /// Handle one frontend message, producing the messages to send back.
     ///
     /// **Timed into `lockstats::STATEMENT`**, which is the inner of the two boundaries the
@@ -698,7 +737,12 @@ impl Session {
                 }
                 let txn = ids.join("+");
                 return match engine.append(rows, &txn) {
-                    Ok(epoch) => {
+                    Ok(applied) => {
+                        let epoch = applied.epoch;
+                        // **This session's own receipt.** Held here, waited on by this
+                        // connection before its reply is written, and reachable by nobody
+                        // else (A9-F01).
+                        self.receipts.extend(applied.receipt);
                         self.observe(epoch);
                         self.failed = false;
                         vec![Backend::CommandComplete(format!("COMMIT {epoch}"))]
@@ -1471,7 +1515,9 @@ impl Session {
             return vec![Backend::CommandComplete(format!("INSERT 0 {n}"))];
         }
         match engine.append(rows, &txn) {
-            Ok(_epoch) => {
+            Ok(applied) => {
+                // This statement's receipt, on this session, for this connection to wait on.
+                self.receipts.extend(applied.receipt);
                 // **The session does not observe the epoch it just wrote.** `append` returns
                 // the *applied* epoch, before its barrier has returned; raising the anchor to
                 // it here meant that when the barrier then failed — and `serve` correctly
@@ -1836,7 +1882,11 @@ schema bank {
             }
             Ok(Rows::text_rows(columns, rows))
         }
-        fn append(&self, rows: Vec<proto_engine::Row>, txn_id: &str) -> Result<u64, ServeError> {
+        fn append(
+            &self,
+            rows: Vec<proto_engine::Row>,
+            txn_id: &str,
+        ) -> Result<Appended, ServeError> {
             let mut st = self.state();
             if st.appended.iter().any(|(t, _)| t == txn_id) {
                 return Err(ServeError::Duplicate(format!(
@@ -1860,7 +1910,12 @@ schema bank {
                 }
             }
             st.frontier += 1;
-            Ok(st.frontier)
+            // No durable sink here, so no barrier and no receipt: `None` says that, where an
+            // empty list could equally have meant "someone else took it".
+            Ok(Appended {
+                epoch: st.frontier,
+                receipt: None,
+            })
         }
         fn views(&self) -> Vec<(String, u32)> {
             self.views.clone()

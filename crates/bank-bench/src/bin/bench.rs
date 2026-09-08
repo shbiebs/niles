@@ -2511,7 +2511,7 @@ fn report_lockstats(port: u16, shape: &str) {
 /// delta for the same reason the fallback rate is: cumulative counters are dominated by
 /// whatever ran first and drift towards a constant, which is the opposite of what a
 /// connection sweep is asking.
-fn nls_flight_counters(port: u16) -> Option<[u64; 13]> {
+fn nls_flight_counters(port: u16) -> Option<[u64; 15]> {
     let mut c = bank_bench::wire::Client::connect("127.0.0.1", port, "bench", "bank").ok()?;
     let r = c.simple("select nilestream_stats").ok()?;
     let at = |name: &str| -> Option<u64> {
@@ -2537,10 +2537,12 @@ fn nls_flight_counters(port: u16) -> Option<[u64; 13]> {
         at("gap_at_finish_max")?,
         at("flights_behind_at_begin")?,
         at("flights_that_fell_behind")?,
+        at("gap_begin_samples")?,
+        at("gap_finish_samples")?,
     ])
 }
 
-fn report_flights(before: Option<[u64; 13]>, after: Option<[u64; 13]>, shape: &str) {
+fn report_flights(before: Option<[u64; 15]>, after: Option<[u64; 15]>, shape: &str) {
     // `n/a` and not zeroes: "no read joined a flight" and "this server does not report
     // flights" are different claims, and a build predating the two-phase read makes the
     // second one.
@@ -2581,15 +2583,29 @@ fn report_flights(before: Option<[u64; 13]>, after: Option<[u64; 13]>, shape: &s
             d[0]
         );
     }
-    // **The anchor gap, in the two phases it is different in.** A flight that begins n
-    // epochs behind and finishes further behind is one whose install is pinned or stale;
-    // the mean is over installs, and the maximum is a level, not a delta.
-    let installs = d[0].max(1);
+    // **The anchor gap, in the two phases it is different in**, each mean over its own
+    // denominator. The first version of this line divided both totals by `pending_joins`,
+    // the nearest counter to hand, and printed a mean of 386 epochs beside a maximum of 16 —
+    // a mean above the maximum, which is arithmetic telling you the divisor is wrong. The
+    // two totals are accumulated over different populations (every authorised flight; every
+    // installing one) and the server now reports both counts.
+    //
+    // The maximum is a level, not a delta: the larger of two maxima can belong entirely to
+    // the window before this one, so it is printed as what it is.
+    let mean = |total: u64, n: u64| -> String {
+        if n == 0 {
+            "n/a".into()
+        } else {
+            format!("{:.2}", total as f64 / n as f64)
+        }
+    };
     eprintln!(
-        "    anchor gap: mean {:.1} at begin, mean {:.1} at finish, max at finish {} \
-         (epochs); {} flights began behind, {} fell further behind",
-        d[8] as f64 / installs as f64,
-        d[9] as f64 / installs as f64,
+        "    anchor gap: begin mean {} over {} flights, finish mean {} over {} installs, \
+         max at finish {} (epochs); {} began behind, {} fell further behind",
+        mean(d[8], d[13]),
+        d[13],
+        mean(d[9], d[14]),
+        d[14],
         a[10],
         d[11],
         d[12]

@@ -354,6 +354,16 @@ pub struct Stats {
     pub gap_at_begin_total: u64,
     pub gap_at_finish_total: u64,
     pub gap_at_finish_max: u64,
+    /// **The denominators, because a total without its count is not a mean.**
+    ///
+    /// The first harness run that printed these divided both totals by `pending_joins`, the
+    /// nearest counter to hand, and reported a mean gap of 386 epochs beside a maximum of
+    /// 16 — a mean above the maximum, which is the arithmetic saying the divisor is wrong.
+    /// The two totals are accumulated over different sets of events (every authorised
+    /// flight; every *installing* one), so they need two counts and neither is any other
+    /// counter in this struct.
+    pub gap_begin_samples: u64,
+    pub gap_finish_samples: u64,
     /// Flights that were already behind when they began, and flights that fell further
     /// behind while folding.
     pub flights_behind_at_begin: u64,
@@ -607,6 +617,7 @@ impl Rev {
                 // under it. `finish_fold` subtracts to say which happened (A10-11).
                 let gap_begin = self.applied.saturating_sub(anchor);
                 self.stats.gap_at_begin_total += gap_begin;
+                self.stats.gap_begin_samples += 1;
                 if gap_begin > 0 {
                     self.stats.flights_behind_at_begin += 1;
                 }
@@ -675,13 +686,19 @@ impl Rev {
             anchor: ticket.anchor,
         };
 
-        // **The gap again, at landing.** Recorded for every fold that owned its flight,
-        // installed or not, because a superseded completion is exactly the case where the
-        // frontier moved furthest and dropping it would bias the distribution towards the
-        // fast reads.
+        // **The gap again, at landing.** Recorded for the folds that install — the ones
+        // whose answer becomes resident state, which is what a merge decision is about. The
+        // comment here used to say "installed or not", which the `if` below has never done;
+        // a fold that does not install has no landing to be late for, and counting it would
+        // mix two populations under one mean.
+        //
+        // `gap_finish_samples` is the divisor. Without it the total is a total, and the
+        // first run to print a mean from it divided by the wrong counter and reported a mean
+        // above the maximum.
         if ticket.install {
             let gap_finish = self.applied.saturating_sub(ticket.anchor);
             self.stats.gap_at_finish_total += gap_finish;
+            self.stats.gap_finish_samples += 1;
             self.stats.gap_at_finish_max = self.stats.gap_at_finish_max.max(gap_finish);
             if gap_finish > ticket.gap_begin {
                 self.stats.flights_that_fell_behind += 1;
@@ -1207,6 +1224,8 @@ impl Runtime {
             s.waiters_refused += v.stats.waiters_refused;
             s.gap_at_begin_total += v.stats.gap_at_begin_total;
             s.gap_at_finish_total += v.stats.gap_at_finish_total;
+            s.gap_begin_samples += v.stats.gap_begin_samples;
+            s.gap_finish_samples += v.stats.gap_finish_samples;
             s.gap_at_finish_max = s.gap_at_finish_max.max(v.stats.gap_at_finish_max);
             s.flights_behind_at_begin += v.stats.flights_behind_at_begin;
             s.flights_that_fell_behind += v.stats.flights_that_fell_behind;

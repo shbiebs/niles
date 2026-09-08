@@ -198,6 +198,10 @@ pub struct ReadStats {
     pub gap_at_begin_total: u64,
     pub gap_at_finish_total: u64,
     pub gap_at_finish_max: u64,
+    /// The two totals' denominators. A total reported without its count invites the reader
+    /// to divide by the nearest counter to hand, which is what the first harness run did.
+    pub gap_begin_samples: u64,
+    pub gap_finish_samples: u64,
     pub flights_behind_at_begin: u64,
     pub flights_that_fell_behind: u64,
 }
@@ -1166,6 +1170,8 @@ impl crate::session::Serving for RevEngine {
                     gap_at_begin_total: s.gap_at_begin_total,
                     gap_at_finish_total: s.gap_at_finish_total,
                     gap_at_finish_max: s.gap_at_finish_max,
+                    gap_begin_samples: s.gap_begin_samples,
+                    gap_finish_samples: s.gap_finish_samples,
                     flights_behind_at_begin: s.flights_behind_at_begin,
                     flights_that_fell_behind: s.flights_that_fell_behind,
                 }
@@ -1655,18 +1661,25 @@ impl RevEngine {
                     crate::lockstats::Timed::acquire(runtime, &crate::lockstats::VIEW_LOCK);
                 let held_from = std::time::Instant::now();
                 view_wait2 = held_from.duration_since(asked2);
-                match rt.view_mut(BALANCE_VIEW) {
+                let a = match rt.view_mut(BALANCE_VIEW) {
                     Some(view) => {
                         gap_finish = view.applied_through().saturating_sub(t.anchor());
-                        let a = view.finish_fold(t, value, rows);
-                        install_hold = held_from.elapsed();
-                        a
+                        view.finish_fold(t, value, rows)
                     }
                     // The view went away between the two phases. The ticket is dropped
                     // un-settled, which cancels the flight and releases anyone who joined
                     // it to retry; this caller falls back to the fold path.
                     None => return ViewAnswer::NotApplicable,
-                }
+                };
+                // **The hold ends when the guard is dropped, not when the work is done.**
+                // `install_hold` was taken while `rt` was still alive, so releasing the
+                // second view guard fell outside every phase and landed in the residual
+                // column — which is how a row in this harness's first run showed 1,160 µs of
+                // "rounding" on a table whose divisions can only lose six. The drop is
+                // explicit and the elapsed time is read after it.
+                drop(rt);
+                install_hold = held_from.elapsed();
+                a
             }
         };
         let view_done = std::time::Instant::now();
@@ -4803,6 +4816,8 @@ mod fallback_rate_tests {
             joins_retried: after.joins_retried - before.joins_retried,
             gap_at_begin_total: after.gap_at_begin_total - before.gap_at_begin_total,
             gap_at_finish_total: after.gap_at_finish_total - before.gap_at_finish_total,
+            gap_begin_samples: after.gap_begin_samples - before.gap_begin_samples,
+            gap_finish_samples: after.gap_finish_samples - before.gap_finish_samples,
             flights_behind_at_begin: after.flights_behind_at_begin - before.flights_behind_at_begin,
             flights_that_fell_behind: after.flights_that_fell_behind
                 - before.flights_that_fell_behind,

@@ -11,8 +11,8 @@
              | file | bytes | lines | tokens | items | views | functions | relations | currencies | ir_ops | diagnostics | checks |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | examples/available_balance.niles | 5610 | 120 | 606 | 14 | 6 | 2 | 3 | 3 | 16 | 0 | 0 |
-| examples/demo_bank.niles | 7453 | 158 | 675 | 14 | 4 | 4 | 3 | 3 | 9 | 0 | 3 |
-| examples/inventory.niles | 6606 | 121 | 276 | 7 | 1 | 2 | 2 | 2 | 3 | 0 | 2 |
+| examples/demo_bank.niles | 7436 | 158 | 671 | 14 | 4 | 4 | 3 | 3 | 9 | 0 | 3 |
+| examples/inventory.niles | 6555 | 121 | 268 | 7 | 1 | 2 | 2 | 2 | 3 | 0 | 2 |
 | crates/niles-lang/tests/mutants/schema.niles | 1990 | 65 | 277 | 10 | 2 | 0 | 4 | 4 | 5 | 0 | 0 |
 
              `checks` is the number of conservation obligations the typechecker accounted for, static and runtime together — the work the compiler did, rather than the text it read.

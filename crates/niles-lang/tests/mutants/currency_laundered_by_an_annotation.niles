@@ -12,5 +12,5 @@ fn launder(from: Id<Account>, to: Id<Account>) -> Result<TxnId, TxnError>
     ! { append, debit<usd>, credit<usd> }
 {
     let m: Money<usd> = 10.00 eur;
-    txn idem("launder", window: 30.days) { post(debit(from, m)?, credit(to, m)) }
+    txn idem("launder") { post(debit(from, m)?, credit(to, m)) }
 }

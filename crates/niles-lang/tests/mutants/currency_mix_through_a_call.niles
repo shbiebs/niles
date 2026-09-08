@@ -7,7 +7,7 @@
 fn pay(from: Id<Account>, to: Id<Account>, m: Money<usd>) -> Result<TxnId, TxnError>
     ! { append, debit<usd>, credit<usd> }
 {
-    txn idem("pay", window: 30.days) { post(debit(from, m)?, credit(to, m)) }
+    txn idem("pay") { post(debit(from, m)?, credit(to, m)) }
 }
 
 fn settle(a: Id<Account>, b: Id<Account>) -> Result<TxnId, TxnError>

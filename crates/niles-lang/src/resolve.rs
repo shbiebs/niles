@@ -36,6 +36,18 @@ pub struct CurrencyInfo {
     /// The minor-unit exponent. Carried, never assumed: JPY is 0, most are 2, BHD is 3.
     pub scale: u32,
     pub span: Span,
+    /// **The currency's wire and IR code: its position among the schema's `currency`
+    /// declarations, counting from zero.**
+    ///
+    /// Assigned once, here, from declaration order. It was derived twice and differently:
+    /// the wire sorted the catalog's currencies by span (`session::declared_currencies`),
+    /// and the compiler took `cat.currencies.keys().position(..)` over a `HashMap` with the
+    /// standard hasher (`lower::scalar`), so a money literal in a compiled circuit named a
+    /// currency by an order that changed between processes while the wire named it by
+    /// declaration index. A currency code is written into the ledger, where it is permanent
+    /// (A9-F05). With one declared currency the two agree at zero, which is why nothing had
+    /// seen it.
+    pub code: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -241,6 +253,11 @@ fn collect_item(item: &Item, cat: &mut Catalog, d: &mut Diagnostics) {
 fn collect_schema_item(si: &SchemaItem, cat: &mut Catalog, d: &mut Diagnostics) {
     match si {
         SchemaItem::Currency(c) => {
+            // **The code is assigned here and nowhere else.** Declaration order, counting
+            // from zero, taken from how many currencies the catalog already holds — which is
+            // the order they were collected in, which is the order they were written in.
+            // Every consumer reads this field instead of re-deriving it (A9-F05).
+            let code = cat.currencies.len() as u32;
             insert_unique(
                 &mut cat.currencies,
                 c.name.text.clone(),
@@ -248,6 +265,7 @@ fn collect_schema_item(si: &SchemaItem, cat: &mut Catalog, d: &mut Diagnostics) 
                     name: c.name.text.clone(),
                     scale: c.scale,
                     span: c.name.span,
+                    code,
                 },
                 |x| x.span,
                 "currency",

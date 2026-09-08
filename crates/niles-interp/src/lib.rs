@@ -390,16 +390,18 @@ pub struct Interp {
     /// caller that has arranged the stack to match (see `run_with_stack`).
     depth: usize,
     max_depth: usize,
-    /// `idem` windows evaluated past. See [`Interp::txn`]; `nilesc run` reports the count.
-    ignored_windows: u32,
     /// The result of each idempotency key already committed in this run.
     ///
     /// T-Idem says a transaction is identified by its key and that a replay is the *same*
-    /// transaction, not a second one. The window is still evaluated past — a window is a
-    /// question about wall-clock retention that this interpreter has no clock to answer —
-    /// but the *identity* half is now honoured within a run, which is the half a caller can
-    /// observe: calling a transfer twice under one key posts one set and returns the first
-    /// answer, where before it posted two and the balance moved twice.
+    /// transaction, not a second one, and the identity is what this interpreter honours
+    /// within a run: calling a transfer twice under one key posts one set and returns the
+    /// first answer, where before it posted two and the balance moved twice.
+    ///
+    /// There is no window here to evaluate past any more. It used to be parsed on the `txn`
+    /// form, counted into `ignored_windows`, and reported by `nilesc run` as a note — a
+    /// count of a thing the language accepted and nothing honoured. The window is declared on
+    /// the relation's `idem` column, in epochs, where the base and the sealer both read it;
+    /// writing one here is NL0218 (F-67).
     committed: BTreeMap<String, Value>,
     /// Whether a `txn` block is already open.
     ///
@@ -433,16 +435,10 @@ impl Interp {
             fuel: 50_000_000,
             depth: 0,
             max_depth: DEFAULT_MAX_DEPTH,
-            ignored_windows: 0,
             committed: BTreeMap::new(),
             in_txn: false,
             ledger: Ledger::new(),
         }
-    }
-
-    /// How many `idem` windows were evaluated past. See [`Interp::txn`].
-    pub fn ignored_windows(&self) -> u32 {
-        self.ignored_windows
     }
 
     pub fn with_fuel(mut self, fuel: u64) -> Self {
@@ -817,7 +813,7 @@ impl Interp {
 
             Expr::Call { callee, args, span } => self.call_expr(env, callee, args, *span),
 
-            // `txn idem(key, window: …) { … }` — the one relational-tier form the interpreter
+            // `txn idem(key) { … }` — the one relational-tier form the interpreter
             // evaluates, because a posting set has to be sealed somewhere for a function to
             // have run at all. Everything else in `refused` below stays refused.
             Expr::Txn { idem, body, span } => self.txn(env, idem.as_ref(), body, *span),
@@ -1406,10 +1402,10 @@ impl Interp {
         r
     }
 
-    /// `txn idem(key, window: …) { … }` — open a transaction, run the body, seal it.
+    /// `txn idem(key) { … }` — open a transaction, run the body, seal it.
     ///
     /// The identity is the `idem` key, evaluated: it is the transaction's name in the encoded
-    /// set, so a schema saying `idem("transfer", window: 30.days)` produces a set whose txn is
+    /// set, so a schema saying `idem("transfer")` produces a set whose txn is
     /// `"transfer"` and whose bytes a Rust product's `PostingSet::new("transfer")` can be
     /// compared against. A `txn` with no `idem` clause takes the empty identity, which is what
     /// a set nobody named has and is not a name this interpreter invents.
@@ -1445,11 +1441,6 @@ impl Interp {
                 }
             },
         };
-        if let Some(spec) = idem {
-            if spec.window.is_some() {
-                self.ignored_windows += 1;
-            }
-        }
         // Nesting, refused rather than approximated. See the `in_txn` field.
         if self.in_txn {
             return Err(Error::NotInSubset {

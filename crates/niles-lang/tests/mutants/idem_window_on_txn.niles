@@ -1,0 +1,15 @@
+// RULE: one concept, one spelling. An idempotency window is declared on the relation's
+// `idem` column, in epochs (NL0215 requires it, NL0217 refuses a wall-clock unit). The
+// transaction form takes the identity and nothing else.
+// WHY IT MATTERS: `txn idem("k", window: 30.days)` parsed, bound its key, and its window then
+// reached nothing — the interpreter counted it and ignored it, lowering dropped it, and
+// NL0216's own suggestion text recommended this spelling in the very unit the column form
+// refuses. A transaction written with a window had none, and two spellings of one concept
+// with different rigor is a defect in the calculus rather than a style question.
+// EXPECT: NL0218
+// STAGE: check
+fn sweep(a: Id<Account>, b: Id<Account>, m: Money<usd>) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("sweep", window: 30.days) { post(debit(a, m)?, credit(b, m)) }
+}

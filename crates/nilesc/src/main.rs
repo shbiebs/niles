@@ -610,15 +610,6 @@ fn run_function(
     }
     let set = &sealed[0];
     println!("{}", ledger::hex(&ledger::encode(&set.txn, &set.legs)));
-    if it.ignored_windows() > 0 {
-        // Not a warning that changes the answer, and said out loud anyway: the window is part
-        // of what the schema declares and nothing here honoured it.
-        eprintln!(
-            "nilesc: note: {} `idem` window(s) were not honoured; this interpreter has no \
-             idempotency store, and the identity is what the encoding carries",
-            it.ignored_windows()
-        );
-    }
     ExitCode::SUCCESS
 }
 

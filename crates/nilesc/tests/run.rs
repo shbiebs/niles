@@ -225,7 +225,7 @@ fn transfer(from: Id<Account>, to: Id<Account>, amount: Money<usd>)
     -> Result<TxnId, TxnError>
     ! { append, debit<usd>, credit<usd> }
 {
-    txn idem("transfer", window: 30.days) {
+    txn idem("transfer") {
         let d = debit(from, amount)?;
         let c = credit(to, amount);
         post(d, c)
@@ -445,7 +445,7 @@ fn once(from: Id<Account>, to: Id<Account>, amount: Money<usd>)
     -> Result<TxnId, TxnError>
     ! { append, debit<usd>, credit<usd> }
 {
-    txn idem("once", window: 30.days) {
+    txn idem("once") {
         post(debit(from, amount)?, credit(to, amount))
     }
 }
@@ -464,14 +464,14 @@ fn twice(from: Id<Account>, to: Id<Account>, amount: Money<usd>)
     -> Result<TxnId, TxnError>
     ! { append, debit<usd>, credit<usd> }
 {
-    txn idem("first", window: 30.days) { post(debit(from, amount)?, credit(to, amount)) };
-    txn idem("second", window: 30.days) { post(debit(from, amount)?, credit(to, amount)) }
+    txn idem("first") { post(debit(from, amount)?, credit(to, amount)) };
+    txn idem("second") { post(debit(from, amount)?, credit(to, amount)) }
 }
 
 fn by_int(amount: Money<usd>) -> Result<TxnId, TxnError>
     ! { append, debit<usd>, credit<usd> }
 {
-    txn idem("ident", window: 30.days) {
+    txn idem("ident") {
         post(debit(acct(1), amount)?, credit(acct(2), amount))
     }
 }
@@ -479,7 +479,7 @@ fn by_int(amount: Money<usd>) -> Result<TxnId, TxnError>
 fn by_str(amount: Money<usd>) -> Result<TxnId, TxnError>
     ! { append, debit<usd>, credit<usd> }
 {
-    txn idem("ident", window: 30.days) {
+    txn idem("ident") {
         post(debit(acct("1"), amount)?, credit(acct("2"), amount))
     }
 }
@@ -488,9 +488,9 @@ fn nested(from: Id<Account>, to: Id<Account>, amount: Money<usd>)
     -> Result<TxnId, TxnError>
     ! { append, debit<usd>, credit<usd> }
 {
-    txn idem("outer", window: 30.days) {
+    txn idem("outer") {
         post(debit(from, amount)?, credit(to, amount));
-        txn idem("inner", window: 30.days) {
+        txn idem("inner") {
             post(debit(from, amount)?, credit(to, amount))
         }
     }

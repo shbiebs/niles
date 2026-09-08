@@ -830,7 +830,12 @@ impl<'a> Lx<'a> {
                 // entered the circuit denominated in a real one. The typechecker reports
                 // the undeclared currency (NL0241); this refuses to lower it, because a
                 // circuit that survived the error would carry the wrong denomination.
-                let Some(ix) = self.cat.currencies.keys().position(|k| k == &currency.text) else {
+                // **The catalog's own code, not a position in a hash map's iteration.** This
+                // was `self.cat.currencies.keys().position(..)` over a `HashMap` with the
+                // standard hasher, so the integer written into a circuit — and from there
+                // into the ledger, where it is permanent — depended on a per-process random
+                // seed, while the wire used the declaration index (A9-F05).
+                let Some(ix) = self.cat.currencies.get(&currency.text).map(|c| c.code) else {
                     self.d.push(
                         Diagnostic::error(
                             "NL0506",
@@ -843,7 +848,7 @@ impl<'a> Lx<'a> {
                 };
                 Scalar::LitMoney {
                     minor: *minor,
-                    currency: ix as u32,
+                    currency: ix,
                 }
             }
             // A date literal is an integer in the IR — days since 1970-01-01, read by the

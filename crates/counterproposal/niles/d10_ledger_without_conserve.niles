@@ -12,5 +12,5 @@ schema bank {
 fn drain(a: Id<A>, b: Id<A>) -> Result<TxnId, TxnError>
     ! { append, debit<usd>, credit<usd> }
 {
-    txn idem("drain", window: 1.days) { post(debit(a, 100.00 usd)?, credit(b, 1.00 usd)) }
+    txn idem("drain") { post(debit(a, 100.00 usd)?, credit(b, 1.00 usd)) }
 }

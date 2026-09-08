@@ -1021,20 +1021,86 @@ impl<'a> Cx<'a> {
                 // transactions written that way are the *same* transaction to the
                 // idempotency store, which is the opposite of what the window was asked for.
                 if let Some(spec) = idem {
-                    if matches!(&*spec.key, Expr::Error(_)) && spec.window.is_some() {
+                    // **W19, first clause.** An `idem` with no key binds the empty string, so
+                    // two different transactions written that way are the *same* transaction
+                    // to the idempotency store — the opposite of what the form is for.
+                    if matches!(&*spec.key, Expr::Error(_)) {
+                        self.push(
+                            Diagnostic::error("NL0216", "a transaction with no idempotency key")
+                                .primary(spec.span, "`idem` needs the identity to key by")
+                                .note("every transaction written this way would share one identity")
+                                .note("W19: an `idem` key must declare a window; the window is declared on the relation's `idem` column, in epochs")
+                                .suggest(
+                                    spec.span,
+                                    "idem(\"name\")",
+                                    "give the transaction an identity",
+                                    crate::diagnostics::Applicability::HasPlaceholders,
+                                ),
+                        );
+                    }
+                    // **One concept, one spelling — NL0218.**
+                    //
+                    // `idem: IdemKey window N.epochs` on the relation is checked to the unit
+                    // (NL0215 requires a window, NL0217 refuses a wall-clock one), reaches
+                    // the catalog, and is read by the daemon and by both idempotency indexes.
+                    // `txn idem("k")` was parsed, its key bound, its window
+                    // *counted and ignored* by the interpreter and dropped by lowering — and
+                    // the diagnostic above used to suggest exactly that spelling, in the
+                    // wall-clock unit the column form refuses. Two spellings of one concept
+                    // with different rigor is a defect in the calculus, not a style question
+                    // (F-67, A9-F14).
+                    //
+                    // The transaction form takes the identity. The window belongs where it is
+                    // enforced.
+                    // **NL0219: an identity needs somewhere to live.**
+                    //
+                    // A `txn idem("k")` posts to the schema's ledger, and the key is written
+                    // into that relation's `idem` column. A ledger with no such column has
+                    // nowhere to put it, so the transaction is not idempotent however it is
+                    // written — the identity is accepted by the type checker and dropped by
+                    // the time anything could refuse a retry. Better to say so where it is
+                    // written than to be silently un-idempotent at run time.
+                    let has_idem_column = self.cat.relations.values().any(|r| {
+                        matches!(r.kind, RelKind::Ledger)
+                            && r.columns.iter().any(|c| {
+                                matches!(&c.ty, Ty::Path { path, .. } if path.last().text == "IdemKey")
+                            })
+                    });
+                    let has_ledger = self
+                        .cat
+                        .relations
+                        .values()
+                        .any(|r| matches!(r.kind, RelKind::Ledger));
+                    if has_ledger && !has_idem_column && !matches!(&*spec.key, Expr::Error(_)) {
                         self.push(
                             Diagnostic::error(
-                                "NL0216",
-                                "an idempotency window without a key",
+                                "NL0219",
+                                "an idempotency key with nowhere to live",
                             )
-                            .primary(spec.span, "a `window:` but nothing to key it by")
-                            .note("a window bounds how long a key is remembered; with no key there is nothing to remember, and every transaction written this way shares one identity")
-                            .note("W19: an `idem` key must declare a window; a window without a key is a static error")
+                            .primary(spec.span, "this identity would be dropped")
+                            .note("the schema's ledger declares no `IdemKey` column, so a committed transaction records no identity and a retry cannot be recognised")
                             .suggest(
                                 spec.span,
-                                "idem(\"name\", window: 30.days)",
-                                "give the transaction an identity",
+                                "idem: IdemKey window 1_000_000.epochs",
+                                "declare the column on the ledger",
                                 crate::diagnostics::Applicability::HasPlaceholders,
+                            ),
+                        );
+                    }
+                    if let Some(w) = &spec.window {
+                        self.push(
+                            Diagnostic::error(
+                                "NL0218",
+                                "an idempotency window on a transaction",
+                            )
+                            .primary(w.span(), "the window does not belong here")
+                            .note("a window is declared on the relation's `idem` column, in epochs: `idem: IdemKey window 1_000_000.epochs`")
+                            .note("this form parsed and then reached nothing: the interpreter counted it and ignored it, and lowering dropped it, so a transaction written with a window had none")
+                            .suggest(
+                                spec.span,
+                                "idem(\"name\")",
+                                "keep the identity, declare the window on the relation",
+                                crate::diagnostics::Applicability::MachineApplicable,
                             ),
                         );
                     }

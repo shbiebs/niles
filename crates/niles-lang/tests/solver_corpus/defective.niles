@@ -21,7 +21,7 @@ fn transfer_with_lost_cent(
 ) -> Result<TxnId, TxnError>
     ! { append, debit<usd>, credit<usd> }
 {
-    txn idem("lost-cent", window: 30.days) {
+    txn idem("lost-cent") {
         post(
             debit(from, 100.00 usd)?,
             credit(to, 99.75 usd),
@@ -42,7 +42,7 @@ fn syndicated_residue(
 ) -> Result<TxnId, TxnError>
     ! { append, debit<usd>, credit<usd> }
 {
-    txn idem("residue", window: 30.days) {
+    txn idem("residue") {
         post(
             debit(lender_a, 33.33 usd)?,
             debit(lender_b, 33.33 usd)?,
@@ -60,7 +60,7 @@ fn currency_mix(a: Id<Account>, b: Id<Account>)
     -> Result<TxnId, TxnError>
     ! { append, debit<usd>, credit<eur> }
 {
-    txn idem("currency-mix", window: 30.days) {
+    txn idem("currency-mix") {
         post(debit(a, 1000.00 usd)?, credit(b, 1000.00 eur))
     }
 }
@@ -73,7 +73,7 @@ fn doubled_credit(from: Id<Account>, to: Id<Account>)
     -> Result<TxnId, TxnError>
     ! { append, debit<usd>, credit<usd> }
 {
-    txn idem("doubled", window: 30.days) {
+    txn idem("doubled") {
         post(
             debit(from, 250.00 usd)?,
             credit(to, 250.00 usd),
@@ -99,7 +99,7 @@ fn unbalanced_on_one_branch(
 ) -> Result<TxnId, TxnError>
     ! { append, debit<usd>, credit<usd> }
 {
-    txn idem("branch-defect", window: 30.days) {
+    txn idem("branch-defect") {
         if waived {
             post(debit(from, 100.00 usd)?, credit(to, 100.00 usd))
         } else {

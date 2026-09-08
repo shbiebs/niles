@@ -1013,9 +1013,9 @@ in the same way nor cheap:
 
 ```sh
 valgrind --tool=dhat   --dhat-out-file=/tmp/dhat.json \
-      ./target/release/nilestreamd --port 5434 --accounts 10000 --rounds 2 --budget 2500
+      ./target/release/nilestreamd --volatile --port 5434 --accounts 10000 --rounds 2 --budget 2500
 valgrind --tool=massif --massif-out-file=/tmp/massif.out \
-      ./target/release/nilestreamd --port 5434 --accounts 10000 --rounds 2 --budget 2500
+      ./target/release/nilestreamd --volatile --port 5434 --accounts 10000 --rounds 2 --budget 2500
 ms_print /tmp/massif.out | head -40
 ```
 

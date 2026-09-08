@@ -7,7 +7,7 @@ The file this replaces was a transcript of the repository's *own* wire client ta
 Reproduce interactively:
 
 ```sh
-cargo run -p nilestream-server --bin nilestreamd -- --port 5433
+cargo run -p nilestream-server --bin nilestreamd -- --volatile --port 5433
 psql -h 127.0.0.1 -p 5433 -U anyone bank
 ```
 

@@ -64,6 +64,24 @@ use session::Serving;
 use std::net::TcpListener;
 use std::sync::Arc;
 
+/// **Parse a flag's value, or refuse by name.**
+///
+/// Every numeric flag used `parse().unwrap_or(default)`. `--budget 2,500` — a comma, the
+/// ordinary way a person writes that number — ran the phase diagram's lever at its default and
+/// said nothing; a mistyped `--port` served somewhere else. The engine's own rule is honest
+/// refusal over silent fallback, and its front door was the one place that broke it (F-70).
+fn flag<T: std::str::FromStr>(name: &str, raw: &str) -> T {
+    raw.parse().unwrap_or_else(|_| {
+        eprintln!(
+            "nilestreamd: {name} expects {}, and `{raw}` is not one. Refusing to start: a \
+             flag that fell back to its default would run this server on a configuration \
+             nobody asked for and report nothing.",
+            std::any::type_name::<T>()
+        );
+        std::process::exit(2);
+    })
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut port = 5433u16;
@@ -73,19 +91,76 @@ fn main() {
     let mut budget = 100_000usize;
     let mut full = false;
     let mut durable: Option<String> = None;
+    // **Durability is a choice that has to be made out loud (LC-16).** Neither flag is a
+    // default: a server that serves volatile because nobody said otherwise is a server whose
+    // guarantee depends on what an operator forgot to type.
+    let mut volatile = false;
+    // **And so is an unbounded idempotency window (LC-35).** A schema whose wire relation
+    // declares no `idem` column keeps every identity ever committed, forever; that is a
+    // legitimate diagnostic configuration and an illegitimate silent one.
+    let mut idem_window_flag: Option<Option<u64>> = None;
     let mut i = 1;
-    while i + 1 < args.len() {
+    while i < args.len() {
+        // The flags that take no value are matched first, so `while i + 1 < args.len()`
+        // cannot swallow them — it used to, and a trailing `--volatile` would have been
+        // ignored entirely.
+        if args[i] == "--volatile" {
+            volatile = true;
+            i += 1;
+            continue;
+        }
+        if i + 1 >= args.len() {
+            eprintln!("nilestreamd: {} expects a value", args[i]);
+            std::process::exit(2);
+        }
         match args[i].as_str() {
-            "--port" => port = args[i + 1].parse().unwrap_or(port),
+            "--port" => port = flag("--port", &args[i + 1]),
             "--schema" => schema_path = Some(args[i + 1].clone()),
-            "--accounts" => accounts = args[i + 1].parse().unwrap_or(accounts),
-            "--rounds" => rounds = args[i + 1].parse().unwrap_or(rounds),
-            "--budget" => budget = args[i + 1].parse().unwrap_or(budget),
-            "--mode" => full = args[i + 1] == "full",
+            "--accounts" => accounts = flag("--accounts", &args[i + 1]),
+            "--rounds" => rounds = flag("--rounds", &args[i + 1]),
+            "--budget" => budget = flag("--budget", &args[i + 1]),
+            "--mode" => match args[i + 1].as_str() {
+                "full" => full = true,
+                "demand" => full = false,
+                other => {
+                    eprintln!("nilestreamd: --mode expects `full` or `demand`, not `{other}`");
+                    std::process::exit(2);
+                }
+            },
             "--durable" => durable = Some(args[i + 1].clone()),
-            _ => {}
+            "--idem-window" => {
+                idem_window_flag = Some(match args[i + 1].as_str() {
+                    "unbounded" => None,
+                    n => Some(flag::<u64>("--idem-window", n)),
+                })
+            }
+            other => {
+                eprintln!(
+                    "nilestreamd: `{other}` is not a flag this server knows. Refusing to \
+                     start rather than ignoring it: an ignored flag is a configuration the \
+                     operator believes is in effect."
+                );
+                std::process::exit(2);
+            }
         }
         i += 2;
+    }
+
+    if durable.is_none() && !volatile {
+        eprintln!(
+            "nilestreamd: refusing to start without `--durable <segment>`.\n\
+             \n\
+             This server's contract is that an acknowledged transaction is on stable storage. \
+             Without a segment there is nothing to acknowledge against, and a client cannot \
+             tell the difference from the outside — which is why the choice is a flag and not \
+             a default (LC-16). Pass `--volatile` to run without durability on purpose; the \
+             banner will say so, and no figure from such a run is a contract result."
+        );
+        std::process::exit(2);
+    }
+    if durable.is_some() && volatile {
+        eprintln!("nilestreamd: `--durable` and `--volatile` are contradictory");
+        std::process::exit(2);
     }
 
     let schema = match &schema_path {
@@ -139,14 +214,59 @@ fn main() {
     // and 99.6 B each (E18), so the write path's memory was a function of history. A schema
     // that declares no window still keeps everything — the banner says which, because a
     // memory bound nobody can see is a memory bound nobody can act on.
-    let idem_window = crate::session::declared_idem_window(&schema);
-    match idem_window {
-        Some(w) => eprintln!("  idempotency window: {w} epochs, from the schema"),
-        None => eprintln!(
-            "  idempotency window: none declared — every identity is kept, and the index \
-             grows with history"
-        ),
-    }
+    // The relation the wire writes to is `postings`; its `idem` column's window is the one
+    // that governs. Reading "whichever relation the hash map yields first" made the daemon's
+    // window differ between two starts of the same binary on the same schema (F-71).
+    let idem_window = match crate::session::declared_idem_window(&schema) {
+        Ok(w) => w,
+        Err(why) => {
+            eprintln!("nilestreamd: {why}");
+            std::process::exit(2);
+        }
+    };
+    // **LC-35: an unbounded window is a choice, not a default.** A schema whose wire relation
+    // declares no `idem` column keeps every identity ever committed — a legitimate
+    // configuration for a diagnostic run and an illegitimate silent one, because the memory
+    // it costs grows with history and nothing says so.
+    let idem_window = match (idem_window, idem_window_flag) {
+        (Some(w), None) => {
+            eprintln!("  idempotency window: {w} epochs, from the schema");
+            Some(w)
+        }
+        (Some(w), Some(f)) => {
+            eprintln!(
+                "nilestreamd: the schema declares an idempotency window of {w} epochs and \
+                 `--idem-window` says {}. The declaration is the contract; remove the flag, \
+                 or change the schema.",
+                f.map(|n| n.to_string())
+                    .unwrap_or_else(|| "unbounded".into())
+            );
+            std::process::exit(2);
+        }
+        (None, Some(Some(w))) => {
+            eprintln!("  idempotency window: {w} epochs, from --idem-window");
+            Some(w)
+        }
+        (None, Some(None)) => {
+            eprintln!(
+                "  idempotency window: UNBOUNDED (explicit) — every identity ever committed \
+                 is kept, in both indexes, and the write path's memory grows with history"
+            );
+            None
+        }
+        (None, None) => {
+            eprintln!(
+                "nilestreamd: this schema's wire relation declares no `idem` column, so \
+                 every identity ever committed would be kept forever in both idempotency \
+                 indexes and the write path's memory would grow with history.\n\
+                 \n\
+                 Refusing to start rather than choosing that silently (LC-35). Declare \
+                 `idem: IdemKey window N.epochs` on the relation, or pass `--idem-window N` \
+                 — or `--idem-window unbounded` to say you meant it."
+            );
+            std::process::exit(2);
+        }
+    };
     let base = RevEngine::seeded(
         accounts,
         rounds,
@@ -156,7 +276,13 @@ fn main() {
     )
     .with_idem_window(idem_window);
     let base = match &durable {
-        None => base,
+        None => {
+            eprintln!(
+                "  durability: VOLATILE (--volatile) — nothing is written to stable storage \
+                 and no figure from this run is a contract result"
+            );
+            base
+        }
         Some(path) => match base.with_durable_bounded(path, idem_window) {
             Ok(e) => {
                 eprintln!("  durable sink at {path} — SyncPolicy::Always, fsync before publish");

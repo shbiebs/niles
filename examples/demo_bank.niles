@@ -96,7 +96,7 @@ fn pay_rent(tenant: Id<Account>, landlord: Id<Account>) -> Result<TxnId, TxnErro
     ! { append, debit<usd>, credit<usd> }
 {
     let rent = 850.00 usd;
-    txn idem("rent-2026-08", window: 30.days) {
+    txn idem("rent-2026-08") {
         let d = debit(tenant, rent)?;
         let c = credit(landlord, rent);
         post(d, c)

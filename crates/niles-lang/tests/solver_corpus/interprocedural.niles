@@ -26,7 +26,7 @@ fn move_pair(from: Id<Account>, to: Id<Account>) -> Result<(), TxnError>
 fn settle_pair(a: Id<Account>, b: Id<Account>) -> Result<TxnId, TxnError>
     ! { append, debit<usd>, credit<usd> }
 {
-    txn idem("settle-pair", window: 30.days) { move_pair(a, b) }
+    txn idem("settle-pair") { move_pair(a, b) }
 }
 
 // --- case: helper_takes_the_amount
@@ -42,7 +42,7 @@ fn move_amount(from: Id<Account>, to: Id<Account>, m: Money<usd>) -> Result<(), 
 fn settle_amount(a: Id<Account>, b: Id<Account>, m: Money<usd>) -> Result<TxnId, TxnError>
     ! { append, debit<usd>, credit<usd> }
 {
-    txn idem("settle-amount", window: 30.days) { move_amount(a, b, m) }
+    txn idem("settle-amount") { move_amount(a, b, m) }
 }
 
 // --- case: two_helpers_one_transaction
@@ -64,7 +64,7 @@ fn settle_with_fee(a: Id<Account>, b: Id<Account>, income: Id<Account>, m: Money
     -> Result<TxnId, TxnError>
     ! { append, debit<usd>, credit<usd> }
 {
-    txn idem("settle-fee", window: 30.days) {
+    txn idem("settle-fee") {
         charge_principal(a, b, m);
         charge_fee(a, income)
     }
@@ -87,7 +87,7 @@ fn accrue(from: Id<Account>, to: Id<Account>, principal: Money<usd>) -> Result<(
 fn book_accrual(a: Id<Account>, b: Id<Account>, p: Money<usd>) -> Result<TxnId, TxnError>
     ! { append, debit<usd>, credit<usd> }
 {
-    txn idem("accrual", window: 30.days) { accrue(a, b, p) }
+    txn idem("accrual") { accrue(a, b, p) }
 }
 
 // --- case: generic_currency_helper
@@ -103,7 +103,7 @@ fn move_generic(from: Id<Account>, to: Id<Account>, m: Money) -> Result<(), TxnE
 fn settle_generic(a: Id<Account>, b: Id<Account>, m: Money<eur>) -> Result<TxnId, TxnError>
     ! { append, debit<eur>, credit<eur> }
 {
-    txn idem("settle-generic", window: 30.days) { move_generic(a, b, m) }
+    txn idem("settle-generic") { move_generic(a, b, m) }
 }
 
 // --- case: three_deep_chain
@@ -124,7 +124,7 @@ fn hop(from: Id<Account>, to: Id<Account>, m: Money<usd>) -> Result<(), TxnError
 fn route(a: Id<Account>, b: Id<Account>, m: Money<usd>) -> Result<TxnId, TxnError>
     ! { append, debit<usd>, credit<usd> }
 {
-    txn idem("route", window: 30.days) { hop(a, b, m) }
+    txn idem("route") { hop(a, b, m) }
 }
 
 // --- case: helper_branches_and_both_arms_balance
@@ -145,7 +145,7 @@ fn book_by_class(a: Id<Account>, r: Id<Account>, c: Id<Account>, m: Money<usd>, 
     -> Result<TxnId, TxnError>
     ! { append, debit<usd>, credit<usd> }
 {
-    txn idem("by-class", window: 30.days) { route_by_class(a, r, c, m, retail) }
+    txn idem("by-class") { route_by_class(a, r, c, m, retail) }
 }
 
 // --- case: recursive_amortisation
@@ -169,7 +169,7 @@ fn amortise(from: Id<Account>, to: Id<Account>, m: Money<usd>, periods: Int)
 fn book_schedule(a: Id<Account>, b: Id<Account>, m: Money<usd>) -> Result<TxnId, TxnError>
     ! { append, debit<usd>, credit<usd> }
 {
-    txn idem("schedule", window: 30.days) { amortise(a, b, m, 12) }
+    txn idem("schedule") { amortise(a, b, m, 12) }
 }
 
 // --- case: DEFECT_caller_of_a_half_poster
@@ -186,7 +186,7 @@ fn post_one_half(a: Id<Account>) -> Result<(), TxnError>
 fn caller_of_a_half_poster(a: Id<Account>) -> Result<TxnId, TxnError>
     ! { append, debit<usd> }
 {
-    txn idem("half", window: 30.days) { post_one_half(a) }
+    txn idem("half") { post_one_half(a) }
 }
 
 // --- case: DEFECT_helper_credits_twice
@@ -202,7 +202,7 @@ fn credit_once(to: Id<Account>) -> Result<(), TxnError>
 fn double_credit(a: Id<Account>, b: Id<Account>) -> Result<TxnId, TxnError>
     ! { append, debit<usd>, credit<usd> }
 {
-    txn idem("double", window: 30.days) {
+    txn idem("double") {
         post(debit(a, 5.00 usd)?, credit(b, 5.00 usd));
         credit_once(b)
     }

@@ -481,7 +481,7 @@ pub static KEYWORDS: &[Keyword] = &[
     kw!("fx", Fx, Unreserved, Bare, Novel, "2026", "Atomic cross-currency form: two conserved legs sealed in one epoch.", "fx { leg a: post(du, cu), leg b: post(dm, cm), rate: r }"),
     kw!("guard", Guard, Unreserved, Bare, Novel, "2026", "Attach the termination witness to a fixpoint. Unguarded recursion is rejected.", "edges.fixpoint(step) guard measure(depth)"),
     kw!("hold", Hold, Unreserved, Bare, Novel, "2026", "Reserve funds as a ledger fact. Linear: resolvable exactly once.", "let h = hold(acct, 20.00 usd, expires: 7.days)?;"),
-    kw!("idem", Idem, Unreserved, Bare, Novel, "2026", "Declare the idempotency key and window of a transaction.", "txn idem(\"ext-991\", window: 24.hours) { .. }"),
+    kw!("idem", Idem, Unreserved, Bare, Novel, "2026", "Declare a transaction's idempotency key, or a relation's idempotency column. The window is declared on the column, in epochs.", "txn idem(\"ext-991\") { .. }"),
     kw!("impact", Impact, Unreserved, Bare, Novel, "2026", "The inverse of `explain`: which views a base row can affect.", "impact postings.row(#4200, 7);"),
     kw!("ledger", Ledger, Unreserved, Bare, Novel, "2026", "A base with a conservation rule and typed money columns. Never partial.", "ledger postings { txn: TxnId, acct: Id<Account>, amt: Money }"),
     kw!("ledger_consistent", LedgerConsistent, Unreserved, Bare, Novel, "2026", "Consistency rung 5: anchored at the visibility frontier exactly. The authorization path.", "serve { consistency: ledger_consistent }"),
@@ -516,7 +516,7 @@ pub static KEYWORDS: &[Keyword] = &[
     kw!("valid_at", ValidAt, Unreserved, Bare, Novel, "2026", "The valid-time axis: when the fact was true in the world.", "balances.valid_at(@2026-03-01).get(k)"),
     kw!("value_date", ValueDate, Unreserved, Bare, Novel, "2026", "The banking value date of a posting; drives valid-time placement.", "post(d, value_date: @2026-03-03)?"),
     kw!("void", Void, Unreserved, Bare, Novel, "2026", "Resolve a hold by cancelling it, releasing the reservation with no posting.", "resolve h void"),
-    kw!("window", Window, Unreserved, Bare, Novel, "2026", "The duration an idempotency key or hold remains in force.", "idem(\"k1\", window: 24.hours)"),
+    kw!("window", Window, Unreserved, Bare, Novel, "2026", "How long an idempotency key is remembered, in epochs, on a relation's `idem` column.", "idem: IdemKey window 1_000_000.epochs"),
 
     // ================= Reserved for future use =================
     kw!("actor", Actor, ReservedFuture, RequiresAs, Novel, "2026", "Reserved: no meaning assigned in this edition.", "n/a"),

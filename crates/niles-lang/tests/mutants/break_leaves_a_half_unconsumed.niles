@@ -8,7 +8,7 @@
 fn sweep(a: Id<Account>, b: Id<Account>, stop: bool) -> Result<TxnId, TxnError>
     ! { append, debit<usd>, credit<usd> }
 {
-    txn idem("sweep", window: 30.days) {
+    txn idem("sweep") {
         loop {
             let d = debit(a, 5.00 usd)?;
             if stop { break; }

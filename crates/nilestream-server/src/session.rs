@@ -1615,22 +1615,54 @@ fn split_statements(sql: &str) -> Vec<String> {
 /// enforces. `None` means the schema did not compile or declares no ledger with an
 /// `IdemKey`, in which case both idempotency indexes keep every identity, which is what they
 /// did unconditionally before T-05 (cycle 8).
-pub fn declared_idem_window(schema: &str) -> Option<u64> {
+/// **The idempotency window the wire relation declares, in epochs.**
+///
+/// `Ok(None)` means no relation declares one. `Err` means two do and they disagree, which
+/// used to be resolved by taking whichever the `HashMap` yielded first: with the standard
+/// hasher that is a per-process choice, so the same binary on the same schema ran with
+/// different windows on different starts (F-71). A window is a durability-adjacent contract
+/// and cannot be decided by a hash seed.
+pub fn declared_idem_window(schema: &str) -> Result<Option<u64>, String> {
     let (prog, d) = niles_lang::parser::parse_program(schema);
     if d.has_errors() {
-        return None;
+        return Ok(None);
     }
     let (cat, rd) = niles_lang::resolve::resolve_program(&prog, 0);
     if rd.has_errors() {
-        return None;
+        return Ok(None);
     }
-    cat.relations
-        .values()
-        .flat_map(|r| r.columns.iter())
-        .find_map(|c| match c.idem_window {
-            Some(niles_lang::resolve::IdemWindow::Epochs(n)) => Some(n),
-            _ => None,
-        })
+    // Ordered by name so the *diagnostic* is stable too: an error message whose two named
+    // relations swap between runs is the same defect one level up.
+    let mut declared: Vec<(&str, u64)> = Vec::new();
+    let mut names: Vec<&String> = cat.relations.keys().collect();
+    names.sort();
+    for name in names {
+        let r = &cat.relations[name];
+        for c in &r.columns {
+            if let Some(niles_lang::resolve::IdemWindow::Epochs(n)) = c.idem_window {
+                declared.push((name.as_str(), n));
+            }
+        }
+    }
+    match declared.as_slice() {
+        [] => Ok(None),
+        [(_, n)] => Ok(Some(*n)),
+        many => {
+            if many.iter().all(|(_, n)| *n == many[0].1) {
+                return Ok(Some(many[0].1));
+            }
+            Err(format!(
+                "the schema declares more than one idempotency window and they disagree: {}. \
+                 One daemon holds one window, and picking one of them by hash-map order made \
+                 the same binary run with different windows on different starts. Declare one \
+                 window, or the same window on every relation.",
+                many.iter()
+                    .map(|(r, n)| format!("`{r}` says {n} epochs"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        }
+    }
 }
 
 fn declared_currencies(schema: &str) -> Option<std::collections::BTreeMap<u32, u32>> {
@@ -1642,18 +1674,16 @@ fn declared_currencies(schema: &str) -> Option<std::collections::BTreeMap<u32, u
     if rd.has_errors() {
         return None;
     }
-    let mut by_span: Vec<&niles_lang::resolve::CurrencyInfo> = cat.currencies.values().collect();
-    by_span.sort_by_key(|c| c.span.start);
-    // Code -> declared scale. The scale travels with the code because it is the *currency's*
-    // property: `currency jpy { scale: 0 }` and `currency bhd { scale: 3 }` are both real, and
-    // a wire that assumed 2 would accept a third decimal place in yen.
-    Some(
-        by_span
-            .iter()
-            .enumerate()
-            .map(|(i, c)| (i as u32, c.scale))
-            .collect(),
-    )
+    // Code -> declared scale, **read from the catalog rather than re-derived**. This sorted
+    // the currencies by span and numbered them, which is the right answer computed the wrong
+    // way: the compiler was numbering them differently (by `HashMap` iteration), and two
+    // derivations of one fact is how they came to disagree (A9-F05). One assignment, at
+    // declaration, and both consumers read it.
+    //
+    // The scale travels with the code because it is the *currency's* property:
+    // `currency jpy { scale: 0 }` and `currency bhd { scale: 3 }` are both real, and a wire
+    // that assumed 2 would accept a third decimal place in yen.
+    Some(cat.currencies.values().map(|c| (c.code, c.scale)).collect())
 }
 
 /// Why an `amt` was refused, when it was refused for its value rather than its shape.
@@ -2798,15 +2828,61 @@ schema bank {
     fn the_daemons_schema_declares_an_idempotency_window_in_epochs() {
         assert_eq!(
             super::declared_idem_window(crate::daemon::DEFAULT_SCHEMA),
-            Some(1_000_000),
+            Ok(Some(1_000_000)),
             "the shipped schema must declare a window the engine can honour, in epochs"
         );
         assert_eq!(
             super::declared_idem_window("schema s { currency usd { scale: 2 } }"),
-            None,
-            "a schema with no ledger declares no window, and the daemon says so rather than \
-             assuming one"
+            Ok(None),
+            "a schema with no ledger declares no window, and the daemon refuses to choose \
+             one silently rather than assuming"
         );
+    }
+
+    /// **One daemon, one window — and it is not chosen by a hash seed (F-71).**
+    ///
+    /// Two relations declaring different windows used to resolve to whichever the catalog's
+    /// `HashMap` yielded first, so the same binary on the same schema ran with different
+    /// windows on different starts. Ten resolutions in one process, because the order this
+    /// depends on is seeded per process and would take luck to catch in one.
+    #[test]
+    fn two_relations_declaring_different_windows_are_refused_by_name() {
+        const TWO: &str = "\
+schema s {
+    currency usd { scale: 2 }
+    ledger postings {
+        txn: TxnId, acct: Id<Account>, cur: Currency, amt: Money,
+        idem: IdemKey window 1_000_000.epochs,
+        conserve per (txn, cur);
+        retain forever;
+    }
+    ledger journal {
+        txn: TxnId, acct: Id<Account>, cur: Currency, amt: Money,
+        idem: IdemKey window 250_000.epochs,
+        conserve per (txn, cur);
+        retain forever;
+    }
+}
+";
+        let mut answers = std::collections::BTreeSet::new();
+        for _ in 0..10 {
+            let r = super::declared_idem_window(TWO);
+            let e = r.expect_err("two disagreeing windows must be refused, not chosen between");
+            assert!(
+                e.contains("postings") && e.contains("journal"),
+                "the refusal must name both relations, and name them in a stable order: {e}"
+            );
+            answers.insert(e);
+        }
+        assert_eq!(
+            answers.len(),
+            1,
+            "the diagnostic itself must not depend on hash order: {answers:?}"
+        );
+
+        // Agreeing declarations are not a disagreement.
+        let agree = TWO.replace("250_000.epochs", "1_000_000.epochs");
+        assert_eq!(super::declared_idem_window(&agree), Ok(Some(1_000_000)));
     }
 
     #[test]

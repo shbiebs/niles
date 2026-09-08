@@ -62,7 +62,7 @@ fn move_stock(from: Id<Account>, to: Id<Account>, qty: Money<widget>)
     -> Result<TxnId, TxnError>
     ! { append, debit<widget>, credit<widget> }
 {
-    txn idem("move", window: 30.days) {
+    txn idem("move") {
         post(debit(from, qty)?, credit(to, qty))
     }
 }
@@ -75,7 +75,7 @@ fn receive(origin: Id<Account>, into: Id<Account>, qty: Money<sprocket>)
     -> Result<TxnId, TxnError>
     ! { append, debit<sprocket>, credit<sprocket> }
 {
-    txn idem("receive", window: 30.days) {
+    txn idem("receive") {
         post(debit(origin, qty)?, credit(into, qty))
     }
 }
@@ -86,7 +86,7 @@ fn receive(origin: Id<Account>, into: Id<Account>, qty: Money<sprocket>)
 // than a note.
 //
 // fn conjure(into: Id<Account>) -> Result<TxnId, TxnError> ! { append, credit<widget> } {
-//     txn idem("conjure", window: 30.days) { post(credit(into, qty)) }
+//     txn idem("conjure") { post(credit(into, qty)) }
 // }
 
 // ─────────────────────────────────────────────────────────────────────────────────────

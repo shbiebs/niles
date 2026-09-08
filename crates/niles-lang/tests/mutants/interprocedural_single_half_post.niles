@@ -14,5 +14,5 @@ fn post_one_half(a: Id<Account>) -> Result<(), TxnError>
 fn caller(a: Id<Account>) -> Result<TxnId, TxnError>
     ! { append, debit<usd> }
 {
-    txn idem("leak", window: 30.days) { post_one_half(a) }
+    txn idem("leak") { post_one_half(a) }
 }

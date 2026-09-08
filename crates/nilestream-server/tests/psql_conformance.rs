@@ -415,7 +415,7 @@ fn transcript() {
          output. If the framing is wrong it says so.\n\n\
          Reproduce interactively:\n\n\
          ```sh\n\
-         cargo run -p nilestream-server --bin nilestreamd -- --port 5433\n\
+         cargo run -p nilestream-server --bin nilestreamd -- --volatile --port 5433\n\
          psql -h 127.0.0.1 -p 5433 -U anyone bank\n\
          ```\n\n"
     ));

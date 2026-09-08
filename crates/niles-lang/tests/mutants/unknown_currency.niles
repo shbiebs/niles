@@ -4,7 +4,7 @@
 fn f(a: Id<Account>, b: Id<Account>) -> Result<TxnId, TxnError>
     ! { append, debit<xbt>, credit<xbt> }
 {
-    txn idem("f", window: 30.days) {
+    txn idem("f") {
         post(debit(a, 1.00 xbt)?, credit(b, 1.00 xbt))
     }
 }

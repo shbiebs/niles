@@ -357,7 +357,7 @@ fn transfer(from: Id<Account>, to: Id<Account>, amount: Money<usd>)
     -> Result<TxnId, TxnError>
     ! { append, debit<usd>, credit<usd> }
 {
-    txn idem("transfer", window: 30.days) {
+    txn idem("transfer") {
         let d = debit(from, amount)?;
         let c = credit(to, amount);
         post(d, c)

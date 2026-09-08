@@ -103,7 +103,7 @@ fn a_movement_that_does_not_conserve_is_refused() {
          fn leak(from: Id<Account>, to: Id<Account>, out: Money<widget>, back: Money<widget>)\n\
              -> Result<TxnId, TxnError>\n\
              ! {{ append, debit<widget>, credit<widget> }}\n\
-         {{ txn idem(\"leak\", window: 30.days) {{ post(debit(from, out)?, credit(to, back)) }} }}\n"
+         {{ txn idem(\"leak\") {{ post(debit(from, out)?, credit(to, back)) }} }}\n"
     );
     let path = repo_root().join("target/inventory-leak.niles");
     std::fs::write(&path, &with_leak).expect("write");

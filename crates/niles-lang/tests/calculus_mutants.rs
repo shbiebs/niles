@@ -167,7 +167,7 @@ fn the_well_typed_neighbour_of_each_mutant_is_accepted() {
             "the currency matches at the call",
             r#"fn pay(from: Id<Account>, to: Id<Account>, m: Money<usd>) -> Result<TxnId, TxnError>
                    ! { append, debit<usd>, credit<usd> }
-               { txn idem("pay", window: 30.days) { post(debit(from, m)?, credit(to, m)) } }
+               { txn idem("pay") { post(debit(from, m)?, credit(to, m)) } }
                fn settle(a: Id<Account>, b: Id<Account>) -> Result<TxnId, TxnError>
                    ! { append, debit<usd>, credit<usd> }
                { pay(a, b, 10.00 usd) }"#,
@@ -177,7 +177,7 @@ fn the_well_typed_neighbour_of_each_mutant_is_accepted() {
             r#"fn f(a: Id<Account>, m: Money<usd>, auth: Auth<authorize<usd>>)
                    -> Result<(), TxnError>
                    ! { append, authorize<usd>, debit<usd>, credit<usd> }
-               { authorize(a, m); txn idem("f", window: 30.days) { post(debit(a, m)?, credit(a, m)) } }"#,
+               { authorize(a, m); txn idem("f") { post(debit(a, m)?, credit(a, m)) } }"#,
         ),
         (
             "the declared rung is the rung that is read",
@@ -190,7 +190,7 @@ fn the_well_typed_neighbour_of_each_mutant_is_accepted() {
                { post(debit(a, 10.00 usd)?, credit(b, 10.00 usd)) }
                fn caller(a: Id<Account>, b: Id<Account>) -> Result<TxnId, TxnError>
                    ! { append, debit<usd>, credit<usd> }
-               { txn idem("ok", window: 30.days) { both_halves(a, b) } }"#,
+               { txn idem("ok") { both_halves(a, b) } }"#,
         ),
         (
             // The neighbour of `currency_laundered_by_an_annotation`, one token apart:
@@ -200,7 +200,7 @@ fn the_well_typed_neighbour_of_each_mutant_is_accepted() {
             r#"fn launder(from: Id<Account>, to: Id<Account>) -> Result<TxnId, TxnError>
                    ! { append, debit<usd>, credit<usd> }
                { let m: Money<usd> = 10.00 usd;
-                 txn idem("launder", window: 30.days) { post(debit(from, m)?, credit(to, m)) } }"#,
+                 txn idem("launder") { post(debit(from, m)?, credit(to, m)) } }"#,
         ),
         (
             // The neighbour of `currency_laundered_by_a_return_type`.
@@ -216,7 +216,7 @@ fn the_well_typed_neighbour_of_each_mutant_is_accepted() {
             r#"fn opaque(from: Id<Account>, to: Id<Account>, k: Int) -> Result<TxnId, TxnError>
                    ! { append, debit<usd>, credit<usd> }
                { let m: Money<usd> = rate_lookup(k);
-                 txn idem("opaque", window: 30.days) { post(debit(from, m)?, credit(to, m)) } }
+                 txn idem("opaque") { post(debit(from, m)?, credit(to, m)) } }
                fn rate_lookup(k: Int) -> Money<usd> ! { } { 1.00 usd }"#,
         ),
         (
@@ -224,7 +224,7 @@ fn the_well_typed_neighbour_of_each_mutant_is_accepted() {
             "the window has a key to bound",
             r#"fn sweep(a: Id<Account>, b: Id<Account>, m: Money<usd>) -> Result<TxnId, TxnError>
                    ! { append, debit<usd>, credit<usd> }
-               { txn idem("sweep", window: 30.days) { post(debit(a, m)?, credit(b, m)) } }"#,
+               { txn idem("sweep") { post(debit(a, m)?, credit(b, m)) } }"#,
         ),
     ];
     for (what, src) in cases {

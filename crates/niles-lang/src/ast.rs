@@ -718,7 +718,7 @@ pub enum Expr {
     Continue(Span),
 
     // --- the novel forms ---
-    /// `txn idem("k", window: 24.hours) { .. }` — the unit the conservation rule is
+    /// `txn idem("k") { .. }` — the unit the conservation rule is
     /// checked over, and the unit an epoch seals.
     Txn {
         idem: Option<IdemSpec>,

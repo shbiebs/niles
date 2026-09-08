@@ -7,5 +7,5 @@ fn f(a: Id<Account>, m: Money<usd>) -> Result<TxnId, TxnError>
     ! { append, debit<usd>, credit<usd> }
 {
     let auth: Auth<authorize<usd>> = 42;
-    txn idem("f", window: 30.days) { post(debit(a, m)?, credit(a, m)) }
+    txn idem("f") { post(debit(a, m)?, credit(a, m)) }
 }

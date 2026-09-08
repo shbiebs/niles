@@ -278,9 +278,13 @@ gate` on the Mac is red on that test today. The author has run `cargo +1.97.1 cl
 landing, which does not run tests, so nothing has said so. The GBS sync block was given at three
 landings with the **wrong ref name** (§0.2) — the cycle-9 brief's rule "repeat until confirmed"
 was followed and the thing repeated was wrong. **Resolved at 16:10 UTC:** the Mac's GBS is at
-`688919c` and pushed. What remains is the verdict: the Mac's `cargo test --workspace` on niles
-has not been run since, so the cross-repo guard's green on the reference host is *expected*,
-not *recorded* — §5 asks for it. And F-10-04.
+`688919c` and pushed. **Recorded green on Host C**: `cargo test --offline -p nilestream-core --test
+downstream_adapter` at niles `e168d2d` against GBS `688919c` — `1 passed` in 2.79 s, which is
+a real compile of the adapter and not the skip. F-10-03 is closed as a state and stays as a
+finding about the interval nobody could see (C9-02 landing → 16:10 UTC) and about the
+instruction. What remains of it is F-10-04. The Mac's full workspace run stops at
+`numeric_binary_oracle` (no PostgreSQL on 5432) unless `--no-fail-fast` is given; that is the
+environment red §5 names.
 
 ### F-10-04 — the cross-repo guard passes when there is nothing to check
 *instrument-gap · EV 3×5÷1 = 15 · HI · read from source.*

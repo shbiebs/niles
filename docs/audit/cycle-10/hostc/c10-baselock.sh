@@ -318,22 +318,31 @@ if [ "$SELF_TEST" -eq 1 ]; then
   # not run and the self-test fails — an untested refusal is not a refusal.
   LISTENER_PID=""
   if command -v perl >/dev/null 2>&1; then
-    perl -e 'use IO::Socket::INET; my $s = IO::Socket::INET->new(LocalAddr=>"127.0.0.1", LocalPort=>$ARGV[0], Listen=>1, ReuseAddr=>1) or exit 1; sleep 60;' "$PORT" &
+    perl -e 'use IO::Socket::INET; my $s = IO::Socket::INET->new(LocalAddr=>"127.0.0.1", LocalPort=>$ARGV[0], Listen=>16, ReuseAddr=>1) or exit 1; sleep 60;' "$PORT" &
     LISTENER_PID=$!
   elif command -v python3 >/dev/null 2>&1; then
     python3 -c 'import socket,sys,time
 s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-s.bind(("127.0.0.1", int(sys.argv[1]))); s.listen(1); time.sleep(60)' "$PORT" &
+s.bind(("127.0.0.1", int(sys.argv[1]))); s.listen(16); time.sleep(60)' "$PORT" &
     LISTENER_PID=$!
   fi
   if [ -n "$LISTENER_PID" ]; then
     sleep 1
-    if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then
-      exec 3>&- 2>/dev/null
-      expect_refusal "an occupied port"                  check_port_free "$PORT"
-    else
-      note "  not run    : an occupied port (the listener did not come up on $PORT)"
+    # **Exactly one connection is made, and it is the one under test.**
+    #
+    # This first probed the port itself and *then* called `check_port_free`, which is two
+    # connections. The listener never calls `accept`, so the first one sits in the backlog —
+    # and on Darwin a connect to a socket whose backlog is full is refused, so the second
+    # connect failed and `check_port_free` reported the port free. Host C's self-test caught
+    # it as `NOT REFUSED: an occupied port` while the Linux container passed, which is the
+    # portability difference this whole self-test exists to surface. The backlog is 16 now,
+    # and the readiness check and the assertion are the same single call.
+    if check_port_free "$PORT" >/dev/null 2>&1; then
+      note "  not run    : an occupied port (the listener did not come up on $PORT, so the"
+      note "               check was never given the fault it is for)"
       st_fail=1
+    else
+      note "  refused    : an occupied port"
     fi
     kill "$LISTENER_PID" 2>/dev/null
     wait "$LISTENER_PID" 2>/dev/null

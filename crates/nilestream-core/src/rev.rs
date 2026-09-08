@@ -31,6 +31,7 @@ use niles_ir::circuit::{Circuit, NodeId};
 use niles_ir::operator::{Agg, Op};
 use niles_ir::{Consistency, Materialize, Retention};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 /// A view key. Concretely a small tuple of integers, which is what a `(acct, cur)` group
@@ -106,26 +107,113 @@ struct CompletionState {
 pub struct Completion {
     state: Mutex<CompletionState>,
     woken: Condvar,
+    /// **Whether anyone has ever joined this flight**, and therefore whether the mutex and
+    /// the condvar below are needed at all.
+    ///
+    /// Set under the view lock, in the one place a completion is handed to a second reader.
+    /// A flight nobody joined has no rendezvous to hold: its answer goes back through
+    /// `finish_fold`'s return value, and its cancellation is read from `cancelled` below.
+    ///
+    /// This is not a micro-optimisation of a lock that was cheap. On a platform whose
+    /// `Mutex` and `Condvar` are futexes the saving is two atomic operations; on macOS,
+    /// where Rust's std lazily boxes a `pthread_mutex_t` and a `pthread_cond_t` on first
+    /// use, it is **two heap allocations and 112 bytes per flight** — 64 for the mutex and
+    /// 48 for the condition variable. E18's `rev_metadata_2x_budget` folds 5,000 uncontended
+    /// keys and measured 44,165 allocations on Host C against 34,165 committed from Linux:
+    /// exactly 10,000, exactly two per key (A10-19). The gate failure was a real cost, paid
+    /// on every uncontended fold, that the committed budget could not see because the
+    /// machine it was measured on does not charge for it.
+    joined: AtomicBool,
+    /// **The cancellation flag, outside the mutex.**
+    ///
+    /// `reap_cancelled` asks every miss whether this key's flight is dead, and a dropped
+    /// ticket answers by setting it. Both were inside the mutex, so both took the lock —
+    /// which on macOS meant the reaping path allocated the pthread objects that the publish
+    /// path had just been taught not to. A flag read and written by a `Drop` and by a
+    /// reader is exactly what an atomic is for.
+    cancelled: AtomicBool,
+    /// How many times [`Completion::lock`] has been called on this completion.
+    locks: std::sync::atomic::AtomicU64,
 }
+
+/// **How many times any completion's mutex has been taken, process-wide.**
+///
+/// The cost this counts is not a duration. On macOS, Rust's std lazily boxes a
+/// `pthread_mutex_t` and a `pthread_cond_t` the first time a `Mutex`/`Condvar` is used, so
+/// *the first* acquisition of a completion's lock costs two heap allocations and 112 bytes
+/// and every later one costs almost nothing — which makes a timing a bad instrument for it
+/// and a count an exact one. A guard written against this counter fails identically on every
+/// platform, including the ones where the saving is two atomics.
+///
+/// Public so the memory probe and the guards can read it; `Relaxed` because it is a
+/// diagnostic total with no ordering obligations to anything.
+pub static COMPLETION_LOCKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 impl Completion {
     fn lock(&self) -> MutexGuard<'_, CompletionState> {
+        // **Counted, per completion.**
+        //
+        // The cost being counted is not a duration. On macOS, Rust's std lazily boxes a
+        // `pthread_mutex_t` and a `pthread_cond_t` the first time a `Mutex`/`Condvar` is
+        // used, so the *first* acquisition costs two heap allocations and 112 bytes and
+        // every later one costs almost nothing — which makes a timing a bad instrument for
+        // it and a count an exact one.
+        //
+        // Per completion rather than in a process-wide static: the first draft used a static
+        // and its guard passed alone and failed under `cargo test`'s parallelism, because
+        // another test's joined flight incremented the same counter between the two reads.
+        // A counter a guard cannot isolate reports someone else's work.
+        self.locks.fetch_add(1, Ordering::Relaxed);
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// How many times this completion's mutex has been taken. Zero for a flight nobody
+    /// joined, which is the property the E18 budget turns on.
+    fn locks(&self) -> u64 {
+        self.locks.load(Ordering::Relaxed)
+    }
+
+    /// Called under the view lock when this completion is handed to a joining reader.
+    ///
+    /// Ordering: the join happens under **V**, and so does `finish_fold`. A joiner that
+    /// arrives first sets this and only then waits; a `finish_fold` that runs first removes
+    /// the flight under V, so no later reader can find it to join. There is no interleaving
+    /// in which a waiter exists and `joined` is false.
+    fn mark_joined(&self) {
+        self.joined.store(true, Ordering::Release);
+    }
+
+    fn was_joined(&self) -> bool {
+        self.joined.load(Ordering::Acquire)
+    }
+
     fn publish(&self, answer: Anchored) {
+        // **Nobody is waiting, so there is nothing to publish to.** The owner's answer
+        // reaches its own caller as `finish_fold`'s return value; the rendezvous exists only
+        // for readers who joined, and there are none.
+        if !self.was_joined() {
+            return;
+        }
         self.lock().answer = Some(answer);
         self.woken.notify_all();
     }
 
     fn cancel(&self) {
+        // The flag first, and unconditionally: `reap_cancelled` reads it on every miss and
+        // must see a dead flight whether or not anyone joined it.
+        self.cancelled.store(true, Ordering::Release);
+        if !self.was_joined() {
+            return;
+        }
+        // A waiter parked on the condvar needs waking, and it reads `cancelled` from the
+        // guarded state, so that copy is kept in step for the one case that reads it.
         self.lock().cancelled = true;
         self.woken.notify_all();
     }
 
     /// The owner gave up. The flight is reapable and no waiter will ever be answered by it.
     fn cancelled(&self) -> bool {
-        self.lock().cancelled
+        self.cancelled.load(Ordering::Acquire)
     }
 
     /// Block until the owner publishes or gives up. **Holds nothing but this leaf.**
@@ -368,6 +456,16 @@ pub struct Stats {
     /// behind while folding.
     pub flights_behind_at_begin: u64,
     pub flights_that_fell_behind: u64,
+    /// **How many times this view's flights took their rendezvous lock.**
+    ///
+    /// A flight nobody joined has no rendezvous to take, and taking one costs two heap
+    /// allocations and 112 bytes on macOS the first time — Rust's std boxes the
+    /// `pthread_mutex_t` and the `pthread_cond_t` lazily. E18's `rev_metadata_2x_budget`
+    /// folds 5,000 uncontended keys and measured 44,165 allocations on Host C against a
+    /// 34,165 budget: exactly two per key (A10-19). This counter is what a guard asserts on,
+    /// and it asserts identically on a platform where the same saving is two atomic
+    /// operations and no allocation at all.
+    pub completion_locks: u64,
 }
 
 impl Stats {
@@ -566,6 +664,11 @@ impl Rev {
         }
         let decision = match self.in_flight.get(key) {
             Some(f) if f.anchor == anchor => {
+                // **This is the one place a completion becomes a rendezvous.** Marked before
+                // the lock is taken, and under the view lock, so that a `finish_fold` racing
+                // this join cannot decide the flight is uncontended after the decision to
+                // join has been made. Both run under V, so they are ordered by V.
+                f.done.mark_joined();
                 let mut st = f.done.lock();
                 if st.answer.is_none() && !st.cancelled && st.waiters < MAX_WAITERS {
                     st.waiters += 1;
@@ -723,6 +826,10 @@ impl Rev {
 
         if let Some(d) = &ticket.done {
             d.publish(answer);
+            // **Folded into the view's stats as the flight ends**, which is the last moment
+            // this completion is reachable from the view. A flight nobody joined contributes
+            // zero, and that zero is the whole of the E18 repair (A10-19).
+            self.stats.completion_locks += d.locks();
         }
         answer
     }
@@ -803,6 +910,9 @@ impl Rev {
             return;
         }
         if let Some(f) = self.in_flight.remove(key) {
+            // A cancelled flight ends here rather than in `finish_fold`, so its rendezvous is
+            // accounted for here or nowhere.
+            self.stats.completion_locks += f.done.locks();
             if let Some(prior) = f.prior {
                 match self.slots.get_mut(key) {
                     Some(slot) => *slot = prior,
@@ -1226,6 +1336,7 @@ impl Runtime {
             s.gap_at_finish_total += v.stats.gap_at_finish_total;
             s.gap_begin_samples += v.stats.gap_begin_samples;
             s.gap_finish_samples += v.stats.gap_finish_samples;
+            s.completion_locks += v.stats.completion_locks;
             s.gap_at_finish_max = s.gap_at_finish_max.max(v.stats.gap_at_finish_max);
             s.flights_behind_at_begin += v.stats.flights_behind_at_begin;
             s.flights_that_fell_behind += v.stats.flights_that_fell_behind;
@@ -2345,6 +2456,16 @@ mod two_phase {
         rt.lock().expect("not poisoned")
     }
 
+    /// This view's rendezvous-lock count, read the way a guard must: from the view under
+    /// test, not from a process-wide total another test in the same binary contributes to.
+    fn completion_locks(rt: &Shared) -> u64 {
+        view(rt)
+            .view("balance")
+            .expect("installed")
+            .stats
+            .completion_locks
+    }
+
     fn runtime(budget: Option<u64>) -> Shared {
         Arc::new(Mutex::new(
             Runtime::install(
@@ -2641,6 +2762,145 @@ mod two_phase {
             v.stats.uninstalled_folds >= 1,
             "a fold that installed nothing must be counted, or the cost is one nobody can \
              be asked about"
+        );
+    }
+
+    /// **A fold nobody joined never touches its rendezvous — A10-19.**
+    ///
+    /// The cost being guarded is a heap allocation, not a wait. Rust's `Mutex` and `Condvar`
+    /// on macOS lazily box a `pthread_mutex_t` and a `pthread_cond_t` on first use — 64 and
+    /// 48 bytes — so the first acquisition of a completion's lock costs two allocations and
+    /// 112 bytes, and every subsequent one costs nothing. E18's `rev_metadata_2x_budget`
+    /// folds 5,000 uncontended keys and measured **44,165 allocations on Host C against
+    /// 34,165 committed**: a difference of exactly 10,000, exactly two per key, with `live`
+    /// and `peak` identical because the objects are freed with the flight. The budget could
+    /// not see it because the machine it was measured on does not charge for it.
+    ///
+    /// So the guard is a **count**, not a duration: it fails the same way on Linux, where
+    /// the saving is two atomic operations and no allocation at all. Ten sequential misses
+    /// on one thread create ten flights, and none of them may lock anything.
+    ///
+    /// This is not a claim that locking is expensive. It is a claim that a rendezvous with
+    /// nobody at it should not be used, and that the platform where that is nearly free is
+    /// not the only platform this runs on.
+    #[test]
+    fn an_uncontended_fold_never_locks_its_completion() {
+        let rt = runtime(Some(64));
+        let hist = Hist::default();
+        for k in 0..10i64 {
+            hist.seal(&vec![k], 10 + k as i128);
+        }
+        let anchor = hist.frontier();
+
+        let before = completion_locks(&rt);
+        for k in 0..10i64 {
+            let outcome = view(&rt)
+                .view_mut("balance")
+                .expect("installed")
+                .begin_read(&vec![k], anchor);
+            match outcome {
+                ReadOutcome::Fold(t) => {
+                    let (v, rows) = hist.fold(t.key(), t.anchor());
+                    view(&rt)
+                        .view_mut("balance")
+                        .expect("installed")
+                        .finish_fold(t, v, rows);
+                }
+                _ => panic!("a cold key on one thread must fold alone"),
+            }
+        }
+        let after = completion_locks(&rt);
+        assert_eq!(
+            after,
+            before,
+            "ten uncontended folds took {} completion lock(s). Each first acquisition costs \
+             two heap allocations and 112 bytes on macOS, which is the whole of the E18 gate \
+             failure at `rev_metadata_2x_budget`: 44,165 allocations against a 34,165 \
+             budget, two per key over 5,000 keys.",
+            after - before
+        );
+    }
+
+    /// **And a fold that IS joined still uses it** — the control without which the guard
+    /// above is satisfied by a rendezvous that never works at all.
+    ///
+    /// The fast path is a claim about flights with no waiter. A build that skipped the
+    /// rendezvous unconditionally would strand every joiner forever and would pass the count
+    /// guard perfectly, so the count is asserted to *rise* here, and the joined reader is
+    /// asserted to actually receive the owner's answer.
+    #[test]
+    fn a_joined_fold_does_use_its_completion_and_answers_the_waiter() {
+        let rt = runtime(Some(64));
+        let hist = Hist::default();
+        hist.seal(&vec![7], 42);
+        let anchor = hist.frontier();
+
+        let ticket = match view(&rt)
+            .view_mut("balance")
+            .expect("installed")
+            .begin_read(&vec![7], anchor)
+        {
+            ReadOutcome::Fold(t) => t,
+            _ => panic!("the first reader owns the flight"),
+        };
+        let before = completion_locks(&rt);
+        let waiter = match view(&rt)
+            .view_mut("balance")
+            .expect("installed")
+            .begin_read(&vec![7], anchor)
+        {
+            ReadOutcome::Join(w) => w,
+            _ => panic!("the second reader at the same anchor joins"),
+        };
+
+        let (v, rows) = hist.fold(ticket.key(), ticket.anchor());
+        let owner_answer = view(&rt)
+            .view_mut("balance")
+            .expect("installed")
+            .finish_fold(ticket, v, rows);
+
+        // **The wait is bounded, because the failure this control is for is a hang.**
+        //
+        // A build that applied the uncontended fast path to every flight — by never marking
+        // a joined completion — publishes to nobody and the waiter parks forever. Reverting
+        // `mark_joined` and running this test proved exactly that, by hanging the suite
+        // until it was killed: a red test that never returns is not a result, it is a
+        // machine to be interrupted. So the wait happens on its own thread and the assertion
+        // is a deadline. The stranded thread is left parked on a completion this test owns
+        // and nothing else can reach.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(waiter.wait());
+        });
+        let joined_answer = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap_or_else(|_| {
+                panic!(
+                    "the joined reader was never answered within 10s. Its owner has already \
+                     finished the fold, so the rendezvous was skipped for a flight that had \
+                     a waiter — which is the fast path applied where it does not hold, and \
+                     the waiter is stranded rather than slow."
+                )
+            })
+            .expect("the waiter is answered, not stranded");
+
+        // Read after the flight has ended, because that is when a completion's count is
+        // folded into the view — it is the last moment the completion is reachable from the
+        // view at all.
+        eprintln!("DBG before={before} after={}", completion_locks(&rt));
+        assert!(
+            completion_locks(&rt) > before,
+            "a joined flight must take its rendezvous. A build that skipped it \
+             unconditionally would pass the uncontended guard perfectly and strand every \
+             waiter, so this control is what makes that guard mean what it says."
+        );
+        assert_eq!(
+            joined_answer.value, owner_answer.value,
+            "a joined reader receives the owner's answer, which is the point of joining"
+        );
+        assert_eq!(
+            joined_answer.anchor, owner_answer.anchor,
+            "and at the owner's anchor, which is its own"
         );
     }
 

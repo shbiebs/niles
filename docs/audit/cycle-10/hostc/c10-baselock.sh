@@ -461,7 +461,15 @@ note "levels          : $LEVELS readers (writers = ceil(readers/2): 6r3w, 9r5w, 
 note "working points  : full  = $ACCOUNTS accounts / $BUDGET_FULL budget (budget above the key count)"
 note "                : part  = $ACCOUNTS accounts / $BUDGET_PARTIAL budget (genuinely partial)"
 note "per level       : ${SECONDS_PER_LEVEL}s mixed, $WARMUPS warm-up + $MEASURED measured per arm"
+ARMS=1
+if [ "$BASELINE_ONLY" -eq 0 ] || [ "$NEUTRAL" -eq 1 ]; then ARMS=2; fi
+REPLICATES_TOTAL=$(( (WARMUPS + MEASURED) * ARMS * 2 ))
 note "replicate cap   : ${REPLICATE_TIMEOUT}s, after which the replicate is killed and counted as not run"
+note "replicates      : $REPLICATES_TOTAL total = ($WARMUPS warm-up + $MEASURED measured) x $ARMS arm(s) x 2 working points"
+note "                : each is 3 levels of ${SECONDS_PER_LEVEL}s mixed plus this machine's fixed"
+note "                : point/fold/durable phases. The first \`replicate elapsed\` line below"
+note "                : times one; multiply by $REPLICATES_TOTAL for the run. Two working"
+note "                : points is what doubles it, and it is the half cycle 9 never measured."
 note "neutral A=A     : $( [ "$NEUTRAL" -eq 1 ] && echo 'yes, before anything is scored' || echo 'SKIPPED by --no-neutral' )"
 
 mkdir -p "$OUT" || { note "FATAL: cannot create $OUT"; exit 3; }
@@ -579,8 +587,10 @@ replicate() {
         --accounts "$ACCOUNTS" --rounds "$ROUNDS" --nls-budget "$budget" \
         --runs 1 --out "$outdir" >"$log" 2>&1
   }
+  rep_began=$(date +%s)
   run_with_deadline "$REPLICATE_TIMEOUT" run_one
   rc=$?
+  rep_took=$(( $(date +%s) - rep_began ))
 
   if [ $rc -eq 124 ]; then
     note "  [$tag] killed at the ${REPLICATE_TIMEOUT}s cap. A replicate that has to be killed"
@@ -594,6 +604,10 @@ replicate() {
   check_writer_progress "$log"   || { note "  [$tag] see $log"; return 1; }
   check_no_missing_fields "$log" || { note "  [$tag] see $log"; return 1; }
 
+  # **How long this replicate took**, so the reader can multiply rather than guess. There are
+  # REPLICATES_TOTAL of them and the preflight cannot know the fixed per-replicate cost of
+  # this machine; the first line of this kind tells you what the whole run will cost.
+  note "  [$tag] replicate elapsed: ${rep_took}s"
   # The whole mixed section, not a grep of it: the slowest-16 table and the lock histogram
   # are rows of numbers with no keyword in them, and a filter that drops them keeps only the
   # sentence saying a table exists.

@@ -3963,6 +3963,132 @@ mod visibility_tests {
         let _ = std::fs::remove_file(&seg);
     }
 
+    /// **One window, two structures, and a named retry across its edge — T00a.5, F-10-12.**
+    ///
+    /// The idempotency window is enforced twice: `proto_engine::Ledger` refuses a duplicate on
+    /// admission, and the sequencer behind the durable sink refuses one on the way to disk.
+    /// They are separate structures, and until C9-02 they counted different things under one
+    /// declaration — the base kept the last W *transactions*, the sink kept the last W
+    /// *batches*, and a batch is up to 4,096 transactions. A retry landing in that gap was
+    /// **new to admission and duplicate to the sink**: applied to the base, an epoch sealed,
+    /// and then unacknowledgeable. That is an applied transaction the client is never told
+    /// about, which is the worst shape a durability bug takes.
+    ///
+    /// **The target here is `accept`, not `refuse`.** The obvious-looking repair is to make
+    /// both sides refuse the retry, and it is wrong: an identity that has aged out of a
+    /// declared window is one the system has *promised to forget*, and a retry of it is a new
+    /// transaction that must commit. Making both refuse would turn a lost acknowledgement
+    /// into a silently dropped payment, which is the same class of error with the sign
+    /// reversed. So this asserts the two agree in both directions:
+    ///
+    ///   * an identity **inside** the window is refused, by both, consistently;
+    ///   * an identity that has **aged out** is accepted, by both, and lands durably.
+    ///
+    /// And nothing is acknowledged before it is durable on either path: the epoch the
+    /// accepted retry gets is asserted to come back from the segment on a fresh open.
+    #[test]
+    fn a_retry_after_the_window_expires_is_accepted_by_admission_and_by_the_sealer() {
+        const W: u64 = 3;
+        let dir = std::env::temp_dir().join("nilestream-visibility-tests");
+        let _ = std::fs::create_dir_all(&dir);
+        let seg = dir.join("idem-window-pair.seg");
+        let _ = std::fs::remove_file(&seg);
+        let e = RevEngine::seeded(
+            8,
+            1,
+            4,
+            proto_engine::ViewMode::Demand,
+            proto_engine::EvictionPolicy::Lru,
+        )
+        .with_idem_window(Some(W))
+        .with_durable_bounded(&seg, Some(W))
+        .expect("durable sink");
+
+        // W + 1 named transactions. The first is then exactly one transaction past the edge.
+        let mut epochs = Vec::new();
+        for i in 0..=W {
+            let epoch = e
+                .append_durable(post(300 + i, i), &format!("win-{i}"))
+                .unwrap_or_else(|err| panic!("`win-{i}` must commit: {err:?}"));
+            epochs.push(epoch);
+        }
+        assert_eq!(
+            e.idem_window(),
+            (W as usize, Some(W)),
+            "PRECONDITION UNMET: the base is not holding exactly the declared window, so \
+             neither half of this test is about the edge it names"
+        );
+
+        // **Inside the window: refused, and by both.** `win-{W}` was the last one committed.
+        let inside = format!("win-{W}");
+        let err = e
+            .append_durable(post(999, 1), &inside)
+            .expect_err("an identity inside the window is a duplicate");
+        assert!(
+            matches!(err, crate::session::ServeError::Duplicate(_)),
+            "an in-window retry must be refused as a duplicate and not as something else: \
+             {err:?}"
+        );
+
+        // **Aged out: accepted, and by both.** `win-0` fell off the front when `win-{W}`
+        // was committed. Admission no longer knows it, and the sealer must not either — if
+        // the sealer still held it, this call would apply to the base and then fail on the
+        // way to disk, which is the gap this test exists for.
+        let head_before = e.head();
+        let epoch = e
+            .append_durable(post(1_000, 2), "win-0")
+            .unwrap_or_else(|err| {
+                panic!(
+                    "`win-0` has aged out of the declared window of {W} transactions, so it \
+                     is a new transaction and must commit. It was refused with {err:?}. A \
+                     both-refuse outcome for an expired identity is not the repair — it \
+                     turns a lost acknowledgement into a dropped payment."
+                )
+            });
+        assert!(
+            epoch > head_before,
+            "the accepted retry must seal a new epoch, not return the original one: {epoch} \
+             against a head of {head_before}"
+        );
+
+        // **Acknowledged only if durable**, checked in the segment's own coordinates.
+        //
+        // The epoch `append_durable` returns is a *base* epoch and the segment counts
+        // *records*; the first draft of this compared the two and failed against a correct
+        // build, because `seeded` starts the base above zero. What the segment can be asked
+        // is which identities are in it and in what order, and that is the question anyway.
+        let frontier = crate::session::Serving::frontier(&e);
+        assert!(
+            frontier >= epoch,
+            "the frontier {frontier} is behind the epoch {epoch} that was acknowledged, so \
+             something was acknowledged before it was visible"
+        );
+        drop(e);
+        let recovery = nilestream_ledger::segment::recover(&seg).expect("the segment decodes");
+        let seen = nilestream_ledger::sequencer::Sequencer::recover_seen_checked(&recovery)
+            .expect("the segment's identities decode");
+        let mut keys: Vec<&str> = seen.keys().map(|k| k.as_str()).collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec!["win-0", "win-1", "win-2", "win-3"],
+            "every identity this test committed must be in the segment, and no others"
+        );
+        // **The retry is a later record than the original**, which is what says it was
+        // written durably as a new commit rather than answered from the sink's memory.
+        // `recover_seen_checked` keeps the last epoch it saw for a key, so `win-0`'s must now
+        // be past `win-{W}`'s — the retry came after every original.
+        let win0 = seen["win-0"];
+        let last_original = seen[&format!("win-{W}")];
+        assert!(
+            win0 > last_original,
+            "`win-0` is recorded at {win0} and the last original at {last_original}: the \
+             accepted retry did not reach the segment as a new record, so it was \
+             acknowledged without being durable"
+        );
+        let _ = std::fs::remove_file(&seg);
+    }
+
     /// **Publication is monotone even when barriers return for a batch at once.**
     ///
     /// `Pending::wait` publishes with `fetch_max`, and the argument that this is safe is that

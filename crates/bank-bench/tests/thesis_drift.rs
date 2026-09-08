@@ -574,6 +574,82 @@ fn bounded_reconstruction_quantifies_correctly() {
     );
 }
 
+/// **Appendix D's API surface survives the traps that made its generator wrong — A10-13.**
+///
+/// `gen-appendix-d.py` truncated each file at the first *occurrence of the characters*
+/// `#[cfg(test)]`, anywhere, including inside a doc comment. `niles-ir/src/eval.rs` explains
+/// in its module documentation why the evaluator is public "rather than living in a
+/// `#[cfg(test)]` block", and that sentence deleted `ZSet`, `eval_scalar` and every other
+/// public item in the file from the appendix. Two more shapes were wrong for the same
+/// reason: a test module in the *middle* of a file deleted the API below it, and the
+/// attribute on a non-module item swallowed the rest of the file.
+///
+/// Across the workspace that understated the public surface by 32 items — `niles-ir` 40 → 58,
+/// `nilestream-server` 78 → 87, `bank-bench` 65 → 70 — and the failure was silent in the
+/// direction that matters: a truncated file makes the appendix *smaller*, and an appendix
+/// missing eighteen items looks exactly like one that is right.
+///
+/// Two halves, because either alone is weak. The generator's own `--self-test` runs the four
+/// traps as synthetic inputs and is the part that would fail if the extraction regressed;
+/// the assertions below are on the *committed* appendix, and are what would fail if the
+/// generator were fixed and the file never regenerated.
+#[test]
+fn appendix_d_lists_the_api_the_traps_used_to_hide() {
+    let out = std::process::Command::new("python3")
+        .arg(repo_root().join("thesis/gen-appendix-d.py"))
+        .arg("--self-test")
+        .current_dir(repo_root())
+        .output()
+        .expect("python3 is what the Makefile generates this appendix with");
+    assert!(
+        out.status.success(),
+        "the API extractor's own self-test fails, so the appendix it generates is short by \
+         an unknown amount:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let api = thesis("appendix-d-api.md");
+    for (name, why) in [
+        // `pub type`, not `pub struct` — the first draft of this guard asserted the wrong
+        // declaration form and failed against an appendix that was already correct, which is
+        // the right way round for a guard to be wrong.
+        (
+            "pub type ZSet",
+            "the doc-comment trap: `eval.rs` names the attribute in prose on line 11",
+        ),
+        (
+            "pub fn eval_scalar",
+            "the same file, below the same sentence",
+        ),
+    ] {
+        assert!(
+            api.contains(name),
+            "`{name}` is missing from the committed appendix — {why}. Either the extractor \
+             regressed or the appendix was not regenerated after it was fixed; \
+             `make generated` decides which."
+        );
+    }
+
+    let map = thesis("appendix-d-map.md");
+    for (crate_name, at_least) in [("niles-ir", 58usize), ("nilestream-server", 87)] {
+        let row = map
+            .lines()
+            .find(|l| l.contains(&format!("`{crate_name}`")))
+            .unwrap_or_else(|| panic!("the map has a row for `{crate_name}`"));
+        let count: usize = row
+            .rsplit('|')
+            .nth(1)
+            .and_then(|c| c.trim().parse().ok())
+            .unwrap_or_else(|| panic!("the `{crate_name}` row ends in a count: {row}"));
+        assert!(
+            count >= at_least,
+            "the map counts {count} public items in `{crate_name}` and the traps used to \
+             hide it down to fewer than {at_least}. A count that falls is the signature of \
+             the truncation coming back, and it falls silently."
+        );
+    }
+}
+
 /// **Every identifier Appendix D names exists in the workspace.**
 ///
 /// D.2 and D.3 listed an engine API in the present tense: `LedgerHandle::append_batch`,

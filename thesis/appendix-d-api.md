@@ -75,6 +75,23 @@ pub struct Node
 pub struct Circuit
 pub struct AccessReport
 pub fn internal_contract() -> ServeContract
+pub type Row
+pub type ZSet
+pub fn add(z: &mut ZSet, row: Row, w: i128)
+pub fn zset(rows: &[(&[i128], i128)]) -> ZSet
+pub fn row(vs: &[Option<i128>]) -> Row
+pub fn eval_scalar(s: &Scalar, r: &[Value]) -> Value
+pub fn keeps(p: &Scalar, r: &[Value]) -> bool
+pub struct Eval<'a>
+pub enum EvalError
+pub fn implements(op: &Op) -> bool
+pub fn run(c: &Circuit, output: &str, sources: &BTreeMap<String, ZSet>) -> (ZSet, u64)
+pub fn run_node(c: &Circuit, id: NodeId, sources: &BTreeMap<String, ZSet>) -> (ZSet, u64)
+pub fn try_run_node(
+pub fn try_run_with(
+pub fn try_run_node_with(
+pub fn try_run(
+pub fn fold(a: Agg, vals: &[(Value, i128)]) -> Value
 pub enum Consistency
 pub enum Materialize
 pub enum Retention
@@ -104,6 +121,7 @@ pub enum Tri
 pub fn compare(a: Value, b: Value, f: impl Fn(i128, i128) -> bool) -> Tri
 pub fn arith(a: Value, b: Value, f: impl Fn(i128, i128) -> i128) -> Value
 pub fn truth(v: Value) -> Tri
+pub fn days_since_epoch(text: &str) -> Option<i64>
 pub struct Violation
 pub struct VerifyReport
 pub fn verify(c: &Circuit) -> VerifyReport

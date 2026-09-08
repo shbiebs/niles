@@ -48,6 +48,7 @@ gate: fmt lint generated test memory
 # document that drifts from the artifact fails a build rather than being noticed in
 # review — which is the failure mode a status line has when nothing produces it.
 generated:
+	python3 thesis/gen-appendix-d.py --self-test
 	python3 thesis/gen-appendix-d.py map | diff -u thesis/appendix-d-map.md - 
 	python3 thesis/gen-appendix-d.py api | diff -u thesis/appendix-d-api.md -
 	cargo run -q -p niles-lang --bin gen-sql-surface -- --check

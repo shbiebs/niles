@@ -20,11 +20,11 @@ component is for is not derivable from its source.
 
 | Crate | Role | public items |
 |---|---|--:|
-| `bank-bench` | NilesBank generator, wall-clock harness, thesis drift tests | 65 |
+| `bank-bench` | NilesBank generator, wall-clock harness, thesis drift tests | 70 |
 | `conservation-suite` | Reference oracle and the conservation property tests | 23 |
 | `experiments` | The E-series measurement harness | 0 |
 | `niles-interp` | The imperative-subset interpreter `nilesc run` drives, and the ledger it posts to | 16 |
-| `niles-ir` | Typed IR: circuit types, verifier, reference interpreter, upquery paths | 40 |
+| `niles-ir` | Typed IR: circuit types, verifier, reference interpreter, upquery paths | 58 |
 | `niles-lang` | Stage-0 compiler: lexer, parser, type/effect checker, lowering; SQL surface | 134 |
 | `nilesc` | The compiler driver: `check`, `verify`, `run` | 0 |
 | `nilestream` | The engine binary: sweep and serve | 0 |
@@ -32,7 +32,7 @@ component is for is not derivable from its source.
 | `nilestream-core` | REV runtime: resident maps, anchor indices, apply loop, upqueries, contracts | 23 |
 | `nilestream-ledger` | Epoch segments, sequencer, hash chain, durability, admission and commit rules | 32 |
 | `nilestream-optimizer` | Plan-time mode selection and the eviction policies (the adaptive optimizer of §4.6 is specified and not built) | 37 |
-| `nilestream-server` | Daemon: sessions, PostgreSQL wire surface, conformance | 78 |
+| `nilestream-server` | Daemon: sessions, PostgreSQL wire surface, conformance | 87 |
 | `proto-engine` | The research prototype the counted-work experiments run on | 24 |
 
 <!-- END:appendix-d-map -->
@@ -123,6 +123,23 @@ pub struct Node
 pub struct Circuit
 pub struct AccessReport
 pub fn internal_contract() -> ServeContract
+pub type Row
+pub type ZSet
+pub fn add(z: &mut ZSet, row: Row, w: i128)
+pub fn zset(rows: &[(&[i128], i128)]) -> ZSet
+pub fn row(vs: &[Option<i128>]) -> Row
+pub fn eval_scalar(s: &Scalar, r: &[Value]) -> Value
+pub fn keeps(p: &Scalar, r: &[Value]) -> bool
+pub struct Eval<'a>
+pub enum EvalError
+pub fn implements(op: &Op) -> bool
+pub fn run(c: &Circuit, output: &str, sources: &BTreeMap<String, ZSet>) -> (ZSet, u64)
+pub fn run_node(c: &Circuit, id: NodeId, sources: &BTreeMap<String, ZSet>) -> (ZSet, u64)
+pub fn try_run_node(
+pub fn try_run_with(
+pub fn try_run_node_with(
+pub fn try_run(
+pub fn fold(a: Agg, vals: &[(Value, i128)]) -> Value
 pub enum Consistency
 pub enum Materialize
 pub enum Retention
@@ -152,6 +169,7 @@ pub enum Tri
 pub fn compare(a: Value, b: Value, f: impl Fn(i128, i128) -> bool) -> Tri
 pub fn arith(a: Value, b: Value, f: impl Fn(i128, i128) -> i128) -> Value
 pub fn truth(v: Value) -> Tri
+pub fn days_since_epoch(text: &str) -> Option<i64>
 pub struct Violation
 pub struct VerifyReport
 pub fn verify(c: &Circuit) -> VerifyReport

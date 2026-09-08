@@ -111,10 +111,6 @@ impl Sequencer {
     ///
     /// The inverse of the batch framing in the sealer. A key that committed before a
     /// restart must still be refused after it, with the epoch it originally committed at.
-    pub fn recover_seen(recovery: &Recovery) -> std::collections::BTreeMap<String, u64> {
-        Self::recover_seen_checked(recovery).unwrap_or_default()
-    }
-
     /// The same, refusing a record whose envelope it cannot finish reading.
     pub fn recover_seen_checked(
         recovery: &Recovery,
@@ -177,9 +173,24 @@ impl Sequencer {
         }
         let (segment, recovery) = Segment::open(path, policy)?;
         let frontier = Frontier::new();
-        // The window comes back with the segment: a key that committed before a restart
-        // must still be refused after it.
-        let seen = Sequencer::recover_seen(&recovery);
+        // **The checked form, and the difference is a data-loss defect.** This called
+        // an unchecked wrapper that was `recover_seen_checked(..).unwrap_or_default()`: on any
+        // envelope the decoder refused, the window came back **empty** and a sequencer
+        // started with it, so every identity committed before the restart was new again and
+        // a retry committed a second time. The daemon survived only because a *later*
+        // checked replay returned `Err` and dropped the engine; every other caller of this
+        // function — the durability bench, the tests, `Sequencer::open` — got the empty
+        // window and no error at all (F-62, A9-F04).
+        let seen = Sequencer::recover_seen_checked(&recovery).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "the idempotency window cannot be rebuilt from this segment: {e}. \
+                     Opening with an empty window would let every identity that committed \
+                     before this restart commit again."
+                ),
+            )
+        })?;
         if let Some(head) = recovery.head() {
             frontier.seal(head + 1);
             frontier.publish(head + 1);
@@ -193,17 +204,13 @@ impl Sequencer {
     /// Every committed transaction, in commit order, as `(idempotency key, payload)`.
     ///
     /// The inverse of the sealer's batch framing, and the companion to
-    /// [`Sequencer::recover_seen`], which reads the same bytes for the keys alone.
+    /// [`Sequencer::recover_seen_checked`], which reads the same bytes for the keys alone.
     ///
     /// **One record is one batch and one batch is many transactions**, so a record's epoch is
     /// not a transaction's index: a caller replaying these onto its own log must count
     /// transactions, not records. That distinction is the whole reason this returns a flat
     /// sequence rather than a per-record structure, and getting it wrong would put every
     /// recovered row at the wrong epoch.
-    pub fn recover_txns(recovery: &Recovery) -> Vec<(String, Vec<u8>)> {
-        Self::recover_txns_checked(recovery).unwrap_or_default()
-    }
-
     /// The same, refusing a record whose envelope it cannot finish reading.
     ///
     /// **The checked form is what a restart must use.** `recover_txns` returns what it could
@@ -253,7 +260,21 @@ impl Sequencer {
                     payload.len()
                 ));
             }
-            let key = String::from_utf8_lossy(&payload[o..o + klen as usize]).into_owned();
+            // **Strict, not lossy.** `from_utf8_lossy` turned damaged identity bytes into
+            // replacement characters and carried on, so a corrupted key recovered as a
+            // *different, valid-looking* key: the retry it was supposed to refuse would then
+            // commit again (A9-F04). An identity that is not what was written is not an
+            // identity.
+            let key = match std::str::from_utf8(&payload[o..o + klen as usize]) {
+                Ok(k) => k.to_string(),
+                Err(e) => {
+                    return Err(format!(
+                        "transaction {i} of {count}: the idempotency key is not valid UTF-8 \
+                         ({e}); it was written as UTF-8, so these are not the bytes that were \
+                         written"
+                    ))
+                }
+            };
             o += klen as usize;
             let Some(plen) = read_u32(payload, &mut o) else {
                 return Err(format!(
@@ -270,6 +291,19 @@ impl Sequencer {
             }
             out.push((key, payload[o..o + plen as usize].to_vec()));
             o += plen as usize;
+        }
+        // **Every byte accounted for.** A count that stops short of the payload's end leaves
+        // bytes nobody claimed: either the count is wrong or the framing is, and in both
+        // cases the transactions recovered are not the transactions written. Accepting the
+        // prefix and ignoring the rest is the same silent-drop this function exists to
+        // refuse, one level up (A9-F04).
+        if o != payload.len() {
+            return Err(format!(
+                "the envelope declares {count} transaction(s) occupying {o} bytes of a \
+                 {}-byte payload; {} byte(s) are unaccounted for",
+                payload.len(),
+                payload.len() - o
+            ));
         }
         Ok(out)
     }
@@ -621,7 +655,7 @@ mod tests {
         let (segment, recovery) = Segment::open(p, policy).unwrap();
         // The window comes back with the segment: a restart must still refuse a key that
         // committed before it.
-        let seen = Sequencer::recover_seen(&recovery);
+        let seen = Sequencer::recover_seen_checked(&recovery).expect("the segment decodes");
         Sequencer::start_with_window(segment, Frontier::new(), policy, seen)
     }
 
@@ -947,7 +981,7 @@ mod window_tests {
     fn a_key_older_than_the_window_is_new_to_the_sealer() {
         let p = tmp("window");
         let (segment, recovery) = Segment::open(&p, SyncPolicy::Always).unwrap();
-        let seen = Sequencer::recover_seen(&recovery);
+        let seen = Sequencer::recover_seen_checked(&recovery).expect("the segment decodes");
         let s =
             Sequencer::start_bounded(segment, Frontier::new(), SyncPolicy::Always, seen, Some(4));
         for i in 0..10u64 {
@@ -993,7 +1027,7 @@ mod window_tests {
         {
             let p = tmp("boundary-one");
             let (segment, recovery) = Segment::open(&p, SyncPolicy::Always).unwrap();
-            let seen = Sequencer::recover_seen(&recovery);
+            let seen = Sequencer::recover_seen_checked(&recovery).expect("the segment decodes");
             let s = Sequencer::start_bounded(
                 segment,
                 Frontier::new(),
@@ -1195,7 +1229,7 @@ mod recovery_tests {
 
     /// **Recovery, in process — T-14.1.**
     ///
-    /// `open_recovered` and `recover_txns` are the two functions a restart depends on, and
+    /// `open_recovered` and `recover_txns_checked` are the two a restart depends on, and
     /// until now the only thing that exercised them end to end was the crash-protocol
     /// integration test: a spawned binary, a `psql` session, a `SIGKILL`, serial writers. A
     /// defect in the record walk would be found by a test that takes forty seconds and needs
@@ -1212,7 +1246,7 @@ mod recovery_tests {
             .collect();
         {
             let (segment, recovery) = Segment::open(&p, SyncPolicy::Always).unwrap();
-            let seen = Sequencer::recover_seen(&recovery);
+            let seen = Sequencer::recover_seen_checked(&recovery).expect("the segment decodes");
             let s =
                 Sequencer::start_with_window(segment, Frontier::new(), SyncPolicy::Always, seen);
             for (k, payload) in &sent {
@@ -1225,7 +1259,7 @@ mod recovery_tests {
             s.shutdown();
         }
         let (_segment, recovery) = Segment::open(&p, SyncPolicy::Always).unwrap();
-        let back = Sequencer::recover_txns(&recovery);
+        let back = Sequencer::recover_txns_checked(&recovery).expect("the segment decodes");
         assert_eq!(
             back, sent,
             "a reopened segment must return every transaction, with its payload, in the order \
@@ -1233,7 +1267,7 @@ mod recovery_tests {
              prefix and asserts each lands at `seed_epochs + k`, so a decoder that returned the \
              right set in the wrong order would rebuild a ledger nobody wrote."
         );
-        let window = Sequencer::recover_seen(&recovery);
+        let window = Sequencer::recover_seen_checked(&recovery).expect("the segment decodes");
         assert_eq!(
             window.len(),
             sent.len(),
@@ -1266,7 +1300,7 @@ mod recovery_tests {
     fn eight_concurrent_submitters_all_commit_and_at_least_one_batch_is_shared() {
         let p = tmp("concurrent-submit");
         let (segment, recovery) = Segment::open(&p, SyncPolicy::Every(8)).unwrap();
-        let seen = Sequencer::recover_seen(&recovery);
+        let seen = Sequencer::recover_seen_checked(&recovery).expect("the segment decodes");
         let s = std::sync::Arc::new(Sequencer::start_with_window(
             segment,
             Frontier::new(),

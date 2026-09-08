@@ -773,6 +773,49 @@ concurrency rises — 5.7× at one thread, 4.8× at sixteen — with transaction
 tampering and splicing. **Status: Built** — `nilestream-ledger`, CRC-checked, hash-chained,
 length-prefixed segments.
 
+#### The record, and the three things recovery can conclude
+
+A record is, little-endian:
+
+```
+len: u32 | len_check: u32 | batch_seq: u64 | parent: [u8;32] | hash: [u8;32] | payload | crc: u32
+```
+
+`len_check = !len ^ 0xA5A5_A5A5`, and it is the version marker as well as the check: a segment
+written before cycle 9 has the batch sequence number's low four bytes where the check belongs,
+fails it, and is refused by name rather than misread. `crc` covers the body — everything after
+the eight-byte header — and `hash` is the chain link over `parent ‖ batch_seq ‖ payload`.
+`batch_seq` is the record's sequence number in this segment and **not** a ledger epoch: one
+record is a batch of up to 4,096 transactions, and reading it as an epoch is how two
+idempotency windows came to count different things (A9-F02).
+
+Recovery classifies the first thing it cannot read into exactly one of three, and the
+classification decides what may be discarded:
+
+| what it found | what it means | what happens |
+|---|---|---|
+| fewer than 8 bytes of header, or a body that runs past the end of a validated length | a crash caught mid-write | trimmed: a torn tail, and nothing beyond it can exist |
+| a header whose `len_check` fails | **damage** — the length says nothing | refused, and nothing is truncated, unless fewer bytes remain than the smallest possible record (84), in which case no committed record can be among them and the tail is trimmed |
+| a bad `crc`, an out-of-order `batch_seq`, or a broken chain link, with further bytes behind it | damage in the middle | refused, and nothing is truncated |
+
+The middle row is the one that was missing. The checksum does not cover the length, so a single
+flipped bit in a length prefix made the record look longer than the file; that was classified as
+a short tail, the damaged prefix was then asked whether anything followed it, and its own
+corrupted answer said no. A ten-record segment with one bit flipped in record zero reopened
+**empty, with a success code** — ten acknowledged, fsynced epochs discarded. The corpus in
+`crates/nilestream-ledger/tests/torn_corpus.rs` is exhaustive over every byte offset and every
+bit of a ten-record fixture and asserts the property directly: *refuse, or recover exactly what
+was acknowledged; never a prefix with a success code.*
+
+**`LC-36` / `BLOCKED-recovery-tip`.** One class remains and cannot be closed from inside the
+file. Damage to the **last** record is indistinguishable from a crash during its write: both
+leave a record that does not verify with nothing after it, and trimming is the correct response
+to one and data loss under the other. 856 of the corpus's 8,840 single-bit flips fall in that
+record and are trimmed. Deciding them needs something the segment does not contain — a
+clean-close marker written at shutdown, or a tip retained outside the segment and compared on
+open. Which of those, and what an operator does when they disagree, is the author's contract to
+give; until then the corpus asserts the boundary rather than pretending it is closed.
+
 ---
 
 ## Part V — The four workloads, simultaneously

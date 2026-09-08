@@ -51,17 +51,26 @@ pub enum SyncPolicy {
 
 /// One record on disk.
 ///
-/// Layout, little-endian: `len: u32 | batch_seq: u64 | parent: [u8;32] | hash: [u8;32] |
-/// payload: [u8; len - 72] | crc: u32`. The length prefix comes first so a truncated tail
-/// is detectable without parsing.
+/// Layout, little-endian: `len: u32 | len_check: u32 | batch_seq: u64 | parent: [u8;32] |
+/// hash: [u8;32] | payload: [u8; len - 72] | crc: u32`. The length prefix comes first so a
+/// truncated tail is detectable without parsing.
 ///
-/// The checksum covers the **body** — everything after the length prefix — and not the
-/// prefix itself. That is deliberate and it is the honest statement: the prefix is
-/// protected instead by the fact that a wrong length makes the record either overrun the
-/// file (caught as `ShortTail`) or misalign the body (caught as a checksum failure). The
-/// doc comment previously said "covers everything", which was simply false, and on an
-/// audit artefact the difference between "everything" and "everything after the first
-/// four bytes" is the sort of thing a reader is entitled to have stated correctly.
+/// **The header checks itself, and it did not.** The checksum covers the body — everything
+/// after the length — and the old comment argued that the prefix needed no protection of its
+/// own, because a wrong length would either overrun the file (`ShortTail`) or misalign the
+/// body (a checksum failure). The first half of that is exactly the hole. A flipped bit that
+/// makes the length *larger* than the file overruns it, `recover` calls that a short tail,
+/// `Segment::open` asks the damaged prefix itself whether anything follows, and — since the
+/// corrupted length says the record extends past the end — concludes the damage is the tail,
+/// truncates to the previous record and opens cleanly. A ten-record segment with one bit
+/// flipped in record zero's prefix reopened **empty, with a success code**: ten acknowledged,
+/// fsynced epochs discarded. Cycle 9's corpus found 216 such flips out of 8,840 (F-61).
+///
+/// `len_check = !len ^ 0xA5A5_A5A5` makes the eight-byte header verify itself, so a damaged
+/// length is *damage* and never a tail. A crash that tears inside the header leaves fewer
+/// than eight bytes, which is a tail and still classified as one; a torn write that produces
+/// a self-consistent pair of four-byte words is a 2^-32 event and is not one this format
+/// pretends to survive.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Record {
     /// **The record's sequence number in this segment — not a ledger epoch.**
@@ -78,6 +87,27 @@ pub struct Record {
 }
 
 const HEADER: usize = 8 + 32 + 32;
+
+/// The self-check written beside the length: `!len ^ MASK`.
+///
+/// Two operations rather than one so that the common damage patterns — a zeroed word, a
+/// copied word, a single flipped bit — all break it. A plain copy of the length would be
+/// defeated by a memory-set to zero, which is what a short write onto a sparse file leaves.
+const LEN_CHECK_MASK: u32 = 0xA5A5_A5A5;
+
+/// Bytes before the body: the length and its check.
+const LEN_PREFIX: usize = 8;
+
+/// The smallest a whole record can be: header, an empty payload, and the checksum.
+///
+/// Used for one decision only, and it is the one that keeps a damaged header from being able
+/// to discard history: fewer bytes than this after the damage means no committed record can
+/// be among them, so trimming loses nothing.
+const MIN_RECORD: usize = LEN_PREFIX + HEADER + 4;
+
+fn len_check(len: u32) -> u32 {
+    !len ^ LEN_CHECK_MASK
+}
 
 impl Record {
     /// The chain link: `h_e = H(h_{e-1} || canon(payload))`.
@@ -100,13 +130,14 @@ impl Record {
 
     fn encode(&self) -> Vec<u8> {
         let body_len = HEADER + self.payload.len();
-        let mut out = Vec::with_capacity(4 + body_len + 4);
+        let mut out = Vec::with_capacity(LEN_PREFIX + body_len + 4);
         out.extend_from_slice(&(body_len as u32).to_le_bytes());
+        out.extend_from_slice(&len_check(body_len as u32).to_le_bytes());
         out.extend_from_slice(&self.batch_seq.to_le_bytes());
         out.extend_from_slice(&self.parent);
         out.extend_from_slice(&self.hash);
         out.extend_from_slice(&self.payload);
-        out.extend_from_slice(&crc32(&out[4..]).to_le_bytes());
+        out.extend_from_slice(&crc32(&out[LEN_PREFIX..]).to_le_bytes());
         out
     }
 }
@@ -118,6 +149,12 @@ pub enum TruncationCause {
     CleanEnd,
     /// The tail is shorter than its own length prefix says: a crash mid-write.
     ShortTail { at_offset: u64 },
+    /// **The eight-byte header does not check out: the length is damaged.**
+    ///
+    /// Never a tail, whatever the damaged length claims about how far the record extends.
+    /// This is the case that used to be classified as `ShortTail` and repaired by discarding
+    /// everything from here on (F-61).
+    BadHeader { at_offset: u64 },
     /// The checksum failed: the record is damaged or half-written.
     BadChecksum { batch_seq: u64, at_offset: u64 },
     /// The chain link does not follow from the previous record. Corruption, or an attempt
@@ -195,17 +232,52 @@ impl Segment {
         let valid_len: u64 = recovery
             .records
             .iter()
-            .map(|r| (4 + HEADER + r.payload.len() + 4) as u64)
+            .map(|r| (LEN_PREFIX + HEADER + r.payload.len() + 4) as u64)
             .sum();
         if !matches!(recovery.cause, TruncationCause::CleanEnd) {
             let file_len = std::fs::metadata(&path)?.len();
             let damaged_from = valid_len;
-            // How long the damaged record *claims* to be, read from its own length
-            // prefix. Bytes beyond that are a further record, so the damage is not at
+            // **A damaged header is never a tail.** The old code asked the damaged prefix
+            // itself how far the record extended and believed the answer: a flipped bit that
+            // enlarged the length past the end of the file made every remaining record
+            // "the tail", and `set_len` discarded them (F-61). A header that fails its own
+            // check tells us nothing about what follows, so nothing may be discarded on its
+            // word.
+            if matches!(recovery.cause, TruncationCause::BadHeader { .. }) {
+                // A damaged header says nothing about how far its record extends, so the
+                // bytes from here to the end are unclassifiable. Exactly one thing can still
+                // be decided about them, and it is decided from the file's own length rather
+                // than from the damaged word: **if fewer bytes remain than the smallest
+                // possible record, no committed record can be among them.** Trimming is then
+                // safe — that is a torn write or an unwritten block at the tail. Otherwise a
+                // whole record could be in there, and discarding it would be the loss F-61
+                // is about.
+                let unclassifiable = file_len.saturating_sub(damaged_from);
+                if unclassifiable >= MIN_RECORD as u64 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "segment {} has a damaged record header at offset \
+                             {damaged_from}: its length does not match its own check word. \
+                             That is corruption, not a torn write, and the {unclassifiable} \
+                             byte(s) after it are enough to hold a committed record — \
+                             refusing to open, and truncating nothing. A ledger does not \
+                             repair itself by forgetting. (If this segment was written \
+                             before cycle 9 its records carry no check word, and this is \
+                             what the older format looks like from here; convert it rather \
+                             than opening it.)",
+                            path.display()
+                        ),
+                    ));
+                }
+            }
+            // How long the damaged record *claims* to be, read from its own — validated —
+            // length prefix. Bytes beyond that are a further record, so the damage is not at
             // the tail and truncating to `valid_len` would discard committed epochs.
             let declared = declared_record_len(&path, damaged_from)?;
             let is_tail = match declared {
-                // The length prefix itself is unreadable: nothing can follow.
+                // The length prefix itself is unreadable or does not check out: nothing can
+                // be concluded, and `BadHeader` above has already refused that case.
                 None => true,
                 Some(n) => file_len <= damaged_from.saturating_add(n),
             };
@@ -341,12 +413,18 @@ fn declared_record_len(path: &Path, offset: u64) -> std::io::Result<Option<u64>>
     if f.seek(SeekFrom::Start(offset)).is_err() {
         return Ok(None);
     }
-    let mut len_buf = [0u8; 4];
-    if f.read_exact(&mut len_buf).is_err() {
+    let mut head_buf = [0u8; LEN_PREFIX];
+    if f.read_exact(&mut head_buf).is_err() {
         return Ok(None);
     }
-    let body = u32::from_le_bytes(len_buf) as u64;
-    Ok(Some(4 + body + 4))
+    let body = u32::from_le_bytes(head_buf[0..4].try_into().unwrap());
+    let check = u32::from_le_bytes(head_buf[4..8].try_into().unwrap());
+    // A length that does not check out says nothing about the file's shape, and answering
+    // with it is how a damaged prefix used to nominate itself as the tail (F-61).
+    if check != len_check(body) {
+        return Ok(None);
+    }
+    Ok(Some(LEN_PREFIX as u64 + body as u64 + 4))
 }
 
 /// Read a segment forward, validating as it goes, and stop at the first failure.
@@ -360,12 +438,12 @@ pub fn recover(path: impl AsRef<Path>) -> std::io::Result<Recovery> {
     let mut expected_seq = 0u64;
 
     let cause = loop {
-        let mut len_buf = [0u8; 4];
-        match r.read_exact(&mut len_buf) {
+        let mut head_buf = [0u8; LEN_PREFIX];
+        match r.read_exact(&mut head_buf) {
             Ok(()) => {}
             // `UnexpectedEof` at a record boundary with nothing read is the clean end.
-            // *Anything else* is not: a one-, two- or three-byte tail is a crash caught
-            // mid-length-prefix, and a real I/O error is a failing disk. Mapping both to
+            // *Anything else* is not: a one- to seven-byte tail is a crash caught
+            // mid-header, and a real I/O error is a failing disk. Mapping both to
             // "clean" reported `was_clean = true` on a torn file and made a device error
             // indistinguishable from a tidy shutdown.
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof && offset == total => {
@@ -376,8 +454,17 @@ pub fn recover(path: impl AsRef<Path>) -> std::io::Result<Recovery> {
             }
             Err(e) => return Err(e),
         };
-        let body_len = u32::from_le_bytes(len_buf) as usize;
-        if body_len < HEADER || (offset + 4 + body_len as u64 + 4) > total {
+        let declared = u32::from_le_bytes(head_buf[0..4].try_into().unwrap());
+        let check = u32::from_le_bytes(head_buf[4..8].try_into().unwrap());
+        // **The header verifies itself before anything is believed about it.** A damaged
+        // length is damage, and it must never be able to describe itself as a tail — which
+        // is what it did when the only test of a length was whether the file was long
+        // enough to satisfy it (F-61).
+        if check != len_check(declared) {
+            break TruncationCause::BadHeader { at_offset: offset };
+        }
+        let body_len = declared as usize;
+        if body_len < HEADER || (offset + LEN_PREFIX as u64 + body_len as u64 + 4) > total {
             break TruncationCause::ShortTail { at_offset: offset };
         }
         let mut body = vec![0u8; body_len];
@@ -421,7 +508,7 @@ pub fn recover(path: impl AsRef<Path>) -> std::io::Result<Recovery> {
 
         parent = rec_hash;
         expected_seq = batch_seq + 1;
-        offset += 4 + body_len as u64 + 4;
+        offset += LEN_PREFIX as u64 + body_len as u64 + 4;
         records.push(Record {
             batch_seq,
             parent: rec_parent,
@@ -578,7 +665,7 @@ mod tests {
         }
         let mut bytes = std::fs::read(&p).unwrap();
         // Flip a payload byte deep inside the file, in epoch 2's record.
-        let idx = 4 + HEADER + 4 + (4 + HEADER + 16 + 4) * 2;
+        let idx = LEN_PREFIX + HEADER + 4 + (LEN_PREFIX + HEADER + 16 + 4) * 2;
         bytes[idx] ^= 0xFF;
         std::fs::write(&p, &bytes).unwrap();
 
@@ -612,13 +699,14 @@ mod tests {
             }
         }
         let mut bytes = std::fs::read(&p).unwrap();
-        let rec_size = 4 + HEADER + 8 + 4;
-        // Rewrite epoch 1's payload and repair its CRC, leaving its stated hash alone.
+        let rec_size = LEN_PREFIX + HEADER + 8 + 4;
+        // Rewrite record 1's payload and repair its CRC, leaving its stated hash alone.
         let start = rec_size;
-        bytes[start + 4 + HEADER] = 0xAA;
-        let body: Vec<u8> = bytes[start + 4..start + 4 + HEADER + 8].to_vec();
+        bytes[start + LEN_PREFIX + HEADER] = 0xAA;
+        let body: Vec<u8> = bytes[start + LEN_PREFIX..start + LEN_PREFIX + HEADER + 8].to_vec();
         let crc = crc32(&body);
-        bytes[start + 4 + HEADER + 8..start + rec_size].copy_from_slice(&crc.to_le_bytes());
+        bytes[start + LEN_PREFIX + HEADER + 8..start + rec_size]
+            .copy_from_slice(&crc.to_le_bytes());
         std::fs::write(&p, &bytes).unwrap();
 
         let rec = recover(&p).unwrap();
@@ -714,7 +802,7 @@ mod durability_tests {
         let before = std::fs::metadata(&p).unwrap().len();
 
         let mut bytes = std::fs::read(&p).unwrap();
-        let payload_byte = 4 + HEADER + 1;
+        let payload_byte = LEN_PREFIX + HEADER + 1;
         bytes[payload_byte] ^= 0xFF;
         std::fs::write(&p, &bytes).unwrap();
 

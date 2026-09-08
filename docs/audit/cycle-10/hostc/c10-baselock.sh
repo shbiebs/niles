@@ -470,8 +470,17 @@ build_arm() {
   wt="$OUT/wt-$arm"
   check_worktree_at "$wt" "$sha" || return 1
   if [ ! -d "$wt" ]; then
-    git -C "$REPO" worktree add --detach "$wt" "$sha" >/dev/null 2>&1 || {
-      note "  could not create the worktree for $arm at $sha"; return 1; }
+    # **Prune first.** A previous run's output directory deleted by hand leaves the worktree
+    # still registered in the repository, and `git worktree add` then refuses a path it
+    # considers taken — which this reported as "could not create the worktree", a message
+    # that names the symptom and hides the cause. Pruning removes exactly the registrations
+    # whose directories are gone and touches nothing that exists.
+    git -C "$REPO" worktree prune >/dev/null 2>&1
+    if ! add_err="$(git -C "$REPO" worktree add --detach "$wt" "$sha" 2>&1)"; then
+      note "  could not create the worktree for $arm at $sha; git said:"
+      printf '%s\n' "$add_err" | sed 's/^/    /'
+      return 1
+    fi
   fi
   ( cd "$wt" && RUSTUP_TOOLCHAIN=stable RUSTUP_AUTO_INSTALL=0 CARGO_NET_OFFLINE=true \
       cargo build --offline --release -p nilestream-server -p bank-bench >"$OUT/build-$arm.log" 2>&1 ) || {

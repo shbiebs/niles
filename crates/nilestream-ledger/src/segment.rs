@@ -51,7 +51,7 @@ pub enum SyncPolicy {
 
 /// One record on disk.
 ///
-/// Layout, little-endian: `len: u32 | epoch: u64 | parent: [u8;32] | hash: [u8;32] |
+/// Layout, little-endian: `len: u32 | batch_seq: u64 | parent: [u8;32] | hash: [u8;32] |
 /// payload: [u8; len - 72] | crc: u32`. The length prefix comes first so a truncated tail
 /// is detectable without parsing.
 ///
@@ -64,7 +64,14 @@ pub enum SyncPolicy {
 /// four bytes" is the sort of thing a reader is entitled to have stated correctly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Record {
-    pub epoch: u64,
+    /// **The record's sequence number in this segment — not a ledger epoch.**
+    ///
+    /// It was called `epoch`, and the two coordinates were then read as one: a record is a
+    /// *batch* and a batch is up to 4,096 transactions, while the base assigns one epoch per
+    /// transaction. Bounding the sealer's idempotency window by this number, under a
+    /// declaration written in epochs, made the window between one and four thousand times
+    /// wider than the base's (A9-F02). The name says which coordinate it is.
+    pub batch_seq: u64,
     pub parent: [u8; 32],
     pub hash: [u8; 32],
     pub payload: Vec<u8>,
@@ -78,13 +85,13 @@ impl Record {
     /// Computed here rather than taken on trust, so that a caller cannot append a record
     /// whose hash does not follow from its parent. That is what makes the chain evidence
     /// rather than decoration.
-    pub fn seal(epoch: u64, parent: [u8; 32], payload: Vec<u8>) -> Record {
+    pub fn seal(batch_seq: u64, parent: [u8; 32], payload: Vec<u8>) -> Record {
         let mut h = Hasher256::new();
         h.update(&parent);
-        h.update(&epoch.to_le_bytes());
+        h.update(&batch_seq.to_le_bytes());
         h.update(&payload);
         Record {
-            epoch,
+            batch_seq,
             parent,
             hash: h.finalize(),
             payload,
@@ -95,7 +102,7 @@ impl Record {
         let body_len = HEADER + self.payload.len();
         let mut out = Vec::with_capacity(4 + body_len + 4);
         out.extend_from_slice(&(body_len as u32).to_le_bytes());
-        out.extend_from_slice(&self.epoch.to_le_bytes());
+        out.extend_from_slice(&self.batch_seq.to_le_bytes());
         out.extend_from_slice(&self.parent);
         out.extend_from_slice(&self.hash);
         out.extend_from_slice(&self.payload);
@@ -112,10 +119,10 @@ pub enum TruncationCause {
     /// The tail is shorter than its own length prefix says: a crash mid-write.
     ShortTail { at_offset: u64 },
     /// The checksum failed: the record is damaged or half-written.
-    BadChecksum { epoch: u64, at_offset: u64 },
+    BadChecksum { batch_seq: u64, at_offset: u64 },
     /// The chain link does not follow from the previous record. Corruption, or an attempt
     /// to splice history. Either way, nothing after it may be read.
-    BrokenChain { epoch: u64, at_offset: u64 },
+    BrokenChain { batch_seq: u64, at_offset: u64 },
     /// Epochs are out of order.
     OutOfOrder { expected: u64, found: u64 },
 }
@@ -132,7 +139,7 @@ pub struct Recovery {
 
 impl Recovery {
     pub fn head(&self) -> Option<u64> {
-        self.records.last().map(|r| r.epoch)
+        self.records.last().map(|r| r.batch_seq)
     }
     pub fn head_hash(&self) -> [u8; 32] {
         self.records.last().map(|r| r.hash).unwrap_or([0u8; 32])
@@ -150,7 +157,7 @@ pub struct Segment {
     policy: SyncPolicy,
     since_sync: u32,
     head_hash: [u8; 32],
-    next_epoch: u64,
+    next_batch_seq: u64,
     /// How many fsyncs this segment has performed. The cost of the guarantee, counted.
     pub fsyncs: u64,
     pub bytes_written: u64,
@@ -249,7 +256,7 @@ impl Segment {
         }
 
         let head_hash = recovery.head_hash();
-        let next_epoch = recovery.head().map_or(0, |e| e + 1);
+        let next_batch_seq = recovery.head().map_or(0, |e| e + 1);
         Ok((
             Segment {
                 path,
@@ -257,7 +264,7 @@ impl Segment {
                 policy,
                 since_sync: 0,
                 head_hash,
-                next_epoch,
+                next_batch_seq,
                 fsyncs: 0,
                 bytes_written: valid_len,
             },
@@ -268,8 +275,9 @@ impl Segment {
     pub fn head_hash(&self) -> [u8; 32] {
         self.head_hash
     }
-    pub fn next_epoch(&self) -> u64 {
-        self.next_epoch
+    /// The sequence number the next record will carry.
+    pub fn next_batch_seq(&self) -> u64 {
+        self.next_batch_seq
     }
     pub fn path(&self) -> &Path {
         &self.path
@@ -282,7 +290,7 @@ impl Segment {
     /// callback: the ordering is the guarantee, and making it the caller's obligation in
     /// code is more honest than burying it in a comment.
     pub fn append(&mut self, payload: Vec<u8>) -> std::io::Result<Record> {
-        let rec = Record::seal(self.next_epoch, self.head_hash, payload);
+        let rec = Record::seal(self.next_batch_seq, self.head_hash, payload);
         let bytes = rec.encode();
         // A partial write must not be left in place. `write_all` can fail after writing
         // some bytes — ENOSPC is the ordinary way — and the previous behaviour was to
@@ -308,7 +316,7 @@ impl Segment {
             self.since_sync = 0;
         }
         self.head_hash = rec.hash;
-        self.next_epoch += 1;
+        self.next_batch_seq += 1;
         Ok(rec)
     }
 
@@ -349,7 +357,7 @@ pub fn recover(path: impl AsRef<Path>) -> std::io::Result<Recovery> {
     let mut records: Vec<Record> = Vec::new();
     let mut offset = 0u64;
     let mut parent = [0u8; 32];
-    let mut expected_epoch = 0u64;
+    let mut expected_seq = 0u64;
 
     let cause = loop {
         let mut len_buf = [0u8; 4];
@@ -380,12 +388,12 @@ pub fn recover(path: impl AsRef<Path>) -> std::io::Result<Recovery> {
         if r.read_exact(&mut crc_buf).is_err() {
             break TruncationCause::ShortTail { at_offset: offset };
         }
-        let epoch = u64::from_le_bytes(body[0..8].try_into().unwrap());
+        let batch_seq = u64::from_le_bytes(body[0..8].try_into().unwrap());
         let mut with_len = Vec::with_capacity(body.len());
         with_len.extend_from_slice(&body);
         if crc32(&with_len) != u32::from_le_bytes(crc_buf) {
             break TruncationCause::BadChecksum {
-                epoch,
+                batch_seq,
                 at_offset: offset,
             };
         }
@@ -395,27 +403,27 @@ pub fn recover(path: impl AsRef<Path>) -> std::io::Result<Recovery> {
         rec_hash.copy_from_slice(&body[40..72]);
         let payload = body[72..].to_vec();
 
-        if epoch != expected_epoch {
+        if batch_seq != expected_seq {
             break TruncationCause::OutOfOrder {
-                expected: expected_epoch,
-                found: epoch,
+                expected: expected_seq,
+                found: batch_seq,
             };
         }
         // Recompute the link. A record whose stated hash does not follow from its parent is
         // either damaged or spliced, and in a ledger those are the same problem.
-        let recomputed = Record::seal(epoch, parent, payload.clone());
+        let recomputed = Record::seal(batch_seq, parent, payload.clone());
         if rec_parent != parent || recomputed.hash != rec_hash {
             break TruncationCause::BrokenChain {
-                epoch,
+                batch_seq,
                 at_offset: offset,
             };
         }
 
         parent = rec_hash;
-        expected_epoch = epoch + 1;
+        expected_seq = batch_seq + 1;
         offset += 4 + body_len as u64 + 4;
         records.push(Record {
-            epoch,
+            batch_seq,
             parent: rec_parent,
             hash: rec_hash,
             payload,
@@ -483,7 +491,7 @@ mod tests {
         assert!(rec.was_clean());
         assert_eq!(rec.head(), Some(4));
         assert_eq!(
-            s.next_epoch(),
+            s.next_batch_seq(),
             5,
             "reopening continues the chain, it does not restart it"
         );
@@ -504,7 +512,7 @@ mod tests {
             assert_eq!(
                 w[1].parent, w[0].hash,
                 "epoch {} does not link to {}",
-                w[1].epoch, w[0].epoch
+                w[1].batch_seq, w[0].batch_seq
             );
         }
         assert_eq!(
@@ -544,7 +552,7 @@ mod tests {
         // Reopening truncates the damage and continues cleanly from the surviving head.
         let (mut s, rec2) = Segment::open(&p, SyncPolicy::Always).unwrap();
         assert_eq!(rec2.records.len(), 5);
-        assert_eq!(s.next_epoch(), 5);
+        assert_eq!(s.next_batch_seq(), 5);
         s.append(vec![99]).unwrap();
         let rec3 = recover(&p).unwrap();
         assert_eq!(rec3.records.len(), 6);
@@ -615,7 +623,7 @@ mod tests {
 
         let rec = recover(&p).unwrap();
         assert!(
-            matches!(rec.cause, TruncationCause::BrokenChain { epoch: 1, .. }),
+            matches!(rec.cause, TruncationCause::BrokenChain { batch_seq: 1, .. }),
             "{:?}",
             rec.cause
         );
@@ -783,7 +791,7 @@ mod durability_tests {
             "the new epoch follows the old three"
         );
         for (i, r) in after.records.iter().enumerate() {
-            assert_eq!(r.epoch, i as u64, "epochs must be contiguous");
+            assert_eq!(r.batch_seq, i as u64, "epochs must be contiguous");
         }
     }
 

@@ -121,9 +121,11 @@ impl Sequencer {
     ) -> Result<std::collections::BTreeMap<String, u64>, String> {
         let mut seen = std::collections::BTreeMap::new();
         for rec in &recovery.records {
-            let epoch = rec.epoch + 1; // epochs are 1-based on the frontier
+            // The frontier's epoch for this record. The record's own number is a *batch*
+            // sequence number; this is the visibility coordinate, 1-based.
+            let epoch = rec.batch_seq + 1;
             for (key, _) in Self::decode_envelope(&rec.payload)
-                .map_err(|e| format!("segment record {}: {e}", rec.epoch))?
+                .map_err(|e| format!("segment record {}: {e}", rec.batch_seq))?
             {
                 seen.insert(key, epoch);
             }
@@ -212,7 +214,7 @@ impl Sequencer {
         for rec in &recovery.records {
             out.extend(
                 Self::decode_envelope(&rec.payload)
-                    .map_err(|e| format!("segment record {}: {e}", rec.epoch))?,
+                    .map_err(|e| format!("segment record {}: {e}", rec.batch_seq))?,
             );
         }
         Ok(out)
@@ -298,9 +300,16 @@ impl Sequencer {
     ///
     /// **Epochs, not days**: an epoch carries no wall clock, and putting a timestamp under
     /// the chain hash would make every committed hash time-dependent (LC-28, decided by the
-    /// author, cycle 8). A batch commits as one epoch here, so unlike the ledger's window
-    /// this one holds *at least* `window` epochs' worth of identities and not a fixed count:
-    /// the bound is on age, which is what the declaration says.
+    /// author, cycle 8).
+    ///
+    /// **And transactions, not batches.** A batch is one segment record and can hold up to
+    /// 4,096 transactions, so pruning by the record's sequence number — which this did until
+    /// cycle 9 — bounded the window somewhere between `window` and 4,096·`window` identities
+    /// while the base's admission index bounded itself at exactly `window` transactions. One
+    /// declaration, two units, and a retry in the gap was new to admission and a duplicate
+    /// here: an applied transaction with no acknowledgement (A9-F02). The bound is the count
+    /// of transactions now, which is what one epoch means in the base and what the column's
+    /// `N.epochs` has meant since LC-28.
     pub fn start_bounded(
         segment: Segment,
         frontier: Arc<Frontier>,
@@ -427,7 +436,10 @@ impl Sequencer {
 
                 match segment.append(payload) {
                     Ok(rec) => {
-                        let epoch = rec.epoch + 1; // epochs are 1-based on the frontier
+                        // The frontier's epoch for this record. The record's own number is
+                        // a *batch* sequence number; this is the visibility coordinate,
+                        // 1-based.
+                        let epoch = rec.batch_seq + 1;
                         f.seal(epoch);
                         // Force the epoch to stable storage before the frontier moves.
                         //
@@ -462,18 +474,29 @@ impl Sequencer {
                             seen.insert(std::sync::Arc::clone(&k), epoch);
                             order.push_back((k, epoch));
                         }
-                        // Prune what has fallen out of the window. An identity is dropped
-                        // when its epoch is `window` epochs behind the one just committed;
-                        // a retry older than that commits again, which is what a window is
-                        // and why the language makes it a declaration rather than a default.
+                        // **Prune by transactions, which is the unit the declaration means.**
+                        //
+                        // This dropped an identity when its *batch sequence number* was
+                        // `window` behind the batch just written. The base's admission index
+                        // (`proto_engine::Ledger::prune_idem`) bounds itself by the last
+                        // `window` **transactions**, and one transaction there is one epoch.
+                        // A batch here is one segment record holding up to 4,096
+                        // transactions, so the two structures called "the window" counted
+                        // different things under one declaration: for `window = W` the base
+                        // remembered W transactions and this remembered somewhere between W
+                        // and 4,096·W of them. A retry landing in the gap was *new* to
+                        // admission — applied to the base, an epoch sealed — and a
+                        // *duplicate* to the sink, which is an applied transaction that
+                        // cannot be acknowledged (A9-F02).
+                        //
+                        // `order` holds one entry per transaction, so bounding its length is
+                        // the same rule the base applies, in the same unit, and the two
+                        // windows now hold the same set.
                         if let Some(w) = window {
-                            while let Some((k, at)) = order.front() {
-                                if at.saturating_add(w.max(1)) <= epoch {
-                                    let k = std::sync::Arc::clone(k);
-                                    order.pop_front();
+                            let w = w.max(1) as usize;
+                            while order.len() > w {
+                                if let Some((k, _)) = order.pop_front() {
                                     seen.remove(&k);
-                                } else {
-                                    break;
                                 }
                             }
                         }
@@ -953,6 +976,128 @@ mod window_tests {
             "`k0` has aged out of the window, so the sealer no longer knows it committed"
         );
         let _ = std::fs::remove_file(&p);
+    }
+
+    /// **The window's boundary is the same transaction count on both sides — C9-02.3.**
+    ///
+    /// `W - 1`, `W`, `W + 1` transactions after an identity committed, with the batch size
+    /// forced to one and then to many. The rule is the base's: an identity is remembered iff
+    /// it is among the last `W` **transactions**. Under the old batch-sequence rule the
+    /// many-per-batch arm remembered every identity in the run, because ten batches of one
+    /// are ten sequence numbers and one batch of ten is one.
+    #[test]
+    fn the_window_holds_the_last_w_transactions_whatever_the_batch_size() {
+        const W: u64 = 4;
+
+        // Arm 1: one transaction per batch. Each `submit` waits, so the sealer drains one.
+        {
+            let p = tmp("boundary-one");
+            let (segment, recovery) = Segment::open(&p, SyncPolicy::Always).unwrap();
+            let seen = Sequencer::recover_seen(&recovery);
+            let s = Sequencer::start_bounded(
+                segment,
+                Frontier::new(),
+                SyncPolicy::Always,
+                seen,
+                Some(W),
+            );
+            s.submit(Txn {
+                idem_key: "target".into(),
+                payload: vec![0],
+            })
+            .expect("new");
+            // W - 1 further transactions: `target` is the W-th most recent, still inside.
+            for i in 0..(W - 1) {
+                s.submit(Txn {
+                    idem_key: format!("f{i}"),
+                    payload: vec![i as u8],
+                })
+                .expect("new");
+            }
+            assert!(
+                matches!(
+                    s.submit(Txn {
+                        idem_key: "target".into(),
+                        payload: vec![0]
+                    }),
+                    Err(Rejected::Duplicate { .. })
+                ),
+                "at W-1 further transactions the identity is the W-th most recent and inside \
+                 the window"
+            );
+            // One more distinct transaction pushes it out.
+            s.submit(Txn {
+                idem_key: "one-more".into(),
+                payload: vec![9],
+            })
+            .expect("new");
+            assert!(
+                s.submit(Txn {
+                    idem_key: "target".into(),
+                    payload: vec![0]
+                })
+                .is_ok(),
+                "at W further transactions the identity has aged out and is new again"
+            );
+            s.shutdown();
+            let _ = std::fs::remove_file(&p);
+        }
+
+        // Arm 2: many transactions per batch, queued behind the gate so the drain takes them
+        // all at once. Under the batch-sequence rule this whole run was one sequence number
+        // and nothing ever aged out.
+        {
+            let p = tmp("boundary-batch");
+            let (segment, _rec) = Segment::open(&p, SyncPolicy::Always).unwrap();
+            let gate = Arc::new(std::sync::Barrier::new(2));
+            let s = Sequencer::start_gated(
+                segment,
+                Frontier::new(),
+                SyncPolicy::Always,
+                Default::default(),
+                Some(W),
+                Some(Arc::clone(&gate)),
+            );
+            let mut waiting = Vec::new();
+            waiting.push(
+                s.submit_pending(Txn {
+                    idem_key: "target".into(),
+                    payload: vec![0],
+                })
+                .expect("queued"),
+            );
+            for i in 0..(W + 1) {
+                waiting.push(
+                    s.submit_pending(Txn {
+                        idem_key: format!("b{i}"),
+                        payload: vec![i as u8],
+                    })
+                    .expect("queued"),
+                );
+            }
+            gate.wait();
+            for rx in waiting {
+                rx.recv().expect("replied").expect("committed");
+            }
+            let st = s.stats();
+            assert!(
+                st.max_batch > 1,
+                "PRECONDITION UNMET: the gate did not produce a shared batch: {st:?}"
+            );
+            assert!(
+                s.submit(Txn {
+                    idem_key: "target".into(),
+                    payload: vec![0]
+                })
+                .is_ok(),
+                "W+1 transactions committed after `target`, so it is outside the window — \
+                 whether they arrived as one batch or as {} of them. Bounding by the batch \
+                 sequence number kept it forever.",
+                st.epochs_sealed
+            );
+            s.shutdown();
+            let _ = std::fs::remove_file(&p);
+        }
     }
 
     #[test]

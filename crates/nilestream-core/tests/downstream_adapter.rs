@@ -45,15 +45,35 @@ fn gbs_root() -> Option<PathBuf> {
 #[test]
 fn the_downstream_adapter_still_compiles_against_this_trees_public_traits() {
     let Some(gbs) = gbs_root() else {
-        // Skipped by name, with the reason in the transcript. Not a silent pass: a reader of
-        // the log can tell this check did not run, which is the whole difference between
-        // "the adapter is fine" and "nobody looked".
-        println!(
-            "SKIPPED: no GBS checkout found. Set GBS_ROOT, or place one at ../GBS beside this \
-             repository. This check is the only thing that notices when a change to a public \
-             trait breaks the adapter that implements it."
+        // **A missing GBS is a refusal, not a skip.**
+        //
+        // This printed `SKIPPED` and returned, so `cargo test` reported `ok`. A reader of a
+        // *transcript* could tell the check had not run; a reader of the gate could not, and
+        // the gate is what decides. That is precisely how the pair stayed broken for a whole
+        // cycle: this workspace never builds the adapter, GBS's own gate was not run, and
+        // both sides were green.
+        //
+        // Standalone development on a machine with no GBS checkout is a real need, so there
+        // is an opt-out — but it must be *asked for*, and what it produces is a NOT RUN
+        // line that the audit harness refuses to accept as a pass.
+        if std::env::var("NILES_NO_GBS").is_ok() {
+            println!(
+                "PAIRED ADAPTER GATE: NOT RUN (NILES_NO_GBS is set). This is an opt-out for \
+                 standalone development and it does not satisfy a paired audit gate. The \
+                 audit harness treats this line as a section that did not run."
+            );
+            return;
+        }
+        panic!(
+            "PAIRED ADAPTER GATE: no GBS checkout found, so the only check that notices when \
+             a change to a public trait breaks its out-of-tree implementor did not run — and \
+             a check that does not run must not report `ok`.\n\n\
+             Point it at one with `GBS_ROOT=/path/to/GBS`, or place a checkout at ../GBS \
+             beside this repository.\n\n\
+             To develop without one, set `NILES_NO_GBS=1`. That is an opt-out, not a pass: \
+             it prints a NOT RUN line and the audit harness refuses a transcript containing \
+             it."
         );
-        return;
     };
 
     // **By manifest path, not by `-p`.** `gbs-nilestream` is deliberately not a default

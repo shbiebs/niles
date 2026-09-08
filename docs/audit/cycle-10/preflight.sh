@@ -12,6 +12,12 @@
 # option and not storage, and every durability conclusion drawn there was void.
 
 set -u
+# **A section that did not run must not exit 0.** The barrier probe below can fail to run at
+# all — no `F_FULLFSYNC` on this Python, no `python3`, a barrier call that returns an error —
+# and each of those is a result that must reach the caller as a status, not only as a line in
+# a transcript somebody may skim. A preflight that exits 0 while its decisive section did not
+# run is a preflight that certifies nothing and says it certified everything.
+FAILED=0
 NILES="${1:-$(pwd)}"
 GBS="${2:-}"
 SCRATCH="$(mktemp -d)"
@@ -40,55 +46,123 @@ say "      divide the quota by the period — that, not nproc, is your core coun
 hdr "B. filesystem under the tree — THE decisive section"
 TARGET_FS_DIR="$NILES"
 say "path             : $TARGET_FS_DIR"
+
+# **The volume the tree is actually on, not the root volume.**
+#
+# This printed `mount | grep ' on / '` when `findmnt` was absent, which is every Mac. On
+# macOS that line describes the read-only system volume reached through a firmlink and says
+# nothing whatever about where `~/Documents/niles` lives or how it is mounted (A10-17). The
+# mount point comes from `df` on the path itself, and the options from the `mount` line for
+# *that* mount point.
 if command -v findmnt >/dev/null 2>&1; then
   findmnt -no SOURCE,FSTYPE,OPTIONS --target "$TARGET_FS_DIR" 2>/dev/null | sed 's/^/mount            : /'
 else
-  df -PT "$TARGET_FS_DIR" 2>/dev/null | tail -1 | sed 's/^/df               : /'
-  mount 2>/dev/null | grep -E ' on / | overlay|fuse' | head -3 | sed 's/^/mount            : /'
+  df -P "$TARGET_FS_DIR" 2>/dev/null | tail -1 | sed 's/^/df               : /'
+  FS_MOUNT="$(df -P "$TARGET_FS_DIR" 2>/dev/null | tail -1 | awk '{for (i=6; i<=NF; i++) printf "%s%s", $i, (i<NF ? " " : "")}')"
+  say "mount point      : ${FS_MOUNT:-<unknown>}"
+  if [ -n "${FS_MOUNT:-}" ]; then
+    mount 2>/dev/null | grep -F " on ${FS_MOUNT} " | head -2 | sed 's/^/mount            : /' \
+      || say "mount            : no mount line for ${FS_MOUNT} (report this rather than reading the root volume's)"
+  fi
 fi
 say "free space       : $(df -Ph "$TARGET_FS_DIR" 2>/dev/null | tail -1 | awk '{print $4" avail of "$2}')"
 say ""
-say "-- the barrier probe: 4 KiB write + fdatasync, 7 times, median reported"
+say "-- the barrier probe: 4 KiB write + a REAL barrier, 7 times, median reported"
 if command -v python3 >/dev/null 2>&1; then
   python3 - "$SCRATCH" <<'PY'
-import os, statistics, sys, time
+import os, platform, statistics, sys, time
+
 d = sys.argv[1]
 p = os.path.join(d, "barrier.probe")
+
+
+def barrier():
+    """The call that actually orders this write against a power cut, per platform.
+
+    **macOS `fsync` is not a barrier.** It pushes the page cache to the drive and returns
+    without waiting for the drive to commit its own write cache; the call that waits is
+    `fcntl(fd, F_FULLFSYNC)`. The earlier probe asked for `os.fdatasync`, got an
+    `AttributeError` on Darwin, fell back to `os.fsync` and reported the result as a barrier
+    rate — so every durability verdict this preflight produced on Host C described a call
+    that does not durably store anything (A10-17).
+
+    Availability is checked rather than assumed, and an unavailable barrier is reported as
+    such rather than substituted for.
+    """
+    if platform.system() == "Darwin":
+        import fcntl
+
+        if not hasattr(fcntl, "F_FULLFSYNC"):
+            return None, (
+                "this Python has no `fcntl.F_FULLFSYNC`, which is the only call on Darwin "
+                "that waits for the drive. `os.fsync` here returns before the data is "
+                "durable and would report a barrier rate for something that is not a "
+                "barrier."
+            )
+        return (lambda fd: fcntl.fcntl(fd, fcntl.F_FULLFSYNC)), "F_FULLFSYNC"
+    if hasattr(os, "fdatasync"):
+        return (lambda fd: os.fdatasync(fd)), "fdatasync"
+    return (lambda fd: os.fsync(fd)), "fsync"
+
+
+call, name = barrier()
+if call is None:
+    print("barrier          : UNAVAILABLE")
+    print(f"VERDICT          : NOT RUN — {name}")
+    print("                   No durability figure may be taken from this host until a")
+    print("                   Python with `fcntl.F_FULLFSYNC` is used. Report this section")
+    print("                   as not run; do not substitute `fsync`.")
+    sys.exit(3)
+
 fd = os.open(p, os.O_CREAT | os.O_WRONLY, 0o600)
 buf = b"x" * 4096
 us = []
-for i in range(7):
-    os.pwrite(fd, buf, 0)
-    t = time.perf_counter()
-    try:
-        os.fdatasync(fd)
-        name = "fdatasync"
-    except AttributeError:
-        os.fsync(fd)
-        name = "fsync"
-    us.append((time.perf_counter() - t) * 1e6)
-os.close(fd); os.unlink(p)
+try:
+    for _ in range(7):
+        os.pwrite(fd, buf, 0)
+        t = time.perf_counter()
+        call(fd)
+        us.append((time.perf_counter() - t) * 1e6)
+except OSError as e:
+    os.close(fd)
+    os.unlink(p)
+    print(f"barrier          : {name}")
+    print(f"VERDICT          : NOT RUN — the barrier call failed: {e}")
+    print("                   A failed barrier is not a fast barrier. Report this section")
+    print("                   as not run.")
+    sys.exit(3)
+os.close(fd)
+os.unlink(p)
+
 m = statistics.median(us)
 rate = 1e6 / m if m > 0 else float("inf")
+print(f"platform         : {platform.system()} {platform.machine()}")
 print(f"barrier          : {name}")
 print(f"median           : {m:.1f} us  ->  {rate:,.0f} barriers/s")
 print(f"spread           : {min(us):.1f}-{max(us):.1f} us")
 if rate > 100000:
     print("VERDICT          : *** NOT STORAGE EVIDENCE ***")
     print("                   A barrier this fast is a mount option, not a device. This")
-    print("                   container CANNOT produce any durability number. Every")
-    print("                   `durable` row measured here is void; say so in your work")
-    print("                   order and route those measurements to Host C.")
+    print("                   host CANNOT produce any durability number. Every `durable`")
+    print("                   row measured here is void; say so in your work order.")
 elif rate > 20000:
     print("VERDICT          : suspicious — verify the mount is not volatile before")
     print("                   publishing any durability figure.")
 else:
-    print("VERDICT          : plausible as a real barrier for THIS container. Still a")
+    print("VERDICT          : plausible as a real barrier for THIS host. Still a")
     print("                   host-shaped number: usable for within-host ratios only.")
 PY
+  BARRIER_RC=$?
+  if [ "$BARRIER_RC" -ne 0 ]; then
+    say ""
+    say "the barrier probe exited $BARRIER_RC and its status is preserved: this section did"
+    say "not run, and nothing here supports a durability claim."
+    FAILED=1
+  fi
 else
   say "python3 absent — cannot probe the barrier. Treat every durability number from this"
-  say "container as unusable until the probe runs."
+  say "host as unusable until the probe runs."
+  FAILED=1
 fi
 say ""
 say "reminder: \`make fsync-proof\` checks the syscall REACHES THE KERNEL. It passes on a"
@@ -245,4 +319,11 @@ say "  * Wall clock needs 2 warm-ups and >=5 measured runs, arms interleaved, me
 say "    range; a gate fires only on >=10% AND >=3x the pooled MAD, else 'noise-limited'."
 say "  * 'unsupported', 'blocked', 'not run', 'noise-limited' are RESULTS. Omission is not."
 say ""
+if [ "$FAILED" -ne 0 ]; then
+  say ""
+  say "PREFLIGHT INCOMPLETE: a section above did not run, and it is named there. This exits"
+  say "non-zero on purpose — the admissibility table cannot be filled in from this run."
+  say "preflight complete (with a section not run)."
+  exit 1
+fi
 say "preflight complete."

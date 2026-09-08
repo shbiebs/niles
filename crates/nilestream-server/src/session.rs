@@ -1026,6 +1026,18 @@ impl Session {
                     // counts (A10-08). `waiters_refused` is the *other* capacity refusal:
                     // reporting it under `flights_refused` is a refusal nobody can act on.
                     Field::int8("deferred_merges"),
+                    // The merge's price beside its count. A mechanism whose benefit is on the
+                    // wire and whose cost is not is one a reader cannot score.
+                    Field::int8("merge_rows_visited"),
+                    Field::int8("merge_epochs_merged"),
+                    // The arm, on the wire. The merging build and the pinned control are one
+                    // binary with a different value here, so a transcript that cannot name
+                    // its caps cannot prove which of the two it is.
+                    Field::int8("merge_max_epochs"),
+                    Field::int8("merge_max_rows"),
+                    Field::int8("merges_refused_epochs"),
+                    Field::int8("merges_refused_rows"),
+                    Field::int8("merges_refused_unavailable"),
                     Field::int8("waiters_refused"),
                     // How a join ended. A retried join is not an error and is not free.
                     Field::int8("joins_answered"),
@@ -1058,6 +1070,13 @@ impl Session {
                     Some(s.pinned_installs.to_string()),
                     Some(s.flights_refused.to_string()),
                     Some(s.deferred_merges.to_string()),
+                    Some(s.merge_rows_visited.to_string()),
+                    Some(s.merge_epochs_merged.to_string()),
+                    Some(s.merge_max_epochs.to_string()),
+                    Some(s.merge_max_rows.to_string()),
+                    Some(s.merges_refused_epochs.to_string()),
+                    Some(s.merges_refused_rows.to_string()),
+                    Some(s.merges_refused_unavailable.to_string()),
                     Some(s.waiters_refused.to_string()),
                     Some(s.joins_answered.to_string()),
                     Some(s.joins_retried.to_string()),
@@ -2919,6 +2938,13 @@ schema bank {
             // name; a dropped column renders as `n/a` rather than failing, so the name is
             // the contract and this list is where it is kept.
             "deferred_merges",
+            "merge_rows_visited",
+            "merge_epochs_merged",
+            "merge_max_epochs",
+            "merge_max_rows",
+            "merges_refused_epochs",
+            "merges_refused_rows",
+            "merges_refused_unavailable",
             "waiters_refused",
             "joins_answered",
             "joins_retried",

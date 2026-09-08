@@ -2511,7 +2511,7 @@ fn report_lockstats(port: u16, shape: &str) {
 /// delta for the same reason the fallback rate is: cumulative counters are dominated by
 /// whatever ran first and drift towards a constant, which is the opposite of what a
 /// connection sweep is asking.
-fn nls_flight_counters(port: u16) -> Option<[u64; 15]> {
+fn nls_flight_counters(port: u16) -> Option<[u64; 22]> {
     let mut c = bank_bench::wire::Client::connect("127.0.0.1", port, "bench", "bank").ok()?;
     let r = c.simple("select nilestream_stats").ok()?;
     let at = |name: &str| -> Option<u64> {
@@ -2539,10 +2539,17 @@ fn nls_flight_counters(port: u16) -> Option<[u64; 15]> {
         at("flights_that_fell_behind")?,
         at("gap_begin_samples")?,
         at("gap_finish_samples")?,
+        at("merge_rows_visited")?,
+        at("merge_epochs_merged")?,
+        at("merges_refused_epochs")?,
+        at("merges_refused_rows")?,
+        at("merges_refused_unavailable")?,
+        at("merge_max_epochs")?,
+        at("merge_max_rows")?,
     ])
 }
 
-fn report_flights(before: Option<[u64; 15]>, after: Option<[u64; 15]>, shape: &str) {
+fn report_flights(before: Option<[u64; 22]>, after: Option<[u64; 22]>, shape: &str) {
     // `n/a` and not zeroes: "no read joined a flight" and "this server does not report
     // flights" are different claims, and a build predating the two-phase read makes the
     // second one.
@@ -2556,6 +2563,41 @@ fn report_flights(before: Option<[u64; 15]>, after: Option<[u64; 15]>, shape: &s
          flights_refused {}, deferred_merges {}, waiters_refused {}",
         d[0], d[1], d[2], d[3], d[4], d[5]
     );
+    // **The merge, with its price and its refusals — never the count alone.**
+    //
+    // `deferred_merges` above says how many late landings installed current instead of
+    // pinning. On its own that is a benefit reported without a cost, which is the shape this
+    // project has already retired twice. The rows are what the merges actually walked; the
+    // three refusals are why the others did not, kept apart because an over-budget suffix is
+    // a tuning question, an unretained one a retention question, and merging switched off is
+    // neither. The caps are printed last because the merging build and the pinned control
+    // are the same binary and this line is what distinguishes them.
+    let (merges, rows, epochs) = (d[4], d[15], d[16]);
+    let (ref_e, ref_r, ref_u) = (d[17], d[18], d[19]);
+    let (cap_e, cap_r) = (a[20], a[21]);
+    let late = merges + ref_e + ref_r + ref_u;
+    eprintln!(
+        "    merge at {shape}: {merges} merged of {late} late landing(s){}; rows visited \
+         {rows}, epochs merged {epochs}; refused {ref_e} over-epochs, {ref_r} over-rows, \
+         {ref_u} unavailable; caps {cap_e} epochs / {cap_r} rows{}",
+        if late == 0 {
+            String::new()
+        } else {
+            format!(" ({:.1}%)", merges as f64 * 100.0 / late as f64)
+        },
+        if cap_e == 0 && cap_r == 0 {
+            "  [PINNED CONTROL: merging off]"
+        } else {
+            ""
+        }
+    );
+    if merges > 0 {
+        eprintln!(
+            "      per merge: {:.1} rows, {:.1} epochs",
+            rows as f64 / merges as f64,
+            epochs as f64 / merges as f64
+        );
+    }
     // **The joins, by how they ended.** `pending_joins` counts the reads that found a flight;
     // it says nothing about whether joining paid. A join answered shared another reader's
     // fold; a join retried woke to find that flight gone and folded anyway, which is the

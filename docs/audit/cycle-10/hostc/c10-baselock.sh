@@ -69,6 +69,7 @@ ROUNDS=8
 BUDGET_FULL=2500
 BUDGET_PARTIAL=400
 BASELINE_ONLY=0
+MERGE_ARMS=0
 NEUTRAL=1
 SELF_TEST=0
 PORT_BASE=6543
@@ -250,6 +251,33 @@ check_no_missing_fields() {
   return 0
 }
 
+# **In --merge-arms, a transcript must name the arm that produced it.**
+#
+# The merging build and the pinned control are one binary with two values of
+# NILESTREAM_MERGE_CAPS, which is what makes the comparison a comparison of one change. The
+# price of that is that nothing about the binary distinguishes the arms, so the *only* thing
+# that can is the caps the daemon reports back. A run whose log does not carry the merge line
+# is a run whose arm rests on the invocation having been typed correctly, and the whole point
+# of an ablation is not to have to trust that.
+check_merge_line() {
+  log="$1"; want="$2"
+  line="$(grep -m1 "  merge at " "$log" 2>/dev/null || true)"
+  if [ -z "$line" ]; then
+    note "REFUSED: this build does not report the merge counters, so its arm cannot be told"
+    note "         from the other one. Both arms would be labelled by the flag they were"
+    note "         given rather than by what the daemon did."
+    return 1
+  fi
+  caps="$(printf '%s\n' "$line" | sed -n 's/.*caps \([0-9]*\) epochs \/ \([0-9]*\) rows.*/\1:\2/p')"
+  if [ "$caps" != "$want" ]; then
+    note "REFUSED: this replicate was launched as caps \`$want\` and the daemon reported"
+    note "         \`$caps\`. One of the two is wrong and neither may be scored:"
+    printf '%s\n' "$line" | sed 's/^/           /'
+    return 1
+  fi
+  return 0
+}
+
 # A mixed level with no writer progress is a read-only level wearing a mixed level's name,
 # and the anchor-mismatch fallback this whole harness exists to observe cannot occur in it.
 check_writer_progress() {
@@ -314,6 +342,7 @@ run_with_deadline() {
 while [ $# -gt 0 ]; do
   case "$1" in
     --baseline-only) BASELINE_ONLY=1 ;;
+    --merge-arms)    MERGE_ARMS=1; BASELINE_ONLY=1; NEUTRAL=0 ;;
     --self-test)     SELF_TEST=1 ;;
     --no-neutral)    NEUTRAL=0 ;;
     --baseline)  BASELINE_REF="${2:-}"; BASELINE_LABEL="baseline ${2:-}"; shift ;;
@@ -395,6 +424,21 @@ if [ "$SELF_TEST" -eq 1 ]; then
   expect_refusal "a modified results file the manifest classes byte-deterministic" \
     check_clean_repo "$TD/rep"
   ( cd "$TD/rep" && git checkout -q -- . )
+
+  # **The arm label, against the fault it is for.** In --merge-arms the two arms are one
+  # binary, so nothing but this line can tell them apart; a check that accepted a log without
+  # it would let both arms be labelled by the flag they were given.
+  printf '  merge at 4r2w: 10 merged of 12 late landing(s) (83.3%%); rows visited 40, epochs merged 22; refused 1 over-epochs, 1 over-rows, 0 unavailable; caps 32 epochs / 4096 rows\n' > "$TD/merge-on.log"
+  printf '  merge at 4r2w: 0 merged of 12 late landing(s); rows visited 0, epochs merged 0; refused 0 over-epochs, 0 over-rows, 0 unavailable; caps 0 epochs / 0 rows  [PINNED CONTROL: merging off]\n' > "$TD/merge-off.log"
+  printf '  flights at 4r2w: pending_joins 0\n' > "$TD/merge-absent.log"
+  expect_accept  "a log whose merge line names the caps it was launched with" \
+    check_merge_line "$TD/merge-on.log" "32:4096"
+  expect_accept  "the pinned control's log, naming merging off" \
+    check_merge_line "$TD/merge-off.log" "0:0"
+  expect_refusal "a log whose merge caps are not the ones the arm asked for" \
+    check_merge_line "$TD/merge-on.log" "0:0"
+  expect_refusal "a log from a build that does not report the merge at all" \
+    check_merge_line "$TD/merge-absent.log" "32:4096"
 
   # stale worktree, and a matching one
   SHA="$(git -C "$TD/rep" rev-parse HEAD)"
@@ -669,7 +713,7 @@ note "cannot bind, so it exited non-zero on every build and always answered 'ref
 rep_seq=0
 
 replicate() {
-  arm="$1"; wt="$2"; rep="$3"; tag="$4"; point="$5"; budget="$6"
+  arm="$1"; wt="$2"; rep="$3"; tag="$4"; point="$5"; budget="$6"; caps="${7:-default}"
   port=$(( PORT_BASE + 2 * (rep_seq % 40) ))
   outdir="$OUT/results-$arm-$point-$rep"
   rm -rf "$outdir"; mkdir -p "$outdir"
@@ -686,7 +730,10 @@ replicate() {
   # subshell instead. Host C is a Mac and this script is written for it.
   run_one() {
     cd "$wt" || return 3
-    CARGO_NET_OFFLINE=true \
+    # **The arm, and the only thing that differs between the two of them.** One binary, two
+    # values: a difference between the arms therefore cannot be a difference between two
+    # compilations, which is the confound a second worktree would reintroduce.
+    CARGO_NET_OFFLINE=true NILESTREAM_MERGE_CAPS="$caps" \
       "$wt/target/release/bench" \
         --run --nls-only --scaling-only --host-nls --nls-port "$port" \
         --connections "$LEVELS" --mixed-seconds "$SECONDS_PER_LEVEL" \
@@ -709,6 +756,12 @@ replicate() {
   fi
   check_writer_progress "$log"   || { note "  [$tag] see $log"; return 1; }
   check_no_missing_fields "$log" || { note "  [$tag] see $log"; return 1; }
+  if [ "$MERGE_ARMS" -eq 1 ]; then
+    want="$caps"
+    [ "$want" = "default" ] && want="32:4096"
+    [ "$want" = "off" ] && want="0:0"
+    check_merge_line "$log" "$want" || { note "  [$tag] see $log"; return 1; }
+  fi
 
   # **How long this replicate took**, so the reader can multiply rather than guess. There are
   # REPLICATES_TOTAL of them and the preflight cannot know the fixed per-replicate cost of
@@ -723,14 +776,14 @@ replicate() {
 
 # Both working points, one after the other, for one arm and one replicate index.
 replicate_both_points() {
-  arm="$1"; wt="$2"; rep="$3"; label="$4"
+  arm="$1"; wt="$2"; rep="$3"; label="$4"; caps="${5:-default}"
   ok=0
   note "  [$label] point: full ($ACCOUNTS accounts / $BUDGET_FULL budget)"
   rep_seq=$(( rep_seq + 1 ))
-  replicate "$arm" "$wt" "$rep" "$label full" full "$BUDGET_FULL" && ok=$(( ok + 1 ))
+  replicate "$arm" "$wt" "$rep" "$label full" full "$BUDGET_FULL" "$caps" && ok=$(( ok + 1 ))
   note "  [$label] point: partial ($ACCOUNTS accounts / $BUDGET_PARTIAL budget)"
   rep_seq=$(( rep_seq + 1 ))
-  replicate "$arm" "$wt" "$rep" "$label partial" partial "$BUDGET_PARTIAL" && ok=$(( ok + 1 ))
+  replicate "$arm" "$wt" "$rep" "$label partial" partial "$BUDGET_PARTIAL" "$caps" && ok=$(( ok + 1 ))
   [ "$ok" -eq 2 ]
 }
 
@@ -743,8 +796,27 @@ else
   ARM_B="baseline";        ARM_C="control"
   ARM_B_LABEL="$BASELINE_LABEL"; ARM_C_LABEL="A=A control (same commit, second build)"
 fi
+ARM_B_CAPS=default
+ARM_C_CAPS=default
 TWO_ARMS=1
 if [ "$BASELINE_ONLY" -eq 1 ] && [ "$NEUTRAL" -eq 0 ]; then TWO_ARMS=0; fi
+
+# **T04.2: the two arms are one build and two settings.**
+#
+# Everything above this point is about comparing two *commits*, which needs two worktrees
+# because the binaries differ. The merge ablation is the other shape: the change under test is
+# a value the daemon reads at start-up, so a second build would add a confound — two
+# compilations of identical source that can differ by layout alone — in exchange for nothing.
+# One worktree, one binary, two values of NILESTREAM_MERGE_CAPS, and every replicate's
+# transcript is checked to carry the caps the daemon actually ran with.
+if [ "$MERGE_ARMS" -eq 1 ]; then
+  ARM_B_WT="$BASELINE_WT"; ARM_C_WT="$BASELINE_WT"
+  ARM_B="merge";           ARM_C="pinned"
+  ARM_B_CAPS=default;      ARM_C_CAPS=off
+  ARM_B_LABEL="deferred merge on (caps 32 epochs / 4096 rows, preregistered)"
+  ARM_C_LABEL="pinned control (merging off) — the policy this cycle measures against"
+  TWO_ARMS=1
+fi
 
 head2 "3. warm-ups (discarded, but not ignored)"
 note "A warm-up that did not complete is a cold arm measured as a warm one, so its exit is"
@@ -754,12 +826,12 @@ warm_bad=0
 while [ "$i" -lt "$WARMUPS" ]; do
   i=$(( i + 1 ))
   note "warm-up $i / $WARMUPS"
-  if ! replicate_both_points "$ARM_B" "$ARM_B_WT" "w$i" "$ARM_B warm-up $i" >/dev/null 2>&1; then
+  if ! replicate_both_points "$ARM_B" "$ARM_B_WT" "w$i" "$ARM_B warm-up $i" "$ARM_B_CAPS" >/dev/null 2>&1; then
     note "  the $ARM_B warm-up $i did not complete"
     warm_bad=1
   fi
   if [ "$TWO_ARMS" -eq 1 ]; then
-    if ! replicate_both_points "$ARM_C" "$ARM_C_WT" "w$i" "$ARM_C warm-up $i" >/dev/null 2>&1; then
+    if ! replicate_both_points "$ARM_C" "$ARM_C_WT" "w$i" "$ARM_C warm-up $i" "$ARM_C_CAPS" >/dev/null 2>&1; then
       note "  the $ARM_C warm-up $i did not complete"
       warm_bad=1
     fi
@@ -783,19 +855,19 @@ while [ "$i" -lt "$MEASURED" ]; do
   if [ $(( i % 2 )) -eq 1 ]; then
     note "--- replicate $i / $MEASURED : order AB ---"
     note "--- $ARM_B_LABEL ---"
-    replicate_both_points "$ARM_B" "$ARM_B_WT" "$i" "$ARM_B $i" && ok_b=$(( ok_b + 1 ))
+    replicate_both_points "$ARM_B" "$ARM_B_WT" "$i" "$ARM_B $i" "$ARM_B_CAPS" && ok_b=$(( ok_b + 1 ))
     if [ "$TWO_ARMS" -eq 1 ]; then
       note "--- $ARM_C_LABEL ---"
-      replicate_both_points "$ARM_C" "$ARM_C_WT" "$i" "$ARM_C $i" && ok_c=$(( ok_c + 1 ))
+      replicate_both_points "$ARM_C" "$ARM_C_WT" "$i" "$ARM_C $i" "$ARM_C_CAPS" && ok_c=$(( ok_c + 1 ))
     fi
   else
     note "--- replicate $i / $MEASURED : order BA ---"
     if [ "$TWO_ARMS" -eq 1 ]; then
       note "--- $ARM_C_LABEL ---"
-      replicate_both_points "$ARM_C" "$ARM_C_WT" "$i" "$ARM_C $i" && ok_c=$(( ok_c + 1 ))
+      replicate_both_points "$ARM_C" "$ARM_C_WT" "$i" "$ARM_C $i" "$ARM_C_CAPS" && ok_c=$(( ok_c + 1 ))
     fi
     note "--- $ARM_B_LABEL ---"
-    replicate_both_points "$ARM_B" "$ARM_B_WT" "$i" "$ARM_B $i" && ok_b=$(( ok_b + 1 ))
+    replicate_both_points "$ARM_B" "$ARM_B_WT" "$i" "$ARM_B $i" "$ARM_B_CAPS" && ok_b=$(( ok_b + 1 ))
   fi
 done
 

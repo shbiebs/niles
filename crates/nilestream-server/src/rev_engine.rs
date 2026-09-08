@@ -303,6 +303,19 @@ pub struct ReadStats {
     /// the lag a read started with and the lag it ended with; their difference is the only
     /// part its own fold caused (A10-08, A10-11).
     pub deferred_merges: u64,
+    /// **What the merge cost, beside what it achieved.** `deferred_merges` alone reports a
+    /// benefit with no price; these are the rows the merges really walked, the epochs they
+    /// really spanned, and the late landings that pinned instead — split by cause, because an
+    /// over-budget suffix, an unretained one and merging switched off are three different
+    /// findings with three different remedies.
+    pub merge_rows_visited: u64,
+    pub merge_epochs_merged: u64,
+    /// The bounds in force, so a transcript names its own arm.
+    pub merge_max_epochs: u64,
+    pub merge_max_rows: u64,
+    pub merges_refused_epochs: u64,
+    pub merges_refused_rows: u64,
+    pub merges_refused_unavailable: u64,
     pub waiters_refused: u64,
     pub joins_answered: u64,
     pub joins_retried: u64,
@@ -1337,6 +1350,9 @@ impl crate::session::Serving for RevEngine {
         let fallbacks = self
             .view_fallbacks
             .load(std::sync::atomic::Ordering::Relaxed);
+        // Read from the runtime rather than from the environment a second time: what the
+        // transcript must name is the value the views are actually running with.
+        let v_caps = guard.as_ref().map(|rt| rt.merge_caps()).unwrap_or_default();
         match guard.as_ref().and_then(|rt| rt.view(BALANCE_VIEW)) {
             Some(v) => {
                 let s = &v.stats;
@@ -1355,6 +1371,13 @@ impl crate::session::Serving for RevEngine {
                     pinned_installs: s.pinned_installs,
                     flights_refused: s.flights_refused,
                     deferred_merges: s.deferred_merges,
+                    merge_rows_visited: s.merge_rows_visited,
+                    merge_epochs_merged: s.merge_epochs_merged,
+                    merge_max_epochs: v_caps.max_epochs,
+                    merge_max_rows: v_caps.max_rows,
+                    merges_refused_epochs: s.merges_refused_epochs,
+                    merges_refused_rows: s.merges_refused_rows,
+                    merges_refused_unavailable: s.merges_refused_unavailable,
                     waiters_refused: s.waiters_refused,
                     joins_answered: self
                         .joins_answered
@@ -1965,7 +1988,14 @@ impl RevEngine {
                 let a = match rt.view_mut(BALANCE_VIEW) {
                     Some(view) => {
                         gap_finish = view.applied_through().saturating_sub(t.anchor());
-                        view.finish_fold(t, value, rows)
+                        // **The base is passed, and it is the one already held.** A late
+                        // landing merges the deltas it missed instead of pinning; the suffix
+                        // is read through the shared guard this read has held since before
+                        // `begin_read`, so no lock is taken here and the order B < V is
+                        // unchanged. What does change is the length of the second view hold,
+                        // which is why `install_hold` is measured around it — the merge's
+                        // price is paid under V and has to be visible there.
+                        view.finish_fold_merging(t, value, rows, Some(&*base))
                     }
                     // The view went away between the two phases. The ticket is dropped
                     // un-settled, which cancels the flight and releases anyone who joined
@@ -2443,10 +2473,123 @@ fn install_balance_view(budget: usize) -> Option<nilestream_core::rev::Runtime> 
         nilestream_core::rev::Policy::Lru,
     )
     .ok()
+    .map(|mut rt| {
+        rt.set_merge_caps(merge_caps_from_env());
+        rt
+    })
+}
+
+/// The deferred-merge bounds this process runs with, read once from the environment.
+///
+/// `NILESTREAM_MERGE_CAPS` takes `off`, `default`, or `<epochs>:<rows>`. **This exists so
+/// that one binary can run both arms of the measurement**: the merging build and the pinned
+/// control differ in this value and in nothing else, so a difference between them cannot be
+/// a difference between two compilations.
+///
+/// An unparseable value is a **refusal**, not a silent fall back to the default. A run whose
+/// arm was decided by a typo is a run that scored the control against itself and said
+/// otherwise, and the caps it actually used are reported on the wire for the same reason.
+fn merge_caps_from_env() -> nilestream_core::rev::MergeCaps {
+    parse_merge_caps(std::env::var("NILESTREAM_MERGE_CAPS").ok().as_deref()).unwrap_or_else(|raw| {
+        panic!(
+            "NILESTREAM_MERGE_CAPS={raw:?} is not `off`, `default` or `<epochs>:<rows>`. \
+                 Refusing rather than defaulting: a run whose arm was decided by a typo would \
+                 report the merging build's numbers under the control's name."
+        )
+    })
+}
+
+/// The parse, with no environment in it.
+///
+/// **Separated because the test for it cannot own the process.** The first version of this
+/// read `std::env::var` inside the function and the test set the variable to each bad value
+/// in turn; `cargo test` runs tests in parallel, so a `RevEngine` built by an unrelated test
+/// saw `NILESTREAM_MERGE_CAPS="8:64:2"` and the refusal — which is the right behaviour —
+/// killed it. That is MF-4's shape exactly: a guard that mutates process-wide state cannot
+/// isolate what it is testing. The environment is read in one place and the decision is a
+/// pure function of a string.
+fn parse_merge_caps(raw: Option<&str>) -> Result<nilestream_core::rev::MergeCaps, String> {
+    use nilestream_core::rev::MergeCaps;
+    let Some(raw) = raw else {
+        return Ok(MergeCaps::default());
+    };
+    match raw.trim() {
+        "" | "default" => Ok(MergeCaps::default()),
+        "off" => Ok(MergeCaps::OFF),
+        other => other
+            .split_once(':')
+            .and_then(|(e, r)| {
+                Some(MergeCaps {
+                    max_epochs: e.trim().parse().ok()?,
+                    max_rows: r.trim().parse().ok()?,
+                })
+            })
+            .ok_or_else(|| other.to_string()),
+    }
 }
 
 /// The name of that view inside the runtime.
 pub const BALANCE_VIEW: &str = "__balance";
+
+/// **The arm selector, and that it refuses rather than defaults.**
+///
+/// T04.2 compares a merging build against a pinned control, and the two are this binary with
+/// two different values of `NILESTREAM_MERGE_CAPS`. Every property that makes that comparison
+/// trustworthy is a property of this function: `off` is exactly [`MergeCaps::OFF`], an absent
+/// variable is the preregistered default, and anything unparseable stops the process instead
+/// of quietly running the default under the control's name.
+#[cfg(test)]
+mod merge_caps_env_tests {
+    use nilestream_core::rev::MergeCaps;
+
+    /// The parse is a pure function of a string, so this test touches no process state at
+    /// all — see `parse_merge_caps`'s own note for what happened when it did not.
+    #[test]
+    fn the_arm_selector_parses_what_it_promises_and_refuses_the_rest() {
+        let parse = super::parse_merge_caps;
+
+        assert_eq!(parse(None).unwrap(), MergeCaps::default());
+        assert_eq!(parse(Some("default")).unwrap(), MergeCaps::default());
+        assert_eq!(parse(Some("  ")).unwrap(), MergeCaps::default());
+        assert_eq!(
+            parse(Some("off")).unwrap(),
+            MergeCaps::OFF,
+            "`off` must be exactly the pinned control, not a small budget that merges a little"
+        );
+        assert_eq!(
+            parse(Some("8:64")).unwrap(),
+            MergeCaps {
+                max_epochs: 8,
+                max_rows: 64
+            }
+        );
+
+        for bad in ["on", "8", "8:", ":64", "eight:64", "-1:64", "8:64:2"] {
+            assert!(
+                parse(Some(bad)).is_err(),
+                "`{bad}` must be refused. Falling back to the default here would run the \
+                 merging build and label the transcript with whatever the invocation \
+                 intended, which is a control scored against itself"
+            );
+        }
+    }
+
+    /// The default is the preregistered pair, stated here so a change to it fails a test
+    /// rather than moving a number the report already quotes.
+    #[test]
+    fn the_preregistered_caps_are_the_ones_the_report_names() {
+        assert_eq!(
+            MergeCaps::default(),
+            MergeCaps {
+                max_epochs: 32,
+                max_rows: 4_096
+            },
+            "cycle 10 preregistered 32 epochs and 4,096 rows, from a measured arrival gap of \
+             4.6-5.7 epochs with a maximum of 17. Changing them is allowed; changing them \
+             silently is not"
+        );
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -3889,6 +4032,26 @@ mod lock_order_tests {
     //! when someone adds a fifth lock.
 
     use super::*;
+
+    /// A copy of `s` with every `//` comment removed, line by line.
+    ///
+    /// **Every source-reading guard in this module needs it, and one of them learned why the
+    /// hard way.** These guards read the *positions* of lock acquisitions and calls, and a
+    /// comment that names one moves the position. The A10-01 repair carries a paragraph
+    /// explaining that `read_stats` used to reach for `self.base()` under the view; with
+    /// comments included, that sentence sat where the acquisition used to be, and the guard
+    /// passed against the reverted deadlocking build on the strength of the prose describing
+    /// the deadlock.
+    fn code_only(s: &str) -> String {
+        s.lines()
+            .map(|l| match l.find("//") {
+                Some(i) => &l[..i],
+                None => l,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     use crate::session::Serving;
 
     /// **The deadlock of A10-01, witnessed and bounded — the stats cycle.**
@@ -4036,14 +4199,7 @@ mod lock_order_tests {
             // `self.base()` under the view, and with comments included that sentence sat
             // where the acquisition used to be — so the guard passed against the reverted,
             // deadlocking build, on the strength of the prose describing the deadlock.
-            let body: String = body
-                .lines()
-                .map(|l| match l.find("//") {
-                    Some(i) => &l[..i],
-                    None => l,
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
+            let body = code_only(body);
             let body = body.as_str();
             // The test module below contains this very test, whose text mentions both
             // spellings in prose and in assertions; scanning it would check the guard
@@ -4279,10 +4435,21 @@ mod lock_order_tests {
             .nth(1)
             .expect("the function");
         let body = &body[..body.find("\n    }").unwrap_or(body.len())];
+        // **Code only, for the reason the scan above gives**: this guard reads *positions*,
+        // and a comment naming one of these calls moves the position it reads. The function
+        // it scans now carries a paragraph about where the base comes from, which is exactly
+        // the shape that defeated the A10-01 guard.
+        let body = code_only(body);
+        let body = body.as_str();
         let begin = body.find("begin_read(").expect("phase one");
         let dropped = body.find("drop(rt);").expect("the view must be released");
         let fold = body.find("base.reconstruct(").expect("the fold");
-        let finish = body.find("finish_fold(").expect("phase two");
+        // `finish_fold` or `finish_fold_merging`: the install is one call under two names —
+        // the second passes the base so a late landing can merge instead of pinning — and
+        // this guard is about *when* it happens, not which of them is used. Matched without
+        // the open parenthesis so a rename of the call cannot make the guard vacuous by
+        // making it panic; with comments stripped, prose cannot satisfy it either.
+        let finish = body.find("finish_fold").expect("phase two");
         assert!(
             begin < dropped && dropped < fold && fold < finish,
             "the keyed read must decide under the view (at {begin}), release it (at \
@@ -5561,6 +5728,16 @@ mod fallback_rate_tests {
             pinned_installs: after.pinned_installs - before.pinned_installs,
             flights_refused: after.flights_refused - before.flights_refused,
             deferred_merges: after.deferred_merges - before.deferred_merges,
+            merge_rows_visited: after.merge_rows_visited - before.merge_rows_visited,
+            merge_epochs_merged: after.merge_epochs_merged - before.merge_epochs_merged,
+            // Not a difference: the caps are a setting, not a counter, and subtracting them
+            // would report zero for a run that had them the whole time.
+            merge_max_epochs: after.merge_max_epochs,
+            merge_max_rows: after.merge_max_rows,
+            merges_refused_epochs: after.merges_refused_epochs - before.merges_refused_epochs,
+            merges_refused_rows: after.merges_refused_rows - before.merges_refused_rows,
+            merges_refused_unavailable: after.merges_refused_unavailable
+                - before.merges_refused_unavailable,
             waiters_refused: after.waiters_refused - before.waiters_refused,
             joins_answered: after.joins_answered - before.joins_answered,
             joins_retried: after.joins_retried - before.joins_retried,

@@ -422,6 +422,86 @@ pub trait Base {
     /// The per-key deltas sealed in epoch `e`. Empty for most keys in most epochs, which
     /// is exactly why partial materialization can pay.
     fn deltas_at(&self, e: Epoch) -> Vec<(Key, Value)>;
+
+    /// The earliest epoch whose per-key deltas this base can still produce.
+    ///
+    /// **Zero by default, because a fully retained base is what F4 promises**, and every
+    /// base in this repository is one: the history is immutable and nothing is compacted
+    /// away, so any epoch at or below the frontier can be re-read. A base that truncates or
+    /// compacts a prefix must override this, and the reason it matters is
+    /// [`Rev::finish_fold`]: a deferred merge folds the deltas in `(anchor, applied]`, and
+    /// `deltas_at` reports an epoch it no longer holds as **empty**, which is
+    /// indistinguishable from an epoch in which nothing happened. Merging across that
+    /// boundary would silently drop real money. The merge refuses a suffix that begins below
+    /// this epoch and pins instead.
+    fn deltas_available_from(&self) -> Epoch {
+        0
+    }
+}
+
+/// The bounds a deferred merge is allowed to spend, fixed before anything was measured.
+///
+/// # Why these are constants and not a heuristic
+///
+/// A merge that adapts its own budget to what it finds is a merge whose cost is a function
+/// of the workload, and the phase diagram this thesis is for would then be measuring the
+/// heuristic rather than the mechanism. These are **preregistered**: written down with their
+/// reasons, and a run that wants different ones states them in its transcript.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MergeCaps {
+    /// The largest suffix, in epochs, a landing may merge across.
+    pub max_epochs: Epoch,
+    /// The largest number of physical delta rows a single merge may visit.
+    pub max_rows: u64,
+}
+
+impl MergeCaps {
+    /// **Merging off.** No suffix is at most zero epochs long when the gap is at least one,
+    /// so every late landing pins — which is the policy this cycle measures against, and the
+    /// reason the ablation is a value rather than a `cfg`.
+    pub const OFF: MergeCaps = MergeCaps {
+        max_epochs: 0,
+        max_rows: 0,
+    };
+}
+
+impl Default for MergeCaps {
+    /// **32 epochs and 4,096 rows.**
+    ///
+    /// The epoch cap comes from the cycle-10 baseline: the arrival gap on both hosts is
+    /// 4.6–5.7 epochs with a maximum of 17 across 45,681 flights. 32 covers that
+    /// distribution with roughly a factor of two in hand and still refuses a genuinely large
+    /// gap — a reader whose anchor is hundreds of epochs old is asking a historical
+    /// question, and pinning is the right answer to it.
+    ///
+    /// The row cap bounds the *physical* work independently, because epochs are not a
+    /// constant amount of reading: an epoch's delta list is the whole epoch's rows across
+    /// every key, and one epoch of a bulk load can be larger than thirty of a payment
+    /// stream. 4,096 rows over at most 32 epochs is 128 rows per epoch, which is well above
+    /// anything the mixed benchmark seals and well below the cost of the reconstruction the
+    /// merge is trying to save.
+    fn default() -> MergeCaps {
+        MergeCaps {
+            max_epochs: 32,
+            max_rows: 4_096,
+        }
+    }
+}
+
+/// Why a late landing did not merge, when it did not.
+///
+/// Kept apart rather than summed into one "declined" counter: an over-budget suffix is a
+/// tuning question, an unavailable one is a retention question, and a merge that is simply
+/// switched off is neither. A refusal reported under the wrong cause is a refusal nobody can
+/// act on — the lesson `waiters_refused` and `flights_refused` already carry (A10-05).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeRefusal {
+    /// The suffix is longer than [`MergeCaps::max_epochs`].
+    TooManyEpochs,
+    /// Visiting the suffix would read more than [`MergeCaps::max_rows`] delta rows.
+    TooManyRows,
+    /// The suffix begins below [`Base::deltas_available_from`].
+    SuffixUnavailable,
 }
 
 /// Eviction policy. `CostAware` is the adaptive one; the other two are the baselines it is
@@ -492,6 +572,19 @@ pub struct Stats {
     /// that is absent from the wire and a counter that reads zero are different claims, and
     /// only one of them can be checked; this one was absent (A10-08).
     pub deferred_merges: u64,
+    /// Delta rows a merge actually visited, and epochs it actually merged across.
+    ///
+    /// The cost side of the same event. `deferred_merges` alone says a merge happened and
+    /// says nothing about what it cost, and a mechanism whose benefit is reported without
+    /// its price is not a measurement.
+    pub merge_rows_visited: u64,
+    pub merge_epochs_merged: u64,
+    /// Late landings that did **not** merge, by cause. An over-budget suffix is a tuning
+    /// question, an unavailable one is a retention question, and merging switched off is
+    /// neither; a refusal reported under the wrong cause is one nobody can act on.
+    pub merges_refused_epochs: u64,
+    pub merges_refused_rows: u64,
+    pub merges_refused_unavailable: u64,
     /// Readers turned away from an existing flight because its waiter list was full. They
     /// folded alone, exactly. Counted apart from `flights_refused`, which is the *other*
     /// capacity: a refusal with one cause reported under another is a refusal nobody can act
@@ -630,6 +723,9 @@ pub struct Rev {
     pub rung: Consistency,
     pub mode: Materialize,
     pub stats: Stats,
+    /// The bounds this view's deferred merges may spend. [`MergeCaps::OFF`] is the pinned
+    /// control the merge is measured against.
+    merge_caps: MergeCaps,
 }
 
 impl Rev {
@@ -699,7 +795,7 @@ impl Rev {
             ReadOutcome::Hit(a) => a,
             ReadOutcome::Fold(t) => {
                 let (value, rows) = base.reconstruct(t.key(), t.anchor());
-                self.finish_fold(t, value, rows)
+                self.finish_fold_merging(t, value, rows, Some(base))
             }
             // `ReadMode::Alone` does not produce this outcome. Returning the ticket's own
             // exact answer is not possible without waiting, so the only honest thing left is
@@ -908,6 +1004,56 @@ impl Rev {
     /// subsequent reader a refold — and clearing an `in_flight` entry it does not own, which
     /// would strand the successor's `Pending` marker with nobody to publish it.
     pub fn finish_fold(&mut self, ticket: FoldTicket, value: Value, rows: u64) -> Anchored {
+        self.finish_fold_merging(ticket, value, rows, None)
+    }
+
+    /// `finish_fold`, with the base available so a late landing can merge instead of pinning.
+    ///
+    /// # What a deferred merge is, and what it deliberately is not
+    ///
+    /// A flight folds the prefix ending at its anchor `a`. If the view advanced to `e > a`
+    /// while it was out, the landing entry holds this key's value as of `a` and has not seen
+    /// the deltas in `(a, e]`. `install` therefore **pins** it: the entry keeps its own
+    /// stamp, serves only `[a, a]`, and every later reader reconstructs. That is sound and
+    /// it is the weaker of the two available landings.
+    ///
+    /// The merge is the other one. Fold this key's deltas over `(a, e]` into the landing
+    /// value and install at `e`, so the entry lands **current** and the next reader at the
+    /// frontier hits instead of reconstructing.
+    ///
+    /// **What the caller receives does not change, and this is the invariant the whole thing
+    /// rests on.** The reader asked at `a` and is answered at `a` — the returned `Anchored`,
+    /// and the `Joined` published to every same-anchor waiter, both carry the fold's own
+    /// value and its own anchor. The merge changes what is written into the view, never what
+    /// is handed back. A merge that returned the merged value would be answering a question
+    /// nobody asked, and every certification-interval guarantee in Chapter 3 is stated about
+    /// the anchor that was requested.
+    ///
+    /// # Why it is bounded, and why it refuses rather than truncating
+    ///
+    /// The merge reads `deltas_at` once per epoch in the suffix, and each call returns that
+    /// epoch's rows across **every** key, not just this one. So the work is a function of the
+    /// suffix's length *and* of how busy those epochs were, and both are bounded separately
+    /// by [`MergeCaps`]. A suffix that exceeds either cap is not partially merged: a partial
+    /// merge installed at `e` would be a value missing some of its own history under a
+    /// current stamp, which is the one thing a pin exists to prevent. It pins, and the
+    /// refusal is counted under its own cause.
+    ///
+    /// The third refusal is retention. `deltas_at` reports an epoch the base no longer holds
+    /// as *empty*, which is indistinguishable from an epoch in which nothing happened, so a
+    /// merge across a compacted boundary would silently drop money rather than fail.
+    /// [`Base::deltas_available_from`] is what makes that case a refusal.
+    ///
+    /// Ownership is unchanged: only a landing that still holds its generation installs at
+    /// all, and only such a landing can merge. A superseded completion writes nothing,
+    /// merged or not.
+    pub fn finish_fold_merging(
+        &mut self,
+        ticket: FoldTicket,
+        value: Value,
+        rows: u64,
+        base: Option<&dyn Base>,
+    ) -> Anchored {
         let mut ticket = ticket;
         ticket.settled = true;
         self.stats.base_rows_read += rows;
@@ -941,12 +1087,28 @@ impl Rev {
                 .is_some_and(|f| f.generation == ticket.generation);
         if mine {
             self.in_flight.remove(&ticket.key);
-            if ticket.anchor < self.applied {
-                self.stats.pinned_installs += 1;
-            }
             // Moved, not cloned. The ticket owns this key and is about to be dropped.
             let key = std::mem::take(&mut ticket.key);
-            self.install(key, value, ticket.anchor);
+            let merged = if ticket.anchor < self.applied {
+                base.and_then(|b| self.merge_suffix(b, &key, ticket.anchor))
+            } else {
+                // Not late. There is no suffix, and asking for one would visit the base for
+                // nothing on the overwhelmingly common path.
+                None
+            };
+            match merged {
+                Some(delta) => {
+                    self.stats.deferred_merges += 1;
+                    let at = self.applied;
+                    self.install(key, value + delta, at);
+                }
+                None => {
+                    if ticket.anchor < self.applied {
+                        self.stats.pinned_installs += 1;
+                    }
+                    self.install(key, value, ticket.anchor);
+                }
+            }
         } else {
             self.stats.uninstalled_folds += 1;
         }
@@ -1060,6 +1222,52 @@ impl Rev {
     /// time, and for one last written by `apply_epoch`; false for a historical read.
     fn certified_through_applied(&self, key: &Key, _stamp: Epoch) -> bool {
         !self.pinned.contains(key)
+    }
+
+    /// This key's total delta over `(anchor, applied]`, or `None` if the merge is refused.
+    ///
+    /// Two passes are deliberately **not** taken: the suffix is walked once, accumulating the
+    /// key's deltas and the physical rows visited together, and the row cap is checked as it
+    /// goes. Walking once to count and again to sum would double the cost of the thing being
+    /// measured. When the cap is exceeded the accumulated sum is discarded — a merge is all
+    /// or nothing, because a partial one installs a value missing part of its own history
+    /// under a current stamp.
+    ///
+    /// The rows visited are counted **whether or not the merge completes**, because they were
+    /// really read: a refusal that reports zero cost is a refusal that looks free.
+    fn merge_suffix(&mut self, base: &dyn Base, key: &Key, anchor: Epoch) -> Option<Value> {
+        let caps = self.merge_caps;
+        let span = self.applied.saturating_sub(anchor);
+        if span > caps.max_epochs {
+            self.stats.merges_refused_epochs += 1;
+            return None;
+        }
+        // `deltas_at` cannot distinguish an epoch it no longer holds from an empty one, so
+        // the boundary is asked for rather than inferred.
+        if anchor + 1 < base.deltas_available_from() {
+            self.stats.merges_refused_unavailable += 1;
+            return None;
+        }
+
+        let mut delta: Value = 0;
+        let mut visited: u64 = 0;
+        for e in (anchor + 1)..=self.applied {
+            let rows = base.deltas_at(e);
+            visited += rows.len() as u64;
+            if visited > caps.max_rows {
+                self.stats.merge_rows_visited += visited;
+                self.stats.merges_refused_rows += 1;
+                return None;
+            }
+            for (k, d) in rows {
+                if k == *key {
+                    delta += d;
+                }
+            }
+        }
+        self.stats.merge_rows_visited += visited;
+        self.stats.merge_epochs_merged += span;
+        Some(delta)
     }
 
     fn install(&mut self, key: Key, value: Value, anchor: Epoch) {
@@ -1483,6 +1691,7 @@ impl Runtime {
                 rung: contract.consistency,
                 mode: contract.materialize,
                 stats: Stats::default(),
+                merge_caps: MergeCaps::default(),
             });
         }
         views.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1491,6 +1700,27 @@ impl Runtime {
             views,
             epoch: 0,
         })
+    }
+
+    /// Set every view's merge bounds. [`MergeCaps::OFF`] is the pinned control.
+    ///
+    /// A runtime-wide setter rather than an `install` parameter: the ablation is a property
+    /// of a *run*, and threading it through nine construction sites would put a measurement
+    /// knob in the signature every caller has to answer.
+    pub fn set_merge_caps(&mut self, caps: MergeCaps) {
+        for v in &mut self.views {
+            v.merge_caps = caps;
+        }
+    }
+
+    /// The merge bounds in force, so a transcript can say which arm produced its numbers.
+    ///
+    /// **Reported rather than assumed.** The measurement compares a merging build against a
+    /// pinned one, and the two are the same binary with a different value here. A run that
+    /// cannot state which value it had is a run whose arm is a matter of trusting the
+    /// invocation, which is how a control ends up scored against itself.
+    pub fn merge_caps(&self) -> MergeCaps {
+        self.views.first().map(|v| v.merge_caps).unwrap_or_default()
     }
 
     pub fn view_mut(&mut self, name: &str) -> Option<&mut Rev> {
@@ -1556,6 +1786,11 @@ impl Runtime {
             s.pinned_installs += v.stats.pinned_installs;
             s.flights_refused += v.stats.flights_refused;
             s.deferred_merges += v.stats.deferred_merges;
+            s.merge_rows_visited += v.stats.merge_rows_visited;
+            s.merge_epochs_merged += v.stats.merge_epochs_merged;
+            s.merges_refused_epochs += v.stats.merges_refused_epochs;
+            s.merges_refused_rows += v.stats.merges_refused_rows;
+            s.merges_refused_unavailable += v.stats.merges_refused_unavailable;
             s.waiters_refused += v.stats.waiters_refused;
             s.joins_declined_by_caller += v.stats.joins_declined_by_caller;
             s.gap_at_begin_total += v.stats.gap_at_begin_total;
@@ -1863,6 +2098,16 @@ mod tests {
     /// applied, so it never saw the deltas in between and may not inherit `applied`. Its
     /// `effective` is its own stamp, and a read above that stamp must reconstruct — the
     /// certification interval collapses to a point and the new upper bound must not widen it.
+    ///
+    /// **Merging is switched off here, and that is the finding rather than a workaround.**
+    /// This test went red when the deferred merge landed, because on this fixture the late
+    /// landing is two epochs behind and now merges: the entry installs current, and the read
+    /// below is served from it instead of rebuilding. The value was right either way — the
+    /// merge is not a correctness change — but the fixture was written when pinning was the
+    /// only landing, so as written it asserts the *policy* and not the property it is named
+    /// for. The property is about what a pinned entry may answer, so the pin is made
+    /// explicit; `a_merged_entry_answers_the_frontier_it_landed_at` is the same fixture with
+    /// merging on, and the two together say what changed.
     #[test]
     fn a_pinned_entry_read_above_its_stamp_still_reconstructs() {
         let mut base = FoldBase::new(0);
@@ -1878,12 +2123,14 @@ mod tests {
             Policy::Lru,
         )
         .unwrap();
+        rt.set_merge_caps(MergeCaps::OFF);
         // Drag the view forward, then read historically: `install` pins the entry because it
         // is anchored below `applied`. `advance` is the runtime's, so it is called before the
         // view is borrowed out of it.
         rt.advance(&base, late);
         let v = rt.view_mut("balance").unwrap();
         assert_eq!(v.read(&base, &vec![7], early).value, 100);
+        assert_eq!(v.stats.pinned_installs, 1, "the fixture must produce a pin");
 
         let before = v.stats.misses;
         let answered = v.read(&base, &vec![7], late);
@@ -1895,6 +2142,51 @@ mod tests {
             v.stats.misses,
             before + 1,
             "and must do so by reconstructing, not by inheriting a frontier it never saw"
+        );
+    }
+
+    /// **The same fixture, with merging on: the entry lands current and the next read hits.**
+    ///
+    /// This is the whole of T04's benefit on the smallest case that shows it, and it is worth
+    /// stating beside the pin rather than only in the merge module: the two tests differ in
+    /// one value, both answer 100 at `early` and 500 at `late`, and the difference between
+    /// them is a reconstruction that does not happen.
+    #[test]
+    fn a_merged_entry_answers_the_frontier_it_landed_at() {
+        let mut base = FoldBase::new(0);
+        base.seal(vec![7], 100);
+        let early = base.frontier();
+        base.seal(vec![7], 400);
+        base.seal(vec![9], 1);
+        let late = base.frontier();
+
+        let mut rt = Runtime::install(
+            circuit(Materialize::Full, Consistency::Snapshot),
+            None,
+            Policy::Lru,
+        )
+        .unwrap();
+        rt.advance(&base, late);
+        let v = rt.view_mut("balance").unwrap();
+        assert_eq!(
+            v.read(&base, &vec![7], early).value,
+            100,
+            "the historical reader is still answered at its own anchor, with its own value"
+        );
+        assert_eq!(v.stats.deferred_merges, 1);
+        assert_eq!(v.stats.pinned_installs, 0);
+
+        let before = v.stats.misses;
+        let answered = v.read(&base, &vec![7], late);
+        assert_eq!(
+            answered.value, 500,
+            "the merged entry is the value at the frontier"
+        );
+        assert_eq!(answered.anchor, late);
+        assert_eq!(
+            v.stats.misses, before,
+            "and it is served from the entry: the reconstruction the pinned arm pays is the \
+             one this arm saves"
         );
     }
 
@@ -2835,7 +3127,7 @@ mod two_phase {
         /// that cut above `Unsupported` and `Runtime` and silently deleted both from the
         /// generated appendix. The generator's rule is fragile and this file must not be the
         /// thing that trips it.
-        fn force_reap(&mut self, key: &Key) {
+        pub(in crate::rev) fn force_reap(&mut self, key: &Key) {
             if let Some(f) = self.in_flight.get(key) {
                 f.done.cancel();
             }
@@ -4129,5 +4421,378 @@ mod deferred_merge_window_tests {
             "with no append inside a flight there is no suffix to merge, which is why T04 is \
              recorded as a negative experiment rather than built"
         );
+    }
+}
+
+/// **T04.1 — the bounded, certified deferred merge.**
+///
+/// A flight folds the prefix ending at its anchor `a`. When the view has advanced to `e > a`
+/// by the time it lands, the entry has not seen `(a, e]` and `install` pins it: it serves
+/// only `[a, a]`, and the next reader at the frontier reconstructs the whole key again. The
+/// cycle-10 baseline says how often that happens — **45,282 pinned installs of 45,681**, with
+/// a suffix of four to six epochs — so the pin is not an edge case, it is the ordinary
+/// landing, and the reconstruction it forces is the ordinary cost.
+///
+/// The merge folds `(a, e]` into the landing value and installs at `e`. Three things have to
+/// hold for that to be an improvement rather than a bug, and each has a test here:
+///
+/// 1. **It merges exactly `(a, e]`** — the merged entry equals an independent reconstruction
+///    at `e`, and the next read at `e` is a hit rather than a fold.
+/// 2. **Nobody's answer changes.** The owner and every same-anchor waiter receive the fold's
+///    own value at `a`. The merge writes the view; it does not answer the reader.
+/// 3. **A suffix it cannot merge exactly is pinned, not truncated.** Over either cap, or
+///    below the base's retention boundary, the landing pins and the refusal is counted under
+///    its own cause. A partially merged entry installed at `e` would be a value missing part
+///    of its own history under a current stamp — precisely what the pin exists to prevent.
+///
+/// `MergeCaps::OFF` is the pinned control the measurement is taken against, and it is a value
+/// rather than a `cfg` so that one binary can run both arms.
+#[cfg(test)]
+mod deferred_merge_tests {
+    use super::tests::{circuit, FoldBase};
+    use super::*;
+
+    /// A view holding one key, advanced to `head`, with a flight open at `head`.
+    fn open_flight(rt: &mut Runtime, key: i64, anchor: Epoch) -> FoldTicket {
+        match rt.view_mut("balance").expect("balance").begin_read_with(
+            &vec![key],
+            anchor,
+            ReadMode::Alone,
+        ) {
+            ReadOutcome::Fold(t) => t,
+            ReadOutcome::Hit(_) => panic!("a cold key must fold, not hit"),
+            ReadOutcome::Join(_) => panic!("`Alone` does not produce a join"),
+        }
+    }
+
+    /// The setup every case here shares: a base with `KEYS` keys, a view advanced to some
+    /// early epoch, a flight opened there, and then the base and the view moved on — so the
+    /// flight is late by construction when it lands.
+    fn late_landing(caps: MergeCaps, extra_rounds: i128) -> (FoldBase, Runtime, FoldTicket, Epoch) {
+        let mut base = FoldBase::new(0);
+        for k in 0..4 {
+            base.seal(vec![k], 100 + k as i128);
+        }
+        let early = base.frontier();
+        let mut rt = Runtime::install(
+            circuit(Materialize::Demand, Consistency::Snapshot),
+            None,
+            Policy::Lru,
+        )
+        .unwrap();
+        rt.set_merge_caps(caps);
+        rt.advance(&base, early);
+        let ticket = open_flight(&mut rt, 0, early);
+        for round in 0..extra_rounds {
+            for k in 0..4 {
+                base.seal(vec![k], 7 + round);
+            }
+        }
+        let late = base.frontier();
+        rt.advance(&base, late);
+        (base, rt, ticket, early)
+    }
+
+    /// **Clause 1.** The merged entry is the value at `e`, and the reader that follows hits.
+    #[test]
+    fn an_eligible_late_landing_merges_exactly_the_deltas_it_missed() {
+        let (base, mut rt, ticket, early) = late_landing(MergeCaps::default(), 3);
+        let late = base.frontier();
+        let (value, rows) = base.reconstruct(&vec![0], early);
+
+        let v = rt.view_mut("balance").expect("balance");
+        v.finish_fold_merging(ticket, value, rows, Some(&base as &dyn Base));
+        assert_eq!(v.stats.deferred_merges, 1, "the landing was eligible");
+        assert_eq!(
+            v.stats.pinned_installs, 0,
+            "a merged landing is current, so nothing was pinned"
+        );
+        assert_eq!(
+            v.stats.merge_epochs_merged,
+            late - early,
+            "the merge must span exactly the suffix the flight missed"
+        );
+
+        // The independent fold: what a reader at the frontier is owed.
+        let (expected, _) = base.reconstruct(&vec![0], late);
+
+        // The next read at the frontier must be served from the entry, not from a new fold —
+        // which is the entire benefit, and is invisible in a value assertion alone.
+        let folds_before = v.stats.base_rows_read;
+        let got = match v.begin_read_with(&vec![0], late, ReadMode::Alone) {
+            ReadOutcome::Hit(a) => a,
+            _ => panic!(
+                "the read after a merged landing reconstructed. The merge installed at the \
+                 frontier precisely so that it would not"
+            ),
+        };
+        assert_eq!(
+            got.value, expected,
+            "the merged entry is the value at {late}"
+        );
+        assert_eq!(got.anchor, late);
+        assert_eq!(
+            v.stats.base_rows_read, folds_before,
+            "the hit must have read no base rows"
+        );
+    }
+
+    /// **Clause 2, the owner.** The reader asked at `a` and is answered at `a`, with the
+    /// fold's own value — not the merged one, which is a different question.
+    #[test]
+    fn the_owner_is_answered_at_its_own_anchor_and_not_at_the_merged_one() {
+        let (base, mut rt, ticket, early) = late_landing(MergeCaps::default(), 3);
+        let (value, rows) = base.reconstruct(&vec![0], early);
+        let (at_late, _) = base.reconstruct(&vec![0], base.frontier());
+        assert_ne!(value, at_late, "the fixture must actually move the key");
+
+        let v = rt.view_mut("balance").expect("balance");
+        let answer = v.finish_fold_merging(ticket, value, rows, Some(&base as &dyn Base));
+        assert_eq!(
+            answer.anchor, early,
+            "the answer carries the anchor asked for"
+        );
+        assert_eq!(
+            answer.value, value,
+            "the owner receives its own fold. Returning the merged value would answer a \
+             question nobody asked, at an anchor the caller did not request"
+        );
+    }
+
+    /// **Clause 2, the waiter.** A reader that joined the flight at the same anchor receives
+    /// the same thing the owner does.
+    #[test]
+    fn a_same_anchor_waiter_receives_the_answer_at_that_anchor() {
+        let mut base = FoldBase::new(0);
+        for k in 0..4 {
+            base.seal(vec![k], 100 + k as i128);
+        }
+        let early = base.frontier();
+        let mut rt = Runtime::install(
+            circuit(Materialize::Demand, Consistency::Snapshot),
+            None,
+            Policy::Lru,
+        )
+        .unwrap();
+        rt.advance(&base, early);
+
+        let v = rt.view_mut("balance").expect("balance");
+        let ticket = match v.begin_read_with(&vec![0], early, ReadMode::Shared) {
+            ReadOutcome::Fold(t) => t,
+            _ => panic!("the first reader owns the flight"),
+        };
+        let waiter = match v.begin_read_with(&vec![0], early, ReadMode::Shared) {
+            ReadOutcome::Join(w) => w,
+            _ => panic!("a second reader at the same anchor must join"),
+        };
+
+        for k in 0..4 {
+            base.seal(vec![k], 11);
+        }
+        let late = base.frontier();
+        rt.advance(&base, late);
+
+        let (value, rows) = base.reconstruct(&vec![0], early);
+        let v = rt.view_mut("balance").expect("balance");
+        v.finish_fold_merging(ticket, value, rows, Some(&base as &dyn Base));
+        assert_eq!(v.stats.deferred_merges, 1);
+
+        // Published before the wait, so this returns without blocking.
+        let joined = waiter
+            .wait()
+            .expect("the flight published at this waiter's anchor");
+        assert_eq!(joined.answer.anchor, early);
+        assert_eq!(
+            joined.answer.value, value,
+            "a waiter is served the flight's answer at its own anchor, whatever the view \
+             then installs"
+        );
+    }
+
+    /// **Clause 3, the epoch cap.** A suffix longer than the cap pins, and says why.
+    #[test]
+    fn a_suffix_longer_than_the_epoch_cap_pins_and_is_counted_as_such() {
+        let caps = MergeCaps {
+            max_epochs: 2,
+            max_rows: u64::MAX,
+        };
+        let (base, mut rt, ticket, early) = late_landing(caps, 4);
+        let (value, rows) = base.reconstruct(&vec![0], early);
+        let v = rt.view_mut("balance").expect("balance");
+        v.finish_fold_merging(ticket, value, rows, Some(&base as &dyn Base));
+
+        assert_eq!(v.stats.deferred_merges, 0);
+        assert_eq!(v.stats.merges_refused_epochs, 1);
+        assert_eq!(v.stats.pinned_installs, 1, "the refusal lands as a pin");
+        // Pinned means exactly this: the entry serves its own anchor and nothing above it.
+        assert!(
+            matches!(
+                v.begin_read_with(&vec![0], base.frontier(), ReadMode::Alone),
+                ReadOutcome::Fold(_)
+            ),
+            "a pinned entry must not answer above its own stamp"
+        );
+    }
+
+    /// **Clause 3, the row cap** — the bound that is not a function of epochs. And the rows a
+    /// refused merge really did read are counted, because a refusal that reports zero cost
+    /// looks free.
+    #[test]
+    fn a_suffix_over_the_row_cap_pins_and_still_reports_what_it_read() {
+        let caps = MergeCaps {
+            max_epochs: u64::MAX,
+            max_rows: 2,
+        };
+        let (base, mut rt, ticket, early) = late_landing(caps, 4);
+        let (value, rows) = base.reconstruct(&vec![0], early);
+        let v = rt.view_mut("balance").expect("balance");
+        v.finish_fold_merging(ticket, value, rows, Some(&base as &dyn Base));
+
+        assert_eq!(v.stats.deferred_merges, 0);
+        assert_eq!(v.stats.merges_refused_rows, 1);
+        assert_eq!(
+            v.stats.merges_refused_epochs, 0,
+            "the epoch cap was not the cause"
+        );
+        assert_eq!(v.stats.pinned_installs, 1);
+        assert!(
+            v.stats.merge_rows_visited > 0,
+            "the walk read rows before it gave up, and a refusal reporting zero cost is one \
+             a reader would take for free"
+        );
+        assert_eq!(
+            v.stats.merge_epochs_merged, 0,
+            "nothing was merged, so no epochs were merged"
+        );
+    }
+
+    /// **Clause 3, retention.** `deltas_at` reports an epoch the base no longer holds as
+    /// *empty*, which is indistinguishable from an epoch in which nothing happened. Merging
+    /// across that boundary would drop real money and report success, so the boundary is
+    /// asked for rather than inferred.
+    #[test]
+    fn a_suffix_below_the_retention_boundary_pins_rather_than_dropping_money() {
+        /// A base that has forgotten its early deltas but can still reconstruct.
+        struct Compacted {
+            inner: FoldBase,
+            from: Epoch,
+        }
+        impl Base for Compacted {
+            fn frontier(&self) -> Epoch {
+                self.inner.frontier()
+            }
+            fn reconstruct(&self, key: &Key, anchor: Epoch) -> (Value, u64) {
+                self.inner.reconstruct(key, anchor)
+            }
+            fn deltas_at(&self, e: Epoch) -> Vec<(Key, Value)> {
+                if e < self.from {
+                    Vec::new()
+                } else {
+                    self.inner.deltas_at(e)
+                }
+            }
+            fn deltas_available_from(&self) -> Epoch {
+                self.from
+            }
+        }
+
+        let mut inner = FoldBase::new(0);
+        for k in 0..4 {
+            inner.seal(vec![k], 100 + k as i128);
+        }
+        let early = inner.frontier();
+        let mut rt = Runtime::install(
+            circuit(Materialize::Demand, Consistency::Snapshot),
+            None,
+            Policy::Lru,
+        )
+        .unwrap();
+
+        let base = Compacted {
+            inner,
+            from: early + 2,
+        };
+        rt.advance(&base, early);
+        let ticket = open_flight(&mut rt, 0, early);
+        let mut base = base;
+        for k in 0..4 {
+            base.inner.seal(vec![k], 9);
+        }
+        let late = base.frontier();
+        rt.advance(&base, late);
+
+        let (value, rows) = base.reconstruct(&vec![0], early);
+        let v = rt.view_mut("balance").expect("balance");
+        v.finish_fold_merging(ticket, value, rows, Some(&base as &dyn Base));
+
+        assert_eq!(v.stats.merges_refused_unavailable, 1);
+        assert_eq!(v.stats.deferred_merges, 0);
+        assert_eq!(v.stats.pinned_installs, 1);
+    }
+
+    /// **The control.** `MergeCaps::OFF` is the pinned policy, so the arm the measurement
+    /// compares against is a value in one binary rather than a second build.
+    #[test]
+    fn merging_off_is_exactly_the_pinned_policy() {
+        let (base, mut rt, ticket, early) = late_landing(MergeCaps::OFF, 3);
+        let (value, rows) = base.reconstruct(&vec![0], early);
+        let v = rt.view_mut("balance").expect("balance");
+        let answer = v.finish_fold_merging(ticket, value, rows, Some(&base as &dyn Base));
+
+        assert_eq!(v.stats.deferred_merges, 0);
+        assert_eq!(v.stats.pinned_installs, 1);
+        assert_eq!(
+            v.stats.merge_rows_visited, 0,
+            "the control reads no suffix at all"
+        );
+        assert_eq!(answer.anchor, early);
+    }
+
+    /// A caller with no base cannot merge, and must pin rather than guess. `finish_fold`'s
+    /// own signature is this case, and it is the one every existing caller takes.
+    #[test]
+    fn a_landing_with_no_base_pins() {
+        let (base, mut rt, ticket, early) = late_landing(MergeCaps::default(), 3);
+        let (value, rows) = base.reconstruct(&vec![0], early);
+        let v = rt.view_mut("balance").expect("balance");
+        v.finish_fold(ticket, value, rows);
+        assert_eq!(v.stats.deferred_merges, 0);
+        assert_eq!(v.stats.pinned_installs, 1);
+    }
+
+    /// **Ownership is unchanged by any of this.** A landing whose generation was superseded
+    /// writes nothing — merged or not — and a merge must not become a second way to write
+    /// over an entry a newer flight installed.
+    #[test]
+    fn a_superseded_landing_merges_nothing_and_writes_nothing() {
+        let (base, mut rt, ticket, early) = late_landing(MergeCaps::default(), 3);
+        let late = base.frontier();
+        let v = rt.view_mut("balance").expect("balance");
+
+        // The owner is superseded: its marker is reaped — a dropped connection, a killed
+        // statement — and the next reader through the view takes the key over with a new
+        // generation.
+        v.force_reap(&vec![0]);
+        let newer = match v.begin_read_with(&vec![0], late, ReadMode::Alone) {
+            ReadOutcome::Fold(t) => t,
+            _ => panic!("the successor owns the key now"),
+        };
+        let (nv, nr) = base.reconstruct(&vec![0], late);
+        v.finish_fold_merging(newer, nv, nr, Some(&base as &dyn Base));
+        let after_successor = v.stats.deferred_merges;
+
+        let (value, rows) = base.reconstruct(&vec![0], early);
+        let answer = v.finish_fold_merging(ticket, value, rows, Some(&base as &dyn Base));
+
+        assert_eq!(
+            answer.anchor, early,
+            "a superseded landing still answers its caller"
+        );
+        assert_eq!(
+            v.stats.deferred_merges, after_successor,
+            "a landing that owns nothing must not merge: the merge writes the view, and this \
+             one has no right to"
+        );
+        assert!(v.stats.uninstalled_folds >= 1);
     }
 }

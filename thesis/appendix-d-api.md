@@ -60,6 +60,8 @@ pub struct FoldTicket
 pub struct WaitTicket
 pub enum ReadMode
 pub trait Base
+pub struct MergeCaps
+pub enum MergeRefusal
 pub enum Policy
 pub struct Stats
 pub struct Rev

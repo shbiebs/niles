@@ -357,6 +357,218 @@ accompanies this report.
 
 ---
 
+## T00a — Resolve the newly observed gate failures before scoring speed
+
+> **Target T00a.1:** The GBS tamper guard mutates verified record regions, distinguishes header and payload corruption, preserves all original bytes on refusal, and passes its clean-file negative control on both paired toolchains.
+
+> **Target T00a.2:** The current E18 allocation-budget violation is attributed with same-source, host/toolchain-labelled runs and is either repaired with a reverting cost guard or recorded as an explicit unresolved gate failure without raising the budget to hide it.
+
+> **Target T00a.3:** The GBS continuous-eviction guard preserves all value/conservation assertions and separately demonstrates an actual resident hit under an explicit retention precondition instead of assuming every new entry remains cached.
+
+> **Target T00a.4:** The paired adapter guard refuses missing GBS unless an explicit opt-out is reported as not-run, Appendix D includes legitimate API items after comment and intermediate-test traps, and Darwin preflight names and checks its actual barrier and data-volume evidence.
+
+> **Target T00a.5:** A named old-window-gap retry is accepted by both admission and sealer after expiry, an in-window duplicate is refused consistently, and no applied-but-undurable visibility or premature acknowledgement occurs under either retry schedule.
+
+### Status
+
+All five landed in the container. **T00a.1's "both paired toolchains" and T00a.4's Darwin
+half are the author's**: the remote-devices shell that reaches Host C is a Linux VM, so
+`platform.system()` there is `Linux` and the Darwin path cannot be exercised through it at
+all. Host C's own terminal is the only place that runs it.
+
+### Commits
+
+| Repo | SHA | What |
+|---|---|---|
+| G | `20d001e` | the tamper guard aims at a region it has decoded (T00a.1) |
+| G | `01e1d85` | the hit path is demonstrated where the entry is proved to survive (T00a.3) |
+| N | `e29a025` | a flight nobody joined never takes its rendezvous (T00a.2) |
+| N | `92f3861` | Appendix D stops losing its API to a sentence about testing (T00a.4) |
+| N | `f50b100` | the paired gate refuses a missing GBS, the Darwin barrier is a barrier (T00a.4) |
+| N | `61c757b` | the two idempotency windows are tested where they meet (T00a.5) |
+
+Container gate at `61c757b` / `01e1d85`, through `c10-gates.sh`: niles **1,050 pass / 0 fail
+/ 7 ignored**, GBS workspace **504 / 0 / 1**, GBS adapter **53 / 0 / 0**, generated documents
+green, `make reproduce` green, and the paired adapter gate green rather than skipped.
+
+### T00a.1 — the tamper guard was aimed at nothing in particular
+
+`a_tampered_record_is_refused_and_the_segment_is_not_truncated` said it flipped "a byte inside
+the third record's payload region" and flipped `buf.len()/2`. That lands in a record *header*:
+the reader answered `damaged record header at offset 660`, and the assertion demanded the
+substring `damaged at offset`, which is the message for damage in a body. A real red test and
+a stale instrument at once — the reader was right, and the aim had never been checked against
+the format.
+
+`record_bounds` now walks the segment by its own length prefixes and **asserts the walk lands
+exactly on the end of the file**: if the framing the test assumes is not the framing on disk,
+that is a failure rather than a silently mis-aimed flip. Three tests where there was one,
+because a header finding and a body finding have different remedies — a bad body is a record
+that can be identified and quoted, a bad header is a record whose extent is unknowable and on
+whose word nothing may be discarded (F-61). Both refusals assert byte-for-byte preservation
+rather than an unchanged length, since a refusal that rewrote the file to the same size would
+pass a length check and destroy the evidence anyway. The clean-file control is its own named
+test, so "the refusals are not refusing everything" is a claim a reader can find in a
+transcript.
+
+**Reversions.** Restoring the flip to `buf.len()/2`:
+
+```
+a damaged payload must be reported as damage in a record with records after it, not as a
+damaged header: ... "segment ... has a damaged record header at offset 660: its length does
+not match its own check word ..."
+test result: FAILED. 0 passed; 1 failed;   EXIT=101
+```
+
+That is A10-18 reproduced exactly. Disabling the reader's two mid-file refusals in the paired
+`nilestream-ledger` checkout:
+
+```
+a segment tampered with in the middle must not open
+a segment with a damaged record header must not open
+test result: FAILED. 1 passed; 2 failed;
+```
+
+— both tamper tests fail while the clean control passes, which is the shape that says the
+controls separate.
+
+### T00a.2 — the E18 allocation gate, repaired rather than excused
+
+`make reproduce` fails `rev_metadata_2x_budget` on Host C with 44,165 allocations against a
+34,165 budget: 10,000 more over 5,000 keys, two per key, +112 bytes each, `live` and `peak`
+identical. The mechanism is `Completion`. Rust's std lazily boxes a `pthread_mutex_t` (64
+bytes) and a `pthread_cond_t` (48) on macOS at first use, and `finish_fold` published to every
+flight's completion whether or not anyone was listening. 64 + 48 = 112, twice per uncontended
+fold. Linux, where the budget was measured, uses futexes and allocates nothing — which is why
+the budget could not see a cost paid on every fold.
+
+**The budget is not raised.** A completion is marked when it is handed to a joining reader,
+under the view lock, and `publish` returns without touching the mutex when it never was. The
+cancellation flag moved out of the guarded state into an atomic for the same reason:
+`reap_cancelled` asks every miss whether a flight is dead, and that read was taking the lock
+the publish path had just been taught not to.
+
+**The guard is a count, not a duration**, because the cost is a first-acquisition allocation
+and every later acquisition is nearly free. It therefore fails identically on Linux, where the
+same saving is two atomic operations:
+
+```
+assertion `left == right` failed: ten uncontended folds took 10 completion lock(s). Each
+first acquisition costs two heap allocations and 112 bytes on macOS ...
+  left: 10
+ right: 0
+```
+
+The counter lives on the completion and is folded into the view's stats when the flight ends.
+Its first draft was a process-wide static and **passed alone while failing under `cargo
+test`'s parallelism**, because another test's joined flight incremented it between the two
+reads — a counter a guard cannot isolate reports someone else's work.
+
+The control is what makes the guard mean anything: a build that skipped the rendezvous
+unconditionally would pass the count perfectly and strand every waiter. Reverting `mark_joined`
+proved that by **hanging the container** until it was killed. A red test that never returns is
+not a result, so the joined reader's wait is on its own thread behind a ten-second deadline,
+and the reversion now fails with `the joined reader was never answered within 10s`.
+
+**Cost, stated.** `size_of::<Stats>()` went 128 → 200 and `size_of::<Rev>()` 336 → 408 across
+this cycle's nine new counters, measured against `c075bae`; `Completion` did not grow at all,
+96 bytes both sides, its three new fields fitting in existing padding. `results/E18-memory`
+moved by exactly 4 × 72 bytes on `ledger_seeded` with its allocation count unchanged at
+150,254.
+
+### T00a.3 — the hit path, where the entry is proved to survive
+
+`money_is_conserved_at_every_anchor_under_continuous_eviction` ended by requiring a second read
+of one key to be a hit, "or the hit path is untested everywhere in this repository". Against
+that ledger — budget three, nine keys, `Policy::CostAware`, a view already full from sixty
+operations — that is not a property of the engine: the victim chosen at a full budget can be
+the entry the read just inserted (A10-20).
+
+The claim is not deleted, because deleting it leaves the hit path unexercised. It moves whole
+into `a_second_read_of_one_key_is_served_from_resident_state`, where the budget is above the
+key space and the two reads are bracketed by an eviction count that must not move. An eviction
+between them is reported as an **unmet precondition** — this run witnesses nothing about hits
+— rather than as a hit that failed to happen. The eviction phase keeps every value and
+conservation assertion, plus `evictions > 0`, `wipes >= 15` and `upqueries > 0`.
+
+**The first attempt at the reversion was itself informative.** Moving the hit assertion to a
+*fresh* ledger at budget three still passes: the failure needs a view already holding budget
+entries. The finding is not "a small budget evicts a fresh insert" but "at a **full** budget it
+can". Restoring the assertion to the end of the eviction loop reproduces A10-20 exactly, and
+the new precondition is reachable too — at budget one with another key read between the two it
+fires with `2 eviction(s) happened between the two reads`.
+
+### T00a.4 — three checks that reported what they had not established
+
+**The paired adapter gate passed when it did not run.** With no GBS checkout it printed
+`SKIPPED` and returned, so `cargo test` said `ok`. A reader of a transcript could tell; a
+reader of the gate could not, and the gate decides — which is how the pair stayed broken for a
+whole cycle with both sides green. A missing checkout is a refusal now, naming `GBS_ROOT` and
+the sibling path. `NILES_NO_GBS=1` remains for standalone development and produces a
+`PAIRED ADAPTER GATE: NOT RUN` line rather than a pass; `c10-gates.sh` refuses a transcript
+containing that line and refuses to run at all if the variable is set in its environment. All
+three behaviours exercised in the container.
+
+**Appendix D was losing its API to a sentence about testing.** The generator truncated each
+file at the first occurrence of the *characters* `#[cfg(test)]`, anywhere. `eval.rs` explains
+in its module documentation why the evaluator is public "rather than living in a
+`#[cfg(test)]` block", and that sentence deleted `ZSet`, `eval_scalar` and every other public
+item in the file. Two more shapes were wrong the same way: a test module in the *middle* of a
+file deleted the API below it, and the attribute on a non-module item swallowed the rest of
+the file. Across the workspace this understated the public surface by **32 items** —
+`niles-ir` 40 → 58, `nilestream-server` 78 → 87, `bank-bench` 65 → 70 — silently, and in the
+direction that looks correct.
+
+The extractor masks comments and string literals (raw strings included) before looking for the
+attribute, and each attribute covers its own item: to the matching brace for a block, to the
+terminating semicolon otherwise. Guarded in two halves, because either alone is weak — a
+`--self-test` over four synthetic traps, which fails if the extraction regresses, and drift
+assertions on the *committed* appendix, which fail if the generator is fixed and the file never
+regenerated. Both proved separately. The guard's own first draft asserted `pub struct ZSet`,
+which is a `pub type`, and failed against an appendix that was already correct.
+
+**The Darwin barrier probe was not measuring a barrier.** The preflight asked for
+`os.fdatasync`, which macOS does not have, caught the `AttributeError` and fell back to
+`os.fsync` — which returns before the drive has committed its own write cache. Every
+durability verdict this preflight produced on Host C described a call that does not durably
+store anything (A10-17). It uses `fcntl(fd, F_FULLFSYNC)` there now, checks the interface
+exists rather than assuming, and reports an unavailable or failing barrier as NOT RUN with a
+non-zero exit rather than substituting a call that is not one. The mount line came from
+`mount | grep ' on / '`, which on macOS describes the read-only system volume reached through
+a firmlink; the mount point now comes from `df` on the path itself.
+
+**`c10-gates.sh`**, which the work order asks the author to run and which did not exist. Its
+own first run in the container found a bug in itself: backticks inside a double-quoted `note`
+executed `numeric_binary_oracle` as a command.
+
+**`c10-rwlock.sh`** took no arguments and ignored everything, so a mistyped flag ran the
+default probe and reported it as an answer to the question asked; it refuses unknown arguments
+now and has a real `--deadline`. Its quantiles were read at index 100 and 180 of 200 sorted
+samples and labelled p50 and p90 — nearest-rank is 99 and 179. Its one "toolchain" line named
+the override it uses rather than the tree's pin, so a reader could not tell whether they agree
+and the audit that ran it on two Mac toolchains had nothing to distinguish them by. Container
+run at the repaired script: 170/200 admitted after the queued writer, p50 239 µs.
+
+### T00a.5 — the two windows, tested where they meet
+
+The window is enforced twice and nothing tested them together. **The target is accept, not
+refuse**, and that distinction is the finding: an identity that has aged out of a declared
+window is one the system has promised to forget, so a retry of it is a new transaction that
+must commit. Both-refuse would turn a lost acknowledgement into a silently dropped payment.
+The test asserts agreement in both directions — in-window refused by both, aged-out accepted
+by both and landing durably — and checks durability in the segment's own coordinates, because
+the first draft compared a base epoch against a record count and failed against a correct
+build.
+
+Three reversions, each firing a different assertion: the sealer pruning by batch sequence
+again (the retry is refused, and the engine's own message reads "the sink has already committed
+this idempotency key at epoch 1, while the base accepted it as new. The two idempotency windows
+disagree"); admission never pruning (the precondition fails, the base holding 12 identities
+against a declared window of 3); admission not refusing duplicates (the in-window retry reaches
+the sink and returns a window disagreement rather than a clean duplicate).
+
+---
+
 ## Material facts not covered by the work order
 
 Recorded as they are found; these are not restatements of A10-01…20 or F-10-01…13.
@@ -389,4 +601,32 @@ because the repair's own explanatory paragraph named `self.base()` above the acq
 moved the position the scan compares. Any guard in this project that locates code by
 `str::find` over `include_str!` has this failure mode; the two in `rev_engine.rs` now strip
 `//` comments before reading positions, and the rest have not been audited for it.
+
+**MF-4 — three guards written this cycle were vacuous, and each was found by reversion rather
+than by review.** The slow-read width check iterated rows and there were none; the lock-mode
+reconciliation summed `0 + n == n` inside a test that drives an engine which never takes the
+lock at all; the completion-lock counter was a process-wide static and passed alone while
+failing under `cargo test`'s parallelism. Two were repaired by moving the property out of the
+test — into a generated column table and into the lock's own declaration — and the third by
+scoping the counter to the view under test. The general shape: **a guard that reads a counter
+must be able to isolate it, and a guard that iterates a collection must assert the collection
+is non-empty**, or it reports on whatever else the process did. Nothing in this repository
+currently enforces either rule.
+
+**MF-5 — a portability defect that only the machine it was written for could find.** The
+harness self-test's occupied-port case passed in the Linux container and failed on Host C. The
+cause was the test, not the check: it made two connections to a listener that never calls
+`accept`, and on Darwin a connect to a socket whose backlog is full is refused, so the second
+connect failed and the check correctly reported a port it could not reach as free. The same
+class caught the executor twice more in one session — the deadlock witness's reverted form
+hung rather than failing, and the completion control's reverted form hung too. Each was code
+written against the platform in front of it and true only there.
+
+**MF-6 — the device bridge to Host C is a Linux VM, so it cannot validate Darwin behaviour.**
+The `mcp__remote-devices__device_bash` shell reports `platform.system() == "Linux"` and
+`hasattr(fcntl, "F_FULLFSYNC") == False` while sitting on the author's Mac with its folders
+mounted. It is excellent for reading files, checking sizes and verifying bundle hashes — all
+of which it did in this cycle — and it is **not** a Darwin execution environment. Any future
+work order that assigns a Darwin-specific check to the executor rather than to the author is
+assigning it to a machine that cannot run it.
 

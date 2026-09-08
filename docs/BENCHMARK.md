@@ -999,6 +999,37 @@ The separation is structural rather than a convention. A scaling level produces 
 produces a `Sample`, which has none. Neither renderer accepts the other's type, so a
 4-connection figure cannot reach the contract table by anyone's mistake.
 
+### What each mixed level prints about the two-phase read
+
+Every `mixed` level prints one line before its throughput row:
+
+```
+  flights at 12r/6w: pending_joins N, uninstalled_folds N, pinned_installs N, flights_refused N
+```
+
+A **level-local delta**, not a lifetime total, for the same reason the fallback rate is one:
+cumulative counters are dominated by whatever ran first and drift towards a constant, which
+is the opposite of what a connection sweep is asking. `n/a` and not zeroes when the server
+does not report the columns — a build predating the two-phase read makes a different claim
+from a build on which no read joined a flight.
+
+`pending_joins > 0` is the wire-level evidence that the absence lattice's fourth state is
+reachable: a keyed read found a reconstruction already in flight at its own exact anchor and
+shared it rather than folding the same prefix a second time. On a build where the
+reconstruction happens inside the view lock the number is zero by construction, because no
+second reader can run at all. `flights_refused > 0` means the flight table hit its ceiling
+and those reads folded alone — exact, unshared, and worth knowing about before reading a
+throughput number.
+
+### The section-D measurement (C9-06.2)
+
+`docs/audit/cycle-9/hostc/c9-pending.sh` is the interleaved two-arm run the two-phase read's
+throughput claim is measured by: one daemon per replicate, the arms alternating inside one
+session, two warm-ups and five measured replicates each, at 6r/3w, 9r/5w and 12r/6w over
+30-second levels. It never writes a tracked artefact and refuses `--publish`. Run it on the
+reference host; the container's figures are a two-core sandbox and say only that the
+mechanism runs.
+
 **Reading the table.** The step from 1 to 2 connections is not the interesting one: a
 single-connection level is round-trip bound — the client sends, blocks, and reads, so the
 server is idle for much of every operation — and a second connection fills that idle time as

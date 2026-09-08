@@ -2238,6 +2238,7 @@ fn run_nilestream_level(
                 );
             }
             let before = nls_view_counters(nls_port);
+            let flights_before = nls_flight_counters(nls_port);
             let mut m = workloads::mixed(
                 workloads::MixedLevel {
                     target: "nilestream",
@@ -2262,6 +2263,11 @@ fn run_nilestream_level(
                 },
             );
             m.fallback_rate = fallback_rate_between(before, nls_view_counters(nls_port));
+            report_flights(
+                flights_before,
+                nls_flight_counters(nls_port),
+                &format!("{}r/{}w", m.readers, m.writers),
+            );
             let (batch, wait) = nls_sealer_counters(nls_port);
             m.max_batch = batch;
             m.lock_wait_p99_us = wait;
@@ -2388,6 +2394,49 @@ fn report_slow_reads(port: u16, shape: &str) {
             at(row, "unaccounted_us"),
         );
     }
+}
+
+/// **What the two-phase read did during this level.**
+///
+/// `pending_joins` is the one that says the absence lattice's fourth state is reachable over
+/// the wire: a keyed read that found a reconstruction already in flight at its own exact
+/// anchor and shared it rather than starting a second fold of the same prefix. It is zero by
+/// construction on any build where the reconstruction happens inside the view lock, because
+/// there is no moment at which a second reader can arrive.
+///
+/// The other three are what the split costs and what it refuses. Reported as a level-local
+/// delta for the same reason the fallback rate is: cumulative counters are dominated by
+/// whatever ran first and drift towards a constant, which is the opposite of what a
+/// connection sweep is asking.
+fn nls_flight_counters(port: u16) -> Option<[u64; 4]> {
+    let mut c = bank_bench::wire::Client::connect("127.0.0.1", port, "bench", "bank").ok()?;
+    let r = c.simple("select nilestream_stats").ok()?;
+    let at = |name: &str| -> Option<u64> {
+        let i = r.columns.iter().position(|c| c == name)?;
+        r.rows.first()?.get(i)?.as_ref()?.trim().parse().ok()
+    };
+    Some([
+        at("pending_joins")?,
+        at("uninstalled_folds")?,
+        at("pinned_installs")?,
+        at("flights_refused")?,
+    ])
+}
+
+fn report_flights(before: Option<[u64; 4]>, after: Option<[u64; 4]>, shape: &str) {
+    // `n/a` and not zeroes: "no read joined a flight" and "this server does not report
+    // flights" are different claims, and a build predating the two-phase read makes the
+    // second one.
+    let (Some(b), Some(a)) = (before, after) else {
+        eprintln!("  flights at {shape}: n/a (the server does not report the flight counters)");
+        return;
+    };
+    let d: Vec<u64> = a.iter().zip(b).map(|(x, y)| x.saturating_sub(y)).collect();
+    eprintln!(
+        "  flights at {shape}: pending_joins {}, uninstalled_folds {}, pinned_installs {}, \
+         flights_refused {}",
+        d[0], d[1], d[2], d[3]
+    );
 }
 
 fn nls_view_counters(port: u16) -> Option<(u64, u64)> {

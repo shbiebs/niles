@@ -170,7 +170,7 @@ replicate() {
   # report daemon one past it), hence the stride of two.
   ( cd "$wt" && RUSTUP_TOOLCHAIN=stable RUSTUP_AUTO_INSTALL=0 \
       ./target/release/bench \
-        --run --nls-only --host-nls --nls-port "$port" \
+        --run --nls-only --scaling-only --host-nls --nls-port "$port" \
         --connections "$LEVELS" --mixed-seconds "$SECONDS_PER_LEVEL" \
         --accounts "$ACCOUNTS" --rounds "$ROUNDS" --nls-budget "$BUDGET" \
         --runs 1 --out "$outdir" ) >"$OUT/bench-$arm-$rep.log" 2>&1
@@ -184,8 +184,10 @@ replicate() {
     note "  [$tag] the run produced no mixed level; see $OUT/bench-$arm-$rep.log"
     return 1
   fi
-  grep -E "E19 mixed|slowest|view_wait_us|pending_joins|uninstalled_folds|flights_refused" \
-    "$OUT/bench-$arm-$rep.log" | sed 's/^/    /'
+  # The whole mixed section, not a grep of it: the slowest-16 table is rows of numbers with
+  # no keyword in them, and a filter that drops the table keeps only the sentence saying a
+  # table exists.
+  sed -n '/E19 mixed/,$p' "$OUT/bench-$arm-$rep.log" | sed 's/^/    /'
   return 0
 }
 

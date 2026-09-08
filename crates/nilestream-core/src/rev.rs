@@ -216,6 +216,12 @@ impl Completion {
         self.cancelled.load(Ordering::Acquire)
     }
 
+    /// Give back a place in the queue that was taken and will not be used.
+    fn release_waiter(&self) {
+        let mut s = self.lock();
+        s.waiters = s.waiters.saturating_sub(1);
+    }
+
     /// Block until the owner publishes or gives up. **Holds nothing but this leaf.**
     fn join(&self) -> Option<Anchored> {
         let mut s = self.lock();
@@ -307,6 +313,9 @@ impl Drop for FoldTicket {
 pub struct WaitTicket {
     done: Arc<Completion>,
     anchor: Epoch,
+    /// Whether [`WaitTicket::wait`] consumed this ticket. A ticket that was waited on has
+    /// already released its place; one that was not is released by `Drop`.
+    consumed: bool,
 }
 
 impl WaitTicket {
@@ -316,9 +325,45 @@ impl WaitTicket {
     ///
     /// `None` means the owner went away, or published an answer at an anchor this waiter
     /// did not ask for — neither is an answer, and the caller goes around again.
-    pub fn wait(self) -> Option<Anchored> {
+    pub fn wait(mut self) -> Option<Anchored> {
+        self.consumed = true;
         self.done.join().filter(|a| a.anchor == self.anchor)
     }
+}
+
+impl Drop for WaitTicket {
+    /// **A place in the queue that is never taken must be given back — A10-05.**
+    ///
+    /// `begin_read` increments `waiters` under the completion's lock and hands out this
+    /// ticket; `join` decrements it on the way out. A ticket that is *dropped* — a cancelled
+    /// statement, a client that hung up, a caller that decided to fold instead — decremented
+    /// nothing, so the flight's queue kept a reservation for a reader that was never coming.
+    /// `MAX_WAITERS` of those and every later reader is refused a join it could have had,
+    /// with the refusal counted against a queue that is empty.
+    ///
+    /// Taking the completion's lock in a destructor is safe here and nowhere else in this
+    /// engine: **F is a leaf**, below the view and below everything else, and is never held
+    /// while another lock is acquired. The `FoldTicket`'s destructor deliberately does *not*
+    /// take the view for exactly the opposite reason.
+    fn drop(&mut self) {
+        if !self.consumed {
+            self.done.release_waiter();
+        }
+    }
+}
+
+/// **Whether the caller of a read is in a position to wait for another reader's flight.**
+///
+/// Not a tuning knob: it is a statement about the caller's lock discipline. A caller holding
+/// the view — `Rev::read` does, for its whole body — cannot wait on a flight whose owner must
+/// take the view to publish, so it says `Alone` and folds its own (A10-03).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadMode {
+    /// The caller holds nothing and may wait; a flight at this exact anchor may be joined.
+    Shared,
+    /// The caller cannot wait. A flight at this anchor is left alone and this read folds
+    /// independently, installing nothing.
+    Alone,
 }
 
 /// How many reconstructions one view will have outstanding at once.
@@ -434,6 +479,10 @@ pub struct Stats {
     /// capacity: a refusal with one cause reported under another is a refusal nobody can act
     /// on (A10-05).
     pub waiters_refused: u64,
+    /// Reads that could have joined a flight at their own anchor and did not, because the
+    /// caller said it was in no position to wait. A third refusal reason, kept apart from
+    /// the two capacity ones: this is lock discipline, not overload.
+    pub joins_declined_by_caller: u64,
     /// **The two anchor gaps, kept apart.** `gap_at_begin_total` sums `applied − anchor` at
     /// the moment a flight is authorised: the read was already behind before it folded.
     /// `gap_at_finish_total` sums it again when the flight lands. Their difference is the
@@ -601,29 +650,47 @@ impl Rev {
     /// it as `as_of_reconstructions`. Those branches are now unreachable, which is the
     /// intended outcome: a caller should not have to check that an engine answered the
     /// question it was asked.
+    /// **This call cannot join another reader's flight, and that is a safety property rather
+    /// than an optimisation — A10-03.**
+    ///
+    /// `read` takes `&mut self` for its whole body. Waiting on someone else's flight from
+    /// here would park a thread holding the view exclusively, and the flight's owner needs
+    /// that same `&mut Rev` to call `finish_fold` and publish — so the waiter waits for a
+    /// publication that cannot happen. The engine's own two-phase path avoids this by
+    /// returning the ticket and waiting in a caller that holds nothing; this one has no
+    /// caller to return to.
+    ///
+    /// It used to loop on `Join` with a comment arguing the case was unreachable: "a
+    /// single-threaded caller cannot reach it: it holds the view for the whole call, so no
+    /// other flight can have started". That is true of a single-threaded caller and false of
+    /// this function, which is public and is reached through a `Mutex<Runtime>` that several
+    /// threads share. One thread owns a flight — having released the mutex to fold — while a
+    /// second calls `read` through the mutex, joins that flight, and waits holding the lock
+    /// the first needs. Both threads are then permanent.
+    ///
+    /// So the flight is not joined: `ReadMode::Alone` folds this key independently, which is
+    /// slower and exact and installs nothing that belongs to somebody else. The `Join` arm is
+    /// gone rather than made unreachable, because "cannot happen on this path" was exactly
+    /// the claim that was wrong.
     pub fn read(&mut self, base: &dyn Base, key: &Key, anchor: Epoch) -> Anchored {
         // **The whole read, expressed in the two-phase API, so there is one read path and
         // not two.** A second implementation of the certification-interval rule would
         // disagree with this one the first time either changed, and the disagreement would
         // be between a unit test's engine and the daemon's.
-        //
-        // The loop exists for the `Join` case, which a single-threaded caller cannot reach:
-        // it holds the view for the whole call, so no other flight can have started. It is
-        // written out rather than asserted unreachable because "cannot happen on this path"
-        // is a claim about callers, and this function is public.
-        loop {
-            match self.begin_read(key, anchor) {
-                ReadOutcome::Hit(a) => return a,
-                ReadOutcome::Fold(t) => {
-                    let (value, rows) = base.reconstruct(t.key(), t.anchor());
-                    return self.finish_fold(t, value, rows);
-                }
-                ReadOutcome::Join(w) => {
-                    if let Some(a) = w.wait() {
-                        return a;
-                    }
-                }
+        match self.begin_read_with(key, anchor, ReadMode::Alone) {
+            ReadOutcome::Hit(a) => a,
+            ReadOutcome::Fold(t) => {
+                let (value, rows) = base.reconstruct(t.key(), t.anchor());
+                self.finish_fold(t, value, rows)
             }
+            // `ReadMode::Alone` does not produce this outcome. Returning the ticket's own
+            // exact answer is not possible without waiting, so the only honest thing left is
+            // to say which invariant broke, rather than to wait and hang.
+            ReadOutcome::Join(_) => unreachable!(
+                "`Rev::read` asked for `ReadMode::Alone` and was handed a join. Waiting here \
+                 holds the view against the owner that must publish through it (A10-03), so \
+                 this is a deadlock the moment it is taken."
+            ),
         }
     }
 
@@ -637,6 +704,16 @@ impl Rev {
     /// is where the decision is made; `base_rows_read` is charged in [`finish_fold`], because
     /// that is where the rows are actually read.
     pub fn begin_read(&mut self, key: &Key, anchor: Epoch) -> ReadOutcome {
+        self.begin_read_with(key, anchor, ReadMode::Shared)
+    }
+
+    /// `begin_read`, with the caller stating whether it is in a position to wait.
+    ///
+    /// A caller that holds the view — or any lock the flight's owner needs to publish through
+    /// — cannot wait for that flight, and asking for [`ReadMode::Alone`] says so. What it
+    /// gets instead is an independent, uninstalled fold: slower, exact, and touching no slot
+    /// that belongs to another flight.
+    pub fn begin_read_with(&mut self, key: &Key, anchor: Epoch, mode: ReadMode) -> ReadOutcome {
         self.stats.reads += 1;
         self.clock += 1;
         let now = self.clock;
@@ -663,6 +740,16 @@ impl Rev {
             Own,
         }
         let decision = match self.in_flight.get(key) {
+            // **A caller that cannot wait does not take a place in the queue.** Counted
+            // apart from both capacity refusals: this is not an overloaded flight table and
+            // not a full waiter list, it is a reader whose own lock discipline forbids the
+            // wait, and reporting it as either would be a refusal nobody can act on
+            // (A10-05).
+            Some(f) if f.anchor == anchor && mode == ReadMode::Alone => {
+                let _ = f;
+                self.stats.joins_declined_by_caller += 1;
+                Decision::Alone
+            }
             Some(f) if f.anchor == anchor => {
                 // **This is the one place a completion becomes a rendezvous.** Marked before
                 // the lock is taken, and under the view lock, so that a `finish_fold` racing
@@ -700,7 +787,11 @@ impl Rev {
         match decision {
             Decision::Join(done) => {
                 self.stats.pending_joins += 1;
-                ReadOutcome::Join(WaitTicket { done, anchor })
+                ReadOutcome::Join(WaitTicket {
+                    done,
+                    anchor,
+                    consumed: false,
+                })
             }
             Decision::Alone => ReadOutcome::Fold(FoldTicket {
                 key: key.clone(),
@@ -1332,6 +1423,7 @@ impl Runtime {
             s.flights_refused += v.stats.flights_refused;
             s.deferred_merges += v.stats.deferred_merges;
             s.waiters_refused += v.stats.waiters_refused;
+            s.joins_declined_by_caller += v.stats.joins_declined_by_caller;
             s.gap_at_begin_total += v.stats.gap_at_begin_total;
             s.gap_at_finish_total += v.stats.gap_at_finish_total;
             s.gap_begin_samples += v.stats.gap_begin_samples;
@@ -2763,6 +2855,169 @@ mod two_phase {
             "a fold that installed nothing must be counted, or the cost is one nobody can \
              be asked about"
         );
+    }
+
+    /// **The legacy read cannot join, so it cannot wait on a publication it is blocking —
+    /// A10-03.**
+    ///
+    /// The schedule: one thread owns a flight for a key and has released the view to fold.
+    /// A second thread calls `Rev::read` for that same key at that same anchor, through the
+    /// same `Mutex<Runtime>`. `read` takes the view exclusively for its whole body, and the
+    /// owner needs that view to call `finish_fold` — so a `read` that joined would wait for
+    /// a publication only it is preventing, and both threads would be permanent.
+    ///
+    /// **Bounded, because the failure is a hang.** The second thread's work is done behind a
+    /// channel with a deadline; a build that joins never sends, and the assertion fails
+    /// instead of stopping the suite. The stranded thread is left parked on a runtime this
+    /// test owns.
+    #[test]
+    fn the_legacy_read_folds_alone_rather_than_waiting_for_a_flight_it_blocks() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let rt = runtime(Some(64));
+        let hist = Hist::default();
+        hist.seal(&vec![5], 11);
+        let anchor = hist.frontier();
+
+        // Thread one owns the flight and holds nothing: `begin_read` returned and the guard
+        // it was taken under is dropped here.
+        let ticket = match view(&rt)
+            .view_mut("balance")
+            .expect("installed")
+            .begin_read(&vec![5], anchor)
+        {
+            ReadOutcome::Fold(t) => t,
+            _ => panic!("the first reader owns the flight"),
+        };
+
+        // Thread two goes through `Rev::read`, which takes the view for its whole body.
+        let (tx, rx) = mpsc::channel();
+        let rt2 = rt.clone();
+        std::thread::spawn(move || {
+            let hist2 = Hist::default();
+            hist2.seal(&vec![5], 11);
+            let a =
+                view(&rt2)
+                    .view_mut("balance")
+                    .expect("installed")
+                    .read(&hist2, &vec![5], anchor);
+            let _ = tx.send(a);
+        });
+
+        let answered = rx.recv_timeout(Duration::from_secs(10)).expect(
+            "`Rev::read` did not return within 10s. It holds the view exclusively for its \
+             whole body, so if it joined the flight owned by this test it is waiting for a \
+             `finish_fold` that needs the very view it is holding — the deadlock of A10-03. \
+             It must fold alone instead.",
+        );
+        assert_eq!(
+            answered.anchor, anchor,
+            "an independent fold still answers at the anchor it was asked for"
+        );
+        assert_eq!(answered.value, 11, "and with the value the base holds");
+
+        // The owner can still finish, which it could not if the view were held against it.
+        let (v, rows) = hist.fold(ticket.key(), ticket.anchor());
+        let owner = view(&rt)
+            .view_mut("balance")
+            .expect("installed")
+            .finish_fold(ticket, v, rows);
+        assert_eq!(owner.value, answered.value, "both folds see the same base");
+
+        let declined = view(&rt)
+            .view("balance")
+            .expect("installed")
+            .stats
+            .joins_declined_by_caller;
+        assert!(
+            declined >= 1,
+            "the declined join must be counted under its own reason and not as a capacity \
+             refusal — an overloaded flight table and a caller that may not wait are \
+             different findings with different remedies"
+        );
+    }
+
+    /// **A wait ticket that is dropped gives its place back — A10-05.**
+    ///
+    /// `begin_read` reserves a place in the flight's queue under the completion's lock and
+    /// hands out a ticket; `join` gives it back. A ticket that is *dropped* — a cancelled
+    /// statement, a client that hung up, a caller that chose to fold instead — gave nothing
+    /// back, so the queue held a reservation for a reader that was never coming.
+    /// `MAX_WAITERS` of those and every later reader is refused a join it could have had,
+    /// against a queue that is in fact empty.
+    ///
+    /// The observable is the refusal counter: with the leak, the reader after the abandoned
+    /// ones is refused and `waiters_refused` rises; without it, that reader joins.
+    #[test]
+    fn an_abandoned_wait_ticket_releases_its_place_in_the_queue() {
+        let rt = runtime(Some(64));
+        let hist = Hist::default();
+        hist.seal(&vec![3], 7);
+        let anchor = hist.frontier();
+
+        let ticket = match view(&rt)
+            .view_mut("balance")
+            .expect("installed")
+            .begin_read(&vec![3], anchor)
+        {
+            ReadOutcome::Fold(t) => t,
+            _ => panic!("the first reader owns the flight"),
+        };
+
+        // Take and abandon a place, more times than the queue can hold. Each `WaitTicket`
+        // is dropped without being waited on, which is the whole case.
+        for _ in 0..(MAX_WAITERS as usize + 8) {
+            match view(&rt)
+                .view_mut("balance")
+                .expect("installed")
+                .begin_read(&vec![3], anchor)
+            {
+                ReadOutcome::Join(w) => drop(w),
+                ReadOutcome::Fold(_) => panic!(
+                    "a reader at the owner's exact anchor must be offered a join; being told \
+                     to fold means the queue is already full of places nobody is standing in"
+                ),
+                ReadOutcome::Hit(_) => panic!("nothing has been installed yet"),
+            }
+        }
+
+        let refused = view(&rt)
+            .view("balance")
+            .expect("installed")
+            .stats
+            .waiters_refused;
+        assert_eq!(
+            refused, 0,
+            "{refused} reader(s) were refused a join. Every ticket above was dropped without \
+             being waited on, so the queue should be empty — a refusal here is a place held \
+             for a reader that is not coming."
+        );
+
+        // And the flight still works: the owner publishes, and a waiter that does wait is
+        // answered. Without this the test would pass against a build that never queues.
+        let waiter = match view(&rt)
+            .view_mut("balance")
+            .expect("installed")
+            .begin_read(&vec![3], anchor)
+        {
+            ReadOutcome::Join(w) => w,
+            _ => panic!("the queue must still admit a real waiter"),
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(waiter.wait());
+        });
+        let (v, rows) = hist.fold(ticket.key(), ticket.anchor());
+        let owner = view(&rt)
+            .view_mut("balance")
+            .expect("installed")
+            .finish_fold(ticket, v, rows);
+        let joined = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the waiter is answered within the deadline")
+            .expect("and with an answer rather than a cancellation");
+        assert_eq!(joined.value, owner.value);
     }
 
     /// **A fold nobody joined never touches its rendezvous — A10-19.**

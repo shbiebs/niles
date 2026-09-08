@@ -28,6 +28,86 @@
 
 use proto_engine::{EvictionPolicy, Ledger, Posting, Row, ViewMode};
 
+/// **A rendezvous inside `report_from_view`**, between deciding the plan's shape and taking
+/// the view to certify and copy it.
+///
+/// It exists so the A10-02 hazard can be *witnessed* rather than argued about. In the
+/// repaired code a thread paused here holds nothing and has certified nothing, so an append
+/// landing while it is parked is seen by the single guard below and the report declines. In
+/// the code this replaces, the certification had already happened above this point — so the
+/// same append moves the view under a decision already taken, and the copy returns the new
+/// values under the old anchor's label.
+///
+/// The same rendezvous, in the same place, tells the two builds apart. Compiled only under
+/// `cfg(test)` and keyed to one thread, for the reasons `stats_order_hook` gives.
+#[cfg(test)]
+pub(crate) mod report_race_hook {
+    use std::sync::{Condvar, Mutex};
+    use std::thread::ThreadId;
+
+    static ARMED_FOR: Mutex<Option<ThreadId>> = Mutex::new(None);
+    static REACHED: Mutex<bool> = Mutex::new(false);
+    static REACHED_CV: Condvar = Condvar::new();
+    static RELEASED: Mutex<bool> = Mutex::new(false);
+    static RELEASED_CV: Condvar = Condvar::new();
+
+    pub(crate) fn arm_this_thread() {
+        *REACHED.lock().expect("not poisoned") = false;
+        *RELEASED.lock().expect("not poisoned") = false;
+        *ARMED_FOR.lock().expect("not poisoned") = Some(std::thread::current().id());
+    }
+
+    pub(crate) fn disarm() {
+        *ARMED_FOR.lock().expect("not poisoned") = None;
+        release();
+    }
+
+    pub(crate) fn pause() {
+        let armed = *ARMED_FOR.lock().expect("not poisoned") == Some(std::thread::current().id());
+        if !armed {
+            return;
+        }
+        {
+            let mut r = REACHED.lock().expect("not poisoned");
+            *r = true;
+            REACHED_CV.notify_all();
+        }
+        let mut g = RELEASED.lock().expect("not poisoned");
+        while !*g {
+            g = RELEASED_CV.wait(g).expect("not poisoned");
+        }
+    }
+
+    pub(crate) fn wait_until_reached(within: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + within;
+        let mut g = REACHED.lock().expect("not poisoned");
+        while !*g {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            let (next, timeout) = REACHED_CV.wait_timeout(g, left).expect("not poisoned");
+            g = next;
+            if timeout.timed_out() && !*g {
+                return false;
+            }
+        }
+        true
+    }
+
+    pub(crate) fn release() {
+        let mut g = RELEASED.lock().expect("not poisoned");
+        *g = true;
+        RELEASED_CV.notify_all();
+    }
+}
+
+#[cfg(not(test))]
+pub(crate) mod report_race_hook {
+    #[inline(always)]
+    pub(crate) fn pause() {}
+}
+
 /// **A rendezvous inside `read_stats`, between its base phase and its view phase.**
 ///
 /// It exists so the deadlock of A10-01 can be *witnessed* rather than argued about. The two
@@ -1362,7 +1442,6 @@ impl RevEngine {
         p: &crate::scan_fold::FoldPlan,
         circuit: &niles_ir::circuit::Circuit,
         output: &str,
-        anchor: u64,
     ) -> Option<bool> {
         use niles_ir::operator::{Agg, Scalar};
         const ACCT: u16 = 1;
@@ -1383,13 +1462,31 @@ impl RevEngine {
         if !with_currency && self.currency_count() != 1 {
             return None;
         }
-        let rt =
-            crate::lockstats::Timed::acquire(self.runtime.as_ref()?, &crate::lockstats::VIEW_LOCK);
-        let view = rt.view(BALANCE_VIEW)?;
-        if !view.is_full() || view.applied_through() != anchor {
-            return None;
-        }
+        // **No lock is taken here, and no state is consulted — A10-02.**
+        //
+        // This used to acquire the view, check `is_full() && applied_through() == anchor`,
+        // release the view, and return `Some`. `report_from_view` then acquired the view a
+        // *second* time and copied whatever was resident. An append landing between the two
+        // acquisitions advances the view, so the rows copied were the values at some
+        // `e > anchor` while the reply carried `anchor` — a report labelled with a snapshot
+        // it is not, and nothing in the reply says so.
+        //
+        // The split is along the line between what moves and what does not. A plan's shape
+        // is a property of the circuit and cannot change under a reader; whether the view is
+        // full and how far it has been advanced can change on every append. So the shape is
+        // decided here, without a lock, and the state is decided by
+        // [`report_certified_at`] inside whichever guard is about to *use* it.
         Some(with_currency)
+    }
+
+    /// Is this view, right now, a full report at exactly this anchor?
+    ///
+    /// **Called only with the view guard already held, and its answer used without releasing
+    /// it.** That is the whole of the A10-02 repair: the question is about state that an
+    /// append moves, so an answer carried across a lock release is a claim about a moment
+    /// that has passed.
+    fn report_certified_at(view: &nilestream_core::rev::Rev, anchor: u64) -> bool {
+        view.is_full() && view.applied_through() == anchor
     }
 
     /// **The serve path this engine would take, as opposed to the one the circuit implies.**
@@ -1412,7 +1509,17 @@ impl RevEngine {
             if self.cross_currency_fold(p).is_some() {
                 return ServePath::Refused;
             }
-            if self.report_shape(p, circuit, output, anchor).is_some() {
+            if self.report_shape(p, circuit, output).is_some()
+                && self
+                    .runtime
+                    .as_ref()
+                    .map(|rt| {
+                        let g = crate::lockstats::Timed::acquire(rt, &crate::lockstats::VIEW_LOCK);
+                        g.view(BALANCE_VIEW)
+                            .is_some_and(|v| Self::report_certified_at(v, anchor))
+                    })
+                    .unwrap_or(false)
+            {
                 return ServePath::Report;
             }
         }
@@ -1452,10 +1559,25 @@ impl RevEngine {
     ) -> Option<crate::session::Rows> {
         use niles_ir::value::Value;
 
-        let with_currency = self.report_shape(p, circuit, output, anchor)?;
+        let with_currency = self.report_shape(p, circuit, output)?;
+        crate::rev_engine::report_race_hook::pause();
+
+        // **One guard, and the certification is inside it — A10-02.**
+        //
+        // The check that the view is applied exactly through `anchor` and the copy of the
+        // rows are now the same critical section. Split across two acquisitions, an append
+        // between them left this returning the values at a later epoch under the earlier
+        // epoch's label; nothing in the reply said so, and a caller has no way to tell.
+        //
+        // Failing the check is a `None`, which sends the statement down the general fold
+        // path — slower, and exact at the anchor it was asked for. A stale label is not the
+        // cheaper alternative to that; it is a wrong answer.
         let rt =
             crate::lockstats::Timed::acquire(self.runtime.as_ref()?, &crate::lockstats::VIEW_LOCK);
         let view = rt.view(BALANCE_VIEW)?;
+        if !Self::report_certified_at(view, anchor) {
+            return None;
+        }
 
         let mut columns: Vec<String> = (0..p.width()).map(|i| format!("c{i}")).collect();
         columns.push("anchor".into());
@@ -2544,6 +2666,187 @@ mod tests {
         assert_eq!(
             Serving::serve_path_now(&full, &point.circuit, "__wire_result", at),
             serve_path(&point.circuit, "__wire_result").as_str()
+        );
+    }
+
+    /// **A report's certification and its rows come from the same instant — A10-02.**
+    ///
+    /// The check that the view is applied exactly through `anchor` and the copy of the
+    /// resident rows used to be two separate acquisitions of the view lock. An append
+    /// landing between them advances the view, so the values copied were those at some
+    /// `e > anchor` while the reply carried `anchor`. Nothing in the reply says so, and a
+    /// client that asked for a snapshot got a later one under the earlier one's name — the
+    /// quietest way a bitemporal system can lie.
+    ///
+    /// This drives the sequence directly rather than racing for it: certify at `anchor`,
+    /// append (which advances the view), then ask for the report at `anchor`. A build that
+    /// certifies once and copies later serves the post-append values; this one declines and
+    /// the general fold path answers exactly at `anchor`.
+    #[test]
+    fn a_report_is_not_served_from_a_view_that_moved_after_it_was_certified() {
+        use crate::session::Serving;
+        let e = RevEngine::seeded(8, 2, usize::MAX, ViewMode::Demand, EvictionPolicy::Lru);
+        let report = compile("select acct, sum(amt) from postings group by acct");
+        let anchor = e.frontier();
+        assert_eq!(
+            Serving::serve_path_now(&e, &report.circuit, "__wire_result", anchor),
+            "report-from-view",
+            "PRECONDITION UNMET: the view must be able to serve this report at `anchor`, or \
+             the certification being tested never happens"
+        );
+        let before = e
+            .query(&report.circuit, "__wire_result", anchor)
+            .expect("serves")
+            .text();
+
+        // The append advances the view past `anchor`. This is the event that used to slip
+        // between the certification and the copy.
+        e.append(
+            vec![
+                Row::Post(proto_engine::Posting {
+                    txn: 4242,
+                    acct: 1,
+                    cur: 0,
+                    amt: 100_000,
+                    valid: 0,
+                }),
+                Row::Post(proto_engine::Posting {
+                    txn: 4242,
+                    acct: 2,
+                    cur: 0,
+                    amt: -100_000,
+                    valid: 0,
+                }),
+            ],
+            "report-race",
+        )
+        .expect("a balanced transfer is admitted");
+        assert!(
+            e.frontier() > anchor,
+            "PRECONDITION UNMET: the append did not move the frontier, so there is no \
+             divergence for this test to be about"
+        );
+
+        // The same question, at the same anchor, after the view moved.
+        let after = e
+            .query(&report.circuit, "__wire_result", anchor)
+            .expect("serves")
+            .text();
+        assert_eq!(
+            before, after,
+            "the report at anchor {anchor} changed when the view advanced past it"
+        );
+
+        // And the engine says so rather than serving a stale label: at an anchor the view
+        // has passed, the report path declines and the fold answers.
+        assert_eq!(
+            Serving::serve_path_now(&e, &report.circuit, "__wire_result", anchor),
+            "fold",
+            "once the view is past `anchor`, the maintained report is a different question \
+             and must not claim to answer this one"
+        );
+    }
+
+    /// **The append lands between the certification and the copy — A10-02, witnessed.**
+    ///
+    /// The test above shows that a build deciding the report path from `is_full()` alone
+    /// claims `report-from-view` for an anchor the view has passed. It does *not* witness the
+    /// divergence in the values, because in that build the certification simply fails and the
+    /// fold answers correctly. The hazard is narrower and needs the append to land in the
+    /// window **between** a certification that succeeded and the copy that follows it, and a
+    /// window is not something to race for.
+    ///
+    /// So it is latched. `report_race_hook` parks the reporting thread at the point between
+    /// deciding the plan's shape and taking the view. In this build nothing has been
+    /// certified when it parks, so the append is seen by the single guard below and the
+    /// report declines — the fold answers exactly at `anchor`. In the build where the
+    /// certification happens above that point, the same append moves the view under a
+    /// decision already made and the copy returns the new values under the old label.
+    ///
+    /// Bounded: the reporting thread reports through a channel with a deadline, so a build
+    /// that parks forever fails rather than hanging the suite.
+    #[test]
+    fn a_report_certified_before_an_append_does_not_serve_the_values_after_it() {
+        use crate::session::Serving;
+        use std::time::Duration;
+
+        let e = std::sync::Arc::new(RevEngine::seeded(
+            8,
+            2,
+            usize::MAX,
+            ViewMode::Demand,
+            EvictionPolicy::Lru,
+        ));
+        let report = compile("select acct, sum(amt) from postings group by acct");
+        let anchor = e.frontier();
+        assert_eq!(
+            Serving::serve_path_now(&*e, &report.circuit, "__wire_result", anchor),
+            "report-from-view",
+            "PRECONDITION UNMET: the view must be able to serve this report at `anchor`"
+        );
+        let expected = e
+            .query(&report.circuit, "__wire_result", anchor)
+            .expect("serves")
+            .text();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let e2 = e.clone();
+        let circuit = report.circuit.clone();
+        std::thread::spawn(move || {
+            report_race_hook::arm_this_thread();
+            let rows = e2
+                .query(&circuit, "__wire_result", anchor)
+                .map(|r| r.text());
+            let _ = tx.send(rows);
+        });
+        assert!(
+            report_race_hook::wait_until_reached(Duration::from_secs(10)),
+            "PRECONDITION UNMET: the reporting thread never reached the rendezvous, so this \
+             run witnesses nothing either way"
+        );
+
+        // Parked. Now move the view past `anchor`.
+        e.append(
+            vec![
+                Row::Post(proto_engine::Posting {
+                    txn: 5252,
+                    acct: 1,
+                    cur: 0,
+                    amt: 777_000,
+                    valid: 0,
+                }),
+                Row::Post(proto_engine::Posting {
+                    txn: 5252,
+                    acct: 2,
+                    cur: 0,
+                    amt: -777_000,
+                    valid: 0,
+                }),
+            ],
+            "report-race-latched",
+        )
+        .expect("a balanced transfer is admitted");
+        assert!(
+            e.frontier() > anchor,
+            "PRECONDITION UNMET: the append did not move the frontier"
+        );
+        report_race_hook::release();
+
+        let got = rx
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap_or_else(|_| {
+                report_race_hook::disarm();
+                panic!("the reporting thread never returned within 10s")
+            })
+            .expect("the query is served one way or the other");
+        report_race_hook::disarm();
+
+        assert_eq!(
+            got, expected,
+            "the report answered at anchor {anchor} with the values the view holds AFTER an \
+             append that moved it past {anchor}. The certification and the copy were \
+             separated by that append, so the reply is a snapshot that never existed and is \
+             labelled with one that did."
         );
     }
 

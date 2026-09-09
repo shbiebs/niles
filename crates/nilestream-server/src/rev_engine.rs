@@ -299,6 +299,9 @@ pub struct ReadStats {
     /// Dead flight records swept away to make room, kept apart from the refusal above: load
     /// and abandonment are different problems and one number cannot report both.
     pub flights_reclaimed: u64,
+    /// Merges refused because accumulating the suffix would overflow `i128`. Kept apart from
+    /// the two budget refusals: those are tuning questions and this one is not.
+    pub merges_refused_overflow: u64,
     /// **The counters the wire could not be asked for.** `deferred_merges` reads zero until
     /// the merge lands and is reported anyway, because an absent counter and a zero counter
     /// are different claims and only one of them is checkable. `waiters_refused` is the
@@ -1384,6 +1387,7 @@ impl crate::session::Serving for RevEngine {
                     pinned_installs: s.pinned_installs,
                     flights_refused: s.flights_refused,
                     flights_reclaimed: s.flights_reclaimed,
+                    merges_refused_overflow: s.merges_refused_overflow,
                     deferred_merges: s.deferred_merges,
                     merge_rows_visited: s.merge_rows_visited,
                     merge_epochs_merged: s.merge_epochs_merged,
@@ -5741,6 +5745,7 @@ mod fallback_rate_tests {
             pending_joins: after.pending_joins - before.pending_joins,
             uninstalled_folds: after.uninstalled_folds - before.uninstalled_folds,
             pinned_installs: after.pinned_installs - before.pinned_installs,
+            merges_refused_overflow: after.merges_refused_overflow - before.merges_refused_overflow,
             flights_reclaimed: after.flights_reclaimed - before.flights_reclaimed,
             flights_refused: after.flights_refused - before.flights_refused,
             deferred_merges: after.deferred_merges - before.deferred_merges,

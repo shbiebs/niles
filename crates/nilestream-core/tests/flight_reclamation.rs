@@ -44,6 +44,9 @@ impl Base for Rows {
     fn deltas_at(&self, _e: Epoch) -> Vec<(Key, Value)> {
         Vec::new()
     }
+    fn delta_rows_at(&self, _e: Epoch) -> u64 {
+        0
+    }
 }
 
 fn contract() -> ServeContract {

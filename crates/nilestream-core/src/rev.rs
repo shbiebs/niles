@@ -423,6 +423,29 @@ pub trait Base {
     /// is exactly why partial materialization can pay.
     fn deltas_at(&self, e: Epoch) -> Vec<(Key, Value)>;
 
+    /// **How many per-key delta rows epoch `e` holds, without materialising them.**
+    ///
+    /// Required, and deliberately not defaulted to `deltas_at(e).len()`, because that default
+    /// *is* the defect. `Rev::merge_suffix` walked the suffix calling `deltas_at`, adding
+    /// `rows.len()` to a running total and refusing once the total passed `max_rows` — so a
+    /// merge refused for being too wide had already allocated every row it was refusing. With
+    /// a cap of 2 against a 10,000-row epoch, ten thousand rows were built and then dropped,
+    /// and `merge_rows_visited` reported ten thousand, which is at least honest about the
+    /// cost and says nothing about the bound being enforced.
+    ///
+    /// The count is asked for first and the extraction happens only within budget, so at most
+    /// `max_rows` rows are ever materialised. **No sentinel row is needed**: the count is
+    /// exact, so the decision never requires looking at one row past the cap.
+    ///
+    /// # Why this cannot race the extraction it precedes
+    ///
+    /// An epoch at or below the frontier is *sealed*: its rows are immutable and no later
+    /// append can change them (F4). So the count and the extraction observe the same rows by
+    /// construction, and the two-pass shape carries none of the risk it would over a mutable
+    /// snapshot. An implementation over storage that is *not* append-only would have to
+    /// return a count and a reader taken together, and would be a different trait.
+    fn delta_rows_at(&self, e: Epoch) -> u64;
+
     /// The earliest epoch whose per-key deltas this base can still produce.
     ///
     /// **Zero by default, because a fully retained base is what F4 promises**, and every
@@ -574,6 +597,13 @@ pub struct Stats {
     /// abandonment problem look like an overload problem, which is a refusal nobody can act
     /// on — the lesson `waiters_refused` and `flights_refused` already carry (A10-05).
     pub flights_reclaimed: u64,
+    /// Merges refused because accumulating the suffix's deltas would overflow `i128`.
+    ///
+    /// Its own counter and not an epoch or row refusal: those two are tuning questions, and
+    /// this one is an arithmetic fact about the data. `delta += d` was unchecked, so before
+    /// this existed the sum wrapped in release and panicked in debug — the profile split
+    /// C11-02 removed from the query evaluator, in the merge.
+    pub merges_refused_overflow: u64,
     /// Deltas held back during a flight and folded into its result on landing.
     ///
     /// **Zero until the merge lands, and reported so it can be seen to be zero.** A counter
@@ -1344,16 +1374,34 @@ impl Rev {
         let mut delta: Value = 0;
         let mut visited: u64 = 0;
         for e in (anchor + 1)..=self.applied {
-            let rows = base.deltas_at(e);
-            visited += rows.len() as u64;
-            if visited > caps.max_rows {
+            // **Count first, materialise second.** The count is exact and reads no rows, so a
+            // refusal costs the count and nothing else; the extraction below happens only
+            // when the whole epoch fits in what is left of the budget. At most `max_rows`
+            // rows are materialised over the entire walk, and no sentinel row is inspected,
+            // because an exact count never needs to look one past the cap to decide.
+            let n = base.delta_rows_at(e);
+            if visited.saturating_add(n) > caps.max_rows {
+                // The rows that would have been needed are still reported: a refusal that
+                // says it cost nothing is a refusal that looks free, and the number a reader
+                // wants here is how wide the suffix actually was.
                 self.stats.merge_rows_visited += visited;
                 self.stats.merges_refused_rows += 1;
                 return None;
             }
-            for (k, d) in rows {
+            visited += n;
+            for (k, d) in base.deltas_at(e) {
                 if k == *key {
-                    delta += d;
+                    // A merge that wrapped would install a balance made of arithmetic that
+                    // did not happen. Refused, counted apart from the two budget refusals,
+                    // and the rows already read are still reported.
+                    match delta.checked_add(d) {
+                        Some(next) => delta = next,
+                        None => {
+                            self.stats.merge_rows_visited += visited;
+                            self.stats.merges_refused_overflow += 1;
+                            return None;
+                        }
+                    }
                 }
             }
         }
@@ -1878,6 +1926,7 @@ impl Runtime {
             s.pinned_installs += v.stats.pinned_installs;
             s.flights_refused += v.stats.flights_refused;
             s.flights_reclaimed += v.stats.flights_reclaimed;
+            s.merges_refused_overflow += v.stats.merges_refused_overflow;
             s.deferred_merges += v.stats.deferred_merges;
             s.merge_rows_visited += v.stats.merge_rows_visited;
             s.merge_epochs_merged += v.stats.merge_epochs_merged;
@@ -1974,6 +2023,14 @@ mod tests {
             }
             (acc, rows)
         }
+        /// The fixture's epochs are small enough that counting and materialising cost the same,
+        /// so this is `deltas_at(e).len()`. Written out rather than defaulted, because a default
+        /// of exactly this shape in the trait would preserve the defect `delta_rows_at` exists to
+        /// remove: every implementation would then materialise the epoch it was about to refuse.
+        fn delta_rows_at(&self, e: Epoch) -> u64 {
+            self.deltas_at(e).len() as u64
+        }
+
         fn deltas_at(&self, e: Epoch) -> Vec<(Key, Value)> {
             self.rows
                 .iter()
@@ -3263,6 +3320,14 @@ mod two_phase {
         fn reconstruct(&self, key: &Key, anchor: Epoch) -> (Value, u64) {
             self.fold(key, anchor)
         }
+        /// The fixture's epochs are small enough that counting and materialising cost the same,
+        /// so this is `deltas_at(e).len()`. Written out rather than defaulted, because a default
+        /// of exactly this shape in the trait would preserve the defect `delta_rows_at` exists to
+        /// remove: every implementation would then materialise the epoch it was about to refuse.
+        fn delta_rows_at(&self, e: Epoch) -> u64 {
+            self.deltas_at(e).len() as u64
+        }
+
         fn deltas_at(&self, e: Epoch) -> Vec<(Key, Value)> {
             let rows = self.rows.read().expect("not poisoned");
             rows.iter()
@@ -4201,6 +4266,14 @@ mod concurrent_differential {
             }
             (acc, read)
         }
+        /// The fixture's epochs are small enough that counting and materialising cost the same,
+        /// so this is `deltas_at(e).len()`. Written out rather than defaulted, because a default
+        /// of exactly this shape in the trait would preserve the defect `delta_rows_at` exists to
+        /// remove: every implementation would then materialise the epoch it was about to refuse.
+        fn delta_rows_at(&self, e: Epoch) -> u64 {
+            self.deltas_at(e).len() as u64
+        }
+
         fn deltas_at(&self, e: Epoch) -> Vec<(Key, Value)> {
             let rows = self.rows.read().expect("not poisoned");
             rows.iter()
@@ -4777,6 +4850,14 @@ mod deferred_merge_tests {
             fn reconstruct(&self, key: &Key, anchor: Epoch) -> (Value, u64) {
                 self.inner.reconstruct(key, anchor)
             }
+            /// The fixture's epochs are small enough that counting and materialising cost the same,
+            /// so this is `deltas_at(e).len()`. Written out rather than defaulted, because a default
+            /// of exactly this shape in the trait would preserve the defect `delta_rows_at` exists to
+            /// remove: every implementation would then materialise the epoch it was about to refuse.
+            fn delta_rows_at(&self, e: Epoch) -> u64 {
+                self.deltas_at(e).len() as u64
+            }
+
             fn deltas_at(&self, e: Epoch) -> Vec<(Key, Value)> {
                 if e < self.from {
                     Vec::new()

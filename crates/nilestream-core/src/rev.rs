@@ -566,6 +566,14 @@ pub struct Stats {
     /// Reads refused a flight because the view already had `MAX_FLIGHTS` outstanding. They
     /// folded anyway, uninstalled.
     pub flights_refused: u64,
+    /// **Dead flight records reclaimed to make room, kept apart from the refusal.**
+    ///
+    /// A read refused for want of a live flight and a read that had to sweep away abandoned
+    /// ones first are different facts about a server: the first is load, the second is
+    /// callers dropping their tickets. Reporting them under one number would make an
+    /// abandonment problem look like an overload problem, which is a refusal nobody can act
+    /// on — the lesson `waiters_refused` and `flights_refused` already carry (A10-05).
+    pub flights_reclaimed: u64,
     /// Deltas held back during a flight and folded into its result on landing.
     ///
     /// **Zero until the merge lands, and reported so it can be seen to be zero.** A counter
@@ -891,9 +899,18 @@ impl Rev {
             // different prefix and will install a value certified at its own anchor;
             // waiting for it would be answering this caller with someone else's snapshot.
             Some(_) => Decision::Alone,
+            // **Before refusing for want of room, take the room that is already free.**
+            // The scan is bounded by `MAX_FLIGHTS` and runs only here, on the path that was
+            // about to refuse; see `reclaim_cancelled_flights`.
             None if self.in_flight.len() >= MAX_FLIGHTS => {
-                self.stats.flights_refused += 1;
-                Decision::Alone
+                if self.reclaim_cancelled_flights() > 0 && self.in_flight.len() < MAX_FLIGHTS {
+                    Decision::Own
+                } else {
+                    // The table really is full of live flights. This is the refusal
+                    // `flights_refused` has always named, and now it names only that.
+                    self.stats.flights_refused += 1;
+                    Decision::Alone
+                }
             }
             None => Decision::Own,
         };
@@ -1195,6 +1212,58 @@ impl Rev {
         None
     }
 
+    /// **Reclaim every abandoned flight in the table, once, when the table is full.**
+    ///
+    /// # The defect
+    ///
+    /// `reap_cancelled` reaps *the incoming key's* flight and nothing else. Drop 256
+    /// installing `FoldTicket`s for 256 distinct cold keys and the table is full of dead
+    /// records; a 257th read, for a key that has no flight at all, finds
+    /// `in_flight.len() >= MAX_FLIGHTS`, counts `flights_refused`, and folds alone. Nothing
+    /// ever removes those records, because the only thing that removes a record for key `K`
+    /// is a read of `K` — so sharing capacity stays exhausted indefinitely, on a server where
+    /// every subsequent read is correct and none of them can share.
+    ///
+    /// # The cost, stated
+    ///
+    /// A full scan of a table that is capped at `MAX_FLIGHTS`, so **at most 256 entries are
+    /// inspected**, and only on the path that was about to refuse. Amortised: a sweep can
+    /// only run when the table is full, and it either frees at least one slot — which then
+    /// takes at least one more admission to fill — or it frees none, in which case the table
+    /// really is full of live flights and the refusal is the true one. Worst case per read
+    /// is therefore O(MAX_FLIGHTS) and it is paid only under capacity pressure; the common
+    /// path is untouched.
+    ///
+    /// A tombstone queue would make it O(1) amortised and would add a second structure to
+    /// keep consistent with the first under the same lock. The bound here is a constant this
+    /// code already enforces, and 256 comparisons under a lock that is about to be released
+    /// for a base fold is not a cost worth a second data structure.
+    fn reclaim_cancelled_flights(&mut self) -> usize {
+        let dead: Vec<Key> = self
+            .in_flight
+            .iter()
+            .filter(|(_, f)| f.done.cancelled())
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in &dead {
+            // Per key, through the same path, so a cancelled flight is put back exactly one
+            // way. A second implementation of the restore rule would disagree with this one
+            // the first time either changed.
+            self.reap_cancelled(k);
+        }
+        self.stats.flights_reclaimed += dead.len() as u64;
+        dead.len()
+    }
+
+    /// **How many flight records this view holds**, live and dead alike.
+    ///
+    /// The budget `C11-04` states is on this number: at most `MAX_FLIGHTS`, with no growth
+    /// over churn. Exposed because a bound nobody can ask about is a bound nobody can hold —
+    /// the same reason `view_metadata_keys` and `idem_window_keys` are columns.
+    pub fn in_flight_len(&self) -> usize {
+        self.in_flight.len()
+    }
+
     /// Put back what a cancelled flight replaced, and let the next reader take over.
     fn reap_cancelled(&mut self, key: &Key) {
         let dead = self.in_flight.get(key).is_some_and(|f| f.done.cancelled());
@@ -1205,12 +1274,35 @@ impl Rev {
             // A cancelled flight ends here rather than in `finish_fold`, so its rendezvous is
             // accounted for here or nowhere.
             self.stats.completion_locks += f.done.locks();
+            // **Put back what this flight replaced, and only over what this flight left.**
+            //
+            // The restore used to be unconditional: `prior` went back over whatever the slot
+            // held. **I could not construct a reachable case where that is wrong**, and the
+            // reason it is safe is worth writing down, because it is not local to this
+            // function and it is three separate decisions in three other places:
+            // `apply_epoch` skips a `Pending` slot rather than writing a delta into it;
+            // `Slot::is_resident` is false for `Pending`, so eviction never chooses it; and
+            // `in_flight` holds at most one flight per key, so no second generation can
+            // install while this record is still in the table.
+            //
+            // So this is a guard and not a repair, and it is here because the sweep added by
+            // C11-04 reclaims *other keys'* flights — records that have been sitting in the
+            // table for an unbounded time, rather than one the incoming reader just found.
+            // The three invariants above still hold, but the window they hold across is now
+            // much longer, and a rule that depends on three distant decisions staying true is
+            // one worth making local. The marker this flight installed is the evidence that
+            // nothing else has touched the slot; if it is gone, so is the right to restore.
             if let Some(prior) = f.prior {
-                match self.slots.get_mut(key) {
-                    Some(slot) => *slot = prior,
+                match self.slots.get(key) {
+                    Some(Slot::Pending(a)) if *a == f.anchor => {
+                        self.slots.insert(key.clone(), prior);
+                    }
+                    // The key was evicted entirely while the flight was in the air, which is
+                    // the state `Bottom` describes and the state `prior` would restore.
                     None => {
                         self.slots.insert(key.clone(), prior);
                     }
+                    _ => {}
                 }
             }
         }
@@ -1785,6 +1877,7 @@ impl Runtime {
             s.uninstalled_folds += v.stats.uninstalled_folds;
             s.pinned_installs += v.stats.pinned_installs;
             s.flights_refused += v.stats.flights_refused;
+            s.flights_reclaimed += v.stats.flights_reclaimed;
             s.deferred_merges += v.stats.deferred_merges;
             s.merge_rows_visited += v.stats.merge_rows_visited;
             s.merge_epochs_merged += v.stats.merge_epochs_merged;

@@ -296,6 +296,9 @@ pub struct ReadStats {
     pub uninstalled_folds: u64,
     pub pinned_installs: u64,
     pub flights_refused: u64,
+    /// Dead flight records swept away to make room, kept apart from the refusal above: load
+    /// and abandonment are different problems and one number cannot report both.
+    pub flights_reclaimed: u64,
     /// **The counters the wire could not be asked for.** `deferred_merges` reads zero until
     /// the merge lands and is reported anyway, because an absent counter and a zero counter
     /// are different claims and only one of them is checkable. `waiters_refused` is the
@@ -1380,6 +1383,7 @@ impl crate::session::Serving for RevEngine {
                     uninstalled_folds: s.uninstalled_folds,
                     pinned_installs: s.pinned_installs,
                     flights_refused: s.flights_refused,
+                    flights_reclaimed: s.flights_reclaimed,
                     deferred_merges: s.deferred_merges,
                     merge_rows_visited: s.merge_rows_visited,
                     merge_epochs_merged: s.merge_epochs_merged,
@@ -5737,6 +5741,7 @@ mod fallback_rate_tests {
             pending_joins: after.pending_joins - before.pending_joins,
             uninstalled_folds: after.uninstalled_folds - before.uninstalled_folds,
             pinned_installs: after.pinned_installs - before.pinned_installs,
+            flights_reclaimed: after.flights_reclaimed - before.flights_reclaimed,
             flights_refused: after.flights_refused - before.flights_refused,
             deferred_merges: after.deferred_merges - before.deferred_merges,
             merge_rows_visited: after.merge_rows_visited - before.merge_rows_visited,

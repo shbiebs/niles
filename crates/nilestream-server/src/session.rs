@@ -1020,6 +1020,10 @@ impl Session {
                     Field::int8("uninstalled_folds"),
                     Field::int8("pinned_installs"),
                     Field::int8("flights_refused"),
+                    // The other half of the capacity story: records reclaimed because their
+                    // owners were dropped. Load and abandonment look identical in a single
+                    // refusal count and need different responses.
+                    Field::int8("flights_reclaimed"),
                     // **A counter that reads zero and a counter that is absent are different
                     // claims, and only one of them can be checked.** `deferred_merges` was
                     // absent from every surface while the thesis described the mechanism it
@@ -1069,6 +1073,7 @@ impl Session {
                     Some(s.uninstalled_folds.to_string()),
                     Some(s.pinned_installs.to_string()),
                     Some(s.flights_refused.to_string()),
+                    Some(s.flights_reclaimed.to_string()),
                     Some(s.deferred_merges.to_string()),
                     Some(s.merge_rows_visited.to_string()),
                     Some(s.merge_epochs_merged.to_string()),
@@ -2934,6 +2939,7 @@ schema bank {
             "uninstalled_folds",
             "pinned_installs",
             "flights_refused",
+            "flights_reclaimed",
             // **Cycle 10's instruments (T00.2).** Each is read by the baseline script by
             // name; a dropped column renders as `n/a` rather than failing, so the name is
             // the contract and this list is where it is kept.

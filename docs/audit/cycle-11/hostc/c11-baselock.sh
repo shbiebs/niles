@@ -71,6 +71,7 @@ BUDGET_PARTIAL=400
 BASELINE_ONLY=0
 MERGE_ARMS=0
 CANDIDATE_CAPS=default
+BASELINE_CAPS=default
 BASELINE_TOOLCHAIN=""
 CANDIDATE_TOOLCHAIN=""
 NEUTRAL=1
@@ -315,6 +316,29 @@ check_merge_line() {
   return 0
 }
 
+# **The daemon, not the flag, says which caps an arm ran with — in every mode.** The first
+# two-arm `--candidate-caps off` run of this script labelled its candidate by the flag it was
+# given and checked nothing, because the merge-line check lived only under `--merge-arms`
+# (F-11-20). A build that prints the merge line must agree with the caps it was launched with;
+# a build that prints none is accepted only at `default` outside `--merge-arms`, which is what a
+# commit predating the counter can honestly be — and is refused when the arm asked for anything
+# else, because a flag the daemon cannot have read is a label and not a setting.
+check_arm_caps() {
+  log="$1"; caps="$2"; merge_arms="${3:-0}"
+  want="$caps"
+  [ "$want" = "default" ] && want="32:4096"
+  [ "$want" = "off" ] && want="0:0"
+  if grep -q "  merge at " "$log" 2>/dev/null; then
+    check_merge_line "$log" "$want"
+    return $?
+  fi
+  if [ "$caps" != "default" ] || [ "$merge_arms" -eq 1 ]; then
+    check_merge_line "$log" "$want"
+    return $?
+  fi
+  return 0
+}
+
 # A mixed level with no writer progress is a read-only level wearing a mixed level's name,
 # and the anchor-mismatch fallback this whole harness exists to observe cannot occur in it.
 check_writer_progress() {
@@ -381,6 +405,7 @@ while [ $# -gt 0 ]; do
     --baseline-only) BASELINE_ONLY=1 ;;
     --merge-arms)    MERGE_ARMS=1; BASELINE_ONLY=1; NEUTRAL=0 ;;
     --candidate-caps)     CANDIDATE_CAPS="${2:-}"; shift ;;
+    --baseline-caps)      BASELINE_CAPS="${2:-}"; shift ;;
     --baseline-toolchain) BASELINE_TOOLCHAIN="${2:-}"; shift ;;
     --candidate-toolchain) CANDIDATE_TOOLCHAIN="${2:-}"; shift ;;
     --self-test)     SELF_TEST=1 ;;
@@ -479,6 +504,18 @@ if [ "$SELF_TEST" -eq 1 ]; then
     check_merge_line "$TD/merge-on.log" "0:0"
   expect_refusal "a log from a build that does not report the merge at all" \
     check_merge_line "$TD/merge-absent.log" "32:4096"
+  # **In every mode (F-11-20).** The candidate of a two-commit run launched at `off` must show
+  # it; a baseline that predates the counter is accepted only when nothing was asked of it.
+  expect_accept  "a pre-merge build launched at default, outside --merge-arms" \
+    check_arm_caps "$TD/merge-absent.log" default 0
+  expect_refusal "a pre-merge build launched at off, outside --merge-arms" \
+    check_arm_caps "$TD/merge-absent.log" off 0
+  expect_refusal "a build reporting merging on, launched at off, outside --merge-arms" \
+    check_arm_caps "$TD/merge-on.log" off 0
+  expect_accept  "a build reporting merging off, launched at off, outside --merge-arms" \
+    check_arm_caps "$TD/merge-off.log" off 0
+  expect_refusal "a pre-merge build under --merge-arms" \
+    check_arm_caps "$TD/merge-absent.log" default 1
 
   # **A build that was refused must stop the run, not annotate it.**
   #
@@ -619,6 +656,25 @@ LOG
       st_fail=1
     else
       note "  accepted   : no \$ARM_* reference between build_arm (line $build_line) and the run phase (line $first_arm_line)"
+    fi
+  fi
+
+  head2 "self-test: c11-pairs.sh holds one variable per pair (F-11-20)"
+  pairs="$(dirname "$0")/c11-pairs.sh"
+  if [ ! -f "$pairs" ]; then
+    note "  NOT REFUSED: c11-pairs.sh is missing beside this script"; st_fail=1
+  else
+    outs="$(grep -o -- '--out "\$OUT_ROOT/pair[0-9]"' "$pairs" | sort -u | wc -l | tr -d ' ')"
+    p1="$(sed -n '/PAIR 1/,/rc1=/p' "$pairs")"
+    if [ "$outs" -ne 2 ]; then
+      note "  NOT REFUSED: c11-pairs.sh does not give its two pairs two output directories"; st_fail=1
+    else
+      note "  accepted   : the two pairs write to two directories"
+    fi
+    if printf '%s' "$p1" | grep -q -- '--baseline-caps off' && printf '%s' "$p1" | grep -q -- '--candidate-caps off'; then
+      note "  accepted   : pair 1 launches BOTH arms with merging off"
+    else
+      note "  NOT REFUSED: pair 1 does not launch both arms at merging off"; st_fail=1
     fi
   fi
 
@@ -870,12 +926,7 @@ replicate() {
   fi
   check_writer_progress "$log"   || { note "  [$tag] see $log"; return 1; }
   check_no_missing_fields "$log" || { note "  [$tag] see $log"; return 1; }
-  if [ "$MERGE_ARMS" -eq 1 ]; then
-    want="$caps"
-    [ "$want" = "default" ] && want="32:4096"
-    [ "$want" = "off" ] && want="0:0"
-    check_merge_line "$log" "$want" || { note "  [$tag] see $log"; return 1; }
-  fi
+  check_arm_caps "$log" "$caps" "$MERGE_ARMS" || { note "  [$tag] see $log"; return 1; }
 
   # **How long this replicate took**, so the reader can multiply rather than guess. There are
   # REPLICATES_TOTAL of them and the preflight cannot know the fixed per-replicate cost of
@@ -911,8 +962,12 @@ else
   ARM_B="baseline";        ARM_C="control"
   ARM_B_LABEL="$BASELINE_LABEL"; ARM_C_LABEL="A=A control (same commit, second build)"
 fi
-ARM_B_CAPS=default
+ARM_B_CAPS="$BASELINE_CAPS"
 ARM_C_CAPS="$CANDIDATE_CAPS"
+if [ "$BASELINE_CAPS" != "default" ]; then
+  BASELINE_LABEL="$BASELINE_LABEL (NILESTREAM_MERGE_CAPS=$BASELINE_CAPS)"
+  ARM_B_LABEL="$BASELINE_LABEL"
+fi
 if [ "$BASELINE_ONLY" -eq 0 ] && [ "$CANDIDATE_CAPS" != "default" ]; then
   CANDIDATE_LABEL="$CANDIDATE_LABEL (NILESTREAM_MERGE_CAPS=$CANDIDATE_CAPS)"
   ARM_C_LABEL="$CANDIDATE_LABEL"

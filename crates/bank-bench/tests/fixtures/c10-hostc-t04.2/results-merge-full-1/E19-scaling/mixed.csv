@@ -1,0 +1,4 @@
+target,run,readers,writers,reads,writes,wall_ms,reads_per_second,writes_per_second,read_p50_us,read_p99_us,write_p50_us,write_p99_us,fallback_rate,max_batch,lock_wait_p99_us,base_epochs,duplicates,errors,not_run
+nilestream,1,6,3,3848491,15028,30015.304,128217.6,500.7,40.0,113.4,5989.2,8264.5,0.0000,5,3,34027,0,0,
+nilestream,1,9,5,4012889,24997,30007.662,133728.8,833.0,61.9,140.5,5992.2,8024.8,0.0000,8,63,45496,0,0,
+nilestream,1,12,6,4142228,31555,30009.454,138030.8,1051.5,79.0,214.2,5930.3,7975.3,0.0000,8,127,53554,0,0,

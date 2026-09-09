@@ -65,6 +65,13 @@ struct Args {
     calibrate: bool,
     run: bool,
     render: bool,
+    /// **Score an output root that a harness run already produced.**
+    ///
+    /// Reads nothing but files. It exists so that the last step of a measurement — the
+    /// arithmetic — belongs to the program that owns the schema, instead of to whoever is
+    /// reading the transcript. Two auditors doing it by hand from the same cycle-10 logs
+    /// produced two different sets of pooled MADs, and the wrong ones were published.
+    score: Option<String>,
     out: String,
     pg_host: String,
     pg_port: u16,
@@ -174,6 +181,7 @@ impl Args {
             calibrate: false,
             run: false,
             render: false,
+            score: None,
             out: "results/E16-wallclock".into(),
             pg_host: "127.0.0.1".into(),
             pg_port: 5433,
@@ -214,6 +222,10 @@ impl Args {
                 "--calibrate" => a.calibrate = true,
                 "--run" => a.run = true,
                 "--render" => a.render = true,
+                "--score" => {
+                    a.score = Some(argv[i + 1].clone());
+                    i += 1;
+                }
                 "--out" => {
                     a.out = argv[i + 1].clone();
                     i += 1;
@@ -349,12 +361,15 @@ impl Args {
 
 fn main() {
     let args = Args::parse();
+    if let Some(dir) = args.score.clone() {
+        std::process::exit(score_only(&dir));
+    }
     if args.scaling_only && args.connections.is_empty() {
         eprintln!("bench: --scaling-only needs --connections, or it would measure nothing");
         std::process::exit(2);
     }
     if !(args.calibrate || args.run || args.render) {
-        eprintln!("bench: one of --calibrate, --run, --render is required");
+        eprintln!("bench: one of --calibrate, --run, --render, --score is required");
         std::process::exit(2);
     }
     let code = if args.render && !args.run {
@@ -363,6 +378,199 @@ fn main() {
         run(&args)
     };
     std::process::exit(code);
+}
+
+/// **`bench --score <dir>`.** Read a harness run's own output and print the table.
+///
+/// Exit codes are the interface: `0` scored, `3` refused. The harness echoes this output and
+/// does no arithmetic; a non-zero exit is a refusal it must propagate rather than a table it
+/// may print anyway. `1` is reserved for a panic, which is a bug in this function and not a
+/// verdict about the data.
+fn score_only(dir: &str) -> i32 {
+    use bank_bench::score::{self, Verdict};
+    let root = std::path::Path::new(dir);
+    let (rows, problems) = score::read_rows(root);
+    println!("== bench --score {dir}");
+    println!(
+        "   the joint gate: |relative change| >= {:.0}% AND >= {:.0} pooled MADs, where the \
+         pooled MAD is sqrt((mad_a^2 + mad_b^2)/2). Either half alone is noise-limited, which \
+         is a result. Arm A is the reference and every sign is relative to it.",
+        score::GATE_REL * 100.0,
+        score::GATE_MADS
+    );
+    if !problems.is_empty() {
+        println!(
+            "\n-- directories this scorer could not read ({})",
+            problems.len()
+        );
+        for p in &problems {
+            println!("   {p}");
+        }
+    }
+    if rows.is_empty() {
+        println!(
+            "\nREFUSED: no `results-<arm>-<point>-<rep>/E19-scaling/mixed.csv` under {dir}. \
+             Nothing here can be scored, and an empty table is not a result."
+        );
+        return 3;
+    }
+
+    // **The per-arm counter table, printed before any comparison.** The order is deliberate:
+    // a reader who sees the fold fraction and the writer columns first is reading a
+    // hypothesis against the counters, rather than reaching for counters to explain a
+    // difference already believed.
+    let flights = score::read_flight_lines(root);
+    println!("\n-- per-arm counters (from the run's own `flights` summary lines)");
+    if flights.is_empty() {
+        println!(
+            "   MISSING: no log under {dir} carries a `flights` summary line. Every log this \
+             build writes carries one, so these logs were written by a build that predates it \
+             — which is a different statement from `the counters were zero`, and this scorer \
+             will not make the second one on their behalf."
+        );
+    } else {
+        println!(
+            "   {:<10} {:<8} {:<9} {:>8} {:>7} {:>7} {:>8} {:>9} {:>9}",
+            "arm", "point", "shape", "folds", "merged", "pinned", "joins", "gap_begin", "refused"
+        );
+        for (arm, point, shape, l) in &flights {
+            let g = |n: &str| l.num(n).why();
+            let mean = |tot: &str, n: &str| -> String {
+                match (l.num(tot).number(), l.num(n).number()) {
+                    (Some(t), Some(c)) if c > 0.0 => format!("{:.2}", t / c),
+                    (Some(_), Some(_)) => "0-samples".into(),
+                    _ => "n/a".into(),
+                }
+            };
+            println!(
+                "   {arm:<10} {point:<8} {shape:<9} {:>8} {:>7} {:>7} {:>8} {:>9} {:>9}",
+                g("folds_from_counters"),
+                g("deferred_merges"),
+                g("pinned_installs"),
+                g("joins_ended"),
+                mean("gap_at_begin_total", "gap_begin_samples"),
+                g("flights_refused"),
+            );
+        }
+        println!(
+            "   folds_from_counters = uninstalled_folds + pinned_installs + deferred_merges. \
+             The fold fraction below divides it by the level's `reads`."
+        );
+    }
+
+    let scored = score::score(&rows);
+    if scored.is_empty() {
+        let mut arms: Vec<String> = rows.iter().map(|r| r.arm.clone()).collect();
+        arms.sort();
+        arms.dedup();
+        println!(
+            "\nREFUSED: {} replicate row(s) under one arm ({}). A comparison needs two.",
+            rows.len(),
+            arms.join(", ")
+        );
+        return 3;
+    }
+
+    println!("\n-- scored rows");
+    println!(
+        "   {:<7} {:<8} {:<18} {:>10} {:>10} {:>8} {:>8} {:>7} {:>15} {:<7}",
+        "point",
+        "level",
+        "metric",
+        "median_a",
+        "median_b",
+        "mad_a",
+        "mad_b",
+        "rel%",
+        "MADs apart",
+        "verdict"
+    );
+    let mut fired = 0usize;
+    let mut refused = 0usize;
+    for s in &scored {
+        let n = |x: f64| {
+            if x.is_finite() {
+                format!("{x:.1}")
+            } else {
+                "n/a".into()
+            }
+        };
+        println!(
+            "   {:<7} {:<8} {:<18} {:>10} {:>10} {:>8} {:>8} {:>7} {:>15} {:<7}",
+            s.point,
+            s.level,
+            s.metric,
+            n(s.median_a),
+            n(s.median_b),
+            n(s.mad_a),
+            n(s.mad_b),
+            if s.rel_change.is_finite() {
+                format!("{:+.1}", s.rel_change * 100.0)
+            } else {
+                "n/a".into()
+            },
+            if s.mads_apart.is_finite() {
+                format!("{:.2}", s.mads_apart)
+            } else {
+                "n/a".into()
+            },
+            s.verdict.word(),
+        );
+        match &s.verdict {
+            Verdict::Fires => fired += 1,
+            Verdict::Refused(why) => {
+                refused += 1;
+                println!("       refused: {why}");
+            }
+            Verdict::NoiseLimited => {}
+        }
+    }
+
+    // **The fold fraction, where both halves of it exist.** It is printed as its two
+    // components and their quotient, and never as the quotient alone: a fraction whose
+    // numerator and denominator come from different instruments is a number a reader cannot
+    // check, and this one does.
+    println!("\n-- fold fraction (folds_from_counters / reads), where both are present");
+    let mut any = false;
+    for (arm, point, shape, l) in &flights {
+        let folds = l.num("folds_from_counters").number();
+        let reads = rows
+            .iter()
+            .filter(|r| r.arm == *arm && r.point == *point && r.level() == *shape)
+            .filter_map(|r| r.values.get("reads").copied().flatten())
+            .sum::<f64>();
+        match folds {
+            Some(f) if reads > 0.0 => {
+                any = true;
+                println!(
+                    "   {arm:<10} {point:<8} {shape:<9} {f:>12.0} / {reads:<12.0} = {:.4}",
+                    f / reads
+                );
+            }
+            _ => {}
+        }
+    }
+    if !any {
+        println!("   n/a: no arm has both a counter line and a read count for the same level");
+    }
+
+    println!("\n-- machine-readable ({} rows)", scored.len());
+    for s in &scored {
+        println!("{}", s.summary_line());
+    }
+
+    println!(
+        "\n== {} row(s): {fired} fire the joint gate, {refused} refused, {} noise-limited",
+        scored.len(),
+        scored.len() - fired - refused
+    );
+    if fired == 0 {
+        println!(
+            "   No row clears both halves of the gate. That is a result and it is the one to \
+             report; it is not an invitation to lower the gate."
+        );
+    }
+    0
 }
 
 fn connect_pg(args: &Args) -> Option<PgTarget> {
@@ -2324,6 +2532,11 @@ fn nls_frontier(port: u16) -> Option<u64> {
 }
 
 fn report_mixed(m: &workloads::MixedSample) {
+    // **The line a reader parses.** Printed before the prose, unconditionally, and including
+    // the `not_run` case: a level that did not run is a fact about the run and not the
+    // absence of one, and a harness that learned "did not run" by failing to find a sentence
+    // could not tell it from a truncated log.
+    eprintln!("{}", m.summary_line());
     match &m.not_run {
         Some(why) => eprintln!(
             "  E19 mixed {} {}r/{}w run {} — NOT RUN: {why}",
@@ -2549,15 +2762,79 @@ fn nls_flight_counters(port: u16) -> Option<[u64; 22]> {
     ])
 }
 
+/// The `flights` summary line: the level's shape and every counter, always the same fields.
+///
+/// `None` renders every counter as `n/a`. The three `_level` / `caps_` fields are read from
+/// the *final* reading and not from the delta, because a running maximum and a configured cap
+/// are not differences of anything — subtracting them was the arithmetic that once printed a
+/// mean anchor gap larger than the maximum it was a mean of.
+fn flights_summary_line(shape: &str, counters: Option<(&[u64], &[u64; 22])>) -> String {
+    let na = bank_bench::summary::NOT_MEASURED.to_string();
+    let values: Vec<String> = match counters {
+        None => {
+            let n = bank_bench::summary::FLIGHTS_HEADER.split(',').count();
+            let mut v = vec![shape.to_string()];
+            v.extend(std::iter::repeat_n(na, n - 1));
+            v
+        }
+        Some((d, a)) => {
+            let late = d[4] + d[17] + d[18] + d[19];
+            let ended = d[6] + d[7];
+            // **Folds this level, from the counters that name them.** Every fold that
+            // finished either installed (pinned or merged) or did not; the three are
+            // disjoint and exhaustive over finished folds, which is what makes their sum the
+            // denominator-free numerator of the fold fraction. The scorer divides it by the
+            // level's `reads` and prints both, so the definition is checkable from the row.
+            let folds = d[1] + d[2] + d[4];
+            vec![
+                shape.to_string(),
+                d[0].to_string(),
+                d[1].to_string(),
+                d[2].to_string(),
+                d[3].to_string(),
+                d[4].to_string(),
+                d[5].to_string(),
+                d[6].to_string(),
+                d[7].to_string(),
+                d[8].to_string(),
+                d[9].to_string(),
+                a[10].to_string(),
+                d[11].to_string(),
+                d[12].to_string(),
+                d[13].to_string(),
+                d[14].to_string(),
+                d[15].to_string(),
+                d[16].to_string(),
+                d[17].to_string(),
+                d[18].to_string(),
+                d[19].to_string(),
+                a[20].to_string(),
+                a[21].to_string(),
+                late.to_string(),
+                ended.to_string(),
+                folds.to_string(),
+            ]
+        }
+    };
+    bank_bench::summary::line("flights", bank_bench::summary::FLIGHTS_HEADER, &values)
+}
+
 fn report_flights(before: Option<[u64; 22]>, after: Option<[u64; 22]>, shape: &str) {
     // `n/a` and not zeroes: "no read joined a flight" and "this server does not report
     // flights" are different claims, and a build predating the two-phase read makes the
     // second one.
     let (Some(b), Some(a)) = (before, after) else {
+        // **The line is printed even when nothing was measured**, with every counter `n/a`.
+        // The harness used to learn this case by grepping for the sentence below; a build
+        // that printed a differently worded sentence, or none, was then indistinguishable
+        // from a build whose counters were all zero. Now the line is always there and the
+        // reader gets `n/a` per field, which is a third thing from both `0` and *absent*.
+        eprintln!("{}", flights_summary_line(shape, None));
         eprintln!("  flights at {shape}: n/a (the server does not report the flight counters)");
         return;
     };
     let d: Vec<u64> = a.iter().zip(b).map(|(x, y)| x.saturating_sub(y)).collect();
+    eprintln!("{}", flights_summary_line(shape, Some((&d, &a))));
     eprintln!(
         "  flights at {shape}: pending_joins {}, uninstalled_folds {}, pinned_installs {}, \
          flights_refused {}, deferred_merges {}, waiters_refused {}",

@@ -1200,39 +1200,58 @@ impl MixedSample {
         }
         self.writes as f64 / self.wall.as_secs_f64()
     }
-    pub fn to_csv(&self) -> String {
+    /// **The one field list**, in `MIXED_CSV_HEADER` order.
+    ///
+    /// The CSV row and the machine-readable summary line are two renderings of this vector,
+    /// so a column added to one is added to the other by construction. Before this existed
+    /// they were two `format!` strings that agreed by inspection, which is the same
+    /// arrangement that let a committed E19 CSV keep a header its writer had stopped writing
+    /// for a whole cycle (`results_headers.rs`).
+    ///
+    /// An absent optional renders `n/a` and never `0`: "the server could not be asked" and
+    /// "the measurement is zero" are different claims and the reader is entitled to tell
+    /// them apart. `not_run` renders as the empty string when the level ran.
+    pub fn csv_fields(&self) -> Vec<String> {
         let us = |d: Duration| d.as_nanos() as f64 / 1000.0;
         let opt = |v: Option<f64>, p: usize| {
             v.map(|x| format!("{x:.p$}", p = p))
                 .unwrap_or_else(|| "n/a".into())
         };
-        format!(
-            "{},{},{},{},{},{},{:.3},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{},{},{},{},{},{},{}",
-            self.target,
-            self.run,
-            self.readers,
-            self.writers,
-            self.reads,
-            self.writes,
-            self.wall.as_secs_f64() * 1000.0,
-            self.reads_per_second(),
-            self.writes_per_second(),
-            us(self.read_p50),
-            us(self.read_p99),
-            us(self.write_p50),
-            us(self.write_p99),
+        vec![
+            self.target.clone(),
+            self.run.to_string(),
+            self.readers.to_string(),
+            self.writers.to_string(),
+            self.reads.to_string(),
+            self.writes.to_string(),
+            format!("{:.3}", self.wall.as_secs_f64() * 1000.0),
+            format!("{:.1}", self.reads_per_second()),
+            format!("{:.1}", self.writes_per_second()),
+            format!("{:.1}", us(self.read_p50)),
+            format!("{:.1}", us(self.read_p99)),
+            format!("{:.1}", us(self.write_p50)),
+            format!("{:.1}", us(self.write_p99)),
             opt(self.fallback_rate, 4),
             opt(self.max_batch.map(|v| v as f64), 0),
             opt(self.lock_wait_p99_us.map(|v| v as f64), 0),
             opt(self.base_epochs.map(|v| v as f64), 0),
-            self.duplicates,
-            self.errors,
+            self.duplicates.to_string(),
+            self.errors.to_string(),
             self.not_run
                 .as_deref()
                 .unwrap_or("")
                 .replace(',', ";")
-                .replace('\n', " ")
-        )
+                .replace('\n', " "),
+        ]
+    }
+
+    pub fn to_csv(&self) -> String {
+        self.csv_fields().join(",")
+    }
+
+    /// The machine-readable line a reader parses instead of the prose above it.
+    pub fn summary_line(&self) -> String {
+        crate::summary::line("mixed", MIXED_CSV_HEADER, &self.csv_fields())
     }
 }
 

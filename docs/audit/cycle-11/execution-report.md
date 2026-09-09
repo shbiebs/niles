@@ -820,3 +820,56 @@ Unchanged and still true: no Host C number appears in this report; 1.97.1 is
 untested here; the counter table's "every" is qualified by eighteen `StaysZero`
 rows (now twenty); C11-03's basis validation is at declaration; and the fold
 fraction's definition is the one printed beside its components.
+
+### 14.5 — C11-05(c) is done; §9's row for it is superseded
+
+§9 records **C11-05(c)** as *"not done: not reached … the first thing cycle 12 can
+take"*. That was true when §9 was written and stopped being true in the same
+session. It is `c11/09-interval-install` (`4a804b9`), on `c11/08-counter-rows`.
+
+*Target C11-05.2* is met with one clause qualified and one deliberately not
+attempted:
+
+* a late landing whose suffix holds deltas installs at the epoch of the last one,
+  un-pinned, certifying `[d, applied]`; one whose suffix holds none installs at
+  its own anchor un-pinned, certifying `[a, applied]`. The second case was
+  previously counted a `pinned_install`, which was wrong before this change too;
+* the owner's answer and every same-anchor waiter's are untouched, asserted;
+* the differential oracle — 5 stop-points x 4 fold anchors x 13 anchors against
+  arithmetic on the fixture's own definition — **names no key**;
+* the §2.2 diagnostic is promoted: a reader arriving 1 to 8 epochs behind the
+  frontier hits the merged entry;
+* **the qualification.** `merges_refused_moved` exists and is on the wire, and it
+  cannot fire. `merge_suffix` runs under the same `&mut self` as the install, so
+  the frontier it read cannot move in between. Its reversion guard does not go
+  red — the same outcome as S-8, reported the same way. It is a tripwire for
+  LC-37 / C11-12, which move the walk out from under the second view acquisition
+  and are exactly what would make it reachable;
+* **not attempted, as the card forbids**: the walk stays where it is, `MergeCaps`
+  is untouched and still defaults `OFF`.
+
+*The finding.* **No test in the repository asserted the stamp of a merged entry.**
+The whole workspace stayed green through this change, and `merge_budget.rs` could
+not have caught it: its base gives the hot key a delta in *every* epoch, so
+`d == applied` always and the old install and the new one are the same stamp.
+That is how a merge certified one epoch instead of thirty-two for a cycle while
+passing every gate — the property F-11-14 is about had no assertion anywhere.
+
+Guards, in a disposable worktree at `9137d76`:
+
+| reversion | result |
+|---|---|
+| install at `applied` again | 3 of the 7 interval tests red — *"anchor 3 is inside [3, 12] and must be served"*, the empty-suffix case, and *"a reader arriving 1 epoch(s) behind the frontier folded instead of hitting"*; the other 4 stay green, which is the file discriminating rather than failing wholesale | 
+| remove the `applied` verification | **nothing fires**, as above |
+
+Validation: 75 suites, **1,151 passed, 0 failed, 8 ignored**; fmt and clippy
+clean; `make reproduce` clean across five seeds (divergences 0, conservation OK,
+chain OK). `rev_read_hit` stays **1.0 alloc/op**, which is the budget the card
+sets, so the widened interval costs nothing per read. E18's `ledger_seeded` bytes
+move a further 64 for the new counter, allocations unchanged at 150,263, and
+committed per §14.1.
+
+**C11-05(d) remains the author's**: this is a correctness repair with a
+performance *motivation*, and nothing here measures it. Until `c11-merge.sh` runs
+on Host C, F-11-14 is a mechanism that now behaves as the theory says and not a
+demonstrated win — and `MergeCaps::default()` stays `OFF` on that basis.

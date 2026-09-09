@@ -729,3 +729,94 @@ carry no untracked files at all — the five exist only on Host C.
 | the six green gate runs | `/tmp/gates-*.log` in the container, copied to the session scratchpad; not committed, because they are host-scoped and this container is not a reference host |
 | cycle 10's raw CSVs | `crates/bank-bench/tests/fixtures/c10-hostc-t04.2/`, committed unaltered on `c11/05-evidence` |
 | the audit that asked for all this | GBS `c11/work-order-11` @ `6233b21`, and the two orders it consolidates |
+
+---
+
+## 14. Corrections — appended 2026-09-09
+
+*This section is append-only, as `docs/audit/*` requires. Nothing above it is
+edited; where a sentence above is wrong, it is quoted here and corrected.*
+
+### 14.1 — §11's third bullet is wrong about `results/E18-memory.{csv,md}`
+
+§11 says:
+
+> **E18's byte totals move by 32 bytes and are not committed.** … the byte rows
+> are `toolchain-scoped` and belong to the host that produced them;
+> `results/E18-memory.csv` and `.md` are deliberately left as they are and
+> **want re-measuring on Host C**.
+
+**Both halves of that are false.**
+
+*They are committed.* `c4bad72` (C11-05(a), on `c11/04-merge`) regenerated both
+files: `ledger_seeded` bytes `21,579,254` → `21,579,286` and `live_delta` by the
+same 32, because `Stats` gained two counters. Allocations are unchanged at
+`150,263` — the portable half, and the half `results/E18-counts.csv` gates. I
+reverted this change out of C11-04's commit, wrote §11 describing that revert,
+and did not notice the same change re-land on C11-05(a)'s commit. The sentence
+was true when it was written about one commit and false about the branch it was
+published against — the same defect class as the cycle-8 preflight recorded in
+`thesis_drift.rs`, in this cycle's own report.
+
+*They do not want re-measuring on Host C.* The file's own banner reads *"Byte
+totals below are host-shaped and were produced on **linux x86_64 / 1.95.0**"* —
+this container — before the change and after it. The numbers never claimed to be
+Host C's, so there is nothing for Host C to restore. What is true is narrower:
+a byte column measured on a different host will differ, and the banner already
+says why.
+
+**Resolution: the regenerated numbers are kept.** The file is written by
+`cargo run --release --manifest-path tools/memprobe/Cargo.toml -- e18` and
+carries the host that wrote it; keeping a stale total to match a paragraph would
+be the document-drifts-from-code failure this project gates against, in the
+direction that looks tidy. The author was given the alternative — revert the two
+lines so the report stands as written — and chose to correct the report.
+
+*What this changes about §11.* Delete its third bullet and read it as: E18's
+byte rows are regenerated on `c11/04-merge`, the allocation counts are unchanged,
+and no gate asserts the byte columns (`results_headers.rs` classes
+`E18-memory.csv` as toolchain-scoped and gates `E18-counts.csv` instead).
+
+### 14.2 — §10's one open question is answered, and the commit exists
+
+§10 asked whether the two-row counter-table reconciliation should happen now or
+at merge time. **Now**, by the author's decision, as `c11/08-counter-rows`
+(`a33cff6`), a merge of `c11/05-evidence` and `c11/04-merge` carrying:
+
+* `StaysZero` rows for `flights_reclaimed` and `merges_refused_overflow`, each
+  with the reason it stays zero in a single-threaded fixture;
+* two `Level` descriptions that were stale the moment the merge existed —
+  `merge_max_epochs` and `merge_max_rows` still described `MergeCaps::default()`
+  as on, which C11-05(b) reversed. `Level` values are not asserted on, so nothing
+  failed; the table exists so that prose about a counter cannot drift, and an
+  undescribed drift in it is worth more than the two lines it costs;
+* the README test count recomputed to **996** rather than merged. Both sides
+  raised a common 939 — one to 967, one to 968 — and either would have been a
+  conflict resolved into a false statement.
+
+Guards, both run in a disposable worktree at `a33cff6` and both red on
+reversion:
+
+| reversion | what fired | exit |
+|---|---|---|
+| the table as `c11/05-evidence` has it | `these counters are on the nilestream_stats wire and no row in this table says what they are or how they move: ["flights_reclaimed", "merges_refused_overflow"]` | 101 |
+| the README at `c11/04-merge`'s 968 | `the README claims 968 test functions and the workspace has 996` | 101 |
+
+Validation on the merged tree, PostgreSQL up and GBS at `c653fdf`: 74 suites,
+**1,144 passed, 0 failed, 8 ignored**; fmt clean; clippy clean across the
+workspace.
+
+### 14.3 — a pairing fact §7 states but does not demonstrate
+
+§7 says `c11/04-delta-count` requires niles `14fd117`. Running the workspace
+suite on the merge with GBS left at `c11/02-adapter-lint` reproduces the failure
+that makes it true: `downstream_adapter` fails with *"not all trait items
+implemented, missing: `delta_rows_at`"*. The pairing table in §7 is therefore
+demonstrated and not merely asserted.
+
+### 14.4 — what §11's other limitations still say
+
+Unchanged and still true: no Host C number appears in this report; 1.97.1 is
+untested here; the counter table's "every" is qualified by eighteen `StaysZero`
+rows (now twenty); C11-03's basis validation is at declaration; and the fold
+fraction's definition is the one printed beside its components.

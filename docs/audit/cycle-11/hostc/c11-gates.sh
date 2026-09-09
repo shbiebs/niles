@@ -425,6 +425,38 @@ for pair in "niles:$NILES:$NILES_TC_SEL" "gbs:$GBS:$GBS_TC_SEL"; do
     note "    full log: /tmp/c11-gates-clippy-$_n.log"
   fi
 done
+# **The adapter crate is linted by manifest path, because nothing else lints it at all.**
+#
+# `gbs-nilestream` is `exclude`d from the GBS workspace on purpose — it needs a niles checkout
+# beside it, and requiring one to run the suite would make an optional dependency mandatory by
+# the back door. The consequence nobody had drawn: every `cargo clippy --workspace` run in that
+# repository, including this gate's, skips it entirely. Section 3 above already *tests* it by
+# manifest path; it was never *linted* by one.
+#
+# What that hid is A11-06 itself. The `u64 as u64` cast was reported as red on 1.97.1 and green
+# on the pin, and it is red on the pin too: `clippy --manifest-path crates/gbs-nilestream/… --
+# -D warnings` fails on 1.95.0. The row looked toolchain-dependent because the only runs that
+# reached it were the ones somebody happened to invoke by hand.
+if [ -d "$GBS/crates/gbs-nilestream" ]; then
+  if in_repo "$GBS" "$GBS_TC_SEL" cargo fmt --manifest-path crates/gbs-nilestream/Cargo.toml -- --check \
+       >/tmp/c11-gates-fmt-gbs-adapter.log 2>&1; then
+    note "  gbs adapter fmt   ($GBS_TC_SEL): clean"
+  else
+    bad "gbs adapter fmt on $GBS_TC_SEL"
+    head -20 /tmp/c11-gates-fmt-gbs-adapter.log | sed 's/^/    /'
+  fi
+  if in_repo "$GBS" "$GBS_TC_SEL" cargo clippy --offline --manifest-path crates/gbs-nilestream/Cargo.toml --all-targets -- -D warnings \
+       >/tmp/c11-gates-clippy-gbs-adapter.log 2>&1; then
+    note "  gbs adapter clippy($GBS_TC_SEL): clean"
+  else
+    bad "gbs adapter clippy on $GBS_TC_SEL — the crate --workspace never reaches"
+    grep -E "^error" /tmp/c11-gates-clippy-gbs-adapter.log | head -10 | sed 's/^/    /'
+    note "    full log: /tmp/c11-gates-clippy-gbs-adapter.log"
+  fi
+else
+  notrun "the gbs adapter crate was not found at $GBS/crates/gbs-nilestream, so the one crate this gate lints by manifest path was not linted"
+fi
+
 if [ "$LINT_TOOLCHAIN" = "none" ]; then
   # **A host with one toolchain says so, and the transcript carries the claim.** The cloud
   # container has no second compiler and cannot install one; without this the section would be
@@ -443,6 +475,13 @@ elif [ -z "$LINT_TOOLCHAIN" ]; then
   - the newer-compiler lint section (no --lint-toolchain given)"
   FAILED=1
 else
+  if in_repo "$GBS" "$LINT_TOOLCHAIN" cargo clippy --offline --manifest-path crates/gbs-nilestream/Cargo.toml --all-targets -- -D warnings \
+       >/tmp/c11-gates-clippy-new-gbs-adapter.log 2>&1; then
+    note "  gbs adapter clippy($LINT_TOOLCHAIN): clean"
+  else
+    note "  gbs adapter clippy($LINT_TOOLCHAIN): RED — reported, and not counted against this gate"
+    grep -E "^error" /tmp/c11-gates-clippy-new-gbs-adapter.log | head -10 | sed 's/^/      /'
+  fi
   for pair in "niles:$NILES" "gbs:$GBS"; do
     _n="${pair%%:*}"; _p="${pair#*:}"
     if in_repo "$_p" "$LINT_TOOLCHAIN" cargo clippy --offline --workspace --all-targets -- -D warnings \

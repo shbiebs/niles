@@ -425,8 +425,18 @@ for pair in "niles:$NILES:$NILES_TC_SEL" "gbs:$GBS:$GBS_TC_SEL"; do
     note "    full log: /tmp/c11-gates-clippy-$_n.log"
   fi
 done
-if [ -z "$LINT_TOOLCHAIN" ]; then
-  note "  the newer compiler was NOT run: pass --lint-toolchain <name> (Host C: 1.97.1)."
+if [ "$LINT_TOOLCHAIN" = "none" ]; then
+  # **A host with one toolchain says so, and the transcript carries the claim.** The cloud
+  # container has no second compiler and cannot install one; without this the section would be
+  # a permanent red row there, and a gate that is always red is a gate nobody reads. What
+  # separates this from defaulting to silence is that `none` is an assertion by the caller, in
+  # the transcript, that this host has only one toolchain — the same rule as `C11_TOOLCHAIN`.
+  note "  the newer compiler was declared absent on this host (--lint-toolchain none)."
+  note "  A11-06's rows are therefore NOT covered by this run, and no conclusion about the"
+  note "  newer lint may be drawn from its exit code."
+elif [ -z "$LINT_TOOLCHAIN" ]; then
+  note "  the newer compiler was NOT run: pass --lint-toolchain <name> (Host C: 1.97.1), or"
+  note "  --lint-toolchain none to assert that this host has only one."
   note "  This is not a green row. It is a row that did not run, and A11-06 is about exactly"
   note "  the rows it would have produced."
   NOTRUN="${NOTRUN}

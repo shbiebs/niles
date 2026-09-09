@@ -254,6 +254,37 @@ section that describes it.
 
 ---
 
+#### Integer arithmetic is total or it refuses — there is no third answer
+
+**Every integer operation in every evaluator either produces the arithmetically correct value
+or fails the query.** Division and remainder by zero are refusals; so is any result outside
+`i128`, including `i128::MIN / -1`, whose quotient is one past `i128::MAX` on a divisor that
+is neither zero nor unusual. Nothing wraps, nothing saturates, and nothing defaults.
+
+*Why this is a specification clause and not an implementation note.* Until cycle 11 the
+reference evaluator answered `Value::Int(0)` for `x / 0`, and the served daemon runs that
+evaluator for every operator above the keyed fold — so a query whose projection or predicate
+divided by zero returned **a row containing a zero**, which a client cannot distinguish from a
+balance of zero. Its `+`, `-` and `*` wrapped in a release build and panicked in a debug one,
+so the same expression denoted one thing under test and another under measurement. The
+interpreter refused the zero divisor and then panicked on `i128::MIN / -1`. Three semantics for
+five operators, one of them reaching the wire as data.
+
+*Why not wrapping, and why not saturating.* Both preserve totality and both break the property
+this system exists to hold: a wrapped or saturated sum is still a total, so the conservation
+checker goes on passing while the number is wrong. A refusal stops the query; a wrapped value
+becomes a balance.
+
+*Where it is implemented.* `niles_ir::arith` — one module, used by `niles_ir::eval`, by
+`nilestream_server::scan_fold` and by `niles-interp`, so that two implementations of `x / y`
+cannot disagree. A refused fold is a `22000` data exception over the wire whose `DETAIL` names
+the operator and the operands.
+
+*Acceptance test.* `crates/niles-ir/src/arith.rs` (the operators, both profiles),
+`crates/nilestream-server/tests/checked_arithmetic.rs` (refused over the wire, no row, with
+controls for the neighbours of every boundary), and
+`niles-interp`'s `the_smallest_integer_divided_by_minus_one_is_an_error_and_not_a_panic`.
+
 ### L-10 Set-at-a-time
 
 **Query operators MUST be defined over relations, not tuples. There MUST be no row cursor

@@ -967,7 +967,17 @@ impl RevEngine {
                 });
                 self.served_rows
                     .fetch_add(scanned, std::sync::atomic::Ordering::Relaxed);
-                let (folded, w) = folder.finish();
+                // **A refused fold is a refused query, over the wire, with a diagnostic.**
+                // The alternative this replaces was not an alternative: the fold could not
+                // fail, because `x / 0` evaluated to `0` and was summed into the answer.
+                let (folded, w) = match folder.finish() {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return QueryStep::Done(Err(crate::session::ServeError::Eval(
+                            e.to_string(),
+                        )))
+                    }
+                };
                 // **When the aggregate *is* the output, the fold has already answered.**
                 //
                 // Handing it to the reference evaluator as a precomputed node and asking for
@@ -2785,7 +2795,8 @@ mod tests {
             .keys()
             .cloned()
             .collect();
-        let (z, _) = crate::scan_fold::fold(&plan, base.iter().map(|r| r.as_slice()));
+        let (z, _) = crate::scan_fold::fold(&plan, base.iter().map(|r| r.as_slice()))
+            .expect("this fixture contains no failing arithmetic");
         let keys: Vec<&Vec<niles_ir::value::Value>> = z.keys().collect();
         assert!(
             keys.windows(2).all(|w| w[0] < w[1]),

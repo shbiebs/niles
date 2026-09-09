@@ -10,6 +10,7 @@
 //! theorems quantify over this object, not over any surface syntax — an IR that erased
 //! those annotations would leave the proofs talking about something else.
 
+pub mod arith;
 pub mod circuit;
 pub mod eval;
 pub mod operator;

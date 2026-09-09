@@ -7,3 +7,8 @@ authors.workspace = true
 
 [dependencies]
 niles-lang = { path = "../niles-lang" }
+# **The one integer arithmetic.** The interpreter and the reference evaluator had three
+# semantics between them for the same five operators (C11-02), and the only way two
+# implementations of `x / y` cannot disagree is for there to be one. `niles-lang` already
+# depends on `niles-ir`, so this adds no edge to the graph that was not there.
+niles-ir = { path = "../niles-ir" }

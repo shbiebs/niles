@@ -4748,6 +4748,59 @@ mod deferred_merge_tests {
         assert_eq!(answer.anchor, early);
     }
 
+    /// **Does the merge help or hurt a reader that arrives behind the frontier?**
+    ///
+    /// Printed rather than asserted: this is the mechanism behind T04.2's measured
+    /// regression, and it is a *shape*, not a threshold. Run with
+    /// `cargo test -p nilestream-core --lib the_merge_against_the_arrival_gap -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "a measurement, not a gate"]
+    fn the_merge_against_the_arrival_gap() {
+        const KEYS: i64 = 200;
+        const ROUNDS: i128 = 60;
+        for gap in [0u64, 1, 3, 5, 8] {
+            let mut line = format!("gap {gap}: ");
+            for caps in [MergeCaps::OFF, MergeCaps::default()] {
+                let mut base = FoldBase::new(0);
+                for k in 0..KEYS {
+                    base.seal(vec![k], 100);
+                }
+                let mut rt = Runtime::install(
+                    circuit(Materialize::Demand, Consistency::Snapshot),
+                    None,
+                    Policy::Lru,
+                )
+                .unwrap();
+                rt.set_merge_caps(caps);
+                for round in 0..ROUNDS {
+                    for k in 0..KEYS {
+                        base.seal(vec![k], 1 + round);
+                    }
+                    let head = base.frontier();
+                    rt.advance(&base, head);
+                    let anchor = head.saturating_sub(gap);
+                    for k in 0..KEYS {
+                        rt.view_mut("balance")
+                            .unwrap()
+                            .read(&base, &vec![k], anchor);
+                    }
+                }
+                let v = rt.view("balance").unwrap();
+                let name = if caps == MergeCaps::OFF {
+                    "pinned"
+                } else {
+                    "merge"
+                };
+                line.push_str(&format!(
+                    "{name} hit {:.1}% rows {}   ",
+                    100.0 * v.stats.hits as f64 / v.stats.reads as f64,
+                    v.stats.base_rows_read
+                ));
+            }
+            println!("{line}");
+        }
+    }
+
     /// A caller with no base cannot merge, and must pin rather than guess. `finish_fold`'s
     /// own signature is this case, and it is the one every existing caller takes.
     #[test]

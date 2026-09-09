@@ -104,14 +104,27 @@ pick_toolchain() {
   # `toolchain 1.95.0 is not installed`. The probe has to measure the thing it is deciding
   # about, so the override is cleared before it rather than after.
   unset RUSTUP_TOOLCHAIN
-  if rustc --version >/dev/null 2>&1; then
-    TOOLCHAIN_USED="$(rustc --version 2>&1)"
-    TOOLCHAIN_HOW="the tree's pin, which resolves on this host"
+  # **Probed from inside the repository, because that is where the pin lives.**
+  #
+  # `rust-toolchain.toml` is resolved relative to the working directory, and this script is
+  # normally invoked by absolute path from wherever the author happens to be standing. Run
+  # from `~`, the probe found no pin at all, resolved to the default channel, and reported
+  # `rustc 1.97.1 ... the tree's pin, which resolves on this host` — a sentence in which
+  # every clause is false. The builds below `cd` into their worktrees and so did use the
+  # pin; only the line describing them was wrong, which is the worse of the two failures to
+  # have, because it is the line a reader trusts.
+  if ( cd "$REPO" 2>/dev/null && rustc --version ) >/dev/null 2>&1; then
+    TOOLCHAIN_USED="$( cd "$REPO" && rustc --version 2>&1 )"
+    TOOLCHAIN_HOW="the tree's pin, resolved in $REPO, which resolves on this host"
   else
     export RUSTUP_TOOLCHAIN=stable
-    TOOLCHAIN_USED="$(rustc --version 2>&1)"
+    TOOLCHAIN_USED="$( cd "$REPO" 2>/dev/null && rustc --version 2>&1 )"
     TOOLCHAIN_HOW="RUSTUP_TOOLCHAIN=stable, because the tree's pin does not resolve here"
   fi
+  # The pin as written, so a reader can compare it with what resolved rather than trust
+  # this script's adjective.
+  TOOLCHAIN_PIN="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' "$REPO/rust-toolchain.toml" 2>/dev/null)"
+  TOOLCHAIN_PIN="${TOOLCHAIN_PIN:-none declared}"
 }
 
 note()  { printf '%s\n' "$*"; }
@@ -683,6 +696,7 @@ note "candidate       : $CANDIDATE_REF -> $CANDIDATE_SHA  $CANDIDATE_LABEL"
 fi
 note "rustc           : $TOOLCHAIN_USED"
 note "toolchain       : $TOOLCHAIN_HOW"
+note "pin declared    : $TOOLCHAIN_PIN  (rust-toolchain.toml)"
 note "cargo           : $(cargo --version 2>&1)"
 note "governor        : $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo 'n/a')"
 note "nproc           : $(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo '?')"

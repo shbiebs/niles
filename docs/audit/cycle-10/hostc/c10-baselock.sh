@@ -119,6 +119,53 @@ head2() { printf '\n=== %s ===\n' "$*"; }
 skip()  { SKIPPED="${SKIPPED}
   - $*"; FAILED=1; note "NOT RUN: $*"; }
 
+# **A refusal that the run cannot continue past.**
+#
+# `skip` records and returns, which is right for a section whose absence leaves the rest of
+# the transcript meaningful — a checkpoint probe that could not run does not invalidate the
+# replicates below it. It is wrong for anything the measurement is *made of*, and the
+# difference cost a 40-minute run: a leftover worktree at an old commit was refused by
+# `build_arm`, and the script then ran every warm-up and all five replicates against the
+# binary already sitting in that directory. Twenty refusals followed, every one of them
+# naming the wrong cause, and the right one had scrolled past.
+#
+# The shape is the paired adapter gate's, which printed `SKIPPED` and returned `ok` while the
+# pair was broken for a whole cycle. A refusal that does not stop the thing it refuses is a
+# note, and notes do not gate.
+# The status section and the exit, in one place because `fatal` needs them too: a run that
+# stops early must still say what it did and did not do, in the same words as one that
+# finishes, or a reader has to learn two shapes of transcript.
+summary_and_exit() {
+  head2 "6. status"
+  if [ -n "$SKIPPED" ]; then
+    note "SECTIONS THAT DID NOT RUN OR DID NOT COMPLETE:$SKIPPED"
+    note ""
+    note "A partial run is not a result. Report it as \`not done\` with this list."
+  else
+    note "every section ran"
+  fi
+
+  note ""
+  note "worktrees left in place for re-runs; remove with:"
+  note "  git -C $REPO worktree remove --force $OUT/wt-baseline"
+  if [ "$BASELINE_ONLY" -eq 0 ]; then
+    note "  git -C $REPO worktree remove --force $OUT/wt-candidate"
+  elif [ "$NEUTRAL" -eq 1 ]; then
+    note "  git -C $REPO worktree remove --force $OUT/wt-control"
+  fi
+
+  exit $FAILED
+}
+
+fatal() {
+  skip "$*"
+  note ""
+  note "STOPPING. This is not a section that can be missing from a transcript: everything"
+  note "below it would be measured against something this script has just refused, and would"
+  note "be reported under a label the refusal says is wrong."
+  summary_and_exit
+}
+
 # ---------------------------------------------------------------------------
 # Checks, written as functions so `--self-test` can inject a fault into each one
 # and require the refusal. A check that is only ever exercised by the happy path
@@ -448,6 +495,30 @@ if [ "$SELF_TEST" -eq 1 ]; then
   expect_refusal "a log from a build that does not report the merge at all" \
     check_merge_line "$TD/merge-absent.log" "32:4096"
 
+  # **A build that was refused must stop the run, not annotate it.**
+  #
+  # Both halves, because either alone is weak. The behavioural half: `fatal` really exits, and
+  # says so in words a reader will see above twenty misleading refusals. The structural half:
+  # no build failure anywhere in this script is still wired to `skip`, which is the form the
+  # defect took — the failure was recorded and the sweep ran anyway, against whatever binary
+  # was already in the refused worktree. A test of the behaviour would pass on the next
+  # `|| skip` somebody adds.
+  out="$( ( fatal "a test arm" ) 2>&1 )"; rc=$?
+  if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "STOPPING"; then
+    note "  refused    : a fatal section stops the run rather than annotating it"
+  else
+    note "  NOT REFUSED: \`fatal\` returned $rc without stopping — a refused build would be"
+    note "               followed by a full sweep against the binary it refused"
+    st_fail=1
+  fi
+  if grep -n "build_arm .* || *skip" "$0" >/dev/null 2>&1; then
+    note "  NOT REFUSED: a build failure is still wired to \`skip\`, which records and returns:"
+    grep -n "build_arm .* || *skip" "$0" | sed 's/^/               /'
+    st_fail=1
+  else
+    note "  refused    : every build failure in this script is fatal, not recorded"
+  fi
+
   # stale worktree, and a matching one
   SHA="$(git -C "$TD/rep" rev-parse HEAD)"
   git -C "$TD/rep" worktree add --detach -q "$TD/wt" "$SHA" >/dev/null 2>&1
@@ -701,16 +772,16 @@ build_arm() {
 
 head2 "1. build"
 BASELINE_WT="$OUT/wt-baseline"
-build_arm baseline "$BASELINE_SHA" || skip "the baseline arm did not build"
+build_arm baseline "$BASELINE_SHA" || fatal "the baseline arm did not build"
 if [ "$BASELINE_ONLY" -eq 0 ]; then
   CANDIDATE_WT="$OUT/wt-candidate"
-  build_arm candidate "$CANDIDATE_SHA" || skip "the candidate arm did not build"
+  build_arm candidate "$CANDIDATE_SHA" || fatal "the candidate arm did not build"
 elif [ "$NEUTRAL" -eq 1 ]; then
   # The neutral arm is the same commit in a second worktree, built separately. Same source,
   # separate build directory, separate binary: if those alone move the number, the harness
   # cannot resolve anything smaller.
   CONTROL_WT="$OUT/wt-control"
-  build_arm control "$BASELINE_SHA" || skip "the A=A control arm did not build"
+  build_arm control "$BASELINE_SHA" || fatal "the A=A control arm did not build"
 fi
 
 head2 "2. the checkpoint premise"
@@ -934,22 +1005,4 @@ if [ "$MERGE_ARMS" -eq 1 ]; then
   note "on it."
 fi
 
-head2 "6. status"
-if [ -n "$SKIPPED" ]; then
-  note "SECTIONS THAT DID NOT RUN OR DID NOT COMPLETE:$SKIPPED"
-  note ""
-  note "A partial run is not a result. Report it as \`not done\` with this list."
-else
-  note "every section ran"
-fi
-
-note ""
-note "worktrees left in place for re-runs; remove with:"
-note "  git -C $REPO worktree remove --force $OUT/wt-baseline"
-if [ "$BASELINE_ONLY" -eq 0 ]; then
-  note "  git -C $REPO worktree remove --force $OUT/wt-candidate"
-elif [ "$NEUTRAL" -eq 1 ]; then
-  note "  git -C $REPO worktree remove --force $OUT/wt-control"
-fi
-
-exit $FAILED
+summary_and_exit

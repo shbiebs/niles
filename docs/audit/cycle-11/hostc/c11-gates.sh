@@ -149,6 +149,56 @@ check_sha() {
   esac
 }
 
+# **Does the GBS adapter's path dependency actually point at the niles tree being gated?**
+#
+# `crates/gbs-nilestream/Cargo.toml` names its niles crates by a fixed relative path,
+# `../../../niles/crates/...`, because a Cargo path dependency cannot be an environment
+# variable. So the crate compiles against whatever sits at `<gbs>/../../niles`, which is not
+# necessarily the tree this gate was told to test — and when the two differ, rustc reports a
+# trait mismatch three sections below and the operator reads it as a code defect.
+#
+# That is exactly what happened on the first Host C run of C11-05(c): both repositories were
+# checked out as git worktrees under new names (`niles-c11`, `gbs-c11`), the adapter resolved
+# `../../../niles` to the *main* checkout two cycles behind, and the gate reported
+# `error[E0407]: method delta_rows_at is not a member of trait Base` — true of the pair it
+# actually compiled, and nothing to do with either branch under test.
+#
+# A gate that fails for the wrong stated reason is only marginally better than one that
+# passes for the wrong reason, so the relation is checked here, by resolved path, before
+# anything is built.
+check_adapter_dep() {
+  ADAPTER_MANIFEST="$2/crates/gbs-nilestream/Cargo.toml"
+  if [ -f "$ADAPTER_MANIFEST" ]; then
+    # The one path every niles crate in that manifest shares, resolved the way cargo resolves
+    # it: relative to the manifest's own directory.
+    _dep="$(cd "$2/crates/gbs-nilestream" 2>/dev/null && cd ../../../niles 2>/dev/null && pwd -P)"
+    _niles="$(cd "$1" 2>/dev/null && pwd -P)"
+    if [ -z "$_dep" ]; then
+      note ""
+      note "REFUSED: the GBS adapter's path dependency (<gbs>/../../niles) does not exist, so"
+      note "         nothing below could build it. gbs   = $2"
+      return 1
+    fi
+    if [ "$_dep" != "$_niles" ]; then
+      note ""
+      note "REFUSED: the GBS adapter would be compiled against a different niles tree than"
+      note "         the one this gate is testing, so every result below would be about a"
+      note "         pair nobody chose."
+      note "           gated niles : $_niles"
+      note "           adapter uses: $_dep"
+      note "         A cargo path dependency cannot be an environment variable, so this is a"
+      note "         layout requirement and not a flag: the two checkouts must be siblings"
+      note '         named "niles" and "GBS". With worktrees, put both under one parent:'
+      note "           git -C <niles> worktree add <parent>/niles  <branch>"
+      note "           git -C <gbs>   worktree add <parent>/GBS    <branch>"
+      note "         and run with --niles <parent>/niles --gbs <parent>/GBS."
+      return 1
+    fi
+    note "adapter dep : <gbs>/../../niles resolves to the gated tree"
+  fi
+  return 0
+}
+
 # ---------------------------------------------------------------------------------------------
 # --self-test: the preflight's own refusals, against the faults they are for (C11-06.4/.6).
 # No cargo, no network, under a minute.
@@ -260,6 +310,34 @@ if [ "$SELF_TEST" -eq 1 ]; then
   if [ $? -eq 0 ]; then ok_ "a HEAD that is the expected SHA is accepted"
   else bad_ "a matching SHA was refused"; fi
 
+  # (12-14) **The adapter's path dependency, which is a layout fact and not a flag.**
+  #     These three arms exist because the first Host C run of C11-05(c) failed with
+  #     `error[E0407]: method delta_rows_at is not a member of trait Base` — a true statement
+  #     about a pair nobody had chosen, because both trees were worktrees under new names and
+  #     `<gbs>/../../niles` still resolved to the main checkout two cycles behind.
+  mkdir -p "$TD/good/niles" "$TD/good/GBS/crates/gbs-nilestream"
+  : > "$TD/good/GBS/crates/gbs-nilestream/Cargo.toml"
+  if check_adapter_dep "$TD/good/niles" "$TD/good/GBS" >/dev/null 2>&1; then
+    ok_ "siblings named niles and GBS are accepted"
+  else
+    bad_ "the layout the adapter actually requires was refused"
+  fi
+
+  mkdir -p "$TD/bad/niles" "$TD/bad/niles-c11" "$TD/bad/GBS-c11/crates/gbs-nilestream"
+  : > "$TD/bad/GBS-c11/crates/gbs-nilestream/Cargo.toml"
+  if check_adapter_dep "$TD/bad/niles-c11" "$TD/bad/GBS-c11" >/dev/null 2>&1; then
+    bad_ "renamed worktrees were accepted — this is the Host C run that failed as E0407"
+  else
+    ok_ "renamed worktrees are refused before anything is built"
+  fi
+
+  mkdir -p "$TD/nogbs/niles" "$TD/nogbs/GBS"
+  if check_adapter_dep "$TD/nogbs/niles" "$TD/nogbs/GBS" >/dev/null 2>&1; then
+    ok_ "a GBS checkout with no adapter crate is not applicable, not a refusal"
+  else
+    bad_ "a GBS checkout with no adapter crate was refused, which would refuse older pairs"
+  fi
+
   hdr "self-test: status"
   if [ "$st_fail" -eq 0 ]; then
     note "every injected fault was refused, and every clean control was accepted"
@@ -308,6 +386,8 @@ if [ -n "${NILES_NO_GBS:-}" ]; then
   note "         re-run:  unset NILES_NO_GBS"
   exit 2
 fi
+
+check_adapter_dep "$NILES" "$GBS" || exit 2
 
 # Untracked files are not a refusal here either, for the reason c11-baselock.sh gives: the
 # five protected files in Host C's tree are untracked, and a check that refused on them would

@@ -32,6 +32,22 @@ set -uo pipefail
 NILES="${C11_NILES:-$HOME/Documents/niles}"
 GBS="${C11_GBS:-$HOME/Documents/GBS}"
 
+# **The commit each tree is expected to be at.** A gate run is evidence about a commit pair;
+# without this the pair is whatever happened to be checked out, and a reader learns it from a
+# line in the transcript that nothing checked. Empty means "do not check", which is the old
+# behaviour and is reported as such.
+NILES_SHA="${C11_NILES_SHA:-}"
+GBS_SHA="${C11_GBS_SHA:-}"
+
+# **The newer compiler, run separately.** A11-06's lint rows are red on 1.97.1 and green on
+# the pin. Running both in one pass would make the gate's verdict depend on which compiler
+# happened to be first; running the newer one as its own section, allowed to be red, keeps the
+# pin's verdict clean and still surfaces the rows. Empty means the section is not run and says
+# so.
+LINT_TOOLCHAIN="${C11_LINT_TOOLCHAIN:-}"
+
+SELF_TEST=0
+
 FAILED=0
 NOTRUN=""
 
@@ -47,7 +63,12 @@ NOTRUN=""
 # The rule now: use the pin if it resolves, fall back to `stable` if it does not, and print
 # which happened. A measurement built with a compiler other than the one the tree pins is not
 # wrong, but it is a different measurement and it must be labelled.
-. "$(cd "$(dirname "$0")" && pwd)/toolchain.sh"
+# **Resolved once, at the top, before anything can change directory.** `$0` is relative when
+# the script is invoked by a relative path, so `dirname "$0"` stops naming this directory the
+# moment any code runs from somewhere else — which the self-test arm `run from a foreign
+# working directory` demonstrated by failing.
+HERE="$(cd "$(dirname "$0")" && pwd)"
+. "$HERE/toolchain.sh"
 
 note()  { printf '%s\n' "$*"; }
 hdr()   { printf '\n=== %s ===\n' "$*"; }
@@ -59,6 +80,10 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --niles) NILES="${2:-}"; shift ;;
     --gbs)   GBS="${2:-}"; shift ;;
+    --niles-sha) NILES_SHA="${2:-}"; shift ;;
+    --gbs-sha)   GBS_SHA="${2:-}"; shift ;;
+    --lint-toolchain) LINT_TOOLCHAIN="${2:-}"; shift ;;
+    --self-test) SELF_TEST=1 ;;
     *) note "REFUSED: unknown flag \`$1\`. A mistyped flag that is ignored is a run that"
        note "         checked something other than what was asked for."
        exit 2 ;;
@@ -66,21 +91,216 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-pick_toolchain
 export CARGO_NET_OFFLINE=true
 export GIT_TERMINAL_PROMPT=0
+
+# ---------------------------------------------------------------------------------------------
+# **One pin per repository, resolved in that repository (C11-06.4).**
+#
+# The first version of this script called `pick_toolchain` with no argument. The function read
+# an ambient `REPO` that this script never sets, so under `set -u` both reads died and the
+# preflight printed
+#
+#     rustc       :
+#                 : RUSTUP_TOOLCHAIN=stable, because the pin (none declared) does not resolve here
+#
+# for a tree whose `rust-toolchain.toml` says 1.95.0 on its first line. The gate then built
+# everything under whatever `stable` is on that machine and reported that the tree had asked
+# for it — MF-7 again, one cycle after MF-7, inside the script written to prevent MF-7.
+#
+# Two repositories can pin two compilers, so each is resolved against its own tree and each
+# section is launched with the selector its repository produced. Nothing inherits: `run_pinned`
+# assigns `RUSTUP_TOOLCHAIN` in the child, so an operator's own default — Host C's is 1.97.1 —
+# cannot reach a section that resolved 1.95.0.
+resolve_repo() {
+  _r="$1"; _tag="$2"
+  if ! pick_toolchain "$_r"; then
+    note "FATAL: $TOOLCHAIN_HOW"
+    note ""
+    note "This is a refusal of everything downstream, not a fallback. A gate that quietly"
+    note "substituted a compiler would produce green rows about a build the tree never asked"
+    note "for, which is the confound that cost cycle 10 its whole baseline."
+    exit 3
+  fi
+  eval "${_tag}_PIN=\$TOOLCHAIN_PIN"
+  eval "${_tag}_SEL=\$TOOLCHAIN_SELECTOR"
+  eval "${_tag}_VER=\$TOOLCHAIN_USED"
+  eval "${_tag}_HOW=\$TOOLCHAIN_HOW"
+}
+
+# Run a cargo (or make) command inside a repository under that repository's selector.
+in_repo() {
+  _r="$1"; _sel="$2"; shift 2
+  ( cd "$_r" && RUSTUP_TOOLCHAIN="$_sel" "$@" )
+}
+
+# **The exact pair, when one was named.** A prefix is accepted because that is how a SHA is
+# written in a work order; the comparison is on the prefix of the full SHA and never the other
+# way round, so a four-character argument cannot match by accident of formatting.
+check_sha() {
+  _name="$1"; _repo="$2"; _want="$3"
+  [ -z "$_want" ] && { note "$_name expected : (none given — this run is not pinned to a commit)"; return 0; }
+  _have="$(git -C "$_repo" rev-parse HEAD)"
+  case "$_have" in
+    "$_want"*) note "$_name expected : $_want, and HEAD matches" ;;
+    *) note "FATAL: $_name is at $_have and this run was told to expect $_want."
+       note "       Every gate below would be evidence about a different commit."
+       exit 3 ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------------------------
+# --self-test: the preflight's own refusals, against the faults they are for (C11-06.4/.6).
+# No cargo, no network, under a minute.
+# ---------------------------------------------------------------------------------------------
+if [ "$SELF_TEST" -eq 1 ]; then
+  hdr "self-test: the toolchain and repository checks"
+  st_fail=0
+  ok_()   { note "  ok      : $*"; }
+  bad_()  { note "  FAILED  : $*"; st_fail=1; }
+
+  TD="$(mktemp -d "${TMPDIR:-/tmp}/c11-gates-selftest.XXXXXX")"
+  trap 'rm -rf "$TD"' EXIT
+
+  mkrepo() {
+    mkdir -p "$1" && git -C "$1" init -q . 2>/dev/null
+    git -C "$1" config user.email c11@example.invalid
+    git -C "$1" config user.name c11
+    printf 'x\n' > "$1/f.txt"
+    git -C "$1" add f.txt >/dev/null 2>&1
+    git -C "$1" commit -qm one >/dev/null 2>&1
+  }
+
+  # (1) **A repository with no pin, and no substitute named, is a refusal.** The whole defect
+  #     this section exists for was a silent `stable`, so the arm asserts the *absence* of a
+  #     selector rather than the presence of a message.
+  mkrepo "$TD/nopin"
+  ( unset C11_TOOLCHAIN; pick_toolchain "$TD/nopin" ) >/dev/null 2>&1
+  rc=$?
+  if [ "$rc" -eq 3 ]; then ok_ "a tree with no resolvable pin, and no substitute named, refuses"
+  else bad_ "a tree with no resolvable pin returned $rc instead of 3 — this is the silent \`stable\`"; fi
+
+  # (2) **A named substitute is accepted and says so.**
+  if ( C11_TOOLCHAIN=stable pick_toolchain "$TD/nopin" >/dev/null 2>&1 ); then
+    ( C11_TOOLCHAIN=stable pick_toolchain "$TD/nopin" >/dev/null 2>&1
+      case "$TOOLCHAIN_HOW" in *C11_TOOLCHAIN=stable*) exit 0 ;; *) exit 1 ;; esac )
+    if [ $? -eq 0 ]; then ok_ "a named substitute is used and the transcript says it was one"
+    else bad_ "a named substitute was used and the transcript does not say so"; fi
+  else
+    bad_ "a named substitute was refused"
+  fi
+
+  # (3) **Called with no repository at all.** This is the bug that produced the fabricated
+  #     'the pin (none declared) does not resolve here' line, and the arm is that the function
+  #     returns 2 and sets no selector rather than reporting about a tree it never opened.
+  ( unset REPO; pick_toolchain ) >/dev/null 2>&1
+  rc=$?
+  ( unset REPO; pick_toolchain >/dev/null 2>&1; [ -z "${TOOLCHAIN_SELECTOR:-}" ] )
+  empty=$?
+  if [ "$rc" -eq 2 ] && [ "$empty" -eq 0 ]; then
+    ok_ "pick_toolchain with no repository refuses and selects nothing"
+  else
+    bad_ "pick_toolchain with no repository returned $rc and left a selector — it is reporting about a tree it never read"
+  fi
+
+  # (4) **An inherited RUSTUP_TOOLCHAIN cannot reach a child.** Host C's shell default is
+  #     1.97.1; a section that resolved 1.95.0 must launch 1.95.0. The child prints what it
+  #     was given, so the assertion is on the child's value and not on the parent's.
+  TOOLCHAIN_SELECTOR=the-selected-one
+  got="$(RUSTUP_TOOLCHAIN=1.97.1; export RUSTUP_TOOLCHAIN; run_pinned sh -c 'printf %s "$RUSTUP_TOOLCHAIN"')"
+  if [ "$got" = "the-selected-one" ]; then ok_ "an inherited RUSTUP_TOOLCHAIN=1.97.1 does not reach the child"
+  else bad_ "the child ran with \`$got\` — the caller's environment decided the compiler"; fi
+  got="$(in_repo "$TD/nopin" the-repo-selector sh -c 'printf %s "$RUSTUP_TOOLCHAIN"')"
+  if [ "$got" = "the-repo-selector" ]; then ok_ "in_repo launches under the repository's own selector"
+  else bad_ "in_repo launched under \`$got\`"; fi
+  unset TOOLCHAIN_SELECTOR
+
+  # (5) **A path with spaces.** Every quoting mistake in this script shows up here and nowhere
+  #     else, because no path on either host has a space in it today.
+  mkrepo "$TD/a dir with spaces"
+  if [ "$(git -C "$TD/a dir with spaces" rev-parse --is-inside-work-tree 2>/dev/null)" = "true" ] \
+     && ( C11_TOOLCHAIN=stable pick_toolchain "$TD/a dir with spaces" >/dev/null 2>&1 ); then
+    ok_ "a repository path containing spaces is read, not split"
+  else
+    bad_ "a repository path containing spaces was not handled"
+  fi
+
+  # (6) **A linked worktree**, whose `.git` is a file and not a directory. The old test was
+  #     `[ -d "$REPO/.git" ]` and refused every worktree on the machine (F-11-12).
+  git -C "$TD/nopin" worktree add -q --detach "$TD/wt" HEAD >/dev/null 2>&1
+  if [ -f "$TD/wt/.git" ] && [ "$(git -C "$TD/wt" rev-parse --is-inside-work-tree 2>/dev/null)" = "true" ]; then
+    ok_ "a linked worktree (its .git is a file) is accepted"
+  else
+    bad_ "a linked worktree was rejected, or the fixture did not build one"
+  fi
+
+  # (7) **A bare repository has a git dir and no working tree**, and every gate below is about
+  #     files. `--git-dir` accepted it; `--is-inside-work-tree` does not.
+  git init -q --bare "$TD/bare.git" 2>/dev/null
+  if [ "$(git -C "$TD/bare.git" rev-parse --is-inside-work-tree 2>/dev/null)" = "true" ]; then
+    bad_ "a bare repository was accepted as a working tree"
+  else
+    ok_ "a bare repository is refused as a working tree"
+  fi
+
+  # (8) **A foreign cwd.** The whole script must behave the same run from anywhere; the
+  #     sibling `toolchain.sh` is sourced by the script's own directory and not by `.`.
+  if ( cd / && . "$HERE/toolchain.sh" && C11_TOOLCHAIN=stable pick_toolchain "$TD/nopin" >/dev/null 2>&1 ); then
+    ok_ "sourced and run from a foreign working directory"
+  else
+    bad_ "the script depends on the directory it is run from"
+  fi
+
+  # (9) **An expected SHA that does not match stops the run.** `check_sha` exits, so the arm
+  #     runs it in a subshell and asserts the exit code.
+  ( check_sha "fixture" "$TD/nopin" "0000000000000000000000000000000000000000" ) >/dev/null 2>&1
+  if [ $? -ne 0 ]; then ok_ "a HEAD that is not the expected SHA stops the run"
+  else bad_ "a HEAD that is not the expected SHA was accepted"; fi
+  ( check_sha "fixture" "$TD/nopin" "$(git -C "$TD/nopin" rev-parse HEAD)" ) >/dev/null 2>&1
+  if [ $? -eq 0 ]; then ok_ "a HEAD that is the expected SHA is accepted"
+  else bad_ "a matching SHA was refused"; fi
+
+  hdr "self-test: status"
+  if [ "$st_fail" -eq 0 ]; then
+    note "every injected fault was refused, and every clean control was accepted"
+    exit 0
+  fi
+  note "AT LEAST ONE CHECK DID NOT DO ITS JOB — this gate is not admissible; see above"
+  exit 1
+fi
 
 hdr "0. preflight"
 note "date        : $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 note "uname       : $(uname -srm)"
 note "niles       : $NILES"
 note "gbs         : $GBS"
-git -C "$NILES" rev-parse --git-dir >/dev/null 2>&1 || { note "FATAL: $NILES is not a git checkout."; exit 3; }
-git -C "$GBS" rev-parse --git-dir >/dev/null 2>&1   || { note "FATAL: $GBS is not a git checkout."; exit 3; }
+# **`--is-inside-work-tree`, not `--git-dir`.** A bare repository has a git directory and no
+# working tree, and every command below is about files on disk; `--git-dir` accepts it. A
+# linked worktree, whose `.git` is a file rather than a directory, is accepted by both and was
+# rejected by the `-d "$REPO/.git"` test this replaced (F-11-12).
+for pair in "niles:$NILES" "gbs:$GBS"; do
+  _n="${pair%%:*}"; _p="${pair#*:}"
+  if [ "$(git -C "$_p" rev-parse --is-inside-work-tree 2>/dev/null)" != "true" ]; then
+    note "FATAL: $_p is not inside a git working tree, so the $_n gates below would be about"
+    note "       files this script cannot name a commit for."
+    exit 3
+  fi
+done
 note "niles HEAD  : $(git -C "$NILES" rev-parse --short HEAD) on $(git -C "$NILES" rev-parse --abbrev-ref HEAD)"
 note "gbs HEAD    : $(git -C "$GBS" rev-parse --short HEAD) on $(git -C "$GBS" rev-parse --abbrev-ref HEAD)"
-note "rustc       : $TOOLCHAIN_USED"
-note "            : $TOOLCHAIN_HOW"
+
+check_sha "niles" "$NILES" "$NILES_SHA"
+check_sha "gbs  " "$GBS" "$GBS_SHA"
+
+resolve_repo "$NILES" NILES_TC
+resolve_repo "$GBS" GBS_TC
+note "niles rustc : $NILES_TC_VER"
+note "            : $NILES_TC_HOW"
+note "gbs rustc   : $GBS_TC_VER"
+note "            : $GBS_TC_HOW"
+note "inherited   : RUSTUP_TOOLCHAIN=$TOOLCHAIN_INHERITED in this shell; every child below is"
+note "            : launched with the selector its own repository produced, so this value"
+note "            : cannot reach one."
 if [ -n "${NILES_NO_GBS:-}" ]; then
   note ""
   note "REFUSED: NILES_NO_GBS is set in this environment. It is an opt-out from the paired"
@@ -104,7 +324,7 @@ for tree in "$NILES" "$GBS"; do
 done
 
 hdr "1. niles: the workspace suite"
-if ( cd "$NILES" && cargo test --offline --workspace ) >/tmp/c11-gates-niles.log 2>&1; then
+if in_repo "$NILES" "$NILES_TC_SEL" cargo test --offline --workspace >/tmp/c11-gates-niles.log 2>&1; then
   grep -E "^test result" /tmp/c11-gates-niles.log \
     | awk -F'[ ;]+' '{p+=$4; f+=$6; i+=$8} END {printf "  pass %d  fail %d  ignored %d\n", p, f, i}'
   note "  green"
@@ -120,7 +340,7 @@ note "        report it as a defect in this tree."
 hdr "2. the paired adapter gate — the one neither tree can run alone"
 note "This is the check that was green for a whole cycle while the pair was broken: this"
 note "workspace never builds the adapter, and GBS's own gate was not being run."
-if ( cd "$NILES" && GBS_ROOT="$GBS" cargo test --offline -p nilestream-core --test downstream_adapter -- --nocapture ) \
+if GBS_ROOT="$GBS" in_repo "$NILES" "$NILES_TC_SEL" cargo test --offline -p nilestream-core --test downstream_adapter -- --nocapture \
      >/tmp/c11-gates-adapter.log 2>&1; then
   if grep -q "PAIRED ADAPTER GATE: NOT RUN" /tmp/c11-gates-adapter.log; then
     notrun "the paired adapter gate opted out (NILES_NO_GBS). A pass produced by an opt-out is not a pass."
@@ -135,7 +355,7 @@ else
 fi
 
 hdr "3. gbs: the workspace suite, and the adapter crate that is not a default member"
-if ( cd "$GBS" && cargo test --offline --workspace ) >/tmp/c11-gates-gbs.log 2>&1; then
+if in_repo "$GBS" "$GBS_TC_SEL" cargo test --offline --workspace >/tmp/c11-gates-gbs.log 2>&1; then
   grep -E "^test result" /tmp/c11-gates-gbs.log \
     | awk -F'[ ;]+' '{p+=$4; f+=$6; i+=$8} END {printf "  workspace: pass %d  fail %d  ignored %d\n", p, f, i}'
 else
@@ -145,7 +365,7 @@ else
 fi
 # `gbs-nilestream` is deliberately excluded from the default members — it needs this niles
 # checkout beside it — so `--workspace` above does not build it and it is run by manifest path.
-if ( cd "$GBS" && cargo test --offline --manifest-path crates/gbs-nilestream/Cargo.toml ) \
+if in_repo "$GBS" "$GBS_TC_SEL" cargo test --offline --manifest-path crates/gbs-nilestream/Cargo.toml \
      >/tmp/c11-gates-gbs-adapter.log 2>&1; then
   grep -E "^test result" /tmp/c11-gates-gbs-adapter.log \
     | awk -F'[ ;]+' '{p+=$4; f+=$6; i+=$8} END {printf "  adapter  : pass %d  fail %d  ignored %d\n", p, f, i}'
@@ -160,7 +380,7 @@ note "Each is regenerated from the workspace and diffed against the committed co
 note "document that drifts from the artifact fails a build rather than being noticed in"
 note "review. The API extractor's own self-test runs first: its failure mode is a *smaller*"
 note "appendix, which looks exactly like a correct one."
-if ( cd "$NILES" && make generated ) >/tmp/c11-gates-generated.log 2>&1; then
+if in_repo "$NILES" "$NILES_TC_SEL" make generated >/tmp/c11-gates-generated.log 2>&1; then
   note "  green"
   grep -E "^  ok: " /tmp/c11-gates-generated.log | sed 's/^/  /'
 else
@@ -172,13 +392,58 @@ fi
 hdr "5. the memory budgets"
 note "Deterministic counters, so one run decides. A budget is never raised to make a row"
 note "pass: an over-budget row is a finding, and A10-19 was one."
-if ( cd "$NILES" && make reproduce ) >/tmp/c11-gates-reproduce.log 2>&1; then
+if in_repo "$NILES" "$NILES_TC_SEL" make reproduce >/tmp/c11-gates-reproduce.log 2>&1; then
   note "  green"
   grep -E "OVER BUDGET|within budget|allocations" /tmp/c11-gates-reproduce.log | head -20 | sed 's/^/    /'
 else
   bad "make reproduce"
   grep -E "OVER BUDGET|differs|error" /tmp/c11-gates-reproduce.log | head -20 | sed 's/^/    /'
   note "  full log: /tmp/c11-gates-reproduce.log"
+fi
+
+hdr "5b. fmt and lint, on the pin and separately on the newer compiler"
+note "Two runs, never one. A11-06's lint rows are red on 1.97.1 and green on the pin, so a"
+note "single pass would make this gate's verdict depend on which compiler happened to be"
+note "selected. The pin decides the gate; the newer compiler is reported beside it and its"
+note "rows are allowed to be red until the repair lands."
+for pair in "niles:$NILES:$NILES_TC_SEL" "gbs:$GBS:$GBS_TC_SEL"; do
+  _n="$(printf '%s' "$pair" | cut -d: -f1)"
+  _p="$(printf '%s' "$pair" | cut -d: -f2)"
+  _s="$(printf '%s' "$pair" | cut -d: -f3)"
+  if in_repo "$_p" "$_s" cargo fmt --all -- --check >"/tmp/c11-gates-fmt-$_n.log" 2>&1; then
+    note "  $_n fmt   ($_s): clean"
+  else
+    bad "$_n fmt on $_s"
+    head -20 "/tmp/c11-gates-fmt-$_n.log" | sed 's/^/    /'
+  fi
+  if in_repo "$_p" "$_s" cargo clippy --offline --workspace --all-targets -- -D warnings \
+       >"/tmp/c11-gates-clippy-$_n.log" 2>&1; then
+    note "  $_n clippy($_s): clean"
+  else
+    bad "$_n clippy on $_s"
+    grep -E "^error" "/tmp/c11-gates-clippy-$_n.log" | head -10 | sed 's/^/    /'
+    note "    full log: /tmp/c11-gates-clippy-$_n.log"
+  fi
+done
+if [ -z "$LINT_TOOLCHAIN" ]; then
+  note "  the newer compiler was NOT run: pass --lint-toolchain <name> (Host C: 1.97.1)."
+  note "  This is not a green row. It is a row that did not run, and A11-06 is about exactly"
+  note "  the rows it would have produced."
+  NOTRUN="${NOTRUN}
+  - the newer-compiler lint section (no --lint-toolchain given)"
+  FAILED=1
+else
+  for pair in "niles:$NILES" "gbs:$GBS"; do
+    _n="${pair%%:*}"; _p="${pair#*:}"
+    if in_repo "$_p" "$LINT_TOOLCHAIN" cargo clippy --offline --workspace --all-targets -- -D warnings \
+         >"/tmp/c11-gates-clippy-new-$_n.log" 2>&1; then
+      note "  $_n clippy($LINT_TOOLCHAIN): clean"
+    else
+      note "  $_n clippy($LINT_TOOLCHAIN): RED — reported, and not counted against this gate"
+      grep -E "^error" "/tmp/c11-gates-clippy-new-$_n.log" | head -10 | sed 's/^/      /'
+      note "      full log: /tmp/c11-gates-clippy-new-$_n.log"
+    fi
+  done
 fi
 
 hdr "6. status"

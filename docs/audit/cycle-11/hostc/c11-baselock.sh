@@ -51,6 +51,12 @@ set -uo pipefail
 REPO="${C11_REPO:-$HOME/Documents/niles}"
 OUT="${C11_OUT:-$HOME/c11-baselock-out}"
 
+# **What this run was asked to do, kept verbatim for the manifest.** A transcript that records
+# its own arguments is the difference between "the pinned arm was slower" and "the pinned arm,
+# as this invocation defined `pinned`, was slower". Captured before parsing, because parsing
+# is where a mistyped flag stops being visible.
+INVOCATION="$0 $*"
+
 # **No default baseline ref.** It used to default to `c7/01-durable-rows`, a cycle-7 branch,
 # so a run with no flags measured a build three cycles old and labelled it "baseline". The
 # baseline is the build under test, which is whatever the repository has checked out; that is
@@ -95,7 +101,13 @@ SKIPPED=""
 # which happened. A measurement built with a compiler other than the one the tree pins is not
 # wrong, but it is a different measurement and it must be labelled.
 # The toolchain probe is shared: see toolchain.sh beside this script (F-11-01).
-. "$(cd "$(dirname "$0")" && pwd)/toolchain.sh"
+#
+# `HERE` is resolved once, before anything can change directory: `$0` is relative when the
+# script is invoked by a relative path, and `dirname "$0"` then stops naming this directory
+# the moment any code runs from somewhere else. The gates script's self-test caught exactly
+# that, and this is the same line.
+HERE="$(cd "$(dirname "$0")" && pwd)"
+. "$HERE/toolchain.sh"
 
 note()  { printf '%s\n' "$*"; }
 head2() { printf '\n=== %s ===\n' "$*"; }
@@ -274,6 +286,99 @@ check_port_free() {
 # Every column this script reports must exist in the log it reports it from. The benchmark
 # renders a name the server does not have as `n/a` and warns; a harness that reads past that
 # warning publishes a table of `n/a` as if it were a measurement.
+# ---------------------------------------------------------------------------------------------
+# THE RUN MANIFEST, AND THE RULE THAT A REFUSED STAGE IS NEVER LAUNCHED (C11-06.3)
+# ---------------------------------------------------------------------------------------------
+#
+# A 40-minute cycle-10 run was lost to this exact shape: `build_arm` refused a worktree that
+# was at the wrong commit, the refusal was recorded with `skip`, and every warm-up and all five
+# replicates then ran against the binary already sitting in that directory. Twenty refusals
+# followed, each naming the wrong cause. `fatal` fixed the *recording*; it did not make the
+# rule structural, because the next `|| skip` somebody writes puts it back.
+#
+# The rule here is about the executable rather than about the control flow. Each arm's binary
+# is hashed when it is built, into `$OUT/exe-<arm>.sha`. Nothing launches a binary whose hash
+# is not the hash this run recorded — an arm whose build never ran has no recorded hash and is
+# therefore unlaunchable, whatever is on disk from a previous run. A stale executable cannot be
+# reached by a stage whose prerequisite failed, and the self-test proves it with a sentinel:
+# the stale binary would create a file if launched, and the arm asserts the file is absent.
+
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" 2>/dev/null | cut -d' ' -f1
+  elif command -v shasum   >/dev/null 2>&1; then shasum -a 256 "$1" 2>/dev/null | cut -d' ' -f1
+  else echo "no-sha256-tool"; fi
+}
+
+# One row per stage, appended as it happens: a stage that never appears did not run, and a
+# stage that ran and failed says so in the same file. `not run` is a value, not an absence.
+stage() {
+  [ -d "$OUT" ] || return 0
+  printf '%s,%s,%s\n' "$1" "$2" "$(printf '%s' "${3:-}" | tr ',\n' ';;')" >> "$OUT/manifest.csv"
+}
+
+record_exe() {
+  arm="$1"; wt="$2"
+  for b in bench nilestreamd; do
+    sha256_of "$wt/target/release/$b" > "$OUT/exe-$arm-$b.sha"
+  done
+}
+
+# **The launch guard.** Returns non-zero — and says which of the two reasons it is — when the
+# binary about to be launched is not the one this run built.
+may_launch() {
+  arm="$1"; wt="$2"; bin="${3:-bench}"
+  rec="$OUT/exe-$arm-$bin.sha"
+  if [ ! -s "$rec" ]; then
+    note "  REFUSED TO LAUNCH: no hash was recorded for the $arm arm's $bin, so its build stage"
+    note "                     did not complete. Whatever is in $wt/target/release is a"
+    note "                     previous run's binary and this run knows nothing about it."
+    return 1
+  fi
+  now="$(sha256_of "$wt/target/release/$bin")"
+  if [ "$now" != "$(cat "$rec")" ]; then
+    note "  REFUSED TO LAUNCH: the $arm arm's $bin on disk is not the one this run built"
+    note "                     (recorded $(cut -c1-12 < "$rec"), found $(printf '%s' "$now" | cut -c1-12))."
+    return 1
+  fi
+  return 0
+}
+
+# **Read one field out of the benchmark's machine-readable lines.**
+#
+# Every check below used to grep an English sentence out of the transcript, which put this
+# harness's interface in the benchmark's *presentation*: rewording a line for a human reader
+# could move a verdict, and three cycle-10 defects came out of that one habit — a substring
+# match that read `900 writes/s` as `0 writes/s`, a check that lived under one mode and
+# watched nothing in the others (F-11-20), and a server column renamed under a reader that
+# answered `unwrap_or(0)` for four cycles.
+#
+# `bench` now prints one `NLSBENCH/1 kind=<kind> k=v ...` line per reported event. This prints
+# the raw token of one field, one line of output per matching line in the log, and it keeps
+# the four outcomes four:
+#
+#   (nothing)       no line of that kind at all — this build does not print them
+#   __MISSING__     the line is there and does not carry the field: a different build
+#   n/a             reported, and not obtained this run
+#   0               a measurement, and it is zero
+#
+# A caller that wants "absent or zero" has to say which, at its own call site.
+summary_fields() {
+  awk -v kind="$2" -v want="$3" '
+    /^NLSBENCH\/1 / {
+      k = ""; v = "__MISSING__"
+      for (i = 2; i <= NF; i++) {
+        eq = index($i, "=")
+        if (eq == 0) continue
+        key = substr($i, 1, eq - 1)
+        val = substr($i, eq + 1)
+        if (key == "kind") k = val
+        else if (key == want) v = val
+      }
+      if (k == kind) print v
+    }
+  ' "$1" 2>/dev/null
+}
+
 check_no_missing_fields() {
   log="$1"
   if grep -q "WARNING: the server's slow-read table has no" "$log" 2>/dev/null; then
@@ -281,6 +386,27 @@ check_no_missing_fields() {
     grep "WARNING: the server's slow-read table has no" "$log" | head -4 | sed 's/^/           /'
     return 1
   fi
+  # **The structured path.** A build that prints `flights` lines is checked field by field,
+  # and `n/a` (asked, not obtained) is told from `0` (measured) and from a field this build
+  # does not carry at all.
+  vals="$(summary_fields "$log" flights pending_joins)"
+  if [ -n "$vals" ]; then
+    if printf '%s\n' "$vals" | grep -qx '__MISSING__'; then
+      note "REFUSED: a flights line in this transcript does not carry \`pending_joins\`, so the"
+      note "         build that wrote it is not the build this harness is scoring."
+      return 1
+    fi
+    if printf '%s\n' "$vals" | grep -qx 'n/a'; then
+      note "REFUSED: the flight counters came back n/a, so this build does not report them and"
+      note "         every flight number in this transcript would be absent rather than zero."
+      return 1
+    fi
+    return 0
+  fi
+  # **The legacy path, and it says it is one.** Pair 2 of the cycle-11 campaign compares two
+  # commits that both predate the machine-readable line; refusing them would be refusing the
+  # measurement the campaign exists for. So the prose grep still runs — and the run's manifest
+  # records `summary_lines=absent` for this arm, so a reader knows which check was applied.
   if grep -q "flights at .*: n/a" "$log" 2>/dev/null; then
     note "REFUSED: the flight counters came back n/a, so this build does not report them and"
     note "         every flight number in this transcript would be absent rather than zero."
@@ -299,6 +425,29 @@ check_no_missing_fields() {
 # of an ablation is not to have to trust that.
 check_merge_line() {
   log="$1"; want="$2"
+  # **The structured path.** Every `flights` line carries the caps the daemon ran with, so an
+  # arm is checked once per level rather than once per log: a run whose first level agreed and
+  # whose later ones did not would have passed the old single-line check.
+  ce="$(summary_fields "$log" flights caps_epochs)"
+  cr="$(summary_fields "$log" flights caps_rows)"
+  if [ -n "$ce" ]; then
+    if printf '%s\n' "$ce$cr" | grep -qx '__MISSING__'; then
+      note "REFUSED: a flights line carries no caps, so its arm rests on the flag it was given."
+      return 1
+    fi
+    n=0
+    while [ "$n" -lt "$(printf '%s\n' "$ce" | wc -l | tr -d ' ')" ]; do
+      n=$(( n + 1 ))
+      e="$(printf '%s\n' "$ce" | sed -n "${n}p")"
+      r="$(printf '%s\n' "$cr" | sed -n "${n}p")"
+      if [ "$e:$r" != "$want" ]; then
+        note "REFUSED: level $n of this replicate was launched as caps \`$want\` and the daemon"
+        note "         reported \`$e:$r\`. One of the two is wrong and neither may be scored."
+        return 1
+      fi
+    done
+    return 0
+  fi
   line="$(grep -m1 "  merge at " "$log" 2>/dev/null || true)"
   if [ -z "$line" ]; then
     note "REFUSED: this build does not report the merge counters, so its arm cannot be told"
@@ -328,10 +477,16 @@ check_arm_caps() {
   want="$caps"
   [ "$want" = "default" ] && want="32:4096"
   [ "$want" = "off" ] && want="0:0"
-  if grep -q "  merge at " "$log" 2>/dev/null; then
+  # **A build that says which caps it ran with is always checked against them.** The earlier
+  # version reached the check only under `--merge-arms` or a non-default request, so a
+  # structured transcript reporting caps 0/0 for an arm launched at `default` passed — the
+  # self-test arm for it is `a structured pinned arm launched at default`.
+  if [ -n "$(summary_fields "$log" flights caps_epochs)" ] || grep -q "  merge at " "$log" 2>/dev/null; then
     check_merge_line "$log" "$want"
     return $?
   fi
+  # No line of either kind: this build reports no merge counters at all. That is honest for a
+  # commit predating them, and only at `default`, where nothing was asked of it.
   if [ "$caps" != "default" ] || [ "$merge_arms" -eq 1 ]; then
     check_merge_line "$log" "$want"
     return $?
@@ -343,6 +498,22 @@ check_arm_caps() {
 # and the anchor-mismatch fallback this whole harness exists to observe cannot occur in it.
 check_writer_progress() {
   log="$1"
+  # **The structured path**, which is where the substring bug could not have happened: the
+  # writer rate is a field, not a token inside a sentence, so `900` cannot contain `0`.
+  w="$(summary_fields "$log" mixed writes_per_second)"
+  if [ -n "$w" ]; then
+    if printf '%s\n' "$w" | grep -qx '__MISSING__\|n/a'; then
+      note "REFUSED: a mixed level did not report a writer rate at all, so whether its readers"
+      note "         saw a moving frontier is unknown rather than answered."
+      return 1
+    fi
+    if printf '%s\n' "$w" | grep -qx '0\|0\.0'; then
+      note "REFUSED: a mixed level made no writer progress, so its reads never saw a moving"
+      note "         frontier and its fallback rate is about nothing."
+      return 1
+    fi
+    return 0
+  fi
   # **A zero, not a zero digit.** This matched the substring `0 writes/s`, which is inside
   # `900 writes/s`, so a healthy level was refused as having made no writer progress and the
   # self-test caught it on its own clean control. The number must be a whole number zero.
@@ -517,6 +688,100 @@ if [ "$SELF_TEST" -eq 1 ]; then
   expect_refusal "a pre-merge build under --merge-arms" \
     check_arm_caps "$TD/merge-absent.log" default 1
 
+  # ---------------------------------------------------------------------------------------
+  # **The machine-readable line, and the four things a field can be (C11-06.2).**
+  #
+  # Four fixture logs, one per outcome, and the arms that must tell them apart. The reason
+  # each outcome is separate is a wrong number this project printed: a renamed column read as
+  # `unwrap_or(0)` (missing read as zero), a counter reading that failed and rendered as
+  # zeroes (`n/a` read as zero), `deferred_merges = 0` which is the finding rather than the
+  # absence of one (zero read as `n/a`), and a log cut off mid-write (malformed read as a
+  # value).
+  MIXHDR='target,run,readers,writers,reads,writes,wall_ms,reads_per_second,writes_per_second,read_p50_us,read_p99_us,write_p50_us,write_p99_us,fallback_rate,max_batch,lock_wait_p99_us,base_epochs,duplicates,errors,not_run'
+  mixline() {
+    printf 'NLSBENCH/1 kind=mixed target=nilestream run=1 readers=6 writers=3 reads=100 writes=%s wall_ms=1000.000 reads_per_second=100.0 writes_per_second=%s read_p50_us=1.0 read_p99_us=2.0 write_p50_us=3.0 write_p99_us=4.0 fallback_rate=0.0000 max_batch=1 lock_wait_p99_us=0 base_epochs=10 duplicates=0 errors=0 not_run=-\n' "$1" "$2"
+  }
+  flightline() {
+    printf 'NLSBENCH/1 kind=flights shape=6r/3w pending_joins=%s uninstalled_folds=%s pinned_installs=0 flights_refused=0 deferred_merges=0 waiters_refused=0 joins_answered=0 joins_retried=0 gap_at_begin_total=0 gap_at_finish_total=0 gap_at_finish_max_level=0 flights_behind_at_begin=0 flights_that_fell_behind=0 gap_begin_samples=0 gap_finish_samples=0 merge_rows_visited=0 merge_epochs_merged=0 merges_refused_epochs=0 merges_refused_rows=0 merges_refused_unavailable=0 caps_epochs=%s caps_rows=%s late_landings=0 joins_ended=0 folds_from_counters=0\n' "$1" "$1" "$2" "$3"
+  }
+
+  # (1) zero: a measured zero writer rate, and a measured zero counter.
+  { mixline 0 0.0; flightline 0 0 0; } > "$TD/sum-zero.log"
+  # (2) n/a: the counters were asked for and not obtained.
+  { mixline 900 900.0; flightline 'n/a' 0 0; } > "$TD/sum-na.log"
+  # (3) missing: a build whose flights line does not carry the field at all.
+  { mixline 900 900.0
+    flightline 0 0 0 | sed 's/ pending_joins=0//'
+  } > "$TD/sum-missing.log"
+  # (4) malformed: a log cut off mid-token.
+  { mixline 900 900.0 | sed 's/writes_per_second=900.0/writes_per_second=/'
+    flightline 0 0 0
+  } > "$TD/sum-malformed.log"
+  # (0) the clean control every refusal above must not fire on.
+  { mixline 900 900.0; flightline 0 0 0; } > "$TD/sum-good.log"
+
+  expect_accept  "a structured transcript whose writers moved" \
+    check_writer_progress "$TD/sum-good.log"
+  expect_refusal "a structured transcript whose writer rate is a measured zero" \
+    check_writer_progress "$TD/sum-zero.log"
+  expect_refusal "a structured transcript whose writer rate is a bare key" \
+    check_writer_progress "$TD/sum-malformed.log"
+  # **The substring bug, as a control.** `900` contains `0`; the field-based reader cannot see
+  # that and this arm is what says so, rather than a comment claiming it.
+  expect_accept  "a writer rate of 900, which the old grep read as a zero" \
+    check_writer_progress "$TD/sum-good.log"
+  expect_accept  "a structured transcript whose counters are a measured zero" \
+    check_no_missing_fields "$TD/sum-zero.log"
+  expect_refusal "a structured transcript whose counters came back n/a" \
+    check_no_missing_fields "$TD/sum-na.log"
+  expect_refusal "a structured transcript missing a counter this harness scores" \
+    check_no_missing_fields "$TD/sum-missing.log"
+  expect_accept  "a structured pinned arm whose every level reports caps 0/0" \
+    check_arm_caps "$TD/sum-good.log" off 0
+  expect_refusal "a structured pinned arm launched at default" \
+    check_arm_caps "$TD/sum-good.log" default 0
+  # **Every level, not the first one.** A run whose first level agreed and whose second did
+  # not passed the old single-line check; two levels in one log is the arm that catches it.
+  { flightline 0 0 0; flightline 0 32 4096; } > "$TD/sum-caps-drift.log"
+  expect_refusal "an arm whose caps change between levels of one replicate" \
+    check_arm_caps "$TD/sum-caps-drift.log" off 0
+
+  # ---------------------------------------------------------------------------------------
+  # **A stage whose prerequisite failed never launches its executable (C11-06.3).**
+  #
+  # The behavioural arm, not the structural one: a stale binary is put where a previous run
+  # would have left it, and it is written to create a sentinel file if it is ever executed.
+  # No hash is recorded for its arm, because its build never ran. The assertion is on the
+  # sentinel's absence — a check that only inspected the return code would pass against a
+  # guard that refused *after* launching.
+  OUT_SAVED="$OUT"
+  OUT="$TD/guard-out"; mkdir -p "$OUT/wt-stale/target/release"
+  printf '#!/bin/sh\ntouch "%s/LAUNCHED"\n' "$TD" > "$OUT/wt-stale/target/release/bench"
+  chmod +x "$OUT/wt-stale/target/release/bench"
+  rm -f "$TD/LAUNCHED"
+  # The launch is written the way `replicate` writes it, so that removing the guard from
+  # `may_launch` really does run the binary here and the sentinel really does appear. An arm
+  # that only inspected the return code would pass against a guard that refused *after*
+  # launching, and against no guard at all if the caller happened not to launch.
+  if may_launch stale "$OUT/wt-stale" bench >/dev/null 2>&1; then
+    "$OUT/wt-stale/target/release/bench" >/dev/null 2>&1 || true
+  fi
+  if [ -e "$TD/LAUNCHED" ]; then
+    note "  NOT REFUSED: the stale executable was launched — the sentinel $TD/LAUNCHED exists"
+    st_fail=1
+  else
+    note "  refused    : a stale executable whose arm never built, and it was not launched"
+  fi
+  # The clean control: an arm whose build recorded this very binary's hash may launch it.
+  record_exe stale "$OUT/wt-stale"
+  expect_accept "an executable whose hash this run recorded" \
+    may_launch stale "$OUT/wt-stale" bench
+  # And the tampered case: the same arm, a different binary on disk.
+  printf '#!/bin/sh\nexit 0\n' > "$OUT/wt-stale/target/release/bench"
+  expect_refusal "an executable replaced after its hash was recorded" \
+    may_launch stale "$OUT/wt-stale" bench
+  OUT="$OUT_SAVED"
+
   # **A build that was refused must stop the run, not annotate it.**
   #
   # Both halves, because either alone is weak. The behavioural half: `fatal` really exits, and
@@ -544,7 +809,7 @@ if [ "$SELF_TEST" -eq 1 ]; then
   # **One toolchain probe.** Three scripts each carried a copy in cycle 10 and one was repaired
   # twice while the other two kept the defect (F-11-01). Any script beside this one that defines
   # its own `pick_toolchain` is the defect coming back.
-  dup="$(grep -l '^pick_toolchain()' "$(dirname "$0")"/*.sh 2>/dev/null | grep -v '/toolchain.sh$' || true)"
+  dup="$(grep -l '^pick_toolchain()' "$HERE"/*.sh 2>/dev/null | grep -v '/toolchain.sh$' || true)"
   if [ -z "$dup" ]; then
     note "  refused    : no cycle-11 script carries its own toolchain probe"
   else
@@ -710,7 +975,15 @@ if [ "$BASELINE_ONLY" -eq 0 ] && [ -z "$CANDIDATE_REF" ]; then
   exit 2
 fi
 
-pick_toolchain
+if ! pick_toolchain "$REPO"; then
+  note "$TOOLCHAIN_HOW"
+  note ""
+  note 'Nothing is built or measured without a named compiler. `stable` is not assumed here:'
+  note 'on Host C `stable` is 1.97.1 and the tree pins 1.95.0, and a run that silently took'
+  note "the first of those is MF-7 — the confound that cost cycle 10 the comparability of its"
+  note "whole baseline."
+  exit 3
+fi
 
 head2 "0. preflight"
 note "date            : $(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -786,6 +1059,42 @@ fi
 
 mkdir -p "$OUT" || { note "FATAL: cannot create $OUT"; exit 3; }
 
+# ---------------------------------------------------------------------------------------------
+# The run manifest (C11-06.3). Written before anything is built, so that a run which dies
+# halfway still leaves a file saying what it was and how far it got.
+# ---------------------------------------------------------------------------------------------
+: > "$OUT/manifest.csv"
+printf 'stage,outcome,detail\n' >> "$OUT/manifest.csv"
+{
+  printf 'run                 : %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf 'invocation          : %s\n' "$INVOCATION"
+  printf 'host                : %s\n' "$(uname -a)"
+  printf 'repo                : %s\n' "$REPO"
+  printf 'repo HEAD           : %s\n' "$(git -C "$REPO" rev-parse HEAD 2>/dev/null)"
+  printf 'repo branch         : %s\n' "$(git -C "$REPO" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+  # **The diff, not just the SHA.** A dirty tree measured at a SHA is not that SHA, and a
+  # hash of the diff is what lets a later reader ask whether two runs had the same
+  # uncommitted change without needing the change itself.
+  printf 'tracked-diff sha256 : %s\n' "$(git -C "$REPO" diff HEAD 2>/dev/null | sha256_of /dev/stdin)"
+  printf 'baseline            : %s -> %s\n' "$BASELINE_REF" "$BASELINE_SHA"
+  [ "$BASELINE_ONLY" -eq 0 ] && printf 'candidate           : %s -> %s\n' "$CANDIDATE_REF" "$CANDIDATE_SHA"
+  printf 'toolchain pin       : %s\n' "$TOOLCHAIN_PIN"
+  printf 'toolchain selector  : %s\n' "$TOOLCHAIN_SELECTOR"
+  printf 'toolchain used      : %s\n' "$TOOLCHAIN_USED"
+  printf 'toolchain how       : %s\n' "$TOOLCHAIN_HOW"
+  printf 'RUSTUP_TOOLCHAIN in : %s\n' "$TOOLCHAIN_INHERITED"
+  printf 'C11_TOOLCHAIN       : %s\n' "${C11_TOOLCHAIN:--}"
+  printf 'CARGO_NET_OFFLINE   : %s\n' "${CARGO_NET_OFFLINE:--}"
+  printf 'arm caps            : baseline=%s candidate=%s merge-arms=%s\n' "$BASELINE_CAPS" "$CANDIDATE_CAPS" "$MERGE_ARMS"
+  printf 'arm toolchains      : baseline=%s candidate=%s\n' "${BASELINE_TOOLCHAIN:--}" "${CANDIDATE_TOOLCHAIN:--}"
+  printf 'limits              : warmups=%s measured=%s levels=%s seconds=%s accounts=%s rounds=%s\n' \
+    "$WARMUPS" "$MEASURED" "$LEVELS" "$SECONDS_PER_LEVEL" "$ACCOUNTS" "$ROUNDS"
+  printf 'budgets             : full=%s partial=%s\n' "$BUDGET_FULL" "$BUDGET_PARTIAL"
+  printf 'replicate cap       : %ss\n' "$REPLICATE_TIMEOUT"
+  printf 'port base           : %s\n' "$PORT_BASE"
+} > "$OUT/manifest.txt"
+note "manifest        : $OUT/manifest.txt (and manifest.csv, one row per stage)"
+
 head2 "0b. the bounded deadlock witness"
 note "A10-01: a stats snapshot that held the view while it waited for the base, against an"
 note "append that holds the base while it waits for the view. The mixed sweep below queries"
@@ -843,12 +1152,21 @@ build_arm() {
   note "  $arm toolchain: $(cat "$OUT/toolchain-$arm.txt")$( [ -n "$tc" ] && printf ' (override %s)' "$tc" )"
   ( cd "$wt" && if [ -n "$tc" ]; then export RUSTUP_TOOLCHAIN="$tc"; fi && CARGO_NET_OFFLINE=true \
       cargo build --offline --release -p nilestream-server -p bank-bench >"$OUT/build-$arm.log" 2>&1 ) || {
-    note "  build failed for $arm; see $OUT/build-$arm.log"; return 1; }
+    note "  build failed for $arm; see $OUT/build-$arm.log"
+    stage "build-$arm" failed "see $OUT/build-$arm.log"
+    return 1; }
   built="$(git -C "$wt" rev-parse HEAD)"
   if [ "$built" != "$sha" ]; then
-    note "  the $arm worktree is at $built and this run is about $sha"; return 1
+    note "  the $arm worktree is at $built and this run is about $sha"
+    stage "build-$arm" failed "worktree at $built, expected $sha"
+    return 1
   fi
+  # **The hash is recorded only here**, after the build succeeded and the commit was verified.
+  # Every launch is checked against it, so an arm that never reached this line cannot be run.
+  record_exe "$arm" "$wt"
   note "  $arm built at $built"
+  note "  $arm bench sha256: $(cut -c1-16 < "$OUT/exe-$arm-bench.sha")"
+  stage "build-$arm" ok "$built $(cut -c1-16 < "$OUT/exe-$arm-bench.sha") $(cat "$OUT/toolchain-$arm.txt")"
   return 0
 }
 
@@ -889,6 +1207,7 @@ replicate() {
   rm -rf "$outdir"; mkdir -p "$outdir"
   log="$OUT/bench-$arm-$point-$rep.log"
 
+  may_launch "$arm" "$wt" bench || { note "  [$tag] not launched"; stage "replicate-$tag" "not run" "the launch guard refused"; return 1; }
   check_port_free "$port"       || { note "  [$tag] port $port is occupied"; return 1; }
   check_port_free $(( port + 1 )) || { note "  [$tag] port $(( port + 1 )) is occupied"; return 1; }
 
@@ -1045,8 +1364,34 @@ while [ "$i" -lt "$MEASURED" ]; do
   fi
 done
 
-head2 "5. what to paste back"
-note "Paste this whole transcript. The reader wants, per arm, per working point and per level:"
+head2 "5. the scored table — computed here, not by the reader"
+# **The arithmetic belongs to the program that owns the schema (F-11-02, C11-06.1).**
+#
+# The previous version of this section listed the statistics a reader was expected to compute
+# from the transcript. Two auditors did exactly that, from the same cycle-10 logs, and
+# disagreed: six pooled MADs were published as the mean of the two arms' MADs where the pooled
+# MAD is their RMS — the same slip A10-09 had already been. `bench --score` reads the
+# per-replicate CSVs this run just wrote and prints the table; this script prints its output
+# and computes nothing of its own.
+SCORER=""
+for cand in "${BASELINE_WT:-}/target/release/bench" "${CANDIDATE_WT:-}/target/release/bench" "${CONTROL_WT:-}/target/release/bench"; do
+  [ -x "$cand" ] && { SCORER="$cand"; break; }
+done
+if [ -z "$SCORER" ]; then
+  skip "no built \`bench\` was available to score this run; the CSVs are in $OUT and \`bench --score $OUT\` will score them"
+  stage score "not run" "no scorer binary"
+elif "$SCORER" --score "$OUT" > "$OUT/score.txt" 2>&1; then
+  cat "$OUT/score.txt"
+  stage score ok "$OUT/score.txt"
+else
+  note "the scorer refused this run:"
+  sed 's/^/  /' "$OUT/score.txt"
+  skip "bench --score refused to score this run; see $OUT/score.txt"
+  stage score failed "$OUT/score.txt"
+fi
+
+head2 "5b. what to paste back"
+note "Paste this whole transcript. Beside the table above, the reader wants, per arm, per working point and per level:"
 note "  * median reads/s over the $MEASURED measured replicates, and the pooled MAD"
 note "    (pooled MAD = sqrt((dA^2 + dB^2)/2) — the RMS, not the mean of the two MADs);"
 note "  * the slowest-16 table with its outcome column, so a tail can be attributed to the"

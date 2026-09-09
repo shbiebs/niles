@@ -296,6 +296,12 @@ pub struct ReadStats {
     pub uninstalled_folds: u64,
     pub pinned_installs: u64,
     pub flights_refused: u64,
+    /// Dead flight records swept away to make room, kept apart from the refusal above: load
+    /// and abandonment are different problems and one number cannot report both.
+    pub flights_reclaimed: u64,
+    /// Merges refused because accumulating the suffix would overflow `i128`. Kept apart from
+    /// the two budget refusals: those are tuning questions and this one is not.
+    pub merges_refused_overflow: u64,
     /// **The counters the wire could not be asked for.** `deferred_merges` reads zero until
     /// the merge lands and is reported anyway, because an absent counter and a zero counter
     /// are different claims and only one of them is checkable. `waiters_refused` is the
@@ -967,7 +973,17 @@ impl RevEngine {
                 });
                 self.served_rows
                     .fetch_add(scanned, std::sync::atomic::Ordering::Relaxed);
-                let (folded, w) = folder.finish();
+                // **A refused fold is a refused query, over the wire, with a diagnostic.**
+                // The alternative this replaces was not an alternative: the fold could not
+                // fail, because `x / 0` evaluated to `0` and was summed into the answer.
+                let (folded, w) = match folder.finish() {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return QueryStep::Done(Err(crate::session::ServeError::Eval(
+                            e.to_string(),
+                        )))
+                    }
+                };
                 // **When the aggregate *is* the output, the fold has already answered.**
                 //
                 // Handing it to the reference evaluator as a precomputed node and asking for
@@ -1370,6 +1386,8 @@ impl crate::session::Serving for RevEngine {
                     uninstalled_folds: s.uninstalled_folds,
                     pinned_installs: s.pinned_installs,
                     flights_refused: s.flights_refused,
+                    flights_reclaimed: s.flights_reclaimed,
+                    merges_refused_overflow: s.merges_refused_overflow,
                     deferred_merges: s.deferred_merges,
                     merge_rows_visited: s.merge_rows_visited,
                     merge_epochs_merged: s.merge_epochs_merged,
@@ -2574,12 +2592,21 @@ mod merge_caps_env_tests {
         }
     }
 
-    /// The default is the preregistered pair, stated here so a change to it fails a test
-    /// rather than moving a number the report already quotes.
+    /// **The preregistered pair is `MergeCaps::ON`, and the default is `OFF`.**
+    ///
+    /// This asserted `default() == 32 / 4,096` until C11-05(b), when LC-38 moved the default
+    /// to `OFF`. Both halves are still pinned, and the assertion now reads against `ON`,
+    /// because the number the report quotes is the *preregistered* pair and not whatever the
+    /// policy default happens to be — those were the same thing and are not any more.
     #[test]
     fn the_preregistered_caps_are_the_ones_the_report_names() {
         assert_eq!(
             MergeCaps::default(),
+            MergeCaps::OFF,
+            "the default is off since LC-38; the preregistered pair is `MergeCaps::ON`"
+        );
+        assert_eq!(
+            MergeCaps::ON,
             MergeCaps {
                 max_epochs: 32,
                 max_rows: 4_096
@@ -2785,7 +2812,8 @@ mod tests {
             .keys()
             .cloned()
             .collect();
-        let (z, _) = crate::scan_fold::fold(&plan, base.iter().map(|r| r.as_slice()));
+        let (z, _) = crate::scan_fold::fold(&plan, base.iter().map(|r| r.as_slice()))
+            .expect("this fixture contains no failing arithmetic");
         let keys: Vec<&Vec<niles_ir::value::Value>> = z.keys().collect();
         assert!(
             keys.windows(2).all(|w| w[0] < w[1]),
@@ -5726,6 +5754,8 @@ mod fallback_rate_tests {
             pending_joins: after.pending_joins - before.pending_joins,
             uninstalled_folds: after.uninstalled_folds - before.uninstalled_folds,
             pinned_installs: after.pinned_installs - before.pinned_installs,
+            merges_refused_overflow: after.merges_refused_overflow - before.merges_refused_overflow,
+            flights_reclaimed: after.flights_reclaimed - before.flights_reclaimed,
             flights_refused: after.flights_refused - before.flights_refused,
             deferred_merges: after.deferred_merges - before.deferred_merges,
             merge_rows_visited: after.merge_rows_visited - before.merge_rows_visited,

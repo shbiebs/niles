@@ -24,7 +24,7 @@ component is for is not derivable from its source.
 | `conservation-suite` | Reference oracle and the conservation property tests | 23 |
 | `experiments` | The E-series measurement harness | 0 |
 | `niles-interp` | The imperative-subset interpreter `nilesc run` drives, and the ledger it posts to | 16 |
-| `niles-ir` | Typed IR: circuit types, verifier, reference interpreter, upquery paths | 58 |
+| `niles-ir` | Typed IR: circuit types, verifier, reference interpreter, upquery paths | 65 |
 | `niles-lang` | Stage-0 compiler: lexer, parser, type/effect checker, lowering; SQL surface | 134 |
 | `nilesc` | The compiler driver: `check`, `verify`, `run` | 0 |
 | `nilestream` | The engine binary: sweep and serve | 0 |
@@ -120,6 +120,13 @@ pub struct Runtime
 **`niles-ir`**
 
 ```rust
+pub enum ArithError
+pub fn add(x: i128, y: i128) -> Result<i128, ArithError>
+pub fn sub(x: i128, y: i128) -> Result<i128, ArithError>
+pub fn mul(x: i128, y: i128) -> Result<i128, ArithError>
+pub fn div(x: i128, y: i128) -> Result<i128, ArithError>
+pub fn rem(x: i128, y: i128) -> Result<i128, ArithError>
+pub fn neg(x: i128) -> Result<i128, ArithError>
 pub type NodeId
 pub enum Anchor
 pub struct Checked<T>
@@ -132,8 +139,8 @@ pub type ZSet
 pub fn add(z: &mut ZSet, row: Row, w: i128)
 pub fn zset(rows: &[(&[i128], i128)]) -> ZSet
 pub fn row(vs: &[Option<i128>]) -> Row
-pub fn eval_scalar(s: &Scalar, r: &[Value]) -> Value
-pub fn keeps(p: &Scalar, r: &[Value]) -> bool
+pub fn eval_scalar(s: &Scalar, r: &[Value]) -> Result<Value, EvalError>
+pub fn keeps(p: &Scalar, r: &[Value]) -> Result<bool, EvalError>
 pub struct Eval<'a>
 pub enum EvalError
 pub fn implements(op: &Op) -> bool
@@ -171,7 +178,7 @@ pub fn derive(circuit: &Circuit, node: NodeId, epoch: u64) -> Result<UpqueryPath
 pub enum Value
 pub enum Tri
 pub fn compare(a: Value, b: Value, f: impl Fn(i128, i128) -> bool) -> Tri
-pub fn arith(a: Value, b: Value, f: impl Fn(i128, i128) -> i128) -> Value
+pub fn arith(
 pub fn truth(v: Value) -> Tri
 pub fn days_since_epoch(text: &str) -> Option<i64>
 pub struct Violation

@@ -159,6 +159,17 @@ const TABLE: &[(&str, Kind)] = &[
         StaysZero("needs MAX_FLIGHTS concurrent owners; one thread holds at most one"),
     ),
     (
+        "flights_reclaimed",
+        StaysZero(
+            "the sweep runs only on the path that is about to refuse admission, so it needs \
+             the flight table already full — MAX_FLIGHTS owners — and one thread holds at \
+             most one flight at a time. This is the same structural bound as flights_refused \
+             and it is reached the same way: `nilestream-core`'s flight_reclamation.rs drives \
+             it directly against the core, where 2,560 cancellation cycles cost nothing. \
+             Driving it over the wire needs the concurrency harness that is its own card",
+        ),
+    ),
+    (
         "deferred_merges",
         StaysZero(
             "a merge happens only when a fold lands late enough that the frontier moved under \
@@ -173,11 +184,14 @@ const TABLE: &[(&str, Kind)] = &[
     ("merge_epochs_merged", StaysZero("as merge_rows_visited")),
     (
         "merge_max_epochs",
-        Level("the configured epoch cap; 32 while MergeCaps::default() is on, 0 when off"),
+        Level(
+            "the configured epoch cap. Reads 0 in this fixture: C11-05(b) made \
+             MergeCaps::default() OFF, and MergeCaps::ON carries the preregistered 32",
+        ),
     ),
     (
         "merge_max_rows",
-        Level("the configured row cap; 4096 on, 0 off"),
+        Level("the configured row cap; 0 here, 4096 under MergeCaps::ON"),
     ),
     (
         "merges_refused_epochs",
@@ -187,6 +201,18 @@ const TABLE: &[(&str, Kind)] = &[
     (
         "merges_refused_unavailable",
         StaysZero("as merges_refused_epochs"),
+    ),
+    (
+        "merges_refused_overflow",
+        StaysZero(
+            "as merges_refused_epochs, and twice over: a merge has to happen at all, which \
+             needs a late landing this fixture never produces, and then the running delta has \
+             to come within one addition of the accumulator's limit. `nilestream-core`'s \
+             merge_budget.rs drives it against a base built to overflow. The refusal exists \
+             because an unchecked `delta += d` would install a balance made of arithmetic \
+             that did not happen, which is the one failure this counter must never be silent \
+             about",
+        ),
     ),
     (
         "waiters_refused",

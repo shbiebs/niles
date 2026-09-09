@@ -55,6 +55,14 @@ impl Base for History {
         }
         (total, rows)
     }
+    /// The fixture's epochs are small enough that counting and materialising cost the same,
+    /// so this is `deltas_at(e).len()`. Written out rather than defaulted, because a default
+    /// of exactly this shape in the trait would preserve the defect `delta_rows_at` exists to
+    /// remove: every implementation would then materialise the epoch it was about to refuse.
+    fn delta_rows_at(&self, e: Epoch) -> u64 {
+        self.deltas_at(e).len() as u64
+    }
+
     fn deltas_at(&self, e: Epoch) -> Vec<(Key, Value)> {
         let mut acc: BTreeMap<Key, Value> = BTreeMap::new();
         for (ep, k, d) in &self.rows {

@@ -425,6 +425,15 @@ pub struct Folder<'p> {
     /// groups were first seen. The map holds the group's index into this.
     accs: Vec<Acc>,
     work: u64,
+    /// **The first arithmetic refusal this fold hit, if any.**
+    ///
+    /// The fold runs per base row on the serving path, so it records rather than returns:
+    /// threading a `Result` through `row` would put a branch in the hottest loop in the
+    /// server for a case that is a refusal of the whole query anyway. `finish` returns it,
+    /// and the caller turns it into a wire error — so no partial answer can escape, which is
+    /// the property that matters. Before this existed, `x / 0` in a projection evaluated to
+    /// `0`, was summed into a balance, and went out over the wire as a row.
+    error: Option<niles_ir::eval::EvalError>,
 }
 
 /// The accumulator table, in one of two shapes.
@@ -474,6 +483,7 @@ impl<'p> Folder<'p> {
             },
             accs: Vec::new(),
             work: 0,
+            error: None,
         }
     }
 
@@ -497,15 +507,28 @@ impl<'p> Folder<'p> {
         self.cur.extend_from_slice(base);
         for step in &self.plan.steps {
             match step {
-                Step::Filter(p) => {
-                    if !eval::keeps(p, &self.cur) {
+                Step::Filter(p) => match eval::keeps(p, &self.cur) {
+                    Ok(true) => {}
+                    Ok(false) => return,
+                    Err(e) => {
+                        if self.error.is_none() {
+                            self.error = Some(e);
+                        }
                         return;
                     }
-                }
+                },
                 Step::Map(exprs) => {
                     self.spare.clear();
                     for e in exprs.iter() {
-                        self.spare.push(eval::eval_scalar(e, &self.cur));
+                        match eval::eval_scalar(e, &self.cur) {
+                            Ok(v) => self.spare.push(v),
+                            Err(err) => {
+                                if self.error.is_none() {
+                                    self.error = Some(err);
+                                }
+                                return;
+                            }
+                        }
                     }
                     std::mem::swap(&mut self.cur, &mut self.spare);
                 }
@@ -563,12 +586,18 @@ impl<'p> Folder<'p> {
                     slot[i].total += 1;
                     slot[i].any = true;
                 }
-                Agg::Sum => {
-                    if let Value::Int(x) = eval::eval_scalar(e, &self.cur) {
+                Agg::Sum => match eval::eval_scalar(e, &self.cur) {
+                    Ok(Value::Int(x)) => {
                         slot[i].total += x;
                         slot[i].any = true;
                     }
-                }
+                    Ok(Value::Null) => {}
+                    Err(err) => {
+                        if self.error.is_none() {
+                            self.error = Some(err);
+                        }
+                    }
+                },
                 // `plan` refuses these, so this is unreachable. A refusal rather than a
                 // default, because a default here would answer `min` with a sum.
                 Agg::Min | Agg::Max | Agg::Avg => unreachable!("plan() accepts sum and count"),
@@ -578,7 +607,14 @@ impl<'p> Folder<'p> {
 
     /// The aggregate's Z-set, and the counted work in the unit `eval` counts: one per row
     /// read, one per group emitted.
-    pub fn finish(self) -> (ZSet, u64) {
+    pub fn finish(self) -> Result<(ZSet, u64), niles_ir::eval::EvalError> {
+        // **The refusal is returned before the answer is assembled.** A fold that hit a
+        // division by zero has an accumulator missing every row after it, and that
+        // accumulator is a plausible balance: returning it and the error together would
+        // invite a caller to use one and log the other.
+        if let Some(e) = self.error {
+            return Err(e);
+        }
         let mut work = self.work;
         let aggs = &self.plan.aggs;
         // The aggregated cells of one group, appended to a row that already holds its key.
@@ -634,12 +670,12 @@ impl<'p> Folder<'p> {
                 }
             }
         }
-        (rows.into_iter().collect(), work)
+        Ok((rows.into_iter().collect(), work))
     }
 }
 
 /// Fold an iterator of base records. The pulling form, for callers that have one.
-pub fn fold<'r, I>(plan: &FoldPlan<'_>, rows: I) -> (ZSet, u64)
+pub fn fold<'r, I>(plan: &FoldPlan<'_>, rows: I) -> Result<(ZSet, u64), niles_ir::eval::EvalError>
 where
     I: IntoIterator<Item = &'r [Value]>,
 {

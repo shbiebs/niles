@@ -1819,26 +1819,35 @@ pub fn run_with_stack<T: Send + 'static>(
         .join()
 }
 
-/// Arithmetic and comparison. Every integer operation is checked.
+/// Arithmetic and comparison, over `niles_ir::arith` — the one integer arithmetic.
+///
+/// The doc comment here used to say "every integer operation is checked" and three of them
+/// were not: `Div` and `Rem` guarded the zero divisor and then used `/` and `%`, which panic
+/// on `i128::MIN / -1` because the quotient is one past `i128::MAX`. A divisor of `-1` is
+/// neither zero nor unusual, so the guard was checking the wrong half of the operation, and
+/// the sentence above it was what stopped anyone looking. The five operators now come from
+/// the module the reference evaluator uses, so the interpreter and the served evaluator
+/// cannot disagree about what `x / y` means.
 fn arith(op: BinOp, a: &Value, b: &Value, at: Span) -> Result<Value, Error> {
     use BinOp::*;
+    // One conversion, so a new operator cannot be added with a different error shape.
+    let lift = |r: Result<i128, niles_ir::arith::ArithError>| -> Result<Value, Error> {
+        match r {
+            Ok(v) => Ok(Value::Int(v)),
+            Err(niles_ir::arith::ArithError::DivideByZero { .. }) => {
+                Err(Error::DivideByZero { at })
+            }
+            Err(niles_ir::arith::ArithError::Overflow { op, .. }) => {
+                Err(Error::Overflow { op, at })
+            }
+        }
+    };
     match (op, a, b) {
-        (Add, Value::Int(x), Value::Int(y)) => x
-            .checked_add(*y)
-            .map(Value::Int)
-            .ok_or(Error::Overflow { op: "+", at }),
-        (Sub, Value::Int(x), Value::Int(y)) => x
-            .checked_sub(*y)
-            .map(Value::Int)
-            .ok_or(Error::Overflow { op: "-", at }),
-        (Mul, Value::Int(x), Value::Int(y)) => x
-            .checked_mul(*y)
-            .map(Value::Int)
-            .ok_or(Error::Overflow { op: "*", at }),
-        (Div, Value::Int(_), Value::Int(0)) => Err(Error::DivideByZero { at }),
-        (Div, Value::Int(x), Value::Int(y)) => Ok(Value::Int(x / y)),
-        (Rem, Value::Int(_), Value::Int(0)) => Err(Error::DivideByZero { at }),
-        (Rem, Value::Int(x), Value::Int(y)) => Ok(Value::Int(x % y)),
+        (Add, Value::Int(x), Value::Int(y)) => lift(niles_ir::arith::add(*x, *y)),
+        (Sub, Value::Int(x), Value::Int(y)) => lift(niles_ir::arith::sub(*x, *y)),
+        (Mul, Value::Int(x), Value::Int(y)) => lift(niles_ir::arith::mul(*x, *y)),
+        (Div, Value::Int(x), Value::Int(y)) => lift(niles_ir::arith::div(*x, *y)),
+        (Rem, Value::Int(x), Value::Int(y)) => lift(niles_ir::arith::rem(*x, *y)),
         (BitAnd, Value::Int(x), Value::Int(y)) => Ok(Value::Int(x & y)),
         (BitOr, Value::Int(x), Value::Int(y)) => Ok(Value::Int(x | y)),
         (BitXor, Value::Int(x), Value::Int(y)) => Ok(Value::Int(x ^ y)),
@@ -2423,6 +2432,59 @@ mod tests {
         let e = run(src, "main").unwrap_err();
         assert!(matches!(e, Error::DivideByZero { .. }));
         assert!(e.span().is_some(), "a stage-0 failure must be locatable");
+    }
+
+    /// **The case the zero-divisor guard did not cover.**
+    ///
+    /// `arith` refused `x / 0` and then evaluated `x / y` with Rust's `/`, which panics on
+    /// `i128::MIN / -1` because the quotient is one past `i128::MAX`. A divisor of `-1` is
+    /// neither zero nor unusual, and the doc comment above the function said "every integer
+    /// operation is checked" — which is what stopped anyone looking. The panic reached the
+    /// interpreter's callers as an abort rather than as an `Error`.
+    ///
+    /// The literal is written as `… 105727 - 1` because the lexer refuses
+    /// `-170141183460469231731687303715884105728`: the positive magnitude overflows before the
+    /// negation is applied, which is its own small demonstration that this boundary is sharp.
+    #[test]
+    fn the_smallest_integer_divided_by_minus_one_is_an_error_and_not_a_panic() {
+        // `-MAX - 1`, which is `i128::MIN`. `0 - (MAX - 1)` is *not*: it is `MIN + 2`, and
+        // writing it that way is how the first draft of this test passed against the defect.
+        let min = "((0 - 170141183460469231731687303715884105727) - 1)";
+        for op in ["/", "%"] {
+            let src = format!("fn main() -> i64 {{ let m = {min}; let d = 0 - 1; m {op} d }}");
+            match run(&src, "main") {
+                Err(Error::Overflow { .. }) => {}
+                Err(other) => panic!(
+                    "MIN {op} -1 should be an overflow and not {other:?}: a divide-by-zero \
+                     would send the caller looking at a divisor that is -1"
+                ),
+                Ok(v) => panic!("MIN {op} -1 has no representable answer and answered {v:?}"),
+            }
+        }
+    }
+
+    /// The controls for the test above: a repair that refused `MIN / -1` by refusing every
+    /// negative divisor, or everything involving `MIN`, would pass it.
+    #[test]
+    fn the_neighbours_of_that_boundary_are_ordinary_arithmetic() {
+        let min = "((0 - 170141183460469231731687303715884105727) - 1)";
+        for (src, want) in [
+            (format!("fn main() -> i64 {{ let m = {min}; m / 1 }}"), None),
+            (
+                format!("fn main() -> i64 {{ let m = {min}; m % 1 }}"),
+                Some(0),
+            ),
+            (
+                "fn main() -> i64 { let d = 0 - 1; 170141183460469231731687303715884105727 % d }"
+                    .to_string(),
+                Some(0),
+            ),
+        ] {
+            let v = run(&src, "main").unwrap_or_else(|e| panic!("{src} was refused: {e:?}"));
+            if let (Some(w), Value::Int(x)) = (want, &v) {
+                assert_eq!(*x, w, "{src}");
+            }
+        }
     }
 
     #[test]

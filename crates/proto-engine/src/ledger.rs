@@ -716,6 +716,25 @@ impl nilestream_core::rev::Base for Ledger {
         self.reconstruct_balance_counted(*acct as Acct, *cur as Cur, anchor)
     }
 
+    /// The posting count of a sealed epoch, read from the record rather than built from it.
+    ///
+    /// `rows` is a `Vec` the epoch already owns, so this is a length and no allocation. An
+    /// epoch this ledger does not hold reports zero rows, which is the same answer
+    /// `deltas_at` gives it and is why `deltas_available_from` exists separately: "no rows"
+    /// and "no longer retained" are different facts and only the second is a refusal.
+    fn delta_rows_at(&self, e: Epoch) -> u64 {
+        self.epochs
+            .get(e as usize)
+            .filter(|r| r.id == e)
+            .map(|rec| {
+                rec.rows
+                    .iter()
+                    .filter(|r| matches!(r, Row::Post(_)))
+                    .count() as u64
+            })
+            .unwrap_or(0)
+    }
+
     fn deltas_at(&self, e: Epoch) -> Vec<(nilestream_core::rev::Key, i128)> {
         // Indexed rather than searched: an epoch's id is its position, assigned by `submit`.
         let Some(rec) = self.epochs.get(e as usize).filter(|r| r.id == e) else {

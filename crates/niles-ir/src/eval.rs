@@ -91,29 +91,31 @@ pub fn row(vs: &[Option<i128>]) -> Row {
 /// is that there is still exactly one scalar evaluator: a second one would be a second
 /// three-valued logic, which is the kind of duplication that disagrees in the null cases
 /// four months later.
-pub fn eval_scalar(s: &Scalar, r: &[Value]) -> Value {
-    match s {
+pub fn eval_scalar(s: &Scalar, r: &[Value]) -> Result<Value, EvalError> {
+    Ok(match s {
         Scalar::Column(c) => *r.get(*c as usize).unwrap_or(&Value::Null),
         Scalar::LitInt(v) => Value::Int(*v),
         Scalar::LitBool(b) => Value::Int(*b as i128),
         Scalar::LitMoney { minor, .. } => Value::Int(*minor),
         Scalar::LitText(_) | Scalar::Anchor => Value::Int(0),
         Scalar::LitNull => Value::Null,
-        Scalar::IsNull(inner) => Tri::of(eval_scalar(inner, r).is_null()).definite(),
-        Scalar::Not(inner) => match truth(eval_scalar(inner, r)) {
+        Scalar::IsNull(inner) => Tri::of(eval_scalar(inner, r)?.is_null()).definite(),
+        Scalar::Not(inner) => match truth(eval_scalar(inner, r)?) {
             Tri::Unknown => Value::Null,
             t => t.not().definite(),
         },
-        Scalar::Neg(inner) => arith(eval_scalar(inner, r), Value::Int(0), |a, _| -a),
+        Scalar::Neg(inner) => arith(eval_scalar(inner, r)?, Value::Int(0), |a, _| {
+            crate::arith::neg(a)
+        })?,
         Scalar::Udf { .. } => Value::Int(0),
         Scalar::Binary { op, lhs, rhs } => {
-            let (a, b) = (eval_scalar(lhs, r), eval_scalar(rhs, r));
+            let (a, b) = (eval_scalar(lhs, r)?, eval_scalar(rhs, r)?);
             match op {
-                ScalarOp::Add => arith(a, b, |x, y| x + y),
-                ScalarOp::Sub => arith(a, b, |x, y| x - y),
-                ScalarOp::Mul => arith(a, b, |x, y| x * y),
-                ScalarOp::Div => arith(a, b, |x, y| if y == 0 { 0 } else { x / y }),
-                ScalarOp::Rem => arith(a, b, |x, y| if y == 0 { 0 } else { x % y }),
+                ScalarOp::Add => arith(a, b, crate::arith::add)?,
+                ScalarOp::Sub => arith(a, b, crate::arith::sub)?,
+                ScalarOp::Mul => arith(a, b, crate::arith::mul)?,
+                ScalarOp::Div => arith(a, b, crate::arith::div)?,
+                ScalarOp::Rem => arith(a, b, crate::arith::rem)?,
                 ScalarOp::Eq => tri_value(compare(a, b, |x, y| x == y)),
                 ScalarOp::Ne => tri_value(compare(a, b, |x, y| x != y)),
                 ScalarOp::Lt => tri_value(compare(a, b, |x, y| x < y)),
@@ -125,7 +127,7 @@ pub fn eval_scalar(s: &Scalar, r: &[Value]) -> Value {
                 ScalarOp::Like => tri_value(compare(a, b, |x, y| x == y)),
             }
         }
-    }
+    })
 }
 
 /// A three-valued result, carried back into the value domain: unknown *is* null.
@@ -137,8 +139,12 @@ fn tri_value(t: Tri) -> Value {
 }
 
 /// Whether a predicate keeps a row. Unknown discards, exactly as in `where`.
-pub fn keeps(p: &Scalar, r: &[Value]) -> bool {
-    truth(eval_scalar(p, r)).keeps()
+///
+/// Fallible for the same reason `eval_scalar` is: a `where` clause can contain arithmetic,
+/// and a predicate that answered `false` because its division failed would filter rows out
+/// of an answer and report nothing — which is the defaulting defect wearing a boolean.
+pub fn keeps(p: &Scalar, r: &[Value]) -> Result<bool, EvalError> {
+    Ok(truth(eval_scalar(p, r)?).keeps())
 }
 
 /// The evaluator, carrying the work counter.
@@ -164,7 +170,21 @@ pub struct Eval<'a> {
     precomputed: &'a BTreeMap<NodeId, ZSet>,
     /// Set when a fixpoint did not converge inside its round budget. Carried rather than
     /// panicked, so a caller can report it as the diagnostic it is.
-    non_terminating: Option<EvalError>,
+    /// **The first error this evaluation hit, whatever kind.**
+    ///
+    /// This slot was `non_terminating` and held only the fixpoint's. It now holds an
+    /// arithmetic refusal too, because the alternative — making `node`, `aggregate` and
+    /// `apply` all fallible — would thread `?` through sixteen recursive call sites to reach
+    /// the same place: `try_run_node_with`, which is the only function that returns anything
+    /// to a caller.
+    ///
+    /// **First writer wins, and the traversal continues with `Value::Null`.** Continuing is
+    /// safe only because every entry point either returns this error or panics with it, so no
+    /// caller ever sees the partial Z-set; the nulls exist to let the walk finish, and they
+    /// are nulls rather than zeroes so that a future path which *did* leak one would leak an
+    /// absence rather than a plausible balance. That is the same distinction the whole
+    /// absence lattice is about, applied to this evaluator's own failure mode.
+    error: Option<EvalError>,
 }
 
 /// Why an evaluation could not produce an answer.
@@ -181,6 +201,24 @@ pub enum EvalError {
         /// whether it was still growing or oscillating.
         tail: Vec<usize>,
     },
+    /// **An integer operation that has no answer.**
+    ///
+    /// Division or remainder by zero, or a result outside `i128`. Before this variant existed
+    /// the first of those answered `Value::Int(0)` — a plausible balance, returned over the
+    /// wire, to a client with no way to know the division had not happened — and the second
+    /// wrapped in release and panicked in debug, so the same expression meant one thing under
+    /// `cargo test` and another in a benchmark.
+    ///
+    /// The operands travel with the error because the row that produced them is gone by the
+    /// time the refusal reaches a client, and "this query overflowed somewhere" is not a
+    /// message anyone can act on.
+    Arithmetic(crate::arith::ArithError),
+}
+
+impl From<crate::arith::ArithError> for EvalError {
+    fn from(e: crate::arith::ArithError) -> EvalError {
+        EvalError::Arithmetic(e)
+    }
 }
 
 impl std::fmt::Display for EvalError {
@@ -190,6 +228,7 @@ impl std::fmt::Display for EvalError {
                 f,
                 "the fixpoint did not converge in {rounds} rounds; the accumulator held {tail:?} rows over the last rounds"
             ),
+            EvalError::Arithmetic(e) => write!(f, "{e}"),
         }
     }
 }
@@ -290,11 +329,11 @@ pub fn try_run_node_with(
         sources,
         work: 0,
         fix_stack: Vec::new(),
-        non_terminating: None,
+        error: None,
         precomputed,
     };
     let z = e.node(id);
-    match e.non_terminating {
+    match e.error {
         Some(err) => Err(err),
         // `into_owned` at the boundary: a caller gets a Z-set it owns, and the copy happens
         // exactly once — for a circuit that is a bare source and for nothing else.
@@ -316,6 +355,50 @@ pub fn try_run(
 }
 
 impl<'a> Eval<'a> {
+    /// Record an error, first writer wins.
+    ///
+    /// First rather than last, because the first is the one a reader can act on: a division
+    /// by zero in a projection will usually be followed by more of the same on every
+    /// remaining row, and reporting the last of ten thousand identical refusals names a row
+    /// chosen by iteration order.
+    fn note_error(&mut self, e: EvalError) {
+        if self.error.is_none() {
+            self.error = Some(e);
+        }
+    }
+
+    /// Whether a predicate keeps a row, recording a refusal and **discarding the row**.
+    ///
+    /// Discarding rather than keeping, and it makes no difference to what a caller sees —
+    /// the recorded error replaces the Z-set — but it makes a difference to what happens
+    /// next: a kept row goes on to be projected and aggregated, so keeping it would run more
+    /// arithmetic on data the query has already failed on and could turn one honest refusal
+    /// into a second, later one that names the wrong operator.
+    fn keeps_row(&mut self, p: &Scalar, r: &[Value]) -> bool {
+        match keeps(p, r) {
+            Ok(k) => k,
+            Err(err) => {
+                self.note_error(err);
+                false
+            }
+        }
+    }
+
+    /// Evaluate a scalar, recording a refusal and yielding null rather than a value.
+    ///
+    /// The null never reaches a caller: `try_run_node_with` returns the recorded error
+    /// instead of the Z-set, and `run_node` panics with it. It exists so the traversal can
+    /// finish without threading `?` through sixteen recursive borrows of `Cow<ZSet>`.
+    fn scalar(&mut self, e: &Scalar, r: &[Value]) -> Value {
+        match eval_scalar(e, r) {
+            Ok(v) => v,
+            Err(err) => {
+                self.note_error(err);
+                Value::Null
+            }
+        }
+    }
+
     /// Evaluate a node, **borrowing a base relation rather than copying it**.
     ///
     /// `Op::Source` used to `.cloned()` the whole source. On the benchmark's base that is a
@@ -357,7 +440,7 @@ impl<'a> Eval<'a> {
                 let mut out = ZSet::new();
                 for (r, w) in inp.iter() {
                     self.work += 1;
-                    if keeps(predicate, r) {
+                    if self.keeps_row(predicate, r) {
                         add(&mut out, r.clone(), *w);
                     }
                 }
@@ -372,7 +455,7 @@ impl<'a> Eval<'a> {
                     self.work += 1;
                     add(
                         &mut out,
-                        exprs.iter().map(|e| eval_scalar(e, r)).collect(),
+                        exprs.iter().map(|e| self.scalar(e, r)).collect(),
                         *w,
                     );
                 }
@@ -481,7 +564,7 @@ impl<'a> Eval<'a> {
                     // re-derived it would be checking the wrong thing here.
                     let _ = measure;
                     let tail = sizes.split_off(sizes.len().saturating_sub(4));
-                    self.non_terminating = Some(EvalError::NonTerminating {
+                    self.note_error(EvalError::NonTerminating {
                         rounds: *max_rounds,
                         tail,
                     });
@@ -683,7 +766,7 @@ impl<'a> Eval<'a> {
                 let mut combined = lrow.clone();
                 combined.extend(rrow.iter().copied());
                 if let Some(res) = residual {
-                    if !keeps(res, &combined) {
+                    if !self.keeps_row(res, &combined) {
                         continue;
                     }
                 }
@@ -759,7 +842,7 @@ impl<'a> Eval<'a> {
                 .collect();
             let slot = raw.entry(k).or_insert_with(|| vec![Vec::new(); aggs.len()]);
             for (i, (_, e)) in aggs.iter().enumerate() {
-                slot[i].push((eval_scalar(e, r), *w));
+                slot[i].push((self.scalar(e, r), *w));
             }
         }
         let mut out = ZSet::new();
@@ -852,7 +935,7 @@ impl<'a> Eval<'a> {
                 ApplyKind::Scalar { agg, expr } => {
                     let vals: Vec<(Value, i128)> = group
                         .iter()
-                        .map(|(r, w)| (eval_scalar(expr, r), *w))
+                        .map(|(r, w)| (eval_scalar(expr, r).unwrap_or(Value::Null), *w))
                         .collect();
                     // An empty matching set yields null — SQL's rule for a scalar
                     // subquery, and the reason the unnested form is a *left outer* join.

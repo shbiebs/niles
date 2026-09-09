@@ -424,6 +424,11 @@ fn a_non_terminating_fixpoint_is_refused_rather_than_answered() {
                 "the report should show the accumulator still growing: {tail:?}"
             );
         }
+        // Exhaustive rather than `_`: this circuit's step is `count(*) + 1`, so an
+        // arithmetic refusal here would mean the growth had reached `i128::MAX` — a real
+        // result about this fixture, and one a wildcard arm would have reported as a
+        // non-terminating fixpoint.
+        other => panic!("expected a non-terminating fixpoint, got {other}"),
     }
 
     // And the control: the same shape with a converging step reaches closure and returns.

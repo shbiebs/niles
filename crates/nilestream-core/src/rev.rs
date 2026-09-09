@@ -423,6 +423,29 @@ pub trait Base {
     /// is exactly why partial materialization can pay.
     fn deltas_at(&self, e: Epoch) -> Vec<(Key, Value)>;
 
+    /// **How many per-key delta rows epoch `e` holds, without materialising them.**
+    ///
+    /// Required, and deliberately not defaulted to `deltas_at(e).len()`, because that default
+    /// *is* the defect. `Rev::merge_suffix` walked the suffix calling `deltas_at`, adding
+    /// `rows.len()` to a running total and refusing once the total passed `max_rows` — so a
+    /// merge refused for being too wide had already allocated every row it was refusing. With
+    /// a cap of 2 against a 10,000-row epoch, ten thousand rows were built and then dropped,
+    /// and `merge_rows_visited` reported ten thousand, which is at least honest about the
+    /// cost and says nothing about the bound being enforced.
+    ///
+    /// The count is asked for first and the extraction happens only within budget, so at most
+    /// `max_rows` rows are ever materialised. **No sentinel row is needed**: the count is
+    /// exact, so the decision never requires looking at one row past the cap.
+    ///
+    /// # Why this cannot race the extraction it precedes
+    ///
+    /// An epoch at or below the frontier is *sealed*: its rows are immutable and no later
+    /// append can change them (F4). So the count and the extraction observe the same rows by
+    /// construction, and the two-pass shape carries none of the risk it would over a mutable
+    /// snapshot. An implementation over storage that is *not* append-only would have to
+    /// return a count and a reader taken together, and would be a different trait.
+    fn delta_rows_at(&self, e: Epoch) -> u64;
+
     /// The earliest epoch whose per-key deltas this base can still produce.
     ///
     /// **Zero by default, because a fully retained base is what F4 promises**, and every
@@ -466,7 +489,32 @@ impl MergeCaps {
 }
 
 impl Default for MergeCaps {
-    /// **32 epochs and 4,096 rows.**
+    /// **Off, by decision (LC-38), and the numbers below are what `ON` restores.**
+    ///
+    /// The default was 32 epochs and 4,096 rows. Cycle 10 measured the merge arm against the
+    /// pinned control on Host C and it lost on every one of six rows — three of them clearing
+    /// the ≥10%-and-≥3-pooled-MADs gate — and cost about 30% of writer throughput and 53–80%
+    /// of write p99 at the partial working point. F-11-14 then located the mechanism: a
+    /// merged landing installs at `applied`, which no concurrent reader's anchor has reached,
+    /// so the merged entry's certification interval sits where nobody is, while the pinned
+    /// arm's point interval catches roughly nineteen of twenty hot-key readers.
+    ///
+    /// So the author's answer to LC-38 is (a): off now, and C11-05(c)'s interval repair plus
+    /// C11-05(d)'s Host C measurement decide whether it comes back. This is a **policy**
+    /// change and not a mechanism change — the mechanism is unchanged and one environment
+    /// variable away — and it is on its own commit so it can be reviewed and reverted as one
+    /// decision.
+    ///
+    /// A default that ships a measured regression is a default nobody chose; a mechanism
+    /// deleted because its first measurement lost is a negative result published about the
+    /// weakest version of the idea. Off-by-default is neither.
+    fn default() -> MergeCaps {
+        MergeCaps::OFF
+    }
+}
+
+impl MergeCaps {
+    /// **The preregistered on-position**, which was the default until LC-38.
     ///
     /// The epoch cap comes from the cycle-10 baseline: the arrival gap on both hosts is
     /// 4.6–5.7 epochs with a maximum of 17 across 45,681 flights. 32 covers that
@@ -480,13 +528,24 @@ impl Default for MergeCaps {
     /// stream. 4,096 rows over at most 32 epochs is 128 rows per epoch, which is well above
     /// anything the mixed benchmark seals and well below the cost of the reconstruction the
     /// merge is trying to save.
-    fn default() -> MergeCaps {
-        MergeCaps {
-            max_epochs: 32,
-            max_rows: 4_096,
-        }
-    }
+    pub const ON: MergeCaps = MergeCaps {
+        max_epochs: 32,
+        max_rows: 4_096,
+    };
 }
+
+const _: () = {
+    // **The two facts a reader of an arm needs, pinned where they cannot drift from the doc
+    // above**: `OFF` is both caps at zero, and `ON` is the preregistered 32 / 4,096. Const
+    // assertions rather than tests, because a test can be filtered out of a run and these
+    // cannot: they are checked by the compiler on every build of this crate.
+    //
+    // `default() == OFF` is asserted in `tests/merge_default.rs` instead, because
+    // `Default::default` is not a `const fn` and cannot be evaluated here. That test is the
+    // arm selector's own contract: it names the decision (LC-38) and the commit that made it.
+    assert!(MergeCaps::OFF.max_epochs == 0 && MergeCaps::OFF.max_rows == 0);
+    assert!(MergeCaps::ON.max_epochs == 32 && MergeCaps::ON.max_rows == 4_096);
+};
 
 /// Why a late landing did not merge, when it did not.
 ///
@@ -566,6 +625,21 @@ pub struct Stats {
     /// Reads refused a flight because the view already had `MAX_FLIGHTS` outstanding. They
     /// folded anyway, uninstalled.
     pub flights_refused: u64,
+    /// **Dead flight records reclaimed to make room, kept apart from the refusal.**
+    ///
+    /// A read refused for want of a live flight and a read that had to sweep away abandoned
+    /// ones first are different facts about a server: the first is load, the second is
+    /// callers dropping their tickets. Reporting them under one number would make an
+    /// abandonment problem look like an overload problem, which is a refusal nobody can act
+    /// on — the lesson `waiters_refused` and `flights_refused` already carry (A10-05).
+    pub flights_reclaimed: u64,
+    /// Merges refused because accumulating the suffix's deltas would overflow `i128`.
+    ///
+    /// Its own counter and not an epoch or row refusal: those two are tuning questions, and
+    /// this one is an arithmetic fact about the data. `delta += d` was unchecked, so before
+    /// this existed the sum wrapped in release and panicked in debug — the profile split
+    /// C11-02 removed from the query evaluator, in the merge.
+    pub merges_refused_overflow: u64,
     /// Deltas held back during a flight and folded into its result on landing.
     ///
     /// **Zero until the merge lands, and reported so it can be seen to be zero.** A counter
@@ -891,9 +965,18 @@ impl Rev {
             // different prefix and will install a value certified at its own anchor;
             // waiting for it would be answering this caller with someone else's snapshot.
             Some(_) => Decision::Alone,
+            // **Before refusing for want of room, take the room that is already free.**
+            // The scan is bounded by `MAX_FLIGHTS` and runs only here, on the path that was
+            // about to refuse; see `reclaim_cancelled_flights`.
             None if self.in_flight.len() >= MAX_FLIGHTS => {
-                self.stats.flights_refused += 1;
-                Decision::Alone
+                if self.reclaim_cancelled_flights() > 0 && self.in_flight.len() < MAX_FLIGHTS {
+                    Decision::Own
+                } else {
+                    // The table really is full of live flights. This is the refusal
+                    // `flights_refused` has always named, and now it names only that.
+                    self.stats.flights_refused += 1;
+                    Decision::Alone
+                }
             }
             None => Decision::Own,
         };
@@ -1195,6 +1278,58 @@ impl Rev {
         None
     }
 
+    /// **Reclaim every abandoned flight in the table, once, when the table is full.**
+    ///
+    /// # The defect
+    ///
+    /// `reap_cancelled` reaps *the incoming key's* flight and nothing else. Drop 256
+    /// installing `FoldTicket`s for 256 distinct cold keys and the table is full of dead
+    /// records; a 257th read, for a key that has no flight at all, finds
+    /// `in_flight.len() >= MAX_FLIGHTS`, counts `flights_refused`, and folds alone. Nothing
+    /// ever removes those records, because the only thing that removes a record for key `K`
+    /// is a read of `K` — so sharing capacity stays exhausted indefinitely, on a server where
+    /// every subsequent read is correct and none of them can share.
+    ///
+    /// # The cost, stated
+    ///
+    /// A full scan of a table that is capped at `MAX_FLIGHTS`, so **at most 256 entries are
+    /// inspected**, and only on the path that was about to refuse. Amortised: a sweep can
+    /// only run when the table is full, and it either frees at least one slot — which then
+    /// takes at least one more admission to fill — or it frees none, in which case the table
+    /// really is full of live flights and the refusal is the true one. Worst case per read
+    /// is therefore O(MAX_FLIGHTS) and it is paid only under capacity pressure; the common
+    /// path is untouched.
+    ///
+    /// A tombstone queue would make it O(1) amortised and would add a second structure to
+    /// keep consistent with the first under the same lock. The bound here is a constant this
+    /// code already enforces, and 256 comparisons under a lock that is about to be released
+    /// for a base fold is not a cost worth a second data structure.
+    fn reclaim_cancelled_flights(&mut self) -> usize {
+        let dead: Vec<Key> = self
+            .in_flight
+            .iter()
+            .filter(|(_, f)| f.done.cancelled())
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in &dead {
+            // Per key, through the same path, so a cancelled flight is put back exactly one
+            // way. A second implementation of the restore rule would disagree with this one
+            // the first time either changed.
+            self.reap_cancelled(k);
+        }
+        self.stats.flights_reclaimed += dead.len() as u64;
+        dead.len()
+    }
+
+    /// **How many flight records this view holds**, live and dead alike.
+    ///
+    /// The budget `C11-04` states is on this number: at most `MAX_FLIGHTS`, with no growth
+    /// over churn. Exposed because a bound nobody can ask about is a bound nobody can hold —
+    /// the same reason `view_metadata_keys` and `idem_window_keys` are columns.
+    pub fn in_flight_len(&self) -> usize {
+        self.in_flight.len()
+    }
+
     /// Put back what a cancelled flight replaced, and let the next reader take over.
     fn reap_cancelled(&mut self, key: &Key) {
         let dead = self.in_flight.get(key).is_some_and(|f| f.done.cancelled());
@@ -1205,12 +1340,35 @@ impl Rev {
             // A cancelled flight ends here rather than in `finish_fold`, so its rendezvous is
             // accounted for here or nowhere.
             self.stats.completion_locks += f.done.locks();
+            // **Put back what this flight replaced, and only over what this flight left.**
+            //
+            // The restore used to be unconditional: `prior` went back over whatever the slot
+            // held. **I could not construct a reachable case where that is wrong**, and the
+            // reason it is safe is worth writing down, because it is not local to this
+            // function and it is three separate decisions in three other places:
+            // `apply_epoch` skips a `Pending` slot rather than writing a delta into it;
+            // `Slot::is_resident` is false for `Pending`, so eviction never chooses it; and
+            // `in_flight` holds at most one flight per key, so no second generation can
+            // install while this record is still in the table.
+            //
+            // So this is a guard and not a repair, and it is here because the sweep added by
+            // C11-04 reclaims *other keys'* flights — records that have been sitting in the
+            // table for an unbounded time, rather than one the incoming reader just found.
+            // The three invariants above still hold, but the window they hold across is now
+            // much longer, and a rule that depends on three distant decisions staying true is
+            // one worth making local. The marker this flight installed is the evidence that
+            // nothing else has touched the slot; if it is gone, so is the right to restore.
             if let Some(prior) = f.prior {
-                match self.slots.get_mut(key) {
-                    Some(slot) => *slot = prior,
+                match self.slots.get(key) {
+                    Some(Slot::Pending(a)) if *a == f.anchor => {
+                        self.slots.insert(key.clone(), prior);
+                    }
+                    // The key was evicted entirely while the flight was in the air, which is
+                    // the state `Bottom` describes and the state `prior` would restore.
                     None => {
                         self.slots.insert(key.clone(), prior);
                     }
+                    _ => {}
                 }
             }
         }
@@ -1252,16 +1410,34 @@ impl Rev {
         let mut delta: Value = 0;
         let mut visited: u64 = 0;
         for e in (anchor + 1)..=self.applied {
-            let rows = base.deltas_at(e);
-            visited += rows.len() as u64;
-            if visited > caps.max_rows {
+            // **Count first, materialise second.** The count is exact and reads no rows, so a
+            // refusal costs the count and nothing else; the extraction below happens only
+            // when the whole epoch fits in what is left of the budget. At most `max_rows`
+            // rows are materialised over the entire walk, and no sentinel row is inspected,
+            // because an exact count never needs to look one past the cap to decide.
+            let n = base.delta_rows_at(e);
+            if visited.saturating_add(n) > caps.max_rows {
+                // The rows that would have been needed are still reported: a refusal that
+                // says it cost nothing is a refusal that looks free, and the number a reader
+                // wants here is how wide the suffix actually was.
                 self.stats.merge_rows_visited += visited;
                 self.stats.merges_refused_rows += 1;
                 return None;
             }
-            for (k, d) in rows {
+            visited += n;
+            for (k, d) in base.deltas_at(e) {
                 if k == *key {
-                    delta += d;
+                    // A merge that wrapped would install a balance made of arithmetic that
+                    // did not happen. Refused, counted apart from the two budget refusals,
+                    // and the rows already read are still reported.
+                    match delta.checked_add(d) {
+                        Some(next) => delta = next,
+                        None => {
+                            self.stats.merge_rows_visited += visited;
+                            self.stats.merges_refused_overflow += 1;
+                            return None;
+                        }
+                    }
                 }
             }
         }
@@ -1785,6 +1961,8 @@ impl Runtime {
             s.uninstalled_folds += v.stats.uninstalled_folds;
             s.pinned_installs += v.stats.pinned_installs;
             s.flights_refused += v.stats.flights_refused;
+            s.flights_reclaimed += v.stats.flights_reclaimed;
+            s.merges_refused_overflow += v.stats.merges_refused_overflow;
             s.deferred_merges += v.stats.deferred_merges;
             s.merge_rows_visited += v.stats.merge_rows_visited;
             s.merge_epochs_merged += v.stats.merge_epochs_merged;
@@ -1881,6 +2059,14 @@ mod tests {
             }
             (acc, rows)
         }
+        /// The fixture's epochs are small enough that counting and materialising cost the same,
+        /// so this is `deltas_at(e).len()`. Written out rather than defaulted, because a default
+        /// of exactly this shape in the trait would preserve the defect `delta_rows_at` exists to
+        /// remove: every implementation would then materialise the epoch it was about to refuse.
+        fn delta_rows_at(&self, e: Epoch) -> u64 {
+            self.deltas_at(e).len() as u64
+        }
+
         fn deltas_at(&self, e: Epoch) -> Vec<(Key, Value)> {
             self.rows
                 .iter()
@@ -2166,6 +2352,10 @@ mod tests {
             Policy::Lru,
         )
         .unwrap();
+        // **This test is about the merge, so it names the arm.** It used to inherit the
+        // policy default, which is `OFF` since C11-05(b): a test of a mechanism that reads
+        // its arm from a policy is a test that changes meaning when the policy does.
+        rt.set_merge_caps(MergeCaps::ON);
         rt.advance(&base, late);
         let v = rt.view_mut("balance").unwrap();
         assert_eq!(
@@ -3170,6 +3360,14 @@ mod two_phase {
         fn reconstruct(&self, key: &Key, anchor: Epoch) -> (Value, u64) {
             self.fold(key, anchor)
         }
+        /// The fixture's epochs are small enough that counting and materialising cost the same,
+        /// so this is `deltas_at(e).len()`. Written out rather than defaulted, because a default
+        /// of exactly this shape in the trait would preserve the defect `delta_rows_at` exists to
+        /// remove: every implementation would then materialise the epoch it was about to refuse.
+        fn delta_rows_at(&self, e: Epoch) -> u64 {
+            self.deltas_at(e).len() as u64
+        }
+
         fn deltas_at(&self, e: Epoch) -> Vec<(Key, Value)> {
             let rows = self.rows.read().expect("not poisoned");
             rows.iter()
@@ -4108,6 +4306,14 @@ mod concurrent_differential {
             }
             (acc, read)
         }
+        /// The fixture's epochs are small enough that counting and materialising cost the same,
+        /// so this is `deltas_at(e).len()`. Written out rather than defaulted, because a default
+        /// of exactly this shape in the trait would preserve the defect `delta_rows_at` exists to
+        /// remove: every implementation would then materialise the epoch it was about to refuse.
+        fn delta_rows_at(&self, e: Epoch) -> u64 {
+            self.deltas_at(e).len() as u64
+        }
+
         fn deltas_at(&self, e: Epoch) -> Vec<(Key, Value)> {
             let rows = self.rows.read().expect("not poisoned");
             rows.iter()
@@ -4496,7 +4702,7 @@ mod deferred_merge_tests {
     /// **Clause 1.** The merged entry is the value at `e`, and the reader that follows hits.
     #[test]
     fn an_eligible_late_landing_merges_exactly_the_deltas_it_missed() {
-        let (base, mut rt, ticket, early) = late_landing(MergeCaps::default(), 3);
+        let (base, mut rt, ticket, early) = late_landing(MergeCaps::ON, 3);
         let late = base.frontier();
         let (value, rows) = base.reconstruct(&vec![0], early);
 
@@ -4541,7 +4747,7 @@ mod deferred_merge_tests {
     /// fold's own value — not the merged one, which is a different question.
     #[test]
     fn the_owner_is_answered_at_its_own_anchor_and_not_at_the_merged_one() {
-        let (base, mut rt, ticket, early) = late_landing(MergeCaps::default(), 3);
+        let (base, mut rt, ticket, early) = late_landing(MergeCaps::ON, 3);
         let (value, rows) = base.reconstruct(&vec![0], early);
         let (at_late, _) = base.reconstruct(&vec![0], base.frontier());
         assert_ne!(value, at_late, "the fixture must actually move the key");
@@ -4574,6 +4780,7 @@ mod deferred_merge_tests {
             Policy::Lru,
         )
         .unwrap();
+        rt.set_merge_caps(MergeCaps::ON);
         rt.advance(&base, early);
 
         let v = rt.view_mut("balance").expect("balance");
@@ -4684,6 +4891,14 @@ mod deferred_merge_tests {
             fn reconstruct(&self, key: &Key, anchor: Epoch) -> (Value, u64) {
                 self.inner.reconstruct(key, anchor)
             }
+            /// The fixture's epochs are small enough that counting and materialising cost the same,
+            /// so this is `deltas_at(e).len()`. Written out rather than defaulted, because a default
+            /// of exactly this shape in the trait would preserve the defect `delta_rows_at` exists to
+            /// remove: every implementation would then materialise the epoch it was about to refuse.
+            fn delta_rows_at(&self, e: Epoch) -> u64 {
+                self.deltas_at(e).len() as u64
+            }
+
             fn deltas_at(&self, e: Epoch) -> Vec<(Key, Value)> {
                 if e < self.from {
                     Vec::new()
@@ -4707,6 +4922,7 @@ mod deferred_merge_tests {
             Policy::Lru,
         )
         .unwrap();
+        rt.set_merge_caps(MergeCaps::ON);
 
         let base = Compacted {
             inner,
@@ -4805,7 +5021,7 @@ mod deferred_merge_tests {
     /// own signature is this case, and it is the one every existing caller takes.
     #[test]
     fn a_landing_with_no_base_pins() {
-        let (base, mut rt, ticket, early) = late_landing(MergeCaps::default(), 3);
+        let (base, mut rt, ticket, early) = late_landing(MergeCaps::ON, 3);
         let (value, rows) = base.reconstruct(&vec![0], early);
         let v = rt.view_mut("balance").expect("balance");
         v.finish_fold(ticket, value, rows);
@@ -4818,7 +5034,7 @@ mod deferred_merge_tests {
     /// over an entry a newer flight installed.
     #[test]
     fn a_superseded_landing_merges_nothing_and_writes_nothing() {
-        let (base, mut rt, ticket, early) = late_landing(MergeCaps::default(), 3);
+        let (base, mut rt, ticket, early) = late_landing(MergeCaps::ON, 3);
         let late = base.frontier();
         let v = rt.view_mut("balance").expect("balance");
 

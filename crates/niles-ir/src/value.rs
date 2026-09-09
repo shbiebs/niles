@@ -151,10 +151,23 @@ pub fn compare(a: Value, b: Value, f: impl Fn(i128, i128) -> bool) -> Tri {
 }
 
 /// Arithmetic under nulls: null propagates. `null + 1` is null, not 1.
-pub fn arith(a: Value, b: Value, f: impl Fn(i128, i128) -> i128) -> Value {
+///
+/// **`f` is fallible, and that is the whole change.** The previous signature took
+/// `Fn(i128, i128) -> i128`, so every caller had to produce *some* `i128` for every pair of
+/// operands — and the only ways to do that are to wrap, to saturate, or to invent a value.
+/// `eval.rs` invented one: `x / 0` was `0`, and the served daemon answered a row with it.
+/// A total signature cannot express a refusal, so the refusal has to be in the type.
+///
+/// Null still propagates before `f` is consulted: `null / 0` is null, not an arithmetic
+/// error, because there is no division to fail.
+pub fn arith(
+    a: Value,
+    b: Value,
+    f: impl Fn(i128, i128) -> Result<i128, crate::arith::ArithError>,
+) -> Result<Value, crate::arith::ArithError> {
     match (a, b) {
-        (Value::Int(x), Value::Int(y)) => Value::Int(f(x, y)),
-        _ => Value::Null,
+        (Value::Int(x), Value::Int(y)) => f(x, y).map(Value::Int),
+        _ => Ok(Value::Null),
     }
 }
 
@@ -221,10 +234,19 @@ mod tests {
 
     #[test]
     fn null_propagates_through_arithmetic() {
-        assert_eq!(arith(Value::Null, Value::Int(1), |a, b| a + b), Value::Null);
         assert_eq!(
-            arith(Value::Int(2), Value::Int(3), |a, b| a + b),
-            Value::Int(5)
+            arith(Value::Null, Value::Int(1), crate::arith::add),
+            Ok(Value::Null)
+        );
+        assert_eq!(
+            arith(Value::Int(2), Value::Int(3), crate::arith::add),
+            Ok(Value::Int(5))
+        );
+        // `null / 0` is null and not an arithmetic error: null propagates before the
+        // operation is attempted, so there is no division to fail.
+        assert_eq!(
+            arith(Value::Null, Value::Int(0), crate::arith::div),
+            Ok(Value::Null)
         );
     }
 

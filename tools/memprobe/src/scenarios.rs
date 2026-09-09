@@ -324,6 +324,14 @@ pub fn rev_read_hit() -> Row {
                 anchor,
             )
         }
+        /// The probe's epochs are built here and are small, so counting and materialising
+        /// cost the same. Written out rather than defaulted in the trait, because a default
+        /// of exactly this shape is the defect `delta_rows_at` exists to remove: every
+        /// implementation would then materialise the epoch it was about to refuse.
+        fn delta_rows_at(&self, e: u64) -> u64 {
+            self.deltas_at(e).len() as u64
+        }
+
         fn deltas_at(&self, e: u64) -> Vec<(Key, Value)> {
             let Some(rec) = self.ledger.epochs.get(e as usize) else {
                 return Vec::new();
@@ -481,6 +489,14 @@ pub fn rev_metadata_2x_budget() -> Row {
                 anchor,
             )
         }
+        /// The probe's epochs are built here and are small, so counting and materialising
+        /// cost the same. Written out rather than defaulted in the trait, because a default
+        /// of exactly this shape is the defect `delta_rows_at` exists to remove: every
+        /// implementation would then materialise the epoch it was about to refuse.
+        fn delta_rows_at(&self, e: u64) -> u64 {
+            self.deltas_at(e).len() as u64
+        }
+
         fn deltas_at(&self, e: u64) -> Vec<(Key, Value)> {
             let Some(rec) = self.ledger.epochs.get(e as usize) else {
                 return Vec::new();
@@ -657,6 +673,14 @@ pub fn rev_metadata_per_key() -> Row {
                 anchor,
             )
         }
+        /// The probe's epochs are built here and are small, so counting and materialising
+        /// cost the same. Written out rather than defaulted in the trait, because a default
+        /// of exactly this shape is the defect `delta_rows_at` exists to remove: every
+        /// implementation would then materialise the epoch it was about to refuse.
+        fn delta_rows_at(&self, e: u64) -> u64 {
+            self.deltas_at(e).len() as u64
+        }
+
         fn deltas_at(&self, e: u64) -> Vec<(Key, Value)> {
             let Some(rec) = self.ledger.epochs.get(e as usize) else {
                 return Vec::new();

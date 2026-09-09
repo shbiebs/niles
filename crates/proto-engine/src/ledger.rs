@@ -702,6 +702,22 @@ impl Ledger {
 /// nothing and reports having read nothing, rather than answering about a currency nobody
 /// named.
 impl nilestream_core::rev::Base for Ledger {
+    /// **A balance oracle, and now it says so.**
+    ///
+    /// `reconstruct` folds `amt` over the postings of one `(acct, cur)` pair, and that is the
+    /// only question it can answer. Until this method existed a runtime could install a
+    /// `count(amt)` view over this base and receive the sum under `count`'s name — a
+    /// well-formed wrong number from a public API, which no answer-level test could catch
+    /// because the number is exactly what the *other* output should give.
+    ///
+    /// The indices are `postings`' own: `txn, acct, cur, amt, idem`, as `schemas/bank.niles`
+    /// and `daemon::DEFAULT_SCHEMA` declare it. A circuit that numbers those columns
+    /// differently denotes a different question over the same rows, and the mismatch is
+    /// caught rather than served.
+    fn answers(&self) -> nilestream_core::rev::BasePlan {
+        nilestream_core::rev::BasePlan::sum("postings", 3, vec![1, 2])
+    }
+
     fn frontier(&self) -> Epoch {
         self.head()
     }

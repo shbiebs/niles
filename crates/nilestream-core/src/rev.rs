@@ -28,7 +28,7 @@
 
 use crate::absence::{Epoch, Slot};
 use niles_ir::circuit::{Circuit, NodeId};
-use niles_ir::operator::{Agg, Op};
+use niles_ir::operator::{Agg, ColIdx, Op, Scalar};
 use niles_ir::{Consistency, Materialize, Retention};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -405,7 +405,114 @@ const MAX_WAITERS: u32 = 256;
 /// produced Chapter 9's numbers and over a durable, segment-backed store, and be
 /// *measured to produce the same counted work* over both. A runtime welded to one storage
 /// layer could not make that comparison.
+/// **What a `Base` answers**, so that a runtime cannot install a view the base cannot serve.
+///
+/// # The defect this exists for
+///
+/// `Base` is a *pre-aggregated oracle*: `reconstruct(key, anchor)` returns one value for one
+/// key, and it is told nothing about the graph. `Runtime::install` admitted any circuit whose
+/// outputs were keyed `Sum` or `Count` aggregates, kept no executable plan for them, and
+/// handed the same base to every view. So a circuit with two outputs —
+///
+/// ```text
+/// sum(amount)   over rows [10, 20]   ->  30      (correct)
+/// count(amount) over rows [10, 20]   ->  30      (the sum, wearing count's name)
+/// ```
+///
+/// — installed and answered, and no answer-level test could catch it, because the second
+/// answer is exactly what the *first* output should give. Chapter 4's claim that an installed
+/// circuit computes "exactly Q_lin" was contradicted by the public API.
+///
+/// Two things follow, and both are in this cycle's repair.
+///
+/// 1. **A runtime holds one base, so it may hold one plan.** Installation refuses a circuit
+///    whose outputs do not all denote the same aggregate over the same key, with a structured
+///    reason naming both. A general planner over several bases is a later extension, and
+///    saying so is the honest form of the claim; admitting `Count` over a balance oracle was
+///    not.
+/// 2. **The base must say what it answers**, and every path that touches it checks. A caller
+///    can otherwise install a `sum(amt)` view and hand it a `count` oracle, which is the same
+///    defect one layer out.
+///
+/// Equality is structural and total: the relation, the aggregate, the aggregated expression
+/// and the key columns *in order*, because `reconstruct` reads the key positionally and a
+/// permuted key is a different question with the same components.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BasePlan {
+    /// The base relation this oracle folds.
+    pub relation: String,
+    /// The aggregate it computes.
+    pub agg: Agg,
+    /// The expression it aggregates, in the source's column space.
+    pub input: Scalar,
+    /// The key columns, in the order `reconstruct` expects them in `Key`.
+    pub group_key: Vec<ColIdx>,
+}
+
+impl BasePlan {
+    /// The plan of a keyed `sum`, which is what every base in this repository answers today.
+    ///
+    /// A constructor rather than four struct literals, so that a base and the circuit it
+    /// serves state the same thing in the same words. The column indices are in the **base
+    /// relation's** own column space — the order its rows are written in — and not in any
+    /// intermediate node's, because that is the space a base can speak about at all.
+    pub fn sum(relation: &str, input: ColIdx, group_key: Vec<ColIdx>) -> BasePlan {
+        BasePlan {
+            relation: relation.to_string(),
+            agg: Agg::Sum,
+            input: Scalar::Column(input),
+            group_key,
+        }
+    }
+}
+
+impl std::fmt::Display for BasePlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}({:?}) over `{}` keyed by {:?}",
+            self.agg.as_str(),
+            self.input,
+            self.relation,
+            self.group_key
+        )
+    }
+}
+
+/// The single base relation an output aggregates over, or `None` if there is not exactly one.
+///
+/// `install` has already refused every node that is not the output aggregate or a base
+/// `Source`, so this walk sees only those two — but it can still see *two sources*, which is
+/// a circuit this runtime cannot serve and which nothing previously named.
+fn base_relation(circuit: &Circuit, output: NodeId) -> Option<String> {
+    let mut seen = BTreeSet::new();
+    let mut stack = vec![output];
+    let mut found: Option<String> = None;
+    while let Some(cur) = stack.pop() {
+        if !seen.insert(cur) {
+            continue;
+        }
+        let n = circuit.node(cur);
+        if let Op::Source { relation, .. } = &n.op {
+            match &found {
+                Some(r) if r != relation => return None,
+                Some(_) => {}
+                None => found = Some(relation.clone()),
+            }
+        }
+        stack.extend(n.inputs.iter().copied());
+    }
+    found
+}
+
 pub trait Base {
+    /// **What this base answers.** See [`BasePlan`].
+    ///
+    /// Required rather than defaulted: a default would be a plan nobody wrote down, and the
+    /// check against it would pass for every base including the wrong one. An implementor
+    /// that cannot state its plan cannot be checked, and this repair is the check.
+    fn answers(&self) -> BasePlan;
+
     /// The current visibility frontier.
     fn frontier(&self) -> Epoch;
 
@@ -659,6 +766,14 @@ struct Meta {
 pub struct Rev {
     pub node: NodeId,
     pub name: String,
+    /// **What this view is a view of**, carried from installation to every use of a base.
+    ///
+    /// Before this field existed the per-view state held no executable plan at all: the
+    /// circuit was consulted by `install` and then never again, and every answer came from
+    /// `Base::reconstruct`, which is handed a key and an epoch and is told nothing. A
+    /// `count(amount)` view and a `sum(amount)` view were therefore the same object, and the
+    /// runtime handed both the same balance oracle.
+    plan: BasePlan,
     slots: BTreeMap<Key, Slot<Value>>,
     resident: u64,
     /// Resident-entry budget. `None` means full materialization.
@@ -786,6 +901,36 @@ impl Rev {
     /// slower and exact and installs nothing that belongs to somebody else. The `Join` arm is
     /// gone rather than made unreachable, because "cannot happen on this path" was exactly
     /// the claim that was wrong.
+    /// **The plan this view was installed for.**
+    pub fn plan(&self) -> &BasePlan {
+        &self.plan
+    }
+
+    /// **Every path that touches the base checks that the base answers this view's question.**
+    ///
+    /// Not every path that *reads*: a hit is answered out of this view's own slots and cannot
+    /// be wrong because of the base, so it pays nothing. A miss is about to fold base rows,
+    /// which costs orders of magnitude more than comparing a plan, so the check is free where
+    /// it is needed and absent where it is not.
+    ///
+    /// A mismatch is a programming error at the API boundary — the caller built this runtime
+    /// and chose this base — and it panics with both plans named. It is not a `debug_assert`:
+    /// the failure it guards is a wrong number in a release binary, and a check that vanished
+    /// in release would be the profile split this cycle removed from the arithmetic.
+    fn require_base(&self, base: &dyn Base) {
+        let theirs = base.answers();
+        assert!(
+            theirs == self.plan,
+            "view `{}` was installed for {} and was handed a base that answers {}. The base \
+             is a pre-aggregated oracle: it is given a key and an epoch and returns one \
+             value, so a mismatch here is a well-formed wrong number and not a failure to \
+             answer.",
+            self.name,
+            self.plan,
+            theirs
+        );
+    }
+
     pub fn read(&mut self, base: &dyn Base, key: &Key, anchor: Epoch) -> Anchored {
         // **The whole read, expressed in the two-phase API, so there is one read path and
         // not two.** A second implementation of the certification-interval rule would
@@ -794,6 +939,7 @@ impl Rev {
         match self.begin_read_with(key, anchor, ReadMode::Alone) {
             ReadOutcome::Hit(a) => a,
             ReadOutcome::Fold(t) => {
+                self.require_base(base);
                 let (value, rows) = base.reconstruct(t.key(), t.anchor());
                 self.finish_fold_merging(t, value, rows, Some(base))
             }
@@ -1236,6 +1382,7 @@ impl Rev {
     /// The rows visited are counted **whether or not the merge completes**, because they were
     /// really read: a refusal that reports zero cost is a refusal that looks free.
     fn merge_suffix(&mut self, base: &dyn Base, key: &Key, anchor: Epoch) -> Option<Value> {
+        self.require_base(base);
         let caps = self.merge_caps;
         let span = self.applied.saturating_sub(anchor);
         if span > caps.max_epochs {
@@ -1335,6 +1482,7 @@ impl Rev {
     /// This is where a consistency rung's cost actually falls, which was itself a measured
     /// finding: instrumenting only the read path showed no difference between rungs at all.
     pub fn apply_epoch(&mut self, base: &dyn Base, e: Epoch) {
+        self.require_base(base);
         for (key, delta) in base.deltas_at(e) {
             // An entry pinned to a historical anchor is missing the deltas between that
             // anchor and now; folding this one in would compound the gap rather than
@@ -1491,6 +1639,19 @@ pub enum Unsupported {
     /// The aggregate reads a derived source: a view this runtime does not hold, and whose
     /// rows no `Base` can fold.
     DerivedSource { node: NodeId, relation: String },
+    /// **Two outputs, two questions, one base.**
+    ///
+    /// A runtime is handed exactly one `Base`, which answers exactly one aggregate over one
+    /// key. Installing a circuit whose outputs denote different questions is installing a
+    /// circuit whose second answer is the first one under another name — which is what
+    /// `sum(amount)` and `count(amount)` did, both answering 30 over the rows `[10, 20]`.
+    MixedPlans {
+        node: NodeId,
+        first: String,
+        second: String,
+    },
+    /// One output node computing several aggregates. `reconstruct` returns one value.
+    MultipleAggregates { node: NodeId, count: usize },
 }
 
 impl Unsupported {
@@ -1505,6 +1666,22 @@ impl Unsupported {
                     "node {node} has no derivable key, so there is nothing to materialize per key"
                 )
             }
+            Unsupported::MixedPlans {
+                node,
+                first,
+                second,
+            } => format!(
+                "output at node {node} denotes {second}, and an output already installed in \
+                 this runtime denotes {first}. A runtime is handed one `Base`, and a `Base` \
+                 answers one aggregate over one key: installing both would make the second \
+                 output answer the first one's question under its own name. Install them in \
+                 two runtimes, each with the base that answers it."
+            ),
+            Unsupported::MultipleAggregates { node, count } => format!(
+                "node {node} computes {count} aggregates in one output, and \
+                 `Base::reconstruct` returns one value. Give each aggregate its own output \
+                 and its own runtime."
+            ),
             Unsupported::Aggregate { node, agg } => {
                 format!("node {node} aggregates with `{agg}`, which this runtime does not maintain")
             }
@@ -1659,6 +1836,54 @@ impl Runtime {
                 }
                 stack.extend(m.inputs.iter().copied());
             }
+            // **The plan this output denotes**, read off the node rather than assumed.
+            //
+            // A runtime is handed exactly one `Base`, and a `Base` answers exactly one
+            // question (see `BasePlan`). So a circuit whose outputs denote two different
+            // questions cannot be served by one runtime, and the previous version installed
+            // it anyway: `sum(amount)` and `count(amount)` over the same rows both answered
+            // the sum, because the base was asked and the base has only one answer.
+            let (group_key, aggs) = match &n.op {
+                Op::Aggregate { group_key, aggs } => (group_key, aggs),
+                // Unreachable: the match above returned `Unsupported::Shape` for every other
+                // op. Written as a refusal rather than an `unreachable!` because the two
+                // matches are far apart and a future arm added to the first one would reach
+                // here silently.
+                other => {
+                    return Err(Unsupported::Shape {
+                        node: id,
+                        op: other.name(),
+                    })
+                }
+            };
+            // One aggregate per output. Two aggregates in one output node are two questions
+            // in the same place, and `reconstruct` returns one value.
+            if aggs.len() != 1 {
+                return Err(Unsupported::MultipleAggregates {
+                    node: id,
+                    count: aggs.len(),
+                });
+            }
+            let relation = base_relation(&circuit, id).ok_or(Unsupported::Shape {
+                node: id,
+                op: "an aggregate over no single base source",
+            })?;
+            let this_plan = BasePlan {
+                relation,
+                agg: aggs[0].0,
+                input: aggs[0].1.clone(),
+                group_key: group_key.clone(),
+            };
+            if let Some(first) = views.first().map(|v: &Rev| v.plan.clone()) {
+                if first != this_plan {
+                    return Err(Unsupported::MixedPlans {
+                        node: id,
+                        first: first.to_string(),
+                        second: this_plan.to_string(),
+                    });
+                }
+            }
+
             // Read the checked fields. This is not incidental: the IR's accessed-field
             // audit fails if a consumer plans without consulting them, and a runtime that
             // ignored the rung would serve stale state and return a well-formed wrong
@@ -1692,6 +1917,7 @@ impl Runtime {
                 mode: contract.materialize,
                 stats: Stats::default(),
                 merge_caps: MergeCaps::default(),
+                plan: this_plan,
             });
         }
         views.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1861,6 +2087,14 @@ mod tests {
     }
 
     impl Base for FoldBase {
+        /// The plan this fake answers: the same keyed `sum` every test circuit in this
+        /// module installs (`postings`, key `[0]`, `sum(Column(1))`). Stated rather than
+        /// defaulted, because a default would make `require_base` pass against every base
+        /// including the wrong one — and the wrong one is the defect this cycle repaired.
+        fn answers(&self) -> BasePlan {
+            BasePlan::sum("postings", 1, vec![0])
+        }
+
         fn frontier(&self) -> Epoch {
             self.head
         }
@@ -3164,6 +3398,14 @@ mod two_phase {
     }
 
     impl Base for Hist {
+        /// The plan this fake answers: the same keyed `sum` every test circuit in this
+        /// module installs (`postings`, key `[0]`, `sum(Column(1))`). Stated rather than
+        /// defaulted, because a default would make `require_base` pass against every base
+        /// including the wrong one — and the wrong one is the defect this cycle repaired.
+        fn answers(&self) -> BasePlan {
+            BasePlan::sum("postings", 1, vec![0])
+        }
+
         fn frontier(&self) -> Epoch {
             self.head.load(Ordering::SeqCst)
         }
@@ -4093,6 +4335,14 @@ mod concurrent_differential {
     }
 
     impl Base for SharedBase {
+        /// The plan this fake answers: the same keyed `sum` every test circuit in this
+        /// module installs (`postings`, key `[0]`, `sum(Column(1))`). Stated rather than
+        /// defaulted, because a default would make `require_base` pass against every base
+        /// including the wrong one — and the wrong one is the defect this cycle repaired.
+        fn answers(&self) -> BasePlan {
+            BasePlan::sum("postings", 1, vec![0])
+        }
+
         fn frontier(&self) -> Epoch {
             self.head.load(Ordering::SeqCst)
         }
@@ -4678,6 +4928,14 @@ mod deferred_merge_tests {
             from: Epoch,
         }
         impl Base for Compacted {
+            /// The plan this fake answers: the same keyed `sum` every test circuit in this
+            /// module installs (`postings`, key `[0]`, `sum(Column(1))`). Stated rather than
+            /// defaulted, because a default would make `require_base` pass against every base
+            /// including the wrong one — and the wrong one is the defect this cycle repaired.
+            fn answers(&self) -> BasePlan {
+                BasePlan::sum("postings", 1, vec![0])
+            }
+
             fn frontier(&self) -> Epoch {
                 self.inner.frontier()
             }

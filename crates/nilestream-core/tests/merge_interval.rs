@@ -147,10 +147,10 @@ fn land_late(rt: &mut Runtime, base: &Stops, key: &Key, anchor: Epoch, advance_t
 /// the same either way, which is the whole reason the fold fraction had to be counted.
 fn is_hit(rt: &mut Runtime, key: &Key, anchor: Epoch) -> bool {
     let view = rt.view_mut("balance").expect("the view");
-    match view.begin_read_with(key, anchor, ReadMode::Alone) {
-        ReadOutcome::Hit(_) => true,
-        _ => false,
-    }
+    matches!(
+        view.begin_read_with(key, anchor, ReadMode::Alone),
+        ReadOutcome::Hit(_)
+    )
 }
 
 #[test]
@@ -162,7 +162,11 @@ fn a_merged_entry_is_stamped_at_the_last_delta_and_certifies_through_the_frontie
     let key: Key = vec![HOT];
 
     let owner = land_late(&mut rt, &base, &key, 1, 12);
-    assert_eq!(owner, base.truth(1), "the owner keeps its own answer at its own anchor");
+    assert_eq!(
+        owner,
+        base.truth(1),
+        "the owner keeps its own answer at its own anchor"
+    );
     assert_eq!(rt.stats().deferred_merges, 1, "the merge was taken");
 
     // **The interval, read end to end.** Every anchor from the last delta to the frontier
@@ -246,7 +250,10 @@ fn every_anchor_the_view_answers_agrees_with_the_fixtures_own_oracle() {
                     base.truth(a),
                     "anchor {a}, key stops at {stops}, fold anchored at {anchor}"
                 );
-                assert_eq!(got.anchor, a, "an answer is stamped with the anchor asked for");
+                assert_eq!(
+                    got.anchor, a,
+                    "an answer is stamped with the anchor asked for"
+                );
             }
         }
     }
@@ -296,7 +303,11 @@ fn the_frontier_cannot_move_between_the_walk_and_the_install_today() {
         0,
         "the frontier moved under a walk that holds `&mut self`, which should not be reachable"
     );
-    assert_eq!(rt.stats().deferred_merges, 1, "and the merge was taken, not refused");
+    assert_eq!(
+        rt.stats().deferred_merges,
+        1,
+        "and the merge was taken, not refused"
+    );
 }
 
 #[test]
@@ -309,7 +320,11 @@ fn a_refused_merge_still_pins_and_the_owner_still_gets_its_own_answer() {
     let key: Key = vec![HOT];
 
     let owner = land_late(&mut rt, &base, &key, 1, 12);
-    assert_eq!(owner, base.truth(1), "the owner's answer is not the merge's to change");
+    assert_eq!(
+        owner,
+        base.truth(1),
+        "the owner's answer is not the merge's to change"
+    );
     assert_eq!(rt.stats().deferred_merges, 0, "no merge was taken");
     assert_eq!(rt.stats().pinned_installs, 1);
     assert!(

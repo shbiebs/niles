@@ -203,6 +203,17 @@ const TABLE: &[(&str, Kind)] = &[
         StaysZero("as merges_refused_epochs"),
     ),
     (
+        "merges_refused_moved",
+        StaysZero(
+            "structurally impossible today, and the row exists so that it cannot become \
+             possible quietly. `merge_suffix` runs under the same `&mut self` as the install \
+             that follows it, so the frontier it read cannot move in between and this refusal \
+             cannot fire. LC-37 / C11-12 move the walk out from under the second view \
+             acquisition; the moment that lands, `applied` can advance mid-walk and this \
+             counter starts moving. A zero here is the current architecture asserting itself",
+        ),
+    ),
+    (
         "merges_refused_overflow",
         StaysZero(
             "as merges_refused_epochs, and twice over: a merge has to happen at all, which \

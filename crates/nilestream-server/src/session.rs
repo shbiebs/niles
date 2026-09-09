@@ -1043,6 +1043,7 @@ impl Session {
                     Field::int8("merges_refused_epochs"),
                     Field::int8("merges_refused_rows"),
                     Field::int8("merges_refused_unavailable"),
+                    Field::int8("merges_refused_moved"),
                     Field::int8("waiters_refused"),
                     // How a join ended. A retried join is not an error and is not free.
                     Field::int8("joins_answered"),
@@ -1084,6 +1085,7 @@ impl Session {
                     Some(s.merges_refused_epochs.to_string()),
                     Some(s.merges_refused_rows.to_string()),
                     Some(s.merges_refused_unavailable.to_string()),
+                    Some(s.merges_refused_moved.to_string()),
                     Some(s.waiters_refused.to_string()),
                     Some(s.joins_answered.to_string()),
                     Some(s.joins_retried.to_string()),
@@ -2954,6 +2956,7 @@ schema bank {
             "merges_refused_epochs",
             "merges_refused_rows",
             "merges_refused_unavailable",
+            "merges_refused_moved",
             "waiters_refused",
             "joins_answered",
             "joins_retried",

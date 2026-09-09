@@ -322,6 +322,7 @@ pub struct ReadStats {
     pub merges_refused_epochs: u64,
     pub merges_refused_rows: u64,
     pub merges_refused_unavailable: u64,
+    pub merges_refused_moved: u64,
     pub waiters_refused: u64,
     pub joins_answered: u64,
     pub joins_retried: u64,
@@ -1396,6 +1397,7 @@ impl crate::session::Serving for RevEngine {
                     merges_refused_epochs: s.merges_refused_epochs,
                     merges_refused_rows: s.merges_refused_rows,
                     merges_refused_unavailable: s.merges_refused_unavailable,
+                    merges_refused_moved: s.merges_refused_moved,
                     waiters_refused: s.waiters_refused,
                     joins_answered: self
                         .joins_answered
@@ -5768,6 +5770,7 @@ mod fallback_rate_tests {
             merges_refused_rows: after.merges_refused_rows - before.merges_refused_rows,
             merges_refused_unavailable: after.merges_refused_unavailable
                 - before.merges_refused_unavailable,
+            merges_refused_moved: after.merges_refused_moved - before.merges_refused_moved,
             waiters_refused: after.waiters_refused - before.waiters_refused,
             joins_answered: after.joins_answered - before.joins_answered,
             joins_retried: after.joins_retried - before.joins_retried,

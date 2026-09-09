@@ -659,6 +659,11 @@ pub struct Stats {
     pub merges_refused_epochs: u64,
     pub merges_refused_rows: u64,
     pub merges_refused_unavailable: u64,
+    /// The frontier moved between the merge walk and the install. Structurally impossible
+    /// while the walk runs under the same `&mut self` as the install; counted so that the
+    /// change which makes it possible (LC-37 / C11-12, moving the walk out from under the
+    /// second view acquisition) cannot make it *silent*.
+    pub merges_refused_moved: u64,
     /// Readers turned away from an existing flight because its waiter list was full. They
     /// folded alone, exactly. Counted apart from `flights_refused`, which is the *other*
     /// capacity: a refusal with one cause reported under another is a refusal nobody can act
@@ -727,6 +732,30 @@ impl Stats {
 struct Meta {
     reads: u64,
     last_read: u64,
+}
+
+/// **What a completed merge walk learned.**
+///
+/// `delta` alone was enough while a merged entry was installed at `applied`. It is not enough
+/// to install at the *right* stamp, which is what F-11-14 is about: an entry stamped `applied`
+/// certifies the single point `[applied, applied]`, and essentially no concurrent Host C
+/// reader's anchor is at `applied` — the arrival gap puts them behind it — so the merged entry
+/// was a hit for almost nobody, and the merge arm folded 8.5x more than the pinned control it
+/// was supposed to beat.
+///
+/// So the walk also reports **where this key's history actually ends**:
+///
+/// * `last` is the epoch of the last delta *for this key* in the suffix, or `None` when the
+///   suffix moved other keys but not this one. The value is unchanged from `last` through the
+///   frontier by construction — the walk read every epoch in between and saw no delta for this
+///   key — so `last` is the earliest stamp the entry can honestly carry, and therefore the
+///   widest interval it can certify.
+/// * `frontier` is the `applied` the walk read through, carried so the install can verify it
+///   has not moved. `finish_fold_merging` says why that check exists today.
+struct Merged {
+    delta: Value,
+    last: Option<Epoch>,
+    frontier: Epoch,
 }
 
 /// One reconstructible epoch-anchored view.
@@ -1180,10 +1209,55 @@ impl Rev {
                 None
             };
             match merged {
-                Some(delta) => {
+                // **The frontier moved between the walk and the install.**
+                //
+                // It cannot, today: `merge_suffix` takes `&mut self` and returns into this
+                // match, so nothing runs in between and `self.applied` is the same value the
+                // walk read. This arm is a tripwire, not a repair, and it is written down as
+                // one — the guard for it does not fire and the report says so.
+                //
+                // It exists because the *next* planned change makes it reachable. LC-37 /
+                // C11-12 move the walk out from under the second view acquisition so that a
+                // merge does not hold V while it reads the base; the moment that lands,
+                // `applied` can advance under a walk in progress, and a merged value computed
+                // against an older frontier and installed as certified through the newer one
+                // is a stale answer served under a fresh anchor — the exact failure the
+                // certification interval exists to prevent. Better a counted refusal already
+                // in place than a correctness bug introduced by a performance commit.
+                Some(m) if m.frontier != self.applied => {
+                    self.stats.merges_refused_moved += 1;
+                    if ticket.anchor < self.applied {
+                        self.stats.pinned_installs += 1;
+                    }
+                    self.install(key, value, ticket.anchor);
+                }
+                // **A completed merge installs at the end of this key's history, not at the
+                // frontier.**
+                //
+                // The walk read every epoch in `(anchor, frontier]`. Where it found deltas for
+                // this key, the last one is at `d` and the value is unchanged from `d` through
+                // `frontier`; where it found none, the value is unchanged from the fold's own
+                // anchor through `frontier`. Either way the entry is certified across a real
+                // interval and `certified_through_applied` may extend it to `applied` — which
+                // is what `install_certified` records by leaving the key un-pinned.
+                //
+                // Installing at `frontier` instead, as this did, is not *wrong*: `[applied,
+                // applied]` is a true interval and every T04.1 case passed. It is merely the
+                // narrowest true interval available, and a reader whose anchor sits behind
+                // `applied` by the arrival gap — which on Host C is nearly all of them —
+                // misses an entry that holds the right answer for it. That is F-11-14.
+                Some(m) => {
                     self.stats.deferred_merges += 1;
-                    let at = self.applied;
-                    self.install(key, value + delta, at);
+                    let at = match m.last {
+                        Some(d) => d,
+                        // No delta for this key in the whole suffix. The fold's own anchor is
+                        // already the end of this key's history, so the entry certifies
+                        // `[anchor, applied]` and is not a historical read at all — which is
+                        // why it must not be pinned, and why counting it as a `pinned_install`
+                        // would have been wrong even before this change.
+                        None => ticket.anchor,
+                    };
+                    self.install_certified(key, value + m.delta, at);
                 }
                 None => {
                     if ticket.anchor < self.applied {
@@ -1393,9 +1467,12 @@ impl Rev {
     ///
     /// The rows visited are counted **whether or not the merge completes**, because they were
     /// really read: a refusal that reports zero cost is a refusal that looks free.
-    fn merge_suffix(&mut self, base: &dyn Base, key: &Key, anchor: Epoch) -> Option<Value> {
+    fn merge_suffix(&mut self, base: &dyn Base, key: &Key, anchor: Epoch) -> Option<Merged> {
         let caps = self.merge_caps;
-        let span = self.applied.saturating_sub(anchor);
+        // Read once, and carried out in `Merged::frontier`. Every comparison below is against
+        // this value, so the walk cannot be reasoned about against two different frontiers.
+        let frontier = self.applied;
+        let span = frontier.saturating_sub(anchor);
         if span > caps.max_epochs {
             self.stats.merges_refused_epochs += 1;
             return None;
@@ -1409,7 +1486,11 @@ impl Rev {
 
         let mut delta: Value = 0;
         let mut visited: u64 = 0;
-        for e in (anchor + 1)..=self.applied {
+        // The epoch of the last delta *for this key*. `None` all the way through means the
+        // suffix moved other keys and not this one, which is the common case for a cold key
+        // in a busy view and the case that gets the widest interval of all.
+        let mut last: Option<Epoch> = None;
+        for e in (anchor + 1)..=frontier {
             // **Count first, materialise second.** The count is exact and reads no rows, so a
             // refusal costs the count and nothing else; the extraction below happens only
             // when the whole epoch fits in what is left of the budget. At most `max_rows`
@@ -1431,7 +1512,14 @@ impl Rev {
                     // did not happen. Refused, counted apart from the two budget refusals,
                     // and the rows already read are still reported.
                     match delta.checked_add(d) {
-                        Some(next) => delta = next,
+                        Some(next) => {
+                            delta = next;
+                            // Every matching epoch overwrites this, so it ends as the last
+                            // one. A zero delta still counts: `d == 0` is a row that exists
+                            // for this key in this epoch, and an entry stamped before it
+                            // would be claiming to certify an epoch it did not read.
+                            last = Some(e);
+                        }
                         None => {
                             self.stats.merge_rows_visited += visited;
                             self.stats.merges_refused_overflow += 1;
@@ -1443,20 +1531,49 @@ impl Rev {
         }
         self.stats.merge_rows_visited += visited;
         self.stats.merge_epochs_merged += span;
-        Some(delta)
+        Some(Merged {
+            delta,
+            last,
+            frontier,
+        })
+    }
+
+    /// **Install an entry whose completeness through `applied` has been proved by a walk.**
+    ///
+    /// [`Rev::install`] decides pinning from the stamp alone: a stamp below `applied` means
+    /// the entry did not see the deltas in between, so it keeps its own stamp and a read above
+    /// it reconstructs. That inference is right for a reconstruction, which knows nothing
+    /// about what happened after its anchor, and wrong for a merge, which has just read every
+    /// epoch up to the frontier and knows exactly what happened.
+    ///
+    /// So this is the one path that may install below `applied` un-pinned, and it may only be
+    /// called where that walk happened. The distinction is the whole of C11-05(c): same value,
+    /// same stamp, a certification interval that ends at `applied` instead of at the stamp.
+    fn install_certified(&mut self, key: Key, value: Value, stamp: Epoch) {
+        self.install_at(key, value, stamp, false);
     }
 
     fn install(&mut self, key: Key, value: Value, anchor: Epoch) {
-        let was_resident = self.slots.get(&key).is_some_and(|s| s.is_resident());
         // A reconstruction anchored below the view's applied frontier is a historical
         // answer. It is worth keeping — it is what a dispute asks for — but it is not
-        // current, and must never inherit `applied`.
-        if anchor < self.applied {
+        // current, and must never inherit `applied`. A *merge* below the frontier is the one
+        // exception, and it goes through `install_certified` because it has read the epochs
+        // in between and this function has not.
+        let pin = anchor < self.applied;
+        self.install_at(key, value, anchor, pin);
+    }
+
+    /// The one place an entry becomes resident. `pin` is the only difference between a
+    /// historical answer and a certified one, and both callers above name it explicitly
+    /// rather than letting it be re-derived from the stamp twice.
+    fn install_at(&mut self, key: Key, value: Value, stamp: Epoch, pin: bool) {
+        let was_resident = self.slots.get(&key).is_some_and(|s| s.is_resident());
+        if pin {
             self.pinned.insert(key.clone());
         } else {
             self.pinned.remove(&key);
         }
-        self.slots.insert(key, Slot::Present(value, anchor));
+        self.slots.insert(key, Slot::Present(value, stamp));
         if !was_resident {
             self.resident += 1;
         }
@@ -1969,6 +2086,7 @@ impl Runtime {
             s.merges_refused_epochs += v.stats.merges_refused_epochs;
             s.merges_refused_rows += v.stats.merges_refused_rows;
             s.merges_refused_unavailable += v.stats.merges_refused_unavailable;
+            s.merges_refused_moved += v.stats.merges_refused_moved;
             s.waiters_refused += v.stats.waiters_refused;
             s.joins_declined_by_caller += v.stats.joins_declined_by_caller;
             s.gap_at_begin_total += v.stats.gap_at_begin_total;

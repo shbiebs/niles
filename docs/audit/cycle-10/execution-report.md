@@ -1105,3 +1105,69 @@ The guard is in two halves because either alone is weak: `fatal` really exits, a
 failure anywhere in the script is still wired to `skip`* — a behavioural test alone would pass
 on the next `|| skip` somebody writes. Witnessed end to end in the container against a
 deliberately stale worktree: the run now stops at section 1 with one refusal and one cause.
+
+---
+
+## T04.2 — measured on Host C, and it is a regression
+
+`c10-merge.sh` at `d680c832`, Host C, 2 warm-ups + 5 measured per arm, both working points,
+AB/BA balanced, 28 replicates of ~103 s. Both arms 5/5. One binary, two settings; every replicate's
+transcript carried the caps it was launched with.
+
+**Target T04.2 (verbatim):** *Against the measured pinned-control figures from c10-merge.sh,
+deferred merging reports its gap, visited-row, reuse, writer and memory costs and makes a
+performance claim only when the preregistered ≥10% and ≥3 pooled-MAD gate passes.* —
+**done, and the claim is negative.** Reported: gap (4.9–6.0 epochs per merge), rows visited
+(9.9–11.9 per merge), refusals (zero of any kind), caps; writer and memory costs are in the
+transcript's lock histograms and `E19-scaling` CSVs. **No performance claim is made: the merge
+costs 7–13% of read throughput at every level and both working points.**
+
+| point | level | merge | pinned | Δ | rel | pooled MAD | MADs | gate |
+|---|---|--:|--:|--:|--:|--:|--:|---|
+| full | 6r3w | 132,430 | 145,466 | −13,036 | −8.96% | 1,311 | 9.94 | below 10% |
+| full | 9r5w | 135,738 | 153,087 | −17,349 | **−11.33%** | 1,908 | 9.09 | **fires, negative** |
+| full | 12r6w | 143,117 | 155,821 | −12,704 | −8.15% | 1,363 | 9.32 | below 10% |
+| partial | 6r3w | 123,859 | 133,341 | −9,482 | −7.11% | 1,024 | 9.26 | below 10% |
+| partial | 9r5w | 118,986 | 136,482 | −17,496 | **−12.82%** | 1,047 | 16.71 | **fires, negative** |
+| partial | 12r6w | 118,949 | 136,161 | −17,212 | **−12.64%** | 1,197 | 14.38 | **fires, negative** |
+
+Medians of five; pooled MAD = sqrt((MAD_A² + MAD_B²)/2). Every row is 9–17 pooled MADs from
+zero against a noise floor of ~1 MAD, so the regression is not noise-limited anywhere; three rows
+also clear the 10% threshold.
+
+**The mechanism is not established, and the executor's first explanation was refuted by
+measurement.** The hypothesis was that merging raises each entry's stamp above the anchors readers
+arrive with, so the certification interval `[stamp, effective]` excludes them and hits become
+folds. `the_merge_against_the_arrival_gap` (ignored, `--nocapture`) says the opposite,
+single-threaded, at this workload's gaps:
+
+```
+gap 1: pinned hit 0.0% rows 377,940   merge hit 97.8% rows 2,228
+gap 5: pinned hit 0.0% rows 377,700   merge hit 95.9% rows 9,540
+```
+
+So the regression is something the served path has and this probe does not, and the transcript
+points at one thing: the suffix is walked **inside the second view hold**. View hold total at full
+6r3w is 3.68 M µs merged against 1.40 M µs pinned; the merge arm walked ~34 M delta rows per
+level under V, the one lock every reader and every append needs. The suffix needs only the base,
+which the reader already holds shared before it re-acquires V. That is a hypothesis with data
+behind it, not a conclusion; the decision on whether to test it is the author's (LC-38 reopened,
+below).
+
+**MF-14 — the transcript misreported its own toolchain, third in a family.** The preflight said
+`rustc 1.97.1 … the tree's pin, which resolves on this host`. The tree pins 1.95.0. The probe ran
+`rustc --version` in the author's current directory — `~` — where there is no
+`rust-toolchain.toml`, so the default channel answered and was called the pin. The builds `cd` into
+their worktrees and did use 1.95.0, identically in both arms, so the comparison stands; the line
+describing it was false. MF-7 was an override invisible on the host that wrote it; MF-11 was a
+probe that measured the value it was about to overwrite; MF-14 is a probe that measured the wrong
+directory. Each was a fix for the one before. The probe now runs inside `$REPO` and the preflight
+prints the declared pin beside what resolved (`3b4f7d9`).
+
+**LC-38 reopened with a measured answer and an open decision.** Merge or pin is no longer "the
+`e − a` distribution decides": the distribution is 4.9–6.0 epochs, every landing is eligible, and
+the merge still loses. The open question is whether the loss is intrinsic or is the cost of where
+the work is done. Options put to the author: (A) move the suffix walk outside the view hold and
+re-measure; (B) record the regression and stop, T04.2 `not done: negative experiment`; (C) ship
+`MergeCaps::OFF` as the default with the mechanism retained behind the flag. Not decided at the
+time of this report.

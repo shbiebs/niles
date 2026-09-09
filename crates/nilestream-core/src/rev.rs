@@ -489,7 +489,32 @@ impl MergeCaps {
 }
 
 impl Default for MergeCaps {
-    /// **32 epochs and 4,096 rows.**
+    /// **Off, by decision (LC-38), and the numbers below are what `ON` restores.**
+    ///
+    /// The default was 32 epochs and 4,096 rows. Cycle 10 measured the merge arm against the
+    /// pinned control on Host C and it lost on every one of six rows — three of them clearing
+    /// the ≥10%-and-≥3-pooled-MADs gate — and cost about 30% of writer throughput and 53–80%
+    /// of write p99 at the partial working point. F-11-14 then located the mechanism: a
+    /// merged landing installs at `applied`, which no concurrent reader's anchor has reached,
+    /// so the merged entry's certification interval sits where nobody is, while the pinned
+    /// arm's point interval catches roughly nineteen of twenty hot-key readers.
+    ///
+    /// So the author's answer to LC-38 is (a): off now, and C11-05(c)'s interval repair plus
+    /// C11-05(d)'s Host C measurement decide whether it comes back. This is a **policy**
+    /// change and not a mechanism change — the mechanism is unchanged and one environment
+    /// variable away — and it is on its own commit so it can be reviewed and reverted as one
+    /// decision.
+    ///
+    /// A default that ships a measured regression is a default nobody chose; a mechanism
+    /// deleted because its first measurement lost is a negative result published about the
+    /// weakest version of the idea. Off-by-default is neither.
+    fn default() -> MergeCaps {
+        MergeCaps::OFF
+    }
+}
+
+impl MergeCaps {
+    /// **The preregistered on-position**, which was the default until LC-38.
     ///
     /// The epoch cap comes from the cycle-10 baseline: the arrival gap on both hosts is
     /// 4.6–5.7 epochs with a maximum of 17 across 45,681 flights. 32 covers that
@@ -503,13 +528,24 @@ impl Default for MergeCaps {
     /// stream. 4,096 rows over at most 32 epochs is 128 rows per epoch, which is well above
     /// anything the mixed benchmark seals and well below the cost of the reconstruction the
     /// merge is trying to save.
-    fn default() -> MergeCaps {
-        MergeCaps {
-            max_epochs: 32,
-            max_rows: 4_096,
-        }
-    }
+    pub const ON: MergeCaps = MergeCaps {
+        max_epochs: 32,
+        max_rows: 4_096,
+    };
 }
+
+const _: () = {
+    // **The two facts a reader of an arm needs, pinned where they cannot drift from the doc
+    // above**: `OFF` is both caps at zero, and `ON` is the preregistered 32 / 4,096. Const
+    // assertions rather than tests, because a test can be filtered out of a run and these
+    // cannot: they are checked by the compiler on every build of this crate.
+    //
+    // `default() == OFF` is asserted in `tests/merge_default.rs` instead, because
+    // `Default::default` is not a `const fn` and cannot be evaluated here. That test is the
+    // arm selector's own contract: it names the decision (LC-38) and the commit that made it.
+    assert!(MergeCaps::OFF.max_epochs == 0 && MergeCaps::OFF.max_rows == 0);
+    assert!(MergeCaps::ON.max_epochs == 32 && MergeCaps::ON.max_rows == 4_096);
+};
 
 /// Why a late landing did not merge, when it did not.
 ///
@@ -2316,6 +2352,10 @@ mod tests {
             Policy::Lru,
         )
         .unwrap();
+        // **This test is about the merge, so it names the arm.** It used to inherit the
+        // policy default, which is `OFF` since C11-05(b): a test of a mechanism that reads
+        // its arm from a policy is a test that changes meaning when the policy does.
+        rt.set_merge_caps(MergeCaps::ON);
         rt.advance(&base, late);
         let v = rt.view_mut("balance").unwrap();
         assert_eq!(
@@ -4662,7 +4702,7 @@ mod deferred_merge_tests {
     /// **Clause 1.** The merged entry is the value at `e`, and the reader that follows hits.
     #[test]
     fn an_eligible_late_landing_merges_exactly_the_deltas_it_missed() {
-        let (base, mut rt, ticket, early) = late_landing(MergeCaps::default(), 3);
+        let (base, mut rt, ticket, early) = late_landing(MergeCaps::ON, 3);
         let late = base.frontier();
         let (value, rows) = base.reconstruct(&vec![0], early);
 
@@ -4707,7 +4747,7 @@ mod deferred_merge_tests {
     /// fold's own value — not the merged one, which is a different question.
     #[test]
     fn the_owner_is_answered_at_its_own_anchor_and_not_at_the_merged_one() {
-        let (base, mut rt, ticket, early) = late_landing(MergeCaps::default(), 3);
+        let (base, mut rt, ticket, early) = late_landing(MergeCaps::ON, 3);
         let (value, rows) = base.reconstruct(&vec![0], early);
         let (at_late, _) = base.reconstruct(&vec![0], base.frontier());
         assert_ne!(value, at_late, "the fixture must actually move the key");
@@ -4740,6 +4780,7 @@ mod deferred_merge_tests {
             Policy::Lru,
         )
         .unwrap();
+        rt.set_merge_caps(MergeCaps::ON);
         rt.advance(&base, early);
 
         let v = rt.view_mut("balance").expect("balance");
@@ -4881,6 +4922,7 @@ mod deferred_merge_tests {
             Policy::Lru,
         )
         .unwrap();
+        rt.set_merge_caps(MergeCaps::ON);
 
         let base = Compacted {
             inner,
@@ -4979,7 +5021,7 @@ mod deferred_merge_tests {
     /// own signature is this case, and it is the one every existing caller takes.
     #[test]
     fn a_landing_with_no_base_pins() {
-        let (base, mut rt, ticket, early) = late_landing(MergeCaps::default(), 3);
+        let (base, mut rt, ticket, early) = late_landing(MergeCaps::ON, 3);
         let (value, rows) = base.reconstruct(&vec![0], early);
         let v = rt.view_mut("balance").expect("balance");
         v.finish_fold(ticket, value, rows);
@@ -4992,7 +5034,7 @@ mod deferred_merge_tests {
     /// over an entry a newer flight installed.
     #[test]
     fn a_superseded_landing_merges_nothing_and_writes_nothing() {
-        let (base, mut rt, ticket, early) = late_landing(MergeCaps::default(), 3);
+        let (base, mut rt, ticket, early) = late_landing(MergeCaps::ON, 3);
         let late = base.frontier();
         let v = rt.view_mut("balance").expect("balance");
 

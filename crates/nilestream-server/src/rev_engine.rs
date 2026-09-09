@@ -2592,12 +2592,21 @@ mod merge_caps_env_tests {
         }
     }
 
-    /// The default is the preregistered pair, stated here so a change to it fails a test
-    /// rather than moving a number the report already quotes.
+    /// **The preregistered pair is `MergeCaps::ON`, and the default is `OFF`.**
+    ///
+    /// This asserted `default() == 32 / 4,096` until C11-05(b), when LC-38 moved the default
+    /// to `OFF`. Both halves are still pinned, and the assertion now reads against `ON`,
+    /// because the number the report quotes is the *preregistered* pair and not whatever the
+    /// policy default happens to be — those were the same thing and are not any more.
     #[test]
     fn the_preregistered_caps_are_the_ones_the_report_names() {
         assert_eq!(
             MergeCaps::default(),
+            MergeCaps::OFF,
+            "the default is off since LC-38; the preregistered pair is `MergeCaps::ON`"
+        );
+        assert_eq!(
+            MergeCaps::ON,
             MergeCaps {
                 max_epochs: 32,
                 max_rows: 4_096

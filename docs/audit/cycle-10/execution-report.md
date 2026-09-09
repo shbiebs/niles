@@ -1077,3 +1077,31 @@ and the container reproduced the original failure with the original message. Rec
 the shape is general and this cycle's edits are all of this form: **a multi-edit script must
 write each edit as it makes it, or verify afterwards that every edit is present.** Nothing in
 the working method currently requires either.
+
+**MF-13 — a refusal that did not stop the thing it refused, found by Host C at the cost of a
+40-minute run.** `c10-merge.sh`'s first real invocation met a leftover worktree from the
+earlier `--baseline-only` sweep, still at `e29a0256`. `build_arm` refused it and printed the
+exact command to remove it — and the script then ran every warm-up and all five measured
+replicates against the binary already sitting in that directory. `e29a0256` predates the merge
+by two commits, so the arm-label check refused all twenty replicates for reporting no merge
+counters. **Every one of those twenty messages named the wrong cause**, and the right one was
+two hundred lines above them.
+
+Two things are worth separating here.
+
+*The check added for T04.2 worked.* Nothing was scored, and nothing was scored *silently* — a
+harness without the arm-label refusal would have measured a two-commit-old binary in both arms
+and reported a clean null result with five replicates behind it. That is the failure the
+refusal exists to prevent and it prevented it.
+
+*The harness was still wrong.* `skip` records a section and returns, which is right when the
+missing section leaves the rest of the transcript meaningful — a checkpoint probe that could
+not run does not invalidate the replicates below it — and wrong for anything the measurement
+is made of. This is the paired adapter gate's shape a third time: **a refusal that does not
+stop the thing it refuses is a note, and notes do not gate.** `fatal` now stops, and the two
+are distinguished where they are defined.
+
+The guard is in two halves because either alone is weak: `fatal` really exits, and *no build
+failure anywhere in the script is still wired to `skip`* — a behavioural test alone would pass
+on the next `|| skip` somebody writes. Witnessed end to end in the container against a
+deliberately stale worktree: the run now stops at section 1 with one refusal and one cause.

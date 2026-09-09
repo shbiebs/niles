@@ -154,6 +154,43 @@ fn the_scorer_reproduces_the_six_t04_2_read_rows_to_the_integer() {
 }
 
 #[test]
+fn the_fixture_can_tell_the_rms_from_the_mean_and_says_on_how_many_rows() {
+    // **Why the wrong pooled MAD survived two reviews.** The RMS and the mean of two numbers
+    // agree exactly when the two are equal and diverge as they separate. On this fixture's
+    // `full 6r/3w` row the two arms' MADs are 1357.3 and 1264.3, so the mean is 1310.8 and the
+    // RMS 1311.6 — a difference of 0.8 in a number published as `1,311`. A reader checking
+    // that row could not have told which formula produced it, and neither could a test with a
+    // one-unit tolerance.
+    //
+    // So this asserts the discriminating power directly rather than assuming it: at least
+    // four of the six rows must separate the two formulae by more than the tolerance the
+    // table above allows. If a future fixture were to lose that, the guard on
+    // `pooled_mad` would be passing by luck and this test says so instead.
+    let (rows, _) = score::read_rows(&fixture());
+    let scored = score::score(&rows);
+    let mut discriminating = 0;
+    let mut report = Vec::new();
+    for (point, level, _, _, _, published, _, _) in T04_2_READS {
+        let r = row(&scored, point, level, "reads_per_second");
+        let mean = (r.mad_a + r.mad_b) / 2.0;
+        let rms = r.pooled_mad;
+        if (mean - published).abs() >= 1.0 {
+            discriminating += 1;
+        }
+        report.push(format!(
+            "{point} {level}: mads {:.1}/{:.1}, rms {rms:.1}, mean {mean:.1}, published {published}",
+            r.mad_a, r.mad_b
+        ));
+    }
+    assert!(
+        discriminating >= 4,
+        "only {discriminating} of 6 rows separate the RMS from the mean by more than this \
+         table's tolerance, so the pooled-MAD guard is largely passing by coincidence:\n  {}",
+        report.join("\n  ")
+    );
+}
+
+#[test]
 fn the_writer_rows_show_the_regression_is_at_the_partial_point_only() {
     let (rows, _) = score::read_rows(&fixture());
     let scored = score::score(&rows);

@@ -6,7 +6,7 @@
 | `conservation-suite` | Reference oracle and the conservation property tests | 23 |
 | `experiments` | The E-series measurement harness | 0 |
 | `niles-interp` | The imperative-subset interpreter `nilesc run` drives, and the ledger it posts to | 16 |
-| `niles-ir` | Typed IR: circuit types, verifier, reference interpreter, upquery paths | 58 |
+| `niles-ir` | Typed IR: circuit types, verifier, reference interpreter, upquery paths | 65 |
 | `niles-lang` | Stage-0 compiler: lexer, parser, type/effect checker, lowering; SQL surface | 134 |
 | `nilesc` | The compiler driver: `check`, `verify`, `run` | 0 |
 | `nilestream` | The engine binary: sweep and serve | 0 |

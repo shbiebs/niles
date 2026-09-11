@@ -511,7 +511,14 @@ pub trait Base {
     /// Required rather than defaulted: a default would be a plan nobody wrote down, and the
     /// check against it would pass for every base including the wrong one. An implementor
     /// that cannot state its plan cannot be checked, and this repair is the check.
-    fn answers(&self) -> BasePlan;
+    ///
+    /// **Borrowed, not owned, because `require_base` runs on every path that touches the
+    /// base.** Returning a `BasePlan` by value meant `relation.to_string()` and a `Vec` for
+    /// the group key on every miss, every `apply_epoch` and every `merge_suffix` — E18 put
+    /// that at +1 alloc/op on `ledger_seeded` and +2 on `append_in_memory` and
+    /// `rev_metadata_2x_budget`, over budget on all three. A base's plan is a property of the
+    /// base, not something recomputed per read, so it is stored once and lent out.
+    fn answers(&self) -> &BasePlan;
 
     /// The current visibility frontier.
     fn frontier(&self) -> Epoch;
@@ -1023,7 +1030,7 @@ impl Rev {
     fn require_base(&self, base: &dyn Base) {
         let theirs = base.answers();
         assert!(
-            theirs == self.plan,
+            *theirs == self.plan,
             "view `{}` was installed for {} and was handed a base that answers {}. The base \
              is a pre-aggregated oracle: it is given a key and an epoch and returns one \
              value, so a mismatch here is a well-formed wrong number and not a failure to \
@@ -2390,8 +2397,9 @@ mod tests {
         /// module installs (`postings`, key `[0]`, `sum(Column(1))`). Stated rather than
         /// defaulted, because a default would make `require_base` pass against every base
         /// including the wrong one — and the wrong one is the defect this cycle repaired.
-        fn answers(&self) -> BasePlan {
-            BasePlan::sum("postings", 1, vec![0])
+        fn answers(&self) -> &BasePlan {
+            static PLAN: std::sync::OnceLock<BasePlan> = std::sync::OnceLock::new();
+            PLAN.get_or_init(|| BasePlan::sum("postings", 1, vec![0]))
         }
 
         fn frontier(&self) -> Epoch {
@@ -3713,8 +3721,9 @@ mod two_phase {
         /// module installs (`postings`, key `[0]`, `sum(Column(1))`). Stated rather than
         /// defaulted, because a default would make `require_base` pass against every base
         /// including the wrong one — and the wrong one is the defect this cycle repaired.
-        fn answers(&self) -> BasePlan {
-            BasePlan::sum("postings", 1, vec![0])
+        fn answers(&self) -> &BasePlan {
+            static PLAN: std::sync::OnceLock<BasePlan> = std::sync::OnceLock::new();
+            PLAN.get_or_init(|| BasePlan::sum("postings", 1, vec![0]))
         }
 
         fn frontier(&self) -> Epoch {
@@ -4658,8 +4667,9 @@ mod concurrent_differential {
         /// module installs (`postings`, key `[0]`, `sum(Column(1))`). Stated rather than
         /// defaulted, because a default would make `require_base` pass against every base
         /// including the wrong one — and the wrong one is the defect this cycle repaired.
-        fn answers(&self) -> BasePlan {
-            BasePlan::sum("postings", 1, vec![0])
+        fn answers(&self) -> &BasePlan {
+            static PLAN: std::sync::OnceLock<BasePlan> = std::sync::OnceLock::new();
+            PLAN.get_or_init(|| BasePlan::sum("postings", 1, vec![0]))
         }
 
         fn frontier(&self) -> Epoch {
@@ -5260,8 +5270,9 @@ mod deferred_merge_tests {
             /// module installs (`postings`, key `[0]`, `sum(Column(1))`). Stated rather than
             /// defaulted, because a default would make `require_base` pass against every base
             /// including the wrong one — and the wrong one is the defect this cycle repaired.
-            fn answers(&self) -> BasePlan {
-                BasePlan::sum("postings", 1, vec![0])
+            fn answers(&self) -> &BasePlan {
+                static PLAN: std::sync::OnceLock<BasePlan> = std::sync::OnceLock::new();
+                PLAN.get_or_init(|| BasePlan::sum("postings", 1, vec![0]))
             }
 
             fn frontier(&self) -> Epoch {

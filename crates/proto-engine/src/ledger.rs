@@ -714,8 +714,10 @@ impl nilestream_core::rev::Base for Ledger {
     /// and `daemon::DEFAULT_SCHEMA` declare it. A circuit that numbers those columns
     /// differently denotes a different question over the same rows, and the mismatch is
     /// caught rather than served.
-    fn answers(&self) -> nilestream_core::rev::BasePlan {
-        nilestream_core::rev::BasePlan::sum("postings", 3, vec![1, 2])
+    fn answers(&self) -> &nilestream_core::rev::BasePlan {
+        static PLAN: std::sync::OnceLock<nilestream_core::rev::BasePlan> =
+            std::sync::OnceLock::new();
+        PLAN.get_or_init(|| nilestream_core::rev::BasePlan::sum("postings", 3, vec![1, 2]))
     }
 
     fn frontier(&self) -> Epoch {

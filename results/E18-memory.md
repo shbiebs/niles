@@ -12,7 +12,7 @@ The tool lives outside the workspace. `GlobalAlloc` cannot be implemented withou
 
 | Scenario | Unit | Ops | Allocations | per op | Bytes | per op | Live | Peak |
 |---|---|--:|--:|--:|--:|--:|--:|--:|
-| `ledger_seeded` | posting | 40000 | 150263 | 3.8 | 21579350 | 539 | 8872117 | 9856518 |
+| `ledger_seeded` | posting | 40000 | 150269 | 3.8 | 21579818 | 539 | 8872525 | 9856518 |
 | `zset_base_at` | row | 40000 | 46665 | 1.2 | 9583856 | 240 | 9583856 | 9583856 |
 | `served_group_by_cur` | query | 3 | 39 | 13.0 | 5454 | 1818 | 0 | 1664 |
 | `served_group_by_acct` | query | 3 | 37806 | 12602.0 | 11387166 | 3795722 | 0 | 2841312 |
@@ -25,7 +25,7 @@ The tool lives outside the workspace. `GlobalAlloc` cannot be implemented withou
 | `served_having_on_key` | query | 200 | 4200 | 21.0 | 635600 | 3178 | 0 | 1856 |
 | `rev_read_hit` | read | 1000 | 1000 | 1.0 | 16000 | 16 | 0 | 16 |
 | `append_in_memory` | transaction | 500 | 3500 | 7.0 | 266000 | 532 | 76000 | 76232 |
-| `rev_metadata_2x_budget` | key | 5000 | 34165 | 6.8 | 2015704 | 403 | 860344 | 860536 |
+| `rev_metadata_2x_budget` | key | 5000 | 34167 | 6.8 | 2015716 | 403 | 860356 | 860548 |
 | `rev_metadata_per_key` | resident key | 2500 | 5416 | 2.2 | 275360 | 110 | 235360 | 235376 |
 | `idem_admission_index` | identity | 100000 | 100016 | 1.0 | 10153756 | 102 | 6876816 | 6979652 |
 | `idem_window_sealer` | identity | 100000 | 116666 | 1.2 | 9961568 | 100 | 9961568 | 9961568 |

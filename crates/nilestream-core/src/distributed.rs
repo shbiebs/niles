@@ -315,8 +315,9 @@ mod tests {
         /// The keyed `sum` this module's circuits install. Stated rather than defaulted: a
         /// default would make the runtime's base check pass against every base including the
         /// wrong one, which is the defect the check exists for.
-        fn answers(&self) -> crate::rev::BasePlan {
-            crate::rev::BasePlan::sum("postings", 1, vec![0])
+        fn answers(&self) -> &crate::rev::BasePlan {
+            static PLAN: std::sync::OnceLock<crate::rev::BasePlan> = std::sync::OnceLock::new();
+            PLAN.get_or_init(|| crate::rev::BasePlan::sum("postings", 1, vec![0]))
         }
         fn frontier(&self) -> Epoch {
             self.head

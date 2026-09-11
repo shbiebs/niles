@@ -105,8 +105,10 @@ impl RawBase {
 }
 
 impl Base for RawBase {
-    fn answers(&self) -> BasePlan {
-        self.plan.clone()
+    fn answers(&self) -> &BasePlan {
+        // The case the borrow is really for: this base's plan is a *field*, varied per test
+        // case, so there is nothing static about it and nothing to clone either.
+        &self.plan
     }
     fn frontier(&self) -> Epoch {
         self.head

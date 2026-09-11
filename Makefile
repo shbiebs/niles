@@ -78,8 +78,9 @@ bootstrap:
 # committed CSV would fail on any machine but the one that produced it. `--render` re-derives
 # the table from the committed CSVs, which is the part that must not drift.
 #
-# `nilestream sweep` needs the release binary, so `make reproduce` after `cargo build
-# --release -p nilestream`; the E12 sweep is deterministic and its diff is meaningful.
+# `nilestream sweep` needs the release binary, and `reproduce` now builds it as its first
+# step rather than telling a reader to; the E12 sweep is deterministic and its diff is
+# meaningful.
 #
 # E21 (`--example wire_cost`) is excluded for the same reason: it is wall-clock, it times two
 # write paths against each other over a socket, and its ratios move a few percent between
@@ -135,6 +136,14 @@ checked-twice:
 	  grep -E "compile_cached|parse_program|lower_program|check_program|verify::verify" | head -6
 
 reproduce:
+# **The binary this target runs, built by this target.** Line 150 below invokes
+# `./target/release/nilestream`, and nothing here used to produce it: the prerequisite
+# lived in a comment, so `make reproduce` passed in any tree that happened to hold a
+# release build from earlier work and exited 127 in a fresh one. Host C's cycle-11 gate
+# is the witness — `/bin/sh: ./target/release/nilestream: No such file or directory`,
+# `make: *** [reproduce] Error 127` — after every prior container run had reported green.
+# A reproduction step that depends on what the last person left behind is not one.
+	cargo build --release --offline -p nilestream
 	python3 thesis/gen-appendix-d.py map > thesis/appendix-d-map.md
 	python3 thesis/gen-appendix-d.py api > thesis/appendix-d-api.md
 	cargo run -q -p niles-lang --bin gen-sql-surface

@@ -39,8 +39,10 @@ impl Base for Rows {
     /// `postings`, grouped by column 0. C11-01 requires the base to say what it
     /// answers so the view can refuse a base that answers a different question;
     /// stating it wrongly here would make `require_base` assert, which is the point.
-    fn answers(&self) -> nilestream_core::rev::BasePlan {
-        nilestream_core::rev::BasePlan::sum("postings", 1, vec![0])
+    fn answers(&self) -> &nilestream_core::rev::BasePlan {
+        static PLAN: std::sync::OnceLock<nilestream_core::rev::BasePlan> =
+            std::sync::OnceLock::new();
+        PLAN.get_or_init(|| nilestream_core::rev::BasePlan::sum("postings", 1, vec![0]))
     }
     fn frontier(&self) -> Epoch {
         1_000

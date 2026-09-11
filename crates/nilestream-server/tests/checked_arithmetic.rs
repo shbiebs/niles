@@ -68,7 +68,10 @@ fn ask(sql: &str) -> Reply {
     let mut rows = pg_wire::decoded_rows(&out);
     for m in &out {
         if let Backend::Rows(block) = m {
-            for (r, _w) in block.z.iter() {
+            // `keys()`, not `iter()` discarding the weight: the multiplicity is not part of
+            // what this file asserts — it counts *whether a row was answered at all* — and
+            // binding a value only to throw it away is what 1.97.1's `for_kv_map` names.
+            for r in block.z.keys() {
                 rows.push(r.iter().map(|v| Some(format!("{v:?}"))).collect());
             }
         }

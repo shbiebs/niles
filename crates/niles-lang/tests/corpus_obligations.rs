@@ -22,6 +22,34 @@ fn repo_root() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
+/// **The GBS corpus, and a refusal when it is not there.**
+///
+/// `../gbs/niles/gbs.niles` carries 11 of the corpus's 16 obligations — more than the rest of
+/// the repository put together. The directory walk below `continue`s past a root it cannot
+/// read, so in a checkout with no sibling GBS this test used to write a table of 5 and call
+/// it the measurement: `TOTAL,,16,0` became `TOTAL,,5,0`, `results/MANIFEST.csv` still
+/// classed the file `byte-deterministic`, and `make reproduce` failed on the diff with
+/// nothing saying why. A missing corpus that produces a *smaller* answer looks exactly like a
+/// correct one — the Appendix D failure mode, in a second place.
+///
+/// So the pair is required, with the same opt-out `downstream_adapter` uses: `NILES_NO_GBS`
+/// is for standalone development, and it suppresses the *write* rather than shrinking the
+/// number, because a fraction measured over part of the corpus is not this fraction.
+fn gbs_corpus() -> std::path::PathBuf {
+    let p = repo_root().join("../gbs/niles");
+    if !p.is_dir() && std::env::var("NILES_NO_GBS").is_err() {
+        panic!(
+            "the obligation corpus includes the GBS programs beside this checkout and \
+             {} is not a directory. Eleven of sixteen obligations live there, so counting \
+             without it would report a smaller fraction as though it were this one. Put a \
+             GBS checkout beside this repository, or set NILES_NO_GBS=1 to measure the \
+             partial corpus without publishing it.",
+            p.display()
+        );
+    }
+    p
+}
+
 /// Every `.niles` program in this repository and the GBS checkout beside it.
 ///
 /// The corpus is deliberately *all* of them and not a selection: choosing which programs to
@@ -31,7 +59,7 @@ fn corpus() -> Vec<std::path::PathBuf> {
     let roots = [
         repo_root().join("examples"),
         repo_root().join("niles"),
-        repo_root().join("../gbs/niles"),
+        gbs_corpus(),
     ];
     for r in roots {
         let Ok(entries) = std::fs::read_dir(&r) else {
@@ -105,6 +133,14 @@ fn the_corpus_reports_what_the_checker_discharges() {
          report; a fraction of zero obligations is not a measurement"
     );
 
+    if std::env::var("NILES_NO_GBS").is_ok() && !gbs_corpus().is_dir() {
+        println!(
+            "NILES_NO_GBS: the GBS half of the corpus is absent, so the count above is over \
+             a subset and results/obligations.csv is NOT written. The committed file stays \
+             the measurement it was."
+        );
+        return;
+    }
     let path = repo_root().join("results/obligations.csv");
     std::fs::create_dir_all(path.parent().expect("results/")).ok();
     std::fs::write(&path, &csv).expect("write results/obligations.csv");

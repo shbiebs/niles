@@ -136,14 +136,15 @@ checked-twice:
 	  grep -E "compile_cached|parse_program|lower_program|check_program|verify::verify" | head -6
 
 reproduce:
-# **The binary this target runs, built by this target.** Line 150 below invokes
-# `./target/release/nilestream`, and nothing here used to produce it: the prerequisite
-# lived in a comment, so `make reproduce` passed in any tree that happened to hold a
-# release build from earlier work and exited 127 in a fresh one. Host C's cycle-11 gate
-# is the witness — `/bin/sh: ./target/release/nilestream: No such file or directory`,
-# `make: *** [reproduce] Error 127` — after every prior container run had reported green.
-# A reproduction step that depends on what the last person left behind is not one.
-	cargo build --release --offline -p nilestream
+# **The sweep is run through cargo, like every other step here.** It used to invoke
+# `./target/release/nilestream` directly, which has two faults and had both: nothing in
+# this target built that binary, so `make reproduce` passed in any tree holding a release
+# build from earlier work and exited 127 in a fresh one (Host C's cycle-11 gate is the
+# witness: `Error 127`, after every prior container run reported green); and the path is
+# hardcoded, so it is wrong whenever `CARGO_TARGET_DIR` is set, which is how a fresh
+# worktree is built. `cargo run` fixes both: it builds what it runs and it knows where the
+# binary is. A reproduction step that depends on what the last person left behind, in a
+# directory they also chose, is not one.
 	python3 thesis/gen-appendix-d.py map > thesis/appendix-d-map.md
 	python3 thesis/gen-appendix-d.py api > thesis/appendix-d-api.md
 	cargo run -q -p niles-lang --bin gen-sql-surface
@@ -156,7 +157,7 @@ reproduce:
 	cargo run --release -p bank-bench --bin bench -- --render
 	cargo run --release -p experiments -- e1 e4 e8 e26
 	cargo run -q --release --manifest-path tools/memprobe/Cargo.toml
-	./target/release/nilestream sweep examples/demo_bank.niles ledger_balance > results/e12_phase_compiled.csv
+	cargo run -q --release --offline -p nilestream -- sweep examples/demo_bank.niles ledger_balance > results/e12_phase_compiled.csv
 	python3 thesis/include-results.py
 	git diff --exit-code -- results/ thesis/ docs/SPEC-LANGUAGE.md docs/keywords.md $(INCOMPARABLE_RESULTS)
 	@echo "  (Excluded from the diff above, read out of results/MANIFEST.csv and not listed here:"

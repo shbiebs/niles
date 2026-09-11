@@ -5,14 +5,15 @@ served_group_by_cur,query,3,39,5454,0,1664,13.0,1818.0
 served_group_by_acct,query,3,37806,11387166,0,2841312,12602.0,3795722.0
 served_top_ten,query,3,37884,14536794,0,2841312,12628.0,4845598.0
 served_sum_negative,query,3,36,5568,0,1728,12.0,1856.0
-served_point,query,200,2200,187600,0,842,11.0,938.0
+served_point,query,200,2000,184400,0,842,10.0,922.0
 wire_reply_10k,reply,5,5,348160,0,69632,1.0,69632.0
 wire_reply_100k,reply,5,5,348160,0,69632,1.0,69632.0
 served_point_conjunct,query,200,3000,427600,0,1792,15.0,2138.0
 served_having_on_key,query,200,4200,635600,0,1856,21.0,3178.0
-rev_read_hit,read,1000,1000,16000,0,16,1.0,16.0
+rev_read_hit,read,1000,0,0,0,0,0.0,0.0
 append_in_memory,transaction,500,3500,266000,76000,76232,7.0,532.0
-rev_metadata_2x_budget,key,5000,34167,2015716,860356,860548,6.8,403.1
-rev_metadata_per_key,resident key,2500,5416,275360,235360,235376,2.2,110.1
+rev_metadata_2x_budget,key,5000,34167,2015716,860356,860532,6.8,403.1
+rev_metadata_per_key,resident key,2500,2500,40000,0,16,1.0,16.0
+rev_metadata_churn,abandoned read,100000,735093,54158368,12544928,12564896,7.4,541.6
 idem_admission_index,identity,100000,100016,10153756,6876816,6979652,1.0,101.5
 idem_window_sealer,identity,100000,116666,9961568,9961568,9961568,1.2,99.6

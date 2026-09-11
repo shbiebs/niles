@@ -776,6 +776,68 @@ pub fn rev_metadata_per_key() -> Row {
     }
 }
 
+/// **Churn: distinct keys read once each, never installed, with a budget far below them.**
+///
+/// The per-key eviction metadata used to be created by `begin_read_with` and removed only by
+/// eviction of a *resident* victim, so it grew with the number of distinct keys the view had
+/// ever been asked about and was bounded by nothing. Ten thousand keys read once each with a
+/// budget of a hundred left ten thousand entries and zero residents.
+///
+/// This is the row that makes the bound a number rather than an assertion. Every read here
+/// takes the flight and abandons it — the shape of a refused admission, a competing flight
+/// and an abandoned ticket alike — so nothing installs and nothing is evicted.
+///
+/// **`live` is the column to read, and it is not flat yet.** The policy metadata is bounded
+/// by the budget as of this row's own assertion below. The `Slot::Pending` each abandoned
+/// read leaves is not: nothing removes a marker whose flight is gone, because eviction only
+/// selects resident entries. So `live` is still linear in `KEYS` — about 125 bytes a key —
+/// and this row is the **before-value** for the card that repairs it, not a demonstration
+/// that it is repaired.
+pub fn rev_metadata_churn() -> Row {
+    use nilestream_core::rev::{Key, Policy, ReadMode, ReadOutcome, Runtime};
+
+    const KEYS: u64 = 100_000;
+    const BUDGET_HERE: u64 = 100;
+
+    let c = circuit("select acct, cur, sum(amt) from postings group by acct, cur");
+    let mut rt = Runtime::install(c, Some(BUDGET_HERE), Policy::Lru)
+        .unwrap_or_else(|u| panic!("the keyed fragment must install: {}", u.explain()));
+    let view = rt.view_mut("__wire_result").expect("the installed view");
+
+    let (_, counted) = count(|| {
+        for a in 0..KEYS {
+            let k: Key = vec![a as i64, 0];
+            if let ReadOutcome::Fold(t) = view.begin_read_with(&k, 1, ReadMode::Alone) {
+                drop(t);
+            }
+        }
+    });
+    assert_eq!(
+        view.resident_count(),
+        0,
+        "this row measures what a read that never installs leaves behind; an install here \
+         would make it measure a slot instead"
+    );
+    assert_eq!(
+        view.slots_len() as u64,
+        KEYS,
+        "the marker leak this row measures has changed size; `live` below is its bytes and \
+         the comparison a later card makes depends on knowing which number moved"
+    );
+    assert!(
+        view.metadata_len() as u64 <= BUDGET_HERE,
+        "{KEYS} abandoned reads left {} metadata entries against a budget of {BUDGET_HERE}. \
+         That is the growth this row exists to hold at zero, and `live` below is its bytes.",
+        view.metadata_len()
+    );
+    Row {
+        scenario: "rev_metadata_churn",
+        unit: "abandoned read",
+        operations: KEYS,
+        counted,
+    }
+}
+
 pub fn all() -> Vec<Row> {
     vec![
         ledger_seeded(),
@@ -793,6 +855,7 @@ pub fn all() -> Vec<Row> {
         append_in_memory(),
         rev_metadata_2x_budget(),
         rev_metadata_per_key(),
+        rev_metadata_churn(),
         idem_admission_index(),
         idem_window_sealer(),
     ]

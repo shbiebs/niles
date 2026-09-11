@@ -964,6 +964,30 @@ impl Rev {
     /// test can assert it rather than infer it from a memory figure, and reported over the
     /// wire as `view_metadata_keys`: a view whose metadata is linear in history rather than
     /// in its budget is a view that does not fit, and nothing said so before.
+    /// **Every slot this view holds, resident or not — and it is not bounded by the budget.**
+    ///
+    /// `resident_count` counts the entries that hold a value. This counts those *plus* the
+    /// markers: `Pending` while a flight is in the air, and `Bottom`/`Hole` where absence is
+    /// recorded. The residency budget bounds the first number and not this one, deliberately
+    /// — `Slot::is_resident` is false for a marker, so eviction never selects one.
+    ///
+    /// That is sound for a marker whose flight is live and **unbounded for one whose flight
+    /// is not**. A read of a cold key that abandons its ticket leaves `Pending`, and nothing
+    /// removes it: `reap_cancelled` runs only when that key is read again, and for a cold key
+    /// it has no `prior` to restore anyway. Ten thousand distinct keys read once each and
+    /// abandoned leave ten thousand slots with zero residents — about 125 bytes a key,
+    /// growing with the number of keys the view has ever been asked about.
+    ///
+    /// Exposed so the next card can measure it rather than infer it, and so
+    /// `metadata_bounded.rs` can assert the defect's present size rather than let it move
+    /// unnoticed. It is a *larger* leak than the policy-metadata one this method arrived
+    /// with, and it is not repaired here: the fix is eviction seeing markers whose flight is
+    /// gone, which changes the two-phase read's state machine and belongs in a card with its
+    /// own guard.
+    pub fn slots_len(&self) -> usize {
+        self.slots.len()
+    }
+
     pub fn metadata_len(&self) -> usize {
         self.meta.len()
     }
@@ -1087,9 +1111,23 @@ impl Rev {
         self.stats.reads += 1;
         self.clock += 1;
         let now = self.clock;
-        let m = self.meta.entry(key.clone()).or_default();
-        m.reads += 1;
-        m.last_read = now;
+        // **A read bumps this key's policy metadata; it does not create it.**
+        //
+        // `entry(key.clone()).or_default()` created one per *distinct key ever read*, and
+        // only eviction of a resident victim removes one — so the map grew with the number
+        // of keys the view had ever been asked about and was bounded by nothing. A read that
+        // never installs leaves an entry behind for ever: a refused admission, a competing
+        // flight, an abandoned ticket, an uninstalled fold. Ten thousand distinct keys read
+        // once each with a residency budget of a hundred left ten thousand entries and zero
+        // residents.
+        //
+        // Both policies rank `resident()` first and only then consult `meta`, so an entry for
+        // a non-resident key can never be read — it was pure growth. The entry is created in
+        // `install_at`, where residency begins, and removed with the slot.
+        if let Some(m) = self.meta.get_mut(key) {
+            m.reads += 1;
+            m.last_read = now;
+        }
 
         if let Some(a) = self.hit(key, anchor) {
             self.stats.hits += 1;
@@ -1725,6 +1763,14 @@ impl Rev {
     /// rather than letting it be re-derived from the stamp twice.
     fn install_at(&mut self, key: Key, value: Value, stamp: Epoch, pin: bool) {
         let was_resident = self.slots.get(&key).is_some_and(|s| s.is_resident());
+        // **Residency is where policy metadata begins.** Created here rather than at the read
+        // so the map is bounded by the budget and not by history; and created *before*
+        // `enforce_budget` below, because the entry that has just arrived is one of the
+        // candidates that eviction ranks.
+        let now = self.clock;
+        let m = self.meta.entry(key.clone()).or_default();
+        m.reads += 1;
+        m.last_read = now;
         if pin {
             self.pinned.insert(key.clone());
         } else {

@@ -197,6 +197,13 @@ pub fn budget(scenario: &str) -> Option<f64> {
         // Metadata per resident key, isolated: every read in the measured region hits, so
         // the only allocations are the policy maps' own. One entry per map, per key.
         "rev_metadata_per_key" => 2.4,
+        // **An initial measurement, not a target.** One ticket per abandoned read, plus the
+        // `Pending` marker the read leaves in the slot map. 7.4 is what it costs today and
+        // 7.5 is the budget; neither is a figure anyone chose, and the row exists to be
+        // reduced. What it is really for is the `live` column: the policy metadata is bounded
+        // now, and `live` is still linear in the key count because the *markers* are not
+        // (`Rev::slots_len`). This row is the before-value for that repair.
+        "rev_metadata_churn" => 7.5,
         // The two idempotency windows, by the structure each is. Held per identity, forever,
         // by both: a `HashSet<String>` for admission and a `BTreeMap<String, u64>` for the
         // epoch a duplicate is told it committed at. One string clone and one node each.
@@ -306,6 +313,7 @@ pub const SCENARIOS: &[&str] = &[
     "append_in_memory",
     "rev_metadata_2x_budget",
     "rev_metadata_per_key",
+    "rev_metadata_churn",
     "idem_admission_index",
     "idem_window_sealer",
 ];

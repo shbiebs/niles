@@ -18,7 +18,7 @@
 //! append's apply, and a shared hold across a keyed read.
 //!
 //! What is **not** instrumented, and is the open question the audit leaves: the view mutex
-//! (`V` in the lock order `O < B < P < V < C`). A mixed workload's read *maximum* is 12–13
+//! (`V` in the lock order `O < B < V < C`). A mixed workload's read *maximum* is 12–13
 //! ms on the reference host while the base guard's longest wait is 1.7 ms, so the tail is
 //! somewhere this file cannot see.
 //!
@@ -266,7 +266,7 @@ pub static ENGINE_LOCK: LockStats = LockStats::with_modes(&BASE_READ, &BASE_WRIT
 pub static BASE_READ: LockStats = LockStats::new();
 pub static BASE_WRITE: LockStats = LockStats::new();
 
-/// **The view mutex — `V` in the lock order `O < B < P < V < C`.**
+/// **The view mutex — `V` in the lock order `O < B < V < C`.**
 ///
 /// The one lock in this engine that nothing measured. `ENGINE_LOCK` covers the base; the
 /// view is taken inside it by an append (to `advance` the maintained state) and taken

@@ -4032,12 +4032,11 @@ mod sealer_stats_tests {
 mod lock_order_tests {
     //! **One order for the two locks, and a test that hangs if it is two.**
     //!
-    //! `RevEngine` holds four things behind locks. In the order a thread may acquire them:
+    //! `RevEngine` holds three things behind locks. In the order a thread may acquire them:
     //!
     //! | | what | taken by |
     //! |---|---|---|
     //! | **B** | the base, `RwLock<Ledger>` | shared by every read, exclusively by `append` |
-    //! | **P** | the pending barriers, `Mutex<Vec<Pending>>` | `append`, `take_pending` |
     //! | **V** | the read model, `Mutex<Runtime>` | `append`, and every read of the view |
     //! | **C** | the currency set, `RwLock<BTreeSet<u32>>` | `append`; read paths take and release it before V |
     //! | **F** | one flight's completion, a condvar inside the view | `finish_fold` to publish; a joined reader to receive |
@@ -4584,6 +4583,84 @@ mod lock_order_tests {
         for (i, t) in threads.into_iter().enumerate() {
             t.join()
                 .unwrap_or_else(|_| panic!("thread {i} panicked during the deadlock probe"));
+        }
+    }
+
+    /// **Every letter in the documented order names a lock that exists, and every lock has a
+    /// letter.**
+    ///
+    /// The documented order carried a `P` between B and V — in `rev.rs`, `lockstats.rs`
+    /// twice, this module's own table and `SPEC-ENGINE.md` — and **P did not exist**.
+    /// (Written that way rather than quoted: the scan below reads any line stating an order,
+    /// and it cannot tell a claim from a history if they are spelled the same. That is the
+    /// test being blunt, and the blunt version is the one that catches a real one.) The pending-barrier
+    /// `Mutex<Vec<Pending>>` it named was removed, and `daemon.rs` *asserts* the removal
+    /// (`!body.contains("take_pending")`): the lock's absence was guarded and the sentence
+    /// describing it was not. Twenty-odd audit documents copied the string forward, and the
+    /// cycle-11 foundations audit found it by counting fields.
+    ///
+    /// A documented lock order is a claim about code. This makes it one that fails.
+    ///
+    /// `O` and `S` are deliberately outside the scan: `O` is `bank-bench`'s outer
+    /// `RwLock<RevEngine>`, which lives in a different crate and is the *caller's* rung, and
+    /// `S` is `SlowReads::samples` in `lockstats.rs`, a leaf that no path holds across
+    /// another acquisition. Both are named in the prose and neither is a field of the engine,
+    /// so the scan below is over the engine's own three plus the flight condvar.
+    #[test]
+    fn the_documented_lock_order_names_the_locks_that_exist() {
+        let engine = include_str!("rev_engine.rs");
+        // The engine's own lock-bearing fields, as declared.
+        let fields: Vec<&str> = engine
+            .lines()
+            .filter_map(|l| {
+                let t = l.trim();
+                let (name, ty) = t.split_once(':')?;
+                let name = name.trim_start_matches("pub ").trim();
+                if name.contains(' ') || name.is_empty() {
+                    return None;
+                }
+                (ty.contains("RwLock<") || ty.contains("Mutex<")).then_some(name)
+            })
+            .collect();
+        assert_eq!(
+            fields,
+            vec!["ledger", "runtime", "currencies"],
+            "the engine's lock-bearing fields changed. The order documented in this module,              in `rev.rs` and in SPEC-ENGINE.md is a claim about exactly these; add or remove              a letter in all four places, or this list is wrong."
+        );
+
+        // The letters the module's own table assigns, in the order it lists them.
+        let table: Vec<&str> = engine
+            .lines()
+            .skip_while(|l| !l.contains("| | what | taken by |"))
+            .take_while(|l| l.trim_start().starts_with("//!"))
+            .filter_map(|l| l.split("| **").nth(1)?.split("**").next())
+            .collect();
+        assert_eq!(
+            table,
+            vec!["B", "V", "C", "F"],
+            "the table above assigns these letters; `P` named a `Mutex<Vec<Pending>>` that              was removed and stayed in the order for three cycles"
+        );
+
+        // And the one-line order strings agree with the table, wherever they appear.
+        //
+        // **Split so this scan does not read itself.** A line searching for the order
+        // contains the order, and the first version of this test failed on its own filter —
+        // the same self-match `thesis_drift` already solves with `concat!("#[", "test]")`.
+        // A source guard satisfied by the guard's own text is the defect class, not the fix.
+        let needle = concat!(" < ", "B", " < ");
+        let order = concat!("O < ", "B", " < V < C");
+        for (what, src) in [
+            ("this module", engine),
+            ("rev.rs", include_str!("../../nilestream-core/src/rev.rs")),
+            ("lockstats.rs", include_str!("lockstats.rs")),
+        ] {
+            for line in src.lines().filter(|l| l.contains(needle)) {
+                assert!(
+                    line.contains(order),
+                    "{what} states a lock order this test does not recognise: `{}`. The                      order is `{order}`, S a leaf, F a leaf below V.",
+                    line.trim()
+                );
+            }
         }
     }
 }

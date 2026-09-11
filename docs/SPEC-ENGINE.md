@@ -816,7 +816,7 @@ rests on it**.
    folds alone, exactly, and `flights_refused` is incremented. There is no silent fold under
    the lock and no second path with different rules.
 
-*The lock order gains one rung.* **O < B < P < V < C**, with a flight's completion condvar
+*The lock order gains one rung.* **O < B < V < C**, with a flight's completion condvar
 **F strictly below all of them**, never held while anything is acquired. A joined reader
 waits in the *caller*, holding nothing: `answer_from_view` returns the ticket rather than
 resolving it, because waiting inside the read would park a thread under the base guard and

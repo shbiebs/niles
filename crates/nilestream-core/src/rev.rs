@@ -114,7 +114,7 @@ struct CompletionState {
 ///
 /// A waiter parked here holds no engine lock at all: `begin_read` returns *after* the view
 /// guard is dropped, and the wait re-acquires nothing. That is what makes this lock a leaf.
-/// The engine's documented order — O < B < P < V < C, S a leaf — gains one rung strictly
+/// The engine's documented order — O < B < V < C, S a leaf — gains one rung strictly
 /// below the view: **V < F**, taken by `finish_fold` to publish and by a waiter to receive,
 /// and never held while anything else is acquired.
 ///

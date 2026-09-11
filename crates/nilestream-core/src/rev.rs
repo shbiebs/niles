@@ -5356,17 +5356,31 @@ mod deferred_merge_tests {
 
     /// **Does the merge help or hurt a reader that arrives behind the frontier?**
     ///
-    /// Printed rather than asserted: this is the mechanism behind T04.2's measured
-    /// regression, and it is a *shape*, not a threshold. Run with
+    /// The shape is printed and **one thing about it is asserted**: at any gap at all, the
+    /// merge arm serves a reader the pinned arm cannot. That is the whole claim the probe
+    /// exists to make, and without it the probe was able to stop making it silently.
+    ///
+    /// It did. C11-05(b) set `MergeCaps::default()` to `OFF`, and this loop armed
+    /// `default()` — so from that commit both arms were the pinned arm, the second one was
+    /// labelled "merge", and five lines of identical numbers printed with no indication that
+    /// the comparison had stopped existing. An instrument that reads zero because it is dead
+    /// reads exactly like one reading zero because the event does not occur; the repair for
+    /// that is the same here as it was for `flights_that_fell_behind` — assert the thing.
+    ///
+    /// `MergeCaps::ON` is named explicitly for the same reason: an arm inherited from a
+    /// default is an arm that changes when the default does.
+    ///
+    /// Run with
     /// `cargo test -p nilestream-core --lib the_merge_against_the_arrival_gap -- --ignored --nocapture`.
     #[test]
-    #[ignore = "a measurement, not a gate"]
+    #[ignore = "a measurement, and one assertion that keeps it one"]
     fn the_merge_against_the_arrival_gap() {
         const KEYS: i64 = 200;
         const ROUNDS: i128 = 60;
         for gap in [0u64, 1, 3, 5, 8] {
             let mut line = format!("gap {gap}: ");
-            for caps in [MergeCaps::OFF, MergeCaps::default()] {
+            let mut hit_rate = [0.0f64; 2];
+            for (arm, caps) in [MergeCaps::OFF, MergeCaps::ON].into_iter().enumerate() {
                 let mut base = FoldBase::new(0);
                 for k in 0..KEYS {
                     base.seal(vec![k], 100);
@@ -5397,13 +5411,33 @@ mod deferred_merge_tests {
                 } else {
                     "merge"
                 };
+                hit_rate[arm] = 100.0 * v.stats.hits as f64 / v.stats.reads as f64;
                 line.push_str(&format!(
                     "{name} hit {:.1}% rows {}   ",
-                    100.0 * v.stats.hits as f64 / v.stats.reads as f64,
-                    v.stats.base_rows_read
+                    hit_rate[arm], v.stats.base_rows_read
                 ));
             }
             println!("{line}");
+            let (pinned, merged) = (hit_rate[0], hit_rate[1]);
+            if gap == 0 {
+                // A reader at the frontier is served by either arm; there is nothing to
+                // separate, and asserting a difference here would assert the wrong thing.
+                assert!(
+                    pinned > 90.0 && merged > 90.0,
+                    "at gap 0 both arms should serve almost every read; got pinned \
+                     {pinned:.1}%, merge {merged:.1}%"
+                );
+            } else {
+                assert!(
+                    merged - pinned > 50.0,
+                    "at gap {gap} the merge arm served {merged:.1}% and the pinned arm \
+                     {pinned:.1}% — a separation of {:.1} points. This probe compares two \
+                     arms and the separation is what it reports; below 50 points the two \
+                     arms are not being armed differently, which is what happened when \
+                     `MergeCaps::default()` became OFF and both arms became the pinned one.",
+                    merged - pinned
+                );
+            }
         }
     }
 

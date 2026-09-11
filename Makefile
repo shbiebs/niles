@@ -47,7 +47,15 @@ lint:
 	cargo clippy --manifest-path tools/memprobe/Cargo.toml --all-targets -- -D warnings
 
 # The gate every task must pass before it is done.
-gate: fmt lint generated test memory
+gate: fmt lint generated test measurements memory
+
+# **The measurements that are also assertions.** `#[ignore]`d because they are shapes rather
+# than thresholds and because they cost seconds, not because they are optional: each one
+# carries a claim that fails if the thing it compares stops being compared. The arrival-gap
+# probe spent a whole commit measuring the pinned arm against itself because nothing here
+# ran it and nothing in it asserted.
+measurements:
+	cargo test --offline -p nilestream-core --lib the_merge_against_the_arrival_gap -- --ignored --nocapture
 
 # Every table, status line and results file that is derived from code. Each target
 # regenerates from the single source and fails if the committed copy differs, so a

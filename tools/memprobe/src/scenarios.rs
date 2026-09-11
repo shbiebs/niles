@@ -313,6 +313,12 @@ pub fn rev_read_hit() -> Row {
         ledger: Ledger,
     }
     impl Base for LedgerBase {
+        /// The plan the circuit below installs, stated so C11-01's `require_base` can check
+        /// it: `sum(amt)` over `postings` grouped by `(acct, cur)`, which is columns 3 and
+        /// (1, 2) of the postings schema — the same plan `proto-engine`'s ledger answers.
+        fn answers(&self) -> nilestream_core::rev::BasePlan {
+            nilestream_core::rev::BasePlan::sum("postings", 3, vec![1, 2])
+        }
         fn frontier(&self) -> u64 {
             self.ledger.head()
         }
@@ -478,6 +484,12 @@ pub fn rev_metadata_2x_budget() -> Row {
         ledger: Ledger,
     }
     impl Base for LedgerBase {
+        /// The plan the circuit below installs, stated so C11-01's `require_base` can check
+        /// it: `sum(amt)` over `postings` grouped by `(acct, cur)`, which is columns 3 and
+        /// (1, 2) of the postings schema — the same plan `proto-engine`'s ledger answers.
+        fn answers(&self) -> nilestream_core::rev::BasePlan {
+            nilestream_core::rev::BasePlan::sum("postings", 3, vec![1, 2])
+        }
         fn frontier(&self) -> u64 {
             self.ledger.head()
         }
@@ -662,6 +674,12 @@ pub fn rev_metadata_per_key() -> Row {
         ledger: Ledger,
     }
     impl Base for LedgerBase {
+        /// The plan the circuit below installs, stated so C11-01's `require_base` can check
+        /// it: `sum(amt)` over `postings` grouped by `(acct, cur)`, which is columns 3 and
+        /// (1, 2) of the postings schema — the same plan `proto-engine`'s ledger answers.
+        fn answers(&self) -> nilestream_core::rev::BasePlan {
+            nilestream_core::rev::BasePlan::sum("postings", 3, vec![1, 2])
+        }
         fn frontier(&self) -> u64 {
             self.ledger.head()
         }

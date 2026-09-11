@@ -41,6 +41,11 @@ impl History {
 }
 
 impl Base for History {
+    /// The keyed `sum` this test's circuit installs: `postings`, key `[0]`, `sum(Column(1))`.
+    fn answers(&self) -> nilestream_core::rev::BasePlan {
+        nilestream_core::rev::BasePlan::sum("postings", 1, vec![0])
+    }
+
     fn frontier(&self) -> Epoch {
         self.head
     }

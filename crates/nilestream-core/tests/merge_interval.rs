@@ -54,6 +54,13 @@ impl Stops {
 }
 
 impl Base for Stops {
+    /// The plan this fixture's runtime installs: a keyed `sum` of column 1 of
+    /// `postings`, grouped by column 0. C11-01 requires the base to say what it
+    /// answers so the view can refuse a base that answers a different question;
+    /// stating it wrongly here would make `require_base` assert, which is the point.
+    fn answers(&self) -> nilestream_core::rev::BasePlan {
+        nilestream_core::rev::BasePlan::sum("postings", 1, vec![0])
+    }
     fn frontier(&self) -> Epoch {
         self.head
     }

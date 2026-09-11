@@ -59,6 +59,7 @@ pub struct Completion
 pub struct FoldTicket
 pub struct WaitTicket
 pub enum ReadMode
+pub struct BasePlan
 pub trait Base
 pub struct MergeCaps
 pub enum MergeRefusal

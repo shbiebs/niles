@@ -312,6 +312,12 @@ mod tests {
     }
 
     impl Base for VecBase {
+        /// The keyed `sum` this module's circuits install. Stated rather than defaulted: a
+        /// default would make the runtime's base check pass against every base including the
+        /// wrong one, which is the defect the check exists for.
+        fn answers(&self) -> crate::rev::BasePlan {
+            crate::rev::BasePlan::sum("postings", 1, vec![0])
+        }
         fn frontier(&self) -> Epoch {
             self.head
         }

@@ -96,6 +96,33 @@ pub enum Verdict {
     Refused(String),
 }
 
+/// **The exit code a scoring run reports, decided in the library that owns the arithmetic.**
+///
+/// `0` every row scored, `3` at least one could not be. The bin used to compute this inline
+/// and always returned `0`: a run in which half the metrics were refused — an arm excluded
+/// for a stale header, a metric `n/a` in a replicate, fewer than `MIN_REPLICATES` surviving —
+/// printed its refusals in the count line and then told its caller it had succeeded. The
+/// harness reads the exit code, so it read "scored".
+///
+/// Here rather than in the bin so a test can assert the interface rather than the prose.
+/// `NoiseLimited` is emphatically **not** a refusal: it is a scored row whose separation did
+/// not clear the gate, which is the result the gate exists to produce.
+pub fn exit_code(scored: &[Scored]) -> i32 {
+    if scored
+        .iter()
+        .any(|s| matches!(s.verdict, Verdict::Refused(_)))
+    {
+        EXIT_REFUSED
+    } else {
+        EXIT_SCORED
+    }
+}
+
+/// Every row scored; the table is a result.
+pub const EXIT_SCORED: i32 = 0;
+/// At least one row could not be scored; the run is a refusal and not a table.
+pub const EXIT_REFUSED: i32 = 3;
+
 impl Verdict {
     pub fn word(&self) -> &'static str {
         match self {

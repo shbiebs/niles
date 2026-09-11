@@ -72,6 +72,7 @@ struct Args {
     /// reading the transcript. Two auditors doing it by hand from the same cycle-10 logs
     /// produced two different sets of pooled MADs, and the wrong ones were published.
     score: Option<String>,
+    check_manifest: Option<String>,
     out: String,
     pg_host: String,
     pg_port: u16,
@@ -182,6 +183,7 @@ impl Args {
             run: false,
             render: false,
             score: None,
+            check_manifest: None,
             out: "results/E16-wallclock".into(),
             pg_host: "127.0.0.1".into(),
             pg_port: 5433,
@@ -224,6 +226,10 @@ impl Args {
                 "--render" => a.render = true,
                 "--score" => {
                     a.score = Some(argv[i + 1].clone());
+                    i += 1;
+                }
+                "--check-manifest" => {
+                    a.check_manifest = Some(argv[i + 1].clone());
                     i += 1;
                 }
                 "--out" => {
@@ -361,6 +367,9 @@ impl Args {
 
 fn main() {
     let args = Args::parse();
+    if let Some(dir) = args.check_manifest.clone() {
+        std::process::exit(check_manifest(&dir));
+    }
     if let Some(dir) = args.score.clone() {
         std::process::exit(score_only(&dir));
     }
@@ -386,6 +395,52 @@ fn main() {
 /// does no arithmetic; a non-zero exit is a refusal it must propagate rather than a table it
 /// may print anyway. `1` is reserved for a panic, which is a bug in this function and not a
 /// verdict about the data.
+/// **Read a finished run's manifest against the schema `bank-bench` owns.**
+///
+/// The harness writes the file — it must, because the first stages it records are the builds
+/// and a manifest written by this binary could not record that this binary failed to build.
+/// What this checks is that what was written is what a reader can read: the header this build
+/// expects, three fields a row, and an outcome word from a closed set. A malformed manifest is
+/// exit 3, the same refusal the scorer uses, because an unreadable record of a run is not a
+/// run anyone can cite.
+fn check_manifest(dir: &str) -> i32 {
+    use bank_bench::manifest;
+    let path = std::path::Path::new(dir).join("manifest.csv");
+    println!("== bench --check-manifest {}", path.display());
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        println!(
+            "REFUSED: no manifest at {}. It is written before anything is built, so its \
+             absence means the run did not start, not that it had no stages.",
+            path.display()
+        );
+        return 3;
+    };
+    match manifest::parse(&text) {
+        Err(p) => {
+            println!("REFUSED: {p}");
+            3
+        }
+        Ok(rows) => {
+            println!(
+                "   {} stage row(s), header and outcomes as this build writes them",
+                rows.len()
+            );
+            let bad = manifest::not_ok(&rows);
+            if bad.is_empty() {
+                println!("   every stage reports `ok`");
+            } else {
+                // Not a refusal: a `not run` score stage is normal on a host with no scorer.
+                // Reported, so the reader does not have to open the file to learn it.
+                println!("   {} stage(s) did not report `ok`:", bad.len());
+                for r in bad {
+                    println!("     {:<24} {:<8} {}", r.stage, r.outcome.word(), r.detail);
+                }
+            }
+            0
+        }
+    }
+}
+
 fn score_only(dir: &str) -> i32 {
     use bank_bench::score::{self, Verdict};
     let root = std::path::Path::new(dir);
@@ -570,7 +625,27 @@ fn score_only(dir: &str) -> i32 {
              report; it is not an invitation to lower the gate."
         );
     }
-    0
+    // **A refused row makes the run a refusal, and the exit code is the interface.**
+    //
+    // The count line above has always said how many rows were refused; the exit code did not,
+    // so a scoring run in which half the metrics could not be scored — an arm excluded for a
+    // stale header, a metric `n/a` in one replicate, fewer than five replicates surviving —
+    // exited 0 and the harness read that as "scored". The audit's injection is the case: one
+    // renamed column in one replicate, the arm correctly excluded, eighteen of thirty-six
+    // rows refused for want of a fifth replicate, and exit 0.
+    //
+    // "Noise-limited" is not a refusal: it is a scored row whose separation did not clear the
+    // gate, which is the result the gate exists to produce. Only a row this scorer could not
+    // score at all counts here.
+    if refused > 0 {
+        println!(
+            "\nREFUSED: {refused} of {} row(s) could not be scored, so this run is a refusal \
+             and not a table. Each refusal names its reason above; none of them is a verdict \
+             about the arms.",
+            scored.len()
+        );
+    }
+    score::exit_code(&scored)
 }
 
 fn connect_pg(args: &Args) -> Option<PgTarget> {

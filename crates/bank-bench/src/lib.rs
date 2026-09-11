@@ -21,6 +21,7 @@
 pub mod analysis;
 pub mod fit;
 pub mod generator;
+pub mod manifest;
 pub mod publish;
 pub mod render;
 pub mod scenarios;

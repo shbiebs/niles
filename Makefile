@@ -143,7 +143,6 @@ checked-twice:
 	@callgrind_annotate --inclusive=yes /tmp/ct-point-cold.out | \
 	  grep -E "compile_cached|parse_program|lower_program|check_program|verify::verify" | head -6
 
-reproduce:
 # **The sweep is run through cargo, like every other step here.** It used to invoke
 # `./target/release/nilestream` directly, which has two faults and had both: nothing in
 # this target built that binary, so `make reproduce` passed in any tree holding a release
@@ -153,6 +152,7 @@ reproduce:
 # worktree is built. `cargo run` fixes both: it builds what it runs and it knows where the
 # binary is. A reproduction step that depends on what the last person left behind, in a
 # directory they also chose, is not one.
+reproduce:
 	python3 thesis/gen-appendix-d.py map > thesis/appendix-d-map.md
 	python3 thesis/gen-appendix-d.py api > thesis/appendix-d-api.md
 	cargo run -q -p niles-lang --bin gen-sql-surface

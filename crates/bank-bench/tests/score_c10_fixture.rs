@@ -280,3 +280,110 @@ fn the_fixture_carries_the_header_this_build_writes() {
     assert!(rows.iter().all(|r| r.target == "nilestream"));
     assert!(rows.iter().all(|r| r.not_run.is_none()));
 }
+
+// ---------------------------------------------------------------------------------------
+// F-H3 — the exit code says what the summary says.
+// ---------------------------------------------------------------------------------------
+
+/// A copy of the committed fixture that this test owns and removes, named per test so two
+/// of them cannot collide — the `Owned` discipline C11-07 established for the torn corpus.
+struct Copied {
+    dir: std::path::PathBuf,
+}
+
+impl Copied {
+    fn of(fixture: &std::path::Path, tag: &str) -> Copied {
+        let dir = std::env::temp_dir().join(format!("bench-score-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        copy_tree(fixture, &dir);
+        Copied { dir }
+    }
+}
+
+impl Drop for Copied {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).expect("create the copy");
+    for e in std::fs::read_dir(from).expect("read the fixture").flatten() {
+        let (src, dst) = (e.path(), to.join(e.file_name()));
+        if src.is_dir() {
+            copy_tree(&src, &dst);
+        } else {
+            std::fs::copy(&src, &dst).expect("copy a fixture file");
+        }
+    }
+}
+
+#[test]
+fn the_clean_fixture_scores_every_row_and_exits_zero() {
+    let (rows, problems) = score::read_rows(&fixture());
+    assert!(
+        problems.is_empty(),
+        "the committed fixture reads clean: {problems:?}"
+    );
+    let scored = score::score(&rows);
+    let refused = scored
+        .iter()
+        .filter(|s| matches!(s.verdict, score::Verdict::Refused(_)))
+        .count();
+    assert_eq!(refused, 0, "no row of the committed fixture is refused");
+    assert_eq!(score::exit_code(&scored), score::EXIT_SCORED);
+}
+
+#[test]
+fn one_renamed_column_in_one_replicate_makes_the_run_a_refusal_and_a_non_zero_exit() {
+    // **The audit's injection, as a test.** `reads_per_second` renamed in a single
+    // replicate's `mixed.csv`. The scorer detects the stale header and excludes that arm —
+    // correct — which leaves four replicates where five are required, so every metric at
+    // that level is refused. Before this card the run printed all of that and exited 0, and
+    // the harness reads the exit code.
+    let copy = Copied::of(&fixture(), "renamed-column");
+    let victim = copy
+        .dir
+        .join("results-merge-partial-3/E19-scaling/mixed.csv");
+    let text = std::fs::read_to_string(&victim).expect("the replicate to mutate");
+    let (header, body) = text.split_once('\n').expect("a header line");
+    assert!(
+        header.contains("reads_per_second"),
+        "the fixture's header should carry the column this test renames"
+    );
+    std::fs::write(
+        &victim,
+        format!("{}\n{body}", header.replace("reads_per_second", "rps")),
+    )
+    .expect("write the mutated replicate");
+
+    let (rows, _problems) = score::read_rows(&copy.dir);
+    let scored = score::score(&rows);
+    let refused: Vec<&score::Scored> = scored
+        .iter()
+        .filter(|s| matches!(s.verdict, score::Verdict::Refused(_)))
+        .collect();
+
+    assert!(
+        !refused.is_empty(),
+        "a replicate with a renamed column must refuse the rows that needed it; the scorer \
+         scored all {} rows as though nothing were missing",
+        scored.len()
+    );
+    assert_eq!(
+        score::exit_code(&scored),
+        score::EXIT_REFUSED,
+        "{} of {} rows refused and the run still reported success",
+        refused.len(),
+        scored.len()
+    );
+    // Every refusal is at the mutated arm's working point, and none of them is a verdict
+    // about the arms: a refused row must not also claim a direction.
+    for s in &refused {
+        assert_eq!(
+            s.point, "partial",
+            "only the mutated point should lose replicates, not {}",
+            s.point
+        );
+    }
+}

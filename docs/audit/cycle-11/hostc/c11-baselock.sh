@@ -1095,6 +1095,25 @@ printf 'stage,outcome,detail\n' >> "$OUT/manifest.csv"
 } > "$OUT/manifest.txt"
 note "manifest        : $OUT/manifest.txt (and manifest.csv, one row per stage)"
 
+# **The schema is `bank-bench`'s, and it is checked rather than trusted.** This file writes
+# the rows — it has to, because the first stages it records are the builds and a manifest
+# written by `bench` could not record that `bench` failed to build — but what it wrote is
+# read back by the program that owns the header and the outcome words. A malformed manifest
+# is exit 3 there and a refusal here; three fields, and an outcome from a closed set.
+check_manifest() {
+  _b="$1/target/release/bench"
+  if [ ! -x "$_b" ]; then
+    note "manifest check  : NOT RUN (no bench binary at $_b) — the rows above are unverified"
+    return 0
+  fi
+  if "$_b" --check-manifest "$OUT" >> "$OUT/manifest-check.txt" 2>&1; then
+    note "manifest check  : the schema is the one this build writes"
+  else
+    note "manifest check  : REFUSED — see $OUT/manifest-check.txt"
+    return 1
+  fi
+}
+
 head2 "0b. the bounded deadlock witness"
 note "A10-01: a stats snapshot that held the view while it waited for the base, against an"
 note "append that holds the base while it waits for the view. The mixed sweep below queries"

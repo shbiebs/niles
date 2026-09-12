@@ -22,7 +22,7 @@ This document is **not part of the thesis**. Appendix A of the thesis retells th
 
 There are six parts, and they are meant to be read in order the first time.
 
-**Part I** is about computers, not about any language. What a processor does. What "running a program" means. What an abstraction is — which is the single most important idea in the whole document. Skip this part only if you already know it.
+**Part I** is about computers, not about any language. What a processor does, and what it is made of — true and false, the gates that combine them, and the transistors that make the gates. What "running a program" means. What an abstraction is — which is the single most important idea in the whole document. Skip this part only if you already know it.
 
 **Part II** is Niles, the language this project invented.
 
@@ -59,19 +59,191 @@ He is not clever. He cannot be asked to "handle the payroll". He cannot notice t
 
 Three consequences follow, and they explain most of what the rest of this guide is about.
 
-**The processor has no idea what anything means.** A number in a pigeonhole might be a price, a letter of the alphabet, a colour, or the address of another pigeonhole. The number itself carries no label. Meaning is entirely in what the program *does* with it. This is why languages have *types* (§5): the meaning has to live somewhere, and if it does not live in the machine it has to live in the language.
+**The processor has no idea what anything means.** A number in a pigeonhole might be a price, a letter of the alphabet, a colour, or the address of another pigeonhole. The number itself carries no label. Meaning is entirely in what the program *does* with it. This is why languages have *types* (§6): the meaning has to live somewhere, and if it does not live in the machine it has to live in the language.
 
 **The processor has no idea what is allowed.** There is no instruction for "this account may not go negative". If money must be conserved, something above the processor has to arrange it. The whole design of Niles is an answer to "where should *something above* live, and how early can it check?"
 
-**Everything is a number, including the orders.** The list of orders is itself in the pigeonholes. This is why a program can write a program — and it is why Part I §4, on how text becomes machine instructions, is a story about a program transforming other programs.
+**Everything is a number, including the orders.** The list of orders is itself in the pigeonholes. This is why a program can write a program — and it is why Part I §5, on how text becomes machine instructions, is a story about a program transforming other programs.
 
-## 2. What a program is, and what "running" means
+## 2. Underneath arithmetic: true, false, and the switch
+
+§1 said the processor's whole repertoire is add, compare, copy and jump. This section is about what those are made of, because they are not primitive either. They are built from a single, much simpler idea — a switch that is either on or off — and the mathematics of switches is small enough to fit in a few pages and worth knowing in full, because the same mathematics reappears, unchanged, in every `if`, every `where`, every `&&` you will read in Part II and Part III.
+
+### 2.1 Two values
+
+Start with statements that are either true or false. *The account is overdrawn.* *This posting is in dollars.* *The card has expired.* There is no third option, and no "somewhat". Call true **1** and false **0**.
+
+Why insist on exactly two? Because two is the number of positions a switch has, and a switch is the cheapest, most reliable thing that can be manufactured by the billion. Everything that follows is a consequence of that manufacturing fact. A computer is not binary because binary is elegant; it is binary because on-and-off is the only distinction that can be made ten billion times a second with no mistakes.
+
+### 2.2 Three operations
+
+Given true-or-false values, there are exactly three basic things worth doing with them. Each is defined by a **truth table** — a complete list of every input and what comes out, which is the whole definition, with nothing left to interpretation.
+
+**AND** — true only when both inputs are true.
+
+| a | b | a AND b |
+|---|---|---|
+| 0 | 0 | 0 |
+| 0 | 1 | 0 |
+| 1 | 0 | 0 |
+| 1 | 1 | 1 |
+
+*The picture:* a safe with two keyholes that must be turned together. Either key alone does nothing.
+
+**OR** — true when at least one input is true.
+
+| a | b | a OR b |
+|---|---|---|
+| 0 | 0 | 0 |
+| 0 | 1 | 1 |
+| 1 | 0 | 1 |
+| 1 | 1 | 1 |
+
+*The picture:* two doorbells wired to one chime. Press either, or both, and it rings. Note that this is the inclusive "or": both is fine. Everyday English often means the exclusive kind — "soup or salad" — and that one has its own name below.
+
+**NOT** — flips the one input.
+
+| a | NOT a |
+|---|---|
+| 0 | 1 |
+| 1 | 0 |
+
+*The picture:* the denial of a statement. "The account is overdrawn" becomes "the account is not overdrawn".
+
+In the code you will read, these three are written `&&`, `||`, `!` in Rust, and in Niles either those or the words `and`, `or`, `not` — the two spellings are the same operator and produce the same result, which a test in this repository checks.
+
+### 2.3 The laws: boolean algebra
+
+The three operations obey a small set of laws, which together are called **boolean algebra** after George Boole, who wrote them down in 1847 as a way of doing logic by calculation. Every one can be checked by writing out the truth table for both sides and seeing that they match — there is nothing to take on trust.
+
+Some of them look like ordinary arithmetic, with AND behaving like multiplication and OR like addition:
+
+- **Commutative:** `a AND b = b AND a`, and the same for OR. Order does not matter.
+- **Associative:** `(a AND b) AND c = a AND (b AND c)`, and the same for OR. Grouping does not matter.
+- **Distributive:** `a AND (b OR c) = (a AND b) OR (a AND c)`. Just like multiplying out brackets.
+- **Identity:** `a AND 1 = a`; `a OR 0 = a`. Anding with true, or oring with false, changes nothing.
+- **Annihilation:** `a AND 0 = 0`; `a OR 1 = 1`. Anding with false is always false; oring with true is always true.
+
+And some of them look nothing like arithmetic, which is where it becomes its own subject:
+
+- **Idempotence:** `a AND a = a`; `a OR a = a`. Asking the same question twice does not change the answer. (In arithmetic, `x + x` is not `x`.)
+- **The other distributive law:** `a OR (b AND c) = (a OR b) AND (a OR c)`. This one has no arithmetic counterpart at all — you cannot distribute addition over multiplication — and it holds here.
+- **Complement:** `a AND (NOT a) = 0`; `a OR (NOT a) = 1`. A statement and its denial are never both true, and one of them is always true.
+- **Double negation:** `NOT (NOT a) = a`.
+- **Absorption:** `a OR (a AND b) = a`; `a AND (a OR b) = a`. If the safe opens with key A alone, then "key A, or keys A and B together" is just key A.
+
+And the two that are most useful in practice, **De Morgan's laws**:
+
+- `NOT (a AND b) = (NOT a) OR (NOT b)`
+- `NOT (a OR b) = (NOT a) AND (NOT b)`
+
+*The picture:* two doorbells and one chime. "The chime did not ring" means "nobody pressed A *and* nobody pressed B". The denial of an OR is an AND of denials. Similarly, "the safe did not open" means "key A was not turned *or* key B was not turned" — the denial of an AND is an OR of denials.
+
+Why a reader of this repository should care about a list of laws: they are the reason a compiler can rewrite `!(a && b)` as `!a || !b` and know the program means the same thing; they are how a database decides which order to test the conditions in a `where` clause; and they are how a chip designer takes a circuit of a thousand switches and finds an equivalent one with six hundred. Every optimisation of a condition, in software or in silicon, is an application of these dozen lines.
+
+### 2.4 The derived operations, and the one that builds all the rest
+
+A few combinations come up so often they have names.
+
+**XOR** ("exclusive or") — true when the inputs *differ*. This is the everyday "soup or salad": one or the other, not both. Written `^` in both languages when applied to numbers.
+
+| a | b | a XOR b |
+|---|---|---|
+| 0 | 0 | 0 |
+| 0 | 1 | 1 |
+| 1 | 0 | 1 |
+| 1 | 1 | 0 |
+
+**NAND** ("not and") — AND, then flipped. True unless both inputs are true.
+
+**NOR** ("not or") — OR, then flipped. True only when both inputs are false.
+
+Here is the fact that makes computers buildable. **Every operation on true-and-false values, however complicated, can be built from NAND alone.** Not from AND, OR and NOT — from just NAND. The demonstration is three lines:
+
+- `NOT a` = `a NAND a`. (Feed the same input to both sides. If `a` is 1, NAND gives 0; if 0, it gives 1.)
+- `a AND b` = `NOT (a NAND b)` = `(a NAND b) NAND (a NAND b)`.
+- `a OR b` = `(NOT a) NAND (NOT b)` — which is De Morgan's law, read backwards.
+
+With NOT, AND and OR in hand, everything else follows. So a factory that can make one kind of component well, and connect copies of it together, can make anything. NOR has the same property. This is called *functional completeness*, and it is why the next section only has to explain how to build one gate.
+
+### 2.5 The transistor is a switch
+
+A **transistor** is a switch with no moving parts. It has three connections. Current can flow between two of them — call them *in* and *out* — but only when a voltage is applied to the third, the **gate**. Apply the voltage and the path conducts; remove it and the path is broken. The gate controls the path without touching it, the way a small valve controls a large pipe.
+
+*The picture:* a tap. The gate is the handle; the water is the current; the handle can be turned by a trickle of water from *another* tap. That last part is what makes it more than a tap — a switch that can be thrown by the output of another switch is a switch that can be arranged into a chain of reasoning.
+
+Two flavours are manufactured, and the pairing between them is what modern chips are made of. An **n-type** transistor conducts when its gate is *high* (voltage on). A **p-type** transistor conducts when its gate is *low* (voltage off). The two are mirror images, and a design that uses both is called **CMOS** — the technology behind essentially every processor made since the 1980s.
+
+*Where the picture breaks.* A tap wears out; a transistor switches ten billion times a second for twenty years. A tap is either open or shut; a transistor has an in-between region that designers work hard to pass through as fast as possible, because time spent there wastes power as heat. And a real transistor leaks a little even when off — which is why a chip with billions of them warms up doing nothing.
+
+### 2.6 A gate from four transistors
+
+Take a supply wire held high (call it 1) and a ground wire held low (0). The **NOT gate** — an *inverter* — is two transistors:
+
+- A p-type between the supply and the output. It conducts when the input is *low*.
+- An n-type between the output and ground. It conducts when the input is *high*.
+
+Both transistors' control terminals are wired to the same input. Input high: the n-type conducts and pulls the output down to 0; the p-type is off. Input low: the p-type conducts and pulls the output up to 1; the n-type is off. Exactly one of the two paths is ever open, which is the NOT truth table, and is also why the gate draws almost no current while it is sitting still — there is never a path straight from supply to ground.
+
+**NAND is four transistors**, and its shape is the whole secret:
+
+- Two p-types *in parallel* between the supply and the output. If *either* input is low, one of them conducts and the output is pulled high.
+- Two n-types *in series* between the output and ground. Only if *both* inputs are high do both conduct and the output get pulled low.
+
+Read that again with §2.2 beside it. Switches in series are AND: the path exists only if both are closed. Switches in parallel are OR: the path exists if either is closed. The NAND gate is those two facts, physically, with the p-types handling the "either input low" case and the n-types handling the "both inputs high" case. Nothing is being computed in any mysterious sense; wires are being connected or not.
+
+(NOR is the same four transistors with the arrangements swapped: p-types in series, n-types in parallel.)
+
+### 2.7 From gates to the four orders of §1
+
+Now the adder. Adding two single binary digits has four cases: 0+0=0, 0+1=1, 1+0=1, and 1+1=10 — that is, 0 with a carry of 1. Look at the two output columns:
+
+- The *sum* digit is 1 exactly when the inputs differ. That is XOR.
+- The *carry* digit is 1 exactly when both inputs are 1. That is AND.
+
+So a **half adder** is one XOR gate and one AND gate. A **full adder** also accepts a carry coming in from the digit to its right — it is two half adders and an OR. Chain sixty-four full adders, each passing its carry to the next, and you have a machine that adds two 64-bit numbers. That is the `add` instruction of §1. (A chain that passes the carry along one digit at a time is slow, because the last digit must wait for all the others; real processors use cleverer arrangements that compute the carries in parallel, but they compute the same function.)
+
+**Compare** is subtraction with the answer thrown away and only its sign kept. **Jump-if-zero** needs to know whether every one of sixty-four bits is 0: that is one enormous NOR. **Copy** is not a gate at all — it is wiring, and a clock pulse that says "now".
+
+So all four of §1's orders are boolean logic, and boolean logic is switches, and switches are transistors. The tower of abstractions from §4 does not start at the processor; it starts at the truth table.
+
+### 2.8 Remembering: a bit of memory from two gates
+
+Everything so far computes an answer and forgets it. A register — the scratch pad of §1 — has to *hold* a value. The trick is feedback: take two NOR gates and connect each one's output to the other's input. The arrangement has two stable states, and once nudged into one it stays there, because each gate is holding the other in place. That is a **latch**, and it stores one bit for as long as the power is on.
+
+A 64-bit register is sixty-four of them. A processor's **clock** is a steady pulse that says, billions of times a second, "everybody take your inputs now" — so that all the latches update together, in step, and the machine advances one order at a time rather than dissolving into a race.
+
+### 2.9 Numbers as bits
+
+A **bit** is one true-or-false, one latch, one wire. Numbers are written in bits the way decimal numbers are written in digits, except each position is worth twice the one to its right instead of ten times: `1011` is 8+0+2+1 = 11. Eight bits together make a **byte**, and can express 256 different values — which is why §22's `u8` runs from 0 to 255, and why adding 1 to 255 has nowhere to go. Sixty-four bits express about eighteen quintillion values; a hundred and twenty-eight bits, which is what this engine uses for money, express about 3.4 × 10³⁸ — roughly the number of atoms in a small asteroid, and some hundred billion billion times the grains of sand on Earth. That width is chosen so that a sum of every transaction a bank will ever process cannot overflow; it is *not* what makes the arithmetic exact. Exactness comes from holding money as whole minor units (§11), and where a genuine fraction arises — an exchange rate, an interest accrual — the rounding is a declared step, not a silent one.
+
+Negative numbers use a convention called **two's complement** — flip every bit and add one — chosen because it lets the same adder circuit handle subtraction with no extra hardware. That is the kind of decision this whole section has been about: a cheap trick in the mathematics becomes a smaller circuit becomes a faster chip.
+
+### 2.10 What this has to do with the code you will read
+
+The connection is not decorative. It is the same logic at every level.
+
+**`bool` is the type of one truth table cell.** In both languages it holds exactly `true` or `false`; every comparison — `==`, `<`, `>=` — produces one, and every `if`, `while` and `where` consumes one. An `if` on a comparison is the jump-if of §1 — and the specific case of "jump if zero" is the giant NOR of §2.7.
+
+**`&&`, `||`, `!` are the three gates, and `and`, `or`, `not` are the same three.** With one addition that a gate does not have: **short-circuiting**. When a program evaluates `a && b`, it evaluates `a` first, and if `a` is false it does not evaluate `b` at all — the annihilation law says the answer is already 0. The same for `a || b` when `a` is true. This matters more than it looks: `x != 0 && total / x > 10` is safe *only because* the division is skipped when `x` is zero. The keyword table's entries for `and` and `or` say "short-circuiting" for exactly this reason, and it is the reason the operands' *order* is part of a program's meaning even though the commutative law says AND does not care about order. The law is about values; the program is about steps.
+
+**`&`, `|`, `^` on integers are the gates applied side by side.** `12 & 10` ands the bits of 12 (`1100`) with the bits of 10 (`1010`) position by position and gets `1000`, which is 8. These sit at their own levels in Appendix B.10.1's precedence table — binding tighter than comparison and looser than arithmetic, which is Rust's ordering — because they are arithmetic on bits, not logic on truths, even though the operation inside each bit is the same one. (It is worth knowing that C orders them the other way, *below* comparison, so that in C `a == b | c` means `(a == b) | c`, a famous trap. Niles follows Rust, and a test confirms it parses `a == (b | c)`. Appendix B.10.1's own sentence describing this as "C's ordering rather than Python's" has it backwards on both counts; the table above that sentence is right, and the table is what the parser implements.)
+
+**De Morgan's laws are why two spellings of one condition are interchangeable**, and why a compiler may quietly choose either. `!(overdrawn && !authorized)` and `!overdrawn || authorized` are the same program, and a reviewer who knows the law can read the second where the author wrote the first.
+
+**A `match` is a truth table with the rows written out.** The exhaustiveness rule of §27 — every case must have an arm — is the requirement that the table have no blank rows. And the exhaustiveness *check* is boolean algebra run by the compiler over the set of patterns.
+
+**The type-checker of §5 is a boolean function over the program.** "Does this program type-check?" is a single true-or-false answer, computed by combining thousands of smaller true-or-false answers about each expression with AND. That is why a type error anywhere makes the whole answer false, and why the thesis can treat "the conservation rule holds" as a *proposition* about a program: the currency-row solver establishes that the proposition is true for every possible input, which is the same discipline — a claim about all rows of a truth table — that a chip designer applies to a circuit before it is manufactured.
+
+That last point is the one to carry into Part II. `conserve per (txn, cur)` is a sentence in the language of §2.2. Its truth is not observed at run time; it is *proved*, over all inputs, before the program is allowed to exist. The distance between "this circuit's output is 1 whenever the inputs are…" and "this transaction balances whenever its legs are…" is the distance between §2 and the rest of this guide, and it is shorter than it looks.
+
+## 3. What a program is, and what "running" means
 
 A program, as a thing on disk, is a file of text. Just characters — letters, brackets, semicolons — with no more inherent power than a shopping list.
 
 Turning that text into the numbered orders of §1 takes one of two routes.
 
-**Compiling** is translating the whole text, in advance, into a file of machine orders. It is a translator producing a finished translation you can hand to the clerk. Rust is compiled, and `nilesc`, this project's Niles translator, compiles too.
+**Compiling** is translating the whole text, in advance, before any of it runs. Rust is compiled all the way down to machine orders. `nilesc`, this project's Niles translator, compiles too, but stops one level short: it produces the intermediate form described in §5 and hands that to an engine that carries it out, rather than emitting processor orders itself. Both are translators producing a finished translation before the clerk sees a word of it; they differ in how far down they translate.
 
 **Interpreting** is having a program read your text and do what it says, line by line, as it goes. It is a translator standing next to the clerk rendering each sentence aloud as it comes. This project has one of these too — `niles-interp` — used for the early stages of the language.
 
@@ -79,7 +251,7 @@ Compiling is faster to run and slower to start; interpreting is the reverse, and
 
 **Running** a compiled program means: the operating system finds a free stretch of pigeonholes, copies the orders into them, points the clerk at the first order, and lets go. The program is then a *process* — a living thing with its own memory, its own position in its own instruction list, and no ability to reach into anyone else's.
 
-## 3. What an abstraction is
+## 4. What an abstraction is
 
 This is the most important section in this guide. Everything else is detail.
 
@@ -103,7 +275,7 @@ And that is why this thesis exists. It is an argument that certain promises — 
 
 **Where the analogy breaks.** Postal abstractions leak gracefully: if the plane is delayed the letter is late, not wrong. Software abstractions leak catastrophically — a mechanism that fails its promise in one case out of ten million produces a confidently wrong answer, at full speed, with no indication. This is why programmers care so much about things that look like pedantry.
 
-## 4. How a line of text becomes electricity
+## 5. How a line of text becomes electricity
 
 A translator — a compiler — works in stages. Naming them is useful because this project's own compiler exposes exactly these stages as commands you can run one at a time, and because half the vocabulary in Part V refers to one of them.
 
@@ -141,7 +313,7 @@ Why bother? Because everything downstream — checking, optimising, planning —
 
 The important thing to take away: **a mistake caught at stage 3 costs nothing, and the same mistake caught at stage 6 costs a production incident.** The entire design of Niles is an argument about moving checks left along this pipeline.
 
-## 5. Types: the idea that a value has a kind
+## 6. Types: the idea that a value has a kind
 
 The processor sees only numbers (§1). A *type* is a claim, made in the program's text and checked by the compiler, about what a number *means* and therefore what may be done with it.
 
@@ -155,7 +327,7 @@ Two ideas that will recur:
 
 **Types as promises.** `Money<usd>` is not merely "a number". It is "an exact whole number of cents, in US dollars, which may be added to other US dollars and to nothing else". The type is where that promise is written down, and the type-checker is what enforces it. When this thesis says a category of accident is *unwritable*, this is the mechanism it means.
 
-## 6. Memory: where the values live
+## 7. Memory: where the values live
 
 Two regions matter, and the distinction explains a lot of Rust.
 
@@ -165,13 +337,13 @@ Two regions matter, and the distinction explains a lot of Rust.
 
 Two failures follow, and between them they account for an enormous share of the world's security vulnerabilities. Forget to give space back and the program slowly consumes all the memory there is (a *leak*). Give it back and keep using the address and you are reading or writing a pigeonhole that now belongs to something else (a *use-after-free*), which is the raw material of a great many exploits.
 
-Languages answer this in three ways. C hands you the responsibility. Java and most modern languages run a *garbage collector* — a background process that periodically works out what is unreachable and reclaims it, at the cost of pausing occasionally and unpredictably. Rust does something else, and §22 is about what.
+Languages answer this in three ways. C hands you the responsibility. Java and most modern languages run a *garbage collector* — a mechanism inside the running program that periodically works out what is unreachable and reclaims it, at the cost of pausing occasionally and unpredictably. Rust does something else, and §23 is about what.
 
 This project cares because of the pauses: a system with a latency promise cannot have an unpredictable pause in the middle of an authorization.
 
-## 7. What a bug is, and what a language can do about it
+## 8. What a bug is, and what a language can do about it
 
-From §3: a bug is a gap between a promise and a mechanism. Languages differ in which gaps they permit.
+From §4: a bug is a gap between a promise and a mechanism. Languages differ in which gaps they permit.
 
 A mistake can be caught at four moments, and the cost rises by roughly an order of magnitude at each step:
 
@@ -186,23 +358,25 @@ Every unusual feature in Niles is an attempt to move a specific banking accident
 
 # Part II — Niles
 
-## 8. What Niles is, and the one rule that shaped it
+## 9. What Niles is, and the one rule that shaped it
 
 Niles is a language for describing a bank's data and asking it questions. It is meant to replace SQL — the language nearly every database in the world speaks — in settings where getting the answer wrong is expensive.
 
 It has a stated rule about where its notation comes from, and knowing the rule makes the language far easier to read:
 
-1. **If Rust has a way of writing it, write it Rust's way.**
-2. **Otherwise, if SQL has a way, write it SQL's way.**
+1. **If SQL already has a way of writing it, write it SQL's way.**
+2. **Otherwise, if Rust has a way, write it Rust's way.**
 3. **Only invent notation for ideas neither language has.**
 
-So a Niles file looks like Rust that has swallowed a database. `fn`, `let`, `match`, `struct` come straight from Rust. `select`, `from`, `group by`, `join` come straight from SQL. And then there are sixty-six words that exist nowhere else, because they name ideas nobody had needed to name: `conserve`, `anchor`, `serve`, `evictable`, `declassify`, `resolve`.
+That is the rule as thesis Appendix B.1 and §6.25 state it — *SQL-first, Rust-fallback, novel-last* — applied construct by construct, with the choice of that order over its inverse adjudicated in Appendix J.1. It carries one stated exception: a SQL spelling is not reused where it would cost the engine determinism or efficiency, which is why unbounded recursion is admitted only behind a guard and `float` is not a legal money type. (The project's one-paragraph description elsewhere says "Rust first"; the thesis's normative text says SQL first, and this guide follows the thesis.)
 
-**Why bother with a new language at all?** Because of §7. SQL can *express* a bank, but it cannot *refuse* one that is wrong. In SQL, "these two rows must sum to zero" is a comment, a convention, or a trigger that runs after the fact. In Niles it is a declaration the compiler checks before anything runs. The thesis is careful about this claim, and so should you be: it is an argument that the checks belong in the language, and the evidence for it is a counted sixteen obligations over four files. It is a real argument with modest evidence, not a settled fact.
+So a Niles file looks like Rust that has swallowed a database. `select`, `from`, `group by`, `join`, `create`, `grant` come straight from SQL, and keep SQL's meaning wherever that meaning survives. `fn`, `let`, `match`, `struct` come straight from Rust, for the things SQL has no way to say. And then there are sixty-six words that exist nowhere else, because they name ideas nobody had needed to name: `conserve`, `anchor`, `serve`, `evictable`, `declassify`, `resolve`.
+
+**Why bother with a new language at all?** Because of §8. SQL can *express* a bank, but it cannot *refuse* one that is wrong. In SQL, "these two rows must sum to zero" is a comment, a convention, or a trigger that runs after the fact. In Niles it is a declaration the compiler checks before anything runs. The thesis is careful about this claim, and so should you be: it is an argument that the checks belong in the language, and the evidence for it is a counted sixteen obligations over four files. It is a real argument with modest evidence, not a settled fact.
 
 **The shape of a file.** A Niles file has two kinds of thing in it. A `schema` block *declares the world* — what currencies exist, what relations exist, what questions are standing. Outside it are `fn` items — *procedures*, things that happen. Declarations are nouns; functions are verbs.
 
-## 9. Declaring the world
+## 10. Declaring the world
 
 ```niles
 schema demo_bank {
@@ -240,7 +414,7 @@ ledger postings { ... }         // immutable, fully retained, and conserved
 
 *Analogy:* a whiteboard. Wipe and rewrite freely.
 
-**`base`** is immutable and fully retained. There is no `update` and no `delete` — those words are not merely discouraged, they are meaningless against it and the compiler says so. Rows are appended, in order, and each addition advances the world's clock by one tick. Nothing is ever removed.
+**`base`** is immutable and fully retained. There is no `update` and no `delete` — those words are not merely discouraged, they are meaningless against it and the compiler says so. Rows are appended, in order, in batches, and each sealed batch advances the world's clock by one tick — an *epoch* (§12). Nothing is ever removed.
 
 *Analogy:* the bound ledger book with no eraser from Appendix A.
 
@@ -264,11 +438,11 @@ Line by line:
 
 - `txn: TxnId` — a column called `txn` holding a transaction identifier. Everywhere in Niles, `name: Type` means "a thing called *name* whose kind is *Type*". That colon is the most frequent punctuation in the language.
 - `amt: Money` — an amount. Not a decimal number: a `Money`, which carries its currency and its scale in its type.
-- `value_date: Date` — the banking value date. Which day this posting counts for, as distinct from which day it was recorded (§11).
-- `idem: IdemKey window 1_000_000.epochs` — see §14 on idempotency. In short: a fingerprint that lets the system recognise the same instruction arriving twice, remembered for a declared length of time.
-- `conserve per (txn, cur);` — **the double-entry rule.** For every transaction, and separately within every currency, the amounts must sum to exactly zero. This is the promise from §3 that the whole project exists to move into the machinery.
+- `value_date: Date` — the banking value date. Which day this posting counts for, as distinct from which day it was recorded (§12).
+- `idem: IdemKey window 1_000_000.epochs` — see §15 on idempotency. In short: a fingerprint that lets the system recognise the same instruction arriving twice, remembered for a declared length of time.
+- `conserve per (txn, cur);` — **the double-entry rule.** For every transaction, and separately within every currency, the amounts must sum to exactly zero. This is the promise from §4 that the whole project exists to move into the machinery.
 - `retain forever;` — never evicted. Mandatory on a base or ledger; this is the asymmetry of Appendix A.9 written as a declaration.
-- `bitemporal;` — this relation keeps both calendars (§11).
+- `bitemporal;` — this relation keeps both calendars (§12).
 
 Note what the example's own comments record: `holds` was written as a `ledger` and the compiler refused it, because a hold is one-sided — reserving money is not a movement of it — and so no hold ever sums to zero. That refusal is the language doing its job on its own author.
 
@@ -295,9 +469,9 @@ A **view** is a standing question with a name. This one says: take the postings,
 
 The view is the central object of the whole thesis. In the theory it is called a **REV** — a *reconstructible epoch-anchored view*. Reconstructible: it can always be rebuilt from the ledger. Epoch-anchored: every answer it gives carries the moment it is true at.
 
-The `serve { ... }` block is the **contract** (§13) — and it is part of the view's *type*, not a configuration file somewhere else. A view's freshness promise travels with the view.
+The `serve { ... }` block is the **contract** (§14) — and it is part of the view's *type*, not a configuration file somewhere else. A view's freshness promise travels with the view.
 
-## 10. Money
+## 11. Money
 
 ```niles
 let rent = 850.00 usd;
@@ -305,12 +479,12 @@ let rent = 850.00 usd;
 
 A **money literal**. `850.00` is the amount, `usd` is the currency, and the two are one token — you cannot have the number without the currency. The fractional digits must match the declared scale exactly: `2.50 usd` is well-formed, `2.5 usd` is a compile error, `1_000.00 jpy` is a compile error.
 
-*The underscore* in `1_000_000` is a thousands separator that the compiler ignores. It exists purely so a human can see at a glance that a number is a million and not a hundred thousand. Both languages in this guide allow it anywhere in a numeric literal.
+*The underscore* in `1_000_000` is a thousands separator that the compiler ignores. It exists purely so a human can see at a glance that a number is a million and not a hundred thousand. Both languages in this guide allow it between the digits of a number.
 
 The type is written `Money<usd>` — "money, in dollars". The currency is *inside the type*, which is what makes the central promise work:
 
 - `Money<usd> + Money<usd>` → fine.
-- `Money<usd> + Money<eur>` → **there is no such operation.** Not forbidden by a rule; simply not defined. This is category 1 of §7.
+- `Money<usd> + Money<eur>` → **there is no such operation.** Not forbidden by a rule; simply not defined. This is category 1 of §8.
 - `Money<usd> * 3` → fine, an integer scaling.
 - `Money<usd> * Money<usd>` → meaningless and absent. Dollars times dollars is square dollars.
 - Any floating-point number anywhere near a `Money` → refused by type.
@@ -333,7 +507,7 @@ fx {
 
 The example's comment records that the thesis's own printed version of this had the effects wrong — it claimed to debit dollars and credit euros, which conserves neither — and that the compiler caught it.
 
-## 11. Time
+## 12. Time
 
 Time in Niles is three separate ideas that most systems confuse.
 
@@ -374,7 +548,7 @@ A **signal** is a value that is a function of time rather than a single number: 
 
 *Analogy:* the difference between a photograph and a film. Most systems store the photograph and try to reconstruct the film from a change log. Here the film is the primary object.
 
-## 12. Asking questions: the pipeline
+## 13. Asking questions: the pipeline
 
 Niles writes queries as a **pipeline** — a chain of steps, each feeding the next, read top to bottom:
 
@@ -409,7 +583,7 @@ view sql_balances = sql {
 
 Same result, same internal form, SQL's syntax. The point of the block is that it is *demarcated*: you can see exactly where the old language starts and stops, and the meanings are the same on both sides of the boundary.
 
-## 13. The serve contract
+## 14. The serve contract
 
 ```niles
 serve {
@@ -467,7 +641,7 @@ A number of entries or bytes. The view's resident state may not exceed it. This 
 
 `off`, `key`, or `full`. Even `off` still stamps every answer with its anchor. Read Appendix A.19 before relying on the other two: the component that would deliver them was withdrawn.
 
-## 14. Writing: transactions, postings, holds
+## 15. Writing: transactions, postings, holds
 
 ### `txn`
 
@@ -493,7 +667,7 @@ let c = credit(landlord, rent);
 post(d, c)
 ```
 
-A **posting** is one signed movement. A `Debit<usd>` and a `Credit<usd>` are its two halves, and they are **linear**: each must be used exactly once. Not zero times — you cannot create a debit and forget about it, because that is money that left an account and arrived nowhere. Not twice — you cannot post the same debit into two transactions.
+A **posting** is one signed movement. A `Debit<usd>` and a `Credit<usd>` are its two halves, and they are **linear**: each must be used exactly once. Not zero times — you cannot create a debit and then forget about it, because a half-written movement that quietly vanishes is exactly the kind of silent error §8 exists to make unwritable. Not twice — you cannot post the same debit into two transactions.
 
 Linearity is enforced by the type system, and it is the most unusual idea in the language. In most languages a value can be copied and dropped freely. Here, dropping a `Debit` without posting it is a compile error.
 
@@ -516,7 +690,7 @@ A hold is also linear, and it has exactly three endings, all spelled with `resol
 
 The type system rejects a program that resolves a hold twice, and rejects one that lets a hold go out of scope unresolved. A forgotten authorization hold — money reserved against a customer's account and never released — is a real and common banking complaint, and this is it made unwritable.
 
-## 15. Permission
+## 16. Permission
 
 ```niles
 capability overdraw;
@@ -534,7 +708,7 @@ A **capability** is an unforgeable token authorising a specific effect. `Auth<ov
 
 The honest limit, from Appendix A.20: this guarantees nobody *forgot to ask*. It does not guarantee you never go overdrawn. The asking still has to happen, and the clause of the soundness theorem covering this is narrower than its first draft.
 
-## 16. Secrecy
+## 17. Secrecy
 
 ```niles
 owner: Text @confidential(e2ee, subject = id),
@@ -552,7 +726,7 @@ The labels are **static**: a column's confidentiality is fixed in its declaratio
 
 Read Appendix A.27 for what is built: the declarations and their checking are real; the `committed` machinery is design.
 
-## 17. Audit
+## 18. Audit
 
 ```niles
 explain available_balance.get((acct, usd))?;   // how was this answer derived?
@@ -564,9 +738,9 @@ Three forms. `explain` looks backwards from an answer to its sources. `reproduce
 
 `anchor` is the epoch stamp that every answer carries, and the mandatory index kind on ledger keys. Both meanings are the same idea: an answer, and the moment it is true at, travel together.
 
-## 18. The imperative part
+## 19. The imperative part
 
-Outside the `schema` block, Niles is essentially Rust. `fn` declares a function; `let` binds a value; `if`, `match`, `for`, `while`, `loop` do what Part III describes. The novel additions are `txn` (§14) and the effect row:
+Outside the `schema` block, Niles is essentially Rust. `fn` declares a function; `let` binds a value; `if`, `match`, `for`, `while`, `loop` do what Part III describes. The novel additions are `txn` (§15) and the effect row:
 
 ```niles
 fn pay_rent(tenant: Id<Account>, landlord: Id<Account>) -> Result<TxnId, TxnError>
@@ -600,17 +774,17 @@ Recursion — a definition that refers to itself — can fail to stop. `guard me
 
 # Part III — Rust
 
-## 19. Why the engines are written in Rust
+## 20. Why the engines are written in Rust
 
 Niles is the language the bank writes. Rust is the language the *machine underneath* is written in. Nilestream — the database engine — and GBS — the core-banking platform — are both Rust, and together they are the great majority of the code in this project. If you are going to read one of these repositories, you are mostly going to be reading Rust.
 
-Rust exists to solve the problem in §6. C lets you manage memory by hand and lets you get it wrong, which is where a large fraction of the world's security vulnerabilities come from. Java and its relatives run a garbage collector, which is safe but pauses unpredictably — and an unpredictable pause in the middle of a card authorization is exactly what a latency promise cannot absorb.
+Rust exists to solve the problem in §7. C lets you manage memory by hand and lets you get it wrong, which is where a large fraction of the world's security vulnerabilities come from. Java and its relatives run a garbage collector, which is safe but pauses unpredictably — and an unpredictable pause in the middle of a card authorization is exactly what a latency promise cannot absorb.
 
-Rust's answer is to prove the memory is handled correctly *at compile time*, and then emit code with no collector at all. You get C's speed and predictability with an enforced guarantee that the whole use-after-free family of bugs is absent. The price is that you must explain your intentions to the compiler in a way no other mainstream language demands, and §22 is about that price.
+Rust's answer is to prove the memory is handled correctly *at compile time*, and then emit code with no collector at all. You get C's speed and predictability with an enforced guarantee that the whole use-after-free family of bugs is absent. The price is that you must explain your intentions to the compiler in a way no other mainstream language demands, and §23 is about that price.
 
-Two facts about this project worth carrying into the rest of Part III. There is **no `unsafe` code** in either engine — the escape hatch Rust provides for stepping outside its guarantees is used exactly once in the whole tree, in a measurement tool that is deliberately excluded from the build and linked into nothing that ships, and two tests exist whose only job is to fail if that ever stops being true. And **no `async`/`await`** — the concurrency machinery — which is a deliberate choice recorded in the compiler's own keyword table: query and transaction context is synchronous by design.
+Two facts about this project worth carrying into the rest of Part III. There is **no `unsafe` code** in either engine — the escape hatch Rust provides for stepping outside its guarantees appears only in a memory-measurement tool, one copy per repository, each excluded from its workspace and linked into nothing that ships, and two tests exist whose only job is to fail if that ever stops being true (§32 has the detail). And **no `async`/`await`** — the concurrency machinery — which is a deliberate choice recorded in the compiler's own keyword table: query and transaction context is synchronous by design.
 
-## 20. Values and bindings
+## 21. Values and bindings
 
 ```rust
 let budget = 100;
@@ -629,13 +803,15 @@ static PLAN: OnceLock<BasePlan> = OnceLock::new();
 
 **`const`** is a value fixed at compile time and substituted wherever it is used. `MAX_FLIGHTS` is not a variable holding 256; it *is* 256, with a name, so that the number appears once instead of in nine places.
 
-**`static`** is a single value that lives for the entire run of the program, at one fixed address. In Rust there is no mutable `static` without `unsafe`, which is why this project has none.
+**`static`** is a single value that lives for the entire run of the program, at one fixed address. A `static mut` — one that can be overwritten in place — cannot be touched without `unsafe`, so this project has none. What it uses instead is what the example shows: a `static` holding a `OnceLock`, which can be filled in exactly once and then only read, or a `Mutex`, which hands out one writer at a time. Both are mutation with the guarantees kept, and both are ordinary safe Rust.
 
 **Type annotations.** `let x: u64 = 5;` says explicitly that `x` is an unsigned 64-bit integer. Usually you can omit it — Rust *infers* the type from context — and the codebase omits it where it is obvious and states it where it is not. The colon means "of type", exactly as in Niles.
 
 **Shadowing.** You may `let` the same name twice; the second hides the first. This is used deliberately for a value that changes form: `let text = read()?; let text = text.trim();`.
 
-## 21. The primitive types
+## 22. The built-in types you will meet
+
+The first six rows are Rust's true primitives; `String` and `Vec` are library types so common that they belong in the same table.
 
 | Written | Is |
 |---|---|
@@ -645,14 +821,14 @@ static PLAN: OnceLock<BasePlan> = OnceLock::new();
 | `f32` `f64` | Approximate fractional numbers. **Never used for money.** |
 | `bool` | `true` or `false` |
 | `char` | One Unicode character |
-| `String` / `&str` | Owned text / a borrowed view into text |
+| `String` / `&str` | Owned text (a library type) / a borrowed view into text (`str` is primitive) |
 | `()` | The *unit* type: no information. What a function returns when it returns nothing |
 
-The bit-width matters: an `i64` can hold about ±9.2 quintillion, a `u8` only 0–255. Adding 1 to a `u8` holding 255 cannot give 256, and what happens instead depends on how the program was built: in a debugging build Rust stops the program on the spot, and in an ordinary optimised build it wraps silently round to 0. That second case is a category-4 failure from §7, and it is the reason a codebase that cares writes `checked_add` — which returns "did it fit?" as a value you must handle — rather than a bare `+`.
+The bit-width matters: an `i64` can hold about ±9.2 quintillion, a `u8` only 0–255. Adding 1 to a `u8` holding 255 cannot give 256, and what happens instead depends on how the program was built: in a debugging build Rust stops the program on the spot, and in an ordinary optimised build it wraps silently round to 0. That second case is a category-4 failure from §8, and it is the reason a codebase that cares writes `checked_add` — which returns "did it fit?" as a value you must handle — rather than a bare `+`. This one does: `crates/niles-ir/src/arith.rs` turns every overflow into an `ArithError` the caller has to answer, and the interpreter and prototype engine do the same on their balance slots.
 
 Two from this project: `Value = i128` — the engine's amounts, a 128-bit whole number of minor units, because exactness matters more than range; `Key = Vec<i64>` — a view's group key is a *list* of numbers, because you may group by account and currency and desk at once.
 
-## 22. Ownership — the hard chapter
+## 23. Ownership — the hard chapter
 
 This is the idea that makes Rust Rust. It takes a page and it is worth the page.
 
@@ -668,7 +844,7 @@ In most languages, `let b = a` gives you two names for one thing, and the questi
 
 *Analogy:* a physical key to a room rather than a copy of one. Hand the key to someone else and you do not have it any more. There is never a question of who locks up, because there is never more than one key.
 
-This is why linear types in Niles (§14) felt natural to add: Rust already works this way for everything, and `Debit` merely tightens it from "at most once" to "exactly once".
+This is why linear types in Niles (§15) felt natural to add: Rust already works this way for everything, and `Debit` merely tightens it from "at most once" to "exactly once".
 
 **`move`** makes the transfer explicit, chiefly for closures: `move |x| ...` means the closure takes ownership of what it captures rather than borrowing it.
 
@@ -676,7 +852,7 @@ This is why linear types in Niles (§14) felt natural to add: Rust already works
 
 **`drop`** is what happens automatically when an owner's scope ends. A type can define what "being dropped" means, and this project uses that: `FoldTicket` has a `fn drop(&mut self)` so that abandoning a reconstruction partway through cleans up after itself, no matter how the function exits.
 
-## 23. Borrowing: `&`, `&mut`, and lifetimes
+## 24. Borrowing: `&`, `&mut`, and lifetimes
 
 Moving ownership every time you wanted to *look* at something would be unbearable. So you can lend instead.
 
@@ -702,7 +878,7 @@ This is the mechanical basis for the thesis's memory-safety claim, and it is why
 
 *Analogy:* a note on a loan saying when the book is due back. Most of the time everyone knows. Occasionally you must write it down so that nobody schedules a reading for after the return date.
 
-## 24. Building your own types
+## 25. Building your own types
 
 ### `struct` — a thing with named parts
 
@@ -742,7 +918,7 @@ An **enum** says: this value is exactly one of these cases, and each case may ca
 
 Most languages would express this with a number and a comment, or with a null and a convention, and the difference between *never asked* and *asked and forgotten* would live in somebody's head. Here it is a type.
 
-And — see §26 — the compiler will refuse a piece of code that forgets one of the cases.
+And — see §27 — the compiler will refuse a piece of code that forgets one of the cases.
 
 *Analogy:* a form with tick-boxes where exactly one must be ticked, and each box has its own follow-up question.
 
@@ -756,7 +932,7 @@ type Key = Vec<i64>;
 
 A second name for an existing type. Not a new type — `Key` and `Vec<i64>` are interchangeable — just a name that says what it is *for*.
 
-## 25. Behaviour: functions, traits, generics
+## 26. Behaviour: functions, traits, generics
 
 ### `fn`
 
@@ -827,9 +1003,9 @@ The angle brackets hold a **type parameter** — a blank to be filled in later. 
 
 `-> impl Iterator<Item = &Row>` — "returns something that iterates; I am not telling you what". Decided at compile time, so no cost at all, but the caller cannot name the type.
 
-`dyn` is *forbidden* in Niles view bodies (§34), because a view must be planned statically: an engine that cannot see, before running, which code a step will use cannot plan the walk backwards of Appendix A.10.
+`dyn` is *forbidden* in Niles view bodies (§35), because a view must be planned statically: an engine that cannot see, before running, which code a step will use cannot plan the walk backwards of Appendix A.10.
 
-## 26. Choosing between cases
+## 27. Choosing between cases
 
 ### `match`
 
@@ -859,9 +1035,9 @@ match outcome {
 
 `if let Row::Post(ref mut post) = ... { }` — "if this value has that shape, unpack it and run this block". A one-case `match`.
 
-`let Ok(entries) = std::fs::read_dir(&dir) else { return; };` — "unpack this, and if it does not have that shape, take this exit". The `else` block must leave — return, break, or panic. It keeps the successful path flat instead of indenting the whole function inside a conditional.
+`let Ok(entries) = std::fs::read_dir(&dir) else { return; };` — "unpack this, and if it does not have that shape, take this exit". The `else` block must leave — `return`, `break`, `continue` or panic; the compiler checks that it cannot fall through. It keeps the successful path flat instead of indenting the whole function inside a conditional.
 
-## 27. When things fail: `Option`, `Result`, `?`
+## 28. When things fail: `Option`, `Result`, `?`
 
 Rust has no `null`. The billion-dollar mistake — a value that might be absent, indistinguishable from one that is present, until it is used — is simply not available.
 
@@ -879,9 +1055,9 @@ set.verify().map_err(LedgerError::Kernel)?;
 
 *Analogy:* a procedure where each step ends "…and if this is refused, return the file to your supervisor with the reason attached". The `?` is that sentence, one character long.
 
-**`panic!`** is the other kind of failure: the unrecoverable one. It stops the thread immediately. `unwrap()` and `expect("...")` say "I am certain this succeeded; panic if I am wrong" — fine in tests, a deliberate decision in shipping code.
+**`panic!`** is the other kind of failure: the unrecoverable one. It stops the thread — unwinding back out through every function on the way, so that each owner's `drop` still runs and nothing is left half-open. `unwrap()` and `expect("...")` say "I am certain this succeeded; panic if I am wrong" — fine in tests, a deliberate decision in shipping code.
 
-## 28. Collections, iterators, closures
+## 29. Collections, iterators, closures
 
 **`Vec<T>`** — a growable list. **`BTreeMap<K, V>`** — a lookup table kept in sorted order (the engine's `ZSet` is one). **`HashMap<K, V>`** — a lookup table with no order but faster access. **`&[T]`** — a *slice*: a borrowed window onto part of a list.
 
@@ -897,7 +1073,7 @@ f.ops.iter().filter(|o| **o == Op::Crash).count()
 
 **Ranges.** `0..10` is ten numbers starting at zero, *excluding* ten. `0..=10` is eleven, *including* ten. The `=` is the difference between "up to" and "up to and including", and confusing them is the classic off-by-one error.
 
-## 29. Organisation: modules and paths
+## 30. Organisation: modules and paths
 
 ```rust
 mod rev;
@@ -913,7 +1089,7 @@ Four path roots: **`crate`** — the top of this compilation unit; **`super`** �
 
 A **crate** is a unit of compilation and distribution: one library or one program. This project has fourteen in the Nilestream workspace and four in GBS. The `Cargo.toml` file at the root lists them, and — a detail that has caused this project three separate defects — a crate listed as `exclude`d is *not* built by a command that says "build everything", which is exactly how a broken crate can hide in plain sight.
 
-## 30. Attributes and macros
+## 31. Attributes and macros
 
 **`#[...]`** is an **attribute**: a note attached to the item below it.
 
@@ -928,13 +1104,13 @@ pub enum Outcome { Ok, Failed, NotRun }
 
 **`#![...]`** with the exclamation mark applies to the *enclosing* item rather than the following one — usually the whole file: `#![allow(dead_code)]`.
 
-**Macros** are called with a `!`: `assert_eq!(a, b)`, `format!("{x}")`, `vec![1, 2, 3]`. A macro is code that writes code before compilation proper begins, which is why it can do things a function cannot — `assert_eq!` prints the text of both expressions when they differ, which requires seeing the source.
+**Macros** are called with a `!`: `assert_eq!(a, b)`, `format!("{x}")`, `vec![1, 2, 3]`. A macro is code that writes code — expanded early in compilation, after the text has been split into tokens and before anything is type-checked — which is why it can do things a function cannot — `assert_eq!` prints the text of both expressions when they differ, which requires seeing the source.
 
 `macro_rules!` defines one. This project has four, all small.
 
-**A note on `!`, which has three unrelated jobs:** negation (`!x` is "not x"); macro invocation (`println!`); and, in Niles only, the effect row (`-> T ! { append }`).
+**A note on `!`, which has four unrelated jobs:** negation (`!x` is "not x"); macro invocation (`println!`); in Rust, and rarely, the *never* type — `fn abort() -> !` declares a function that does not return, and neither repository uses it; and, in Niles only, the effect row (`-> T ! { append }`).
 
-## 31. `unsafe`, and its absence
+## 32. `unsafe`, and its absence
 
 ```rust
 unsafe impl GlobalAlloc for Counting { ... }
@@ -954,20 +1130,21 @@ Niles reserves the word and rejects it outright. The compiler's own table gives 
 
 These are not keywords of any language. They are names this project invented, and you will meet them on nearly every page of the two repositories. Knowing what twenty of them mean is most of what it takes to read the code.
 
-## 32. Nilestream — the database engine
+## 33. Nilestream — the database engine
 
 ### The write path (`nilestream-ledger`)
 
 | Name | What it is | The metaphor |
 |---|---|---|
-| `Epoch(u64)` | A tick of the system clock: one sealed batch of writes. A counter, not a time. | The page number of the vault book. |
+| `Epoch(u64)` | A tick of the system clock: one sealed batch of writes. A counter, not a time. (The ledger crate wraps it in its own type; the read-path crate spells the same idea `type Epoch = u64`.) | The page number of the vault book. |
 | `Minor = i128` | An amount, as an exact whole number of minor units. | Counting in cents, never in dollars-and-a-fraction. |
 | `Txn` | A transaction: the group of movements the conservation rule is checked over. | One complete entry in the book, which must balance. |
 | `Record` | One row as it is stored. | One line. |
 | `Segment` | A chunk of the ledger on disk. | One physical volume of the book. |
 | `Sequencer` | The component that puts writes in order and seals epochs. | The single desk where the current page is written. |
 | `Frontier` | The newest epoch that is visible to readers. | How far the book has been sealed. |
-| `Hasher256`, `Commitment` | The fingerprint machinery: a 32-byte seal over a page and its predecessor. | The wax seal that makes tampering detectable. |
+| `Hasher256`, `chain_hash` | The fingerprint machinery: a 32-byte SHA-256 seal computed over an epoch's rows, its number, and the previous epoch's seal (`chain_hash(parent, body)`). | The wax seal that makes tampering detectable. |
+| `Commitment` | Not the chain seal, despite the name. A 32-byte `H(salt ‖ value)` kept in the confidentiality sidecar in place of a value, so the chain can commit to a figure it cannot read. | The sealed envelope's fingerprint — what the book records instead of the contents. |
 | `Snapshot`, `Recovery` | Restart machinery: what was saved, and how the engine returns after a crash. | Where the bookmark was when the lights went out. |
 | `SyncPolicy` | How hard the engine insists the disk really wrote it. | Whether you watch the postbox door close. |
 | `TruncationCause` | Why the tail of the log was found incomplete. | The half-written last line after a power cut. |
@@ -1003,19 +1180,19 @@ These are not keywords of any language. They are names this project invented, an
 | `ServeContract` | The `serve { ... }` block as data: `Consistency`, `Materialize`, `Retention`, `Lineage`. |
 | `UpqueryPath`, `Hop`, `Step` | The route backwards from a question to the ledger pages that answer it — Appendix A.10, as a data structure. |
 | `VerifyReport`, `Violation` | What the independent IR checker found. Deliberately a second implementation of rules the compiler already enforces, so that a mistake must be made twice to escape. |
-| `Tok`, `Kw`, `Item`, `Expr`, `Pat`, `Ty` | The compiler's own stages: tokens, keywords, declarations, expressions, patterns, types (§4). |
+| `Tok`, `Kw`, `Item`, `Expr`, `Pat`, `Ty` | The compiler's own stages: tokens, keywords, declarations, expressions, patterns, types (§5). |
 
-## 33. GBS — the core-banking platform
+## 34. GBS — the core-banking platform
 
 GBS is a separate artifact: a complete banking platform — accounts, entries, holds, schedules, foreign exchange, lending, trade finance, securities, liquidity — with no external dependencies at all, and one excluded crate that connects it to Nilestream.
 
 | Name | What it is |
 |---|---|
-| `Account`, `AccountId` | An account, and its identifier as a distinct type (§24). |
+| `Account`, `AccountId` | An account, and its identifier as a distinct type (§25). |
 | `Amount { minor, currency, scale }` | Money as three inseparable parts. |
 | `Entry`, `Side`, `Nature` | One line of double-entry: the movement, which side (debit or credit), and what kind of account it belongs to. |
 | `Chart` | The chart of accounts: the tree every entry must land in. |
-| `PostingSet`, `Sealed` | A set of entries as assembled, and one that has been checked and sealed. The type says which, so an unchecked set cannot be filed by mistake — this is §24's tuple-struct discipline applied to the thing that matters most. |
+| `PostingSet`, `Sealed` | A set of entries as assembled, and one that has been checked and sealed. The type says which, so an unchecked set cannot be filed by mistake — this is §25's tuple-struct discipline applied to the thing that matters most. |
 | `Committed` | Unrelated to `Sealed` despite the name: the narrative of a committed-confidentiality encoding. |
 | `LedgerSink` | The trait that says "somewhere sealed entries can be sent". `MemoryLedger` implements it; so does the Nilestream connector. This is the seam between the two projects. |
 | `AnchorIndex` | GBS's own version of the mandatory ledger index. |
@@ -1028,7 +1205,7 @@ GBS is a separate artifact: a complete banking platform — accounts, entries, h
 
 # Part V — The complete lookup
 
-## 34. Every Niles keyword, A to Z
+## 35. Every Niles keyword, A to Z
 
 All 174 words the compiler knows, in one alphabetical list. The **From** column says where the word comes from: **SQL**, **Rust**, **new** (invented for Niles), or **reserved** (set aside, with no meaning yet — using one is a hard error naming the reason).
 
@@ -1211,7 +1388,7 @@ A note before the table. Being a keyword in Niles mostly does *not* stop you usi
 | `with` | SQL | A named sub-query in the SQL surface. | "Given the following working definition…" |
 | `yield` | reserved | Set aside. | — |
 
-## 35. Every Niles sign
+## 36. Every Niles sign
 
 | Sign | Read it as | What it does | The picture |
 |---|---|---|---|
@@ -1245,14 +1422,13 @@ A note before the table. Being a keyword in Niles mostly does *not* stop you usi
 | `--` | a comment, SQL-style | Accepted **only inside `sql { }`**. | A margin note in the old language. |
 | `r#name` | an escape | Use a reserved word as an ordinary name. | Quotation marks around a word being used as a name. |
 
-## 36. Every Niles literal
+## 37. Every Niles literal
 
 | Written | Is | Note |
 |---|---|---|
-| `42`, `1_000_000`, `0xFF`, `0o77`, `0b1010` | Whole numbers, in base 10, 16, 8 and 2. | `_` is a separator the compiler ignores. |
-| `42i64`, `7u32` | A number with its exact type stated. | |
-| `3.14`, `6.02e23` | Approximate fractional numbers. | **Banned in money positions by type**, not by convention. |
-| `"text"`, `r"raw"`, `r#"raw"#`, `b"bytes"` | Text, text with no escape processing, and raw bytes. | |
+| `42`, `1_000_000` | Whole numbers, in base 10. | `_` between digits is a separator the compiler ignores. |
+| `3.14` | An approximate fractional number. | **Banned in money positions by type**, not by convention. |
+| `"text"`, `b"bytes"` | Text with Rust's escapes, and raw bytes. | |
 | `true`, `false` | Booleans. | |
 | `()` | Unit: no information. | What a function returns when it returns nothing. |
 | `125.00 usd`, `1_000 jpy`, `12.345 kwd` | **Money.** Number and currency as one token. | Fractional digits must match the declared scale exactly. The grade must be exactly three lowercase letters — the limitation of Appendix A.29. |
@@ -1264,9 +1440,11 @@ A note before the table. Being a keyword in Niles mostly does *not* stop you usi
 | `@2026-01-01 ..= @2026-12-31` | A closed valid-time interval. | |
 | `idem("payment-7f3a")` | An idempotency key. | The reference number on the cheque. |
 
-One correction to thesis Appendix B.2, which lists `idem"payment-7f3a"` — the key written as a prefix directly against a string, with no brackets — as a literal form. **The compiler does not have it.** The parser reads `idem` and then requires an argument list, so the form that exists is `idem("payment-7f3a")`, which is what `examples/demo_bank.niles` uses and what §14 and §40 of this guide show. `examples/available_balance.niles` names the adjacent-string spelling explicitly as one of the constructs the language does not have. The appendix is describing an intention; the parser is describing the language.
+**Nine forms that thesis Appendix B.2 lists and the compiler does not have.** This table was checked by feeding each form to `nilesc check` rather than by copying the appendix, and the appendix overclaims. Hexadecimal, octal and binary integers (`0xFF`, `0o77`, `0b1010`), exponent floats (`6.02e23`), typed numeric suffixes (`42i64`, `7u32`) and raw strings (`r"…"`, `r#"…"#`) all fail at the lexer today — each is read as a number or an identifier followed by something unexpected, and rejected with `NL0001`. So does `idem"payment-7f3a"`, the idempotency key written directly against a string: the parser reads `idem` and then requires an argument list, so the form that exists is `idem("payment-7f3a")`, which is what `examples/demo_bank.niles` uses and what §15 and §41 of this guide show. `examples/available_balance.niles` already names that last spelling as one of the constructs the language does not have. In every case the appendix is describing an intention and the lexer is describing the language; this guide lists what lexes.
 
-## 37. Every Niles type
+The money rules, by contrast, are exactly as described and each has its own diagnostic: `2.5 usd` is refused as `NL0240` ("this literal has 1 decimal places but `usd` has scale 2"), and so is `1_000.00 jpy`; `12.345 kwd` and `1_000 jpy` are accepted.
+
+## 38. Every Niles type
 
 **Primitives.** `bool`; `i8` through `i128` and `u8` through `u128` (whole numbers, signed and unsigned, of that many bits); `f32`, `f64` (approximate fractions, never money); `Text`; `Bytes`; `()`.
 
@@ -1293,7 +1471,7 @@ One correction to thesis Appendix B.2, which lists `idem"payment-7f3a"` — the 
 
 ---
 
-## 38. Every Rust keyword, A to Z
+## 39. Every Rust keyword, A to Z
 
 Rust's full reserved vocabulary. The **In use** column says whether the word appears in this project's shipping code — several do not, and the reasons are interesting.
 
@@ -1354,9 +1532,9 @@ Rust's full reserved vocabulary. The **In use** column says whether the word app
 | `yield` | no (reserved) | Reserved. | — |
 | `'static` | yes | A lifetime meaning "for the whole run of the program". | A loan with no due date, because it is never returned. |
 
-## 39. Every Rust sign
+## 40. Every Rust sign
 
-Rust shares most punctuation with Niles (§35). These are the ones that are Rust's alone, or that mean something different here.
+Rust shares most punctuation with Niles (§36). These are the ones that are Rust's alone, or that mean something different here.
 
 | Sign | Read it as | What it does | The picture |
 |---|---|---|---|
@@ -1379,16 +1557,16 @@ Rust shares most punctuation with Niles (§35). These are the ones that are Rust
 | `\|` | "or" in a pattern | Alternatives in a pattern. Also bitwise or. | "Either of these shapes." |
 | `\|x\| ...` | "given x" | A closure. | An instruction slip with a blank. |
 | `::` | path separator | Navigate a module path. | The slashes in a folder path. |
-| `dyn` / `impl` in a type | see §25 | Dynamic versus static dispatch. | Asking at the door versus knowing in advance. |
+| `dyn` / `impl` in a type | see §26 | Dynamic versus static dispatch. | Asking at the door versus knowing in advance. |
 | `Vec<T>`, `&[T]` | list, window | An owned growable list; a borrowed view into part of one. | The whole folder; a few pages held open. |
 
 ---
 
 # Part VI — Reading real files
 
-## 40. A Niles file, line by line
+## 41. A Niles file, line by line
 
-From `examples/demo_bank.niles`. This is the thesis's worked example, and a test keeps it compiling, so it cannot drift away from the language it describes.
+From `examples/demo_bank.niles`. This is the thesis's worked example, and `every_niles_source_in_the_repository_compiles_and_verifies` in `crates/niles-lang/tests/niles_sources.rs` keeps it compiling, so it cannot drift away from the language it describes.
 
 ```niles
 ledger postings {
@@ -1432,7 +1610,7 @@ fn card_authorization(acct: Id<Account>, amount: Money<usd>) -> Result<TxnId, Tx
 
 Three things the type system is enforcing invisibly. `amount` is `Money<usd>`, so no euro amount can be passed. `h` is linear, so a version of this function that forgot the last line would not compile — a hold cannot be left unresolved. And `resolve` consumes it, so a version that resolved it twice would not compile either.
 
-## 41. A Rust file, line by line
+## 42. A Rust file, line by line
 
 Three short excerpts, each from where it actually lives. The first is from `gbs/crates/gbs-kernel/src/ledger.rs`.
 
@@ -1480,9 +1658,9 @@ A note on this project's convention, because it is unusual and it is load-bearin
 
 ---
 
-## 42. Where to go next
+## 43. Where to go next
 
-- **`examples/demo_bank.niles`** — the complete worked Niles program, kept compiling by a test.
+- **`examples/demo_bank.niles`** — the complete worked Niles program, kept compiling by `tests/niles_sources.rs`.
 - **`examples/inventory.niles`** — the same machinery counting warehouse stock rather than money. The falsifier of Appendix A.29.
 - **`docs/keywords.md`** — the normative keyword reference, generated from the compiler's own registry. If this guide and that file ever disagree, that file is right: it cannot drift, because a test compares it to the lexer.
 - **Thesis Appendix A** — the same ideas without any code at all.

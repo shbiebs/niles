@@ -152,6 +152,7 @@ this table.
 | `docs/SPEC-LANGUAGE.md` | The normative Niles specification. Part V's conformance table is generated from the compiler. |
 | `docs/SPEC-ENGINE.md` | The normative engine specification, with a status line per requirement. |
 | `docs/keywords.md` | The keyword reference, generated from the compiler's registry. |
+| `docs/reading-the-code.md` | A plain-language guide to Niles, to Rust and to both engines, for readers who have never read code. Covers every keyword of both languages, every sign, literal, type and engine name, technically and by analogy. Not part of the thesis. |
 | `docs/ROADMAP.md` | What is planned, what was cut, and what was deleted from the workspace. |
 | `docs/REQUIREMENTS.md` | The requirements the two specifications answer to. |
 | `docs/BENCHMARK.md` | How to run the wall-clock harness, with the recipe a test reproduces. |

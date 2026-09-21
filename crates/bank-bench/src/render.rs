@@ -664,6 +664,11 @@ pub fn mixed_table_refusals(samples: &[crate::workloads::MixedSample]) -> usize 
 ///   5,825/s across this project's hosts. A durable ratio without it says nothing.
 /// * **commit** — which code produced the numbers, stamped at build time (see `build.rs`).
 /// * **baseline commit** — what it is being compared *against*, when the caller names one.
+/// The invocation id and the tree's dirtiness, read once per process by
+/// [`Provenance::init`]. See its doc comment for why *once* and why *first*.
+static SESSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+static DIRTY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
 pub struct Provenance {
     host: String,
     instance: String,
@@ -702,13 +707,23 @@ impl Provenance {
             .unwrap_or_else(|| "unknown".into());
         // One id per invocation, from the clock. It does not need to be unique across the
         // world, only to differ between two runs whose tables might be laid side by side.
-        let session = format!(
-            "{:x}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0)
-        );
+        //
+        // **Once per process, not once per call.** `scaling_document` calls `gather` twice —
+        // for the block and for the core caveat — and a document whose header says *both
+        // arms of every ratio below come from this one invocation* while carrying two
+        // different invocation ids, because the two calls straddled a second, is a document
+        // arguing against itself.
+        let session = SESSION
+            .get_or_init(|| {
+                format!(
+                    "{:x}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0)
+                )
+            })
+            .clone();
         Provenance {
             host,
             instance,
@@ -732,7 +747,7 @@ impl Provenance {
             // is not that kind of fact — `dirty` answers *is this hash checkable*, and a
             // tree edited since the build makes it no more checkable than one edited before.
             // Both are read, and either one is enough.
-            dirty: env!("NILES_DIRTY") == "true" || Self::tree_is_dirty(),
+            dirty: env!("NILES_DIRTY") == "true" || *DIRTY.get_or_init(Self::tree_is_dirty),
             baseline,
             cores: Self::granted_cores(),
         }
@@ -745,6 +760,27 @@ impl Provenance {
     /// ignore the flag. A `git` that cannot be run answers `false` — the build-time stamp is
     /// then the only signal, and saying "dirty" because git is absent would be the same
     /// training in the other direction.
+    /// Read the volatile halves of the provenance now, before the process writes anything.
+    ///
+    /// Both are cached for the life of the process, and both must be read *first*. The
+    /// dirtiness check is the reason: this harness's own outputs are tracked files under
+    /// `results/`, so a check run after the first CSV is written reports the run's own
+    /// writes and says "dirty" on every invocation from every tree. A flag that is always
+    /// set carries no information, which is the same failure as one that is never set,
+    /// arrived at from the other side.
+    pub fn init() {
+        SESSION.get_or_init(|| {
+            format!(
+                "{:x}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0)
+            )
+        });
+        DIRTY.get_or_init(Self::tree_is_dirty);
+    }
+
     fn tree_is_dirty() -> bool {
         std::process::Command::new("git")
             .args(["status", "--porcelain", "--untracked-files=no"])
@@ -1486,6 +1522,15 @@ mod provenance_cores_tests {
             return;
         }
         let tree_dirty = !String::from_utf8_lossy(&out.stdout).trim().is_empty();
+        // The cache must not have been warmed by an earlier test in this process with a
+        // different tree state; `init` is idempotent and the direct call below is the
+        // uncached reading.
+        assert_eq!(
+            Provenance::gather(None).session,
+            Provenance::gather(None).session,
+            "two `gather` calls in one process must report one invocation id, or a document \
+             that says both arms came from one invocation can carry two"
+        );
         // The run-time signal itself, asserted against git in both directions. This half is
         // deterministic; the half below only exercises the repair when the build-time stamp
         // happens to be stale, which depends on whether anything has touched `.git/index`

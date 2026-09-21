@@ -366,6 +366,12 @@ impl Args {
 }
 
 fn main() {
+    // **First, before anything is written.** The provenance block's two volatile fields --
+    // the invocation id and whether this tree has uncommitted changes -- are read here and
+    // cached. The dirtiness check is the reason it must be first: this harness writes
+    // tracked files under `results/`, so a check taken after the first CSV lands reports the
+    // run's own output and says "dirty" from every tree there is.
+    render::Provenance::init();
     let args = Args::parse();
     if let Some(dir) = args.check_manifest.clone() {
         std::process::exit(check_manifest(&dir));

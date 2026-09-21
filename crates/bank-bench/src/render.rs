@@ -714,10 +714,45 @@ impl Provenance {
             instance,
             session,
             commit: env!("NILES_COMMIT"),
-            dirty: env!("NILES_DIRTY") == "true",
+            // **Either signal is enough to say the hash does not identify the code.**
+            //
+            // The build-time flag alone was wrong in the most common state there is. A build
+            // script that emits any `cargo:rerun-if-changed` loses cargo's default "re-run
+            // when a file in this package changes", and the two paths this one names are
+            // `.git/HEAD` and `.git/index` — neither of which moves when a tracked file is
+            // *edited and not staged*. So the stamp kept whatever value it had at the last
+            // rebuild, and the last rebuild is usually the clean one. Every E19 and E16
+            // document produced from an edited tree therefore printed a hash with no
+            // warning beside it, which is the one failure the header exists to prevent and
+            // the one direction in which it is invisible.
+            //
+            // The commit stays a build-time fact, for the reason `build.rs` gives: the
+            // running process's HEAD is whatever the tree is checked out at, which a
+            // benchmark built before a checkout would stamp itself with wrongly. Dirtiness
+            // is not that kind of fact — `dirty` answers *is this hash checkable*, and a
+            // tree edited since the build makes it no more checkable than one edited before.
+            // Both are read, and either one is enough.
+            dirty: env!("NILES_DIRTY") == "true" || Self::tree_is_dirty(),
             baseline,
             cores: Self::granted_cores(),
         }
+    }
+
+    /// Whether the working tree has an uncommitted change to a tracked file, now.
+    ///
+    /// Untracked files are excluded for the reason `build.rs` gives: these working copies
+    /// carry several by design, and marking every run unidentifiable would train a reader to
+    /// ignore the flag. A `git` that cannot be run answers `false` — the build-time stamp is
+    /// then the only signal, and saying "dirty" because git is absent would be the same
+    /// training in the other direction.
+    fn tree_is_dirty() -> bool {
+        std::process::Command::new("git")
+            .args(["status", "--porcelain", "--untracked-files=no"])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .is_some_and(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
     }
 
     /// The cgroup's quota if there is one, else what the runtime says is available.
@@ -749,12 +784,20 @@ impl Provenance {
             "> **This host grants {n} core{s}.** These rows say whether throughput rises with \
              connections *on {n} core{s}*. They say nothing about a machine with more, and a \
              reader who extrapolates them to a server-class host is reading a number this \
-             experiment did not measure: the saturation point of an {n}-core host is a \
+             experiment did not measure: the saturation point of {a} {n}-core host is a \
              property of the host. Measured from the cgroup quota at run time, not typed into \
              this sentence — it read \"2 cores\" on a ten-core reference host for two \
              cycles.\n\n",
             n = self.cores,
-            s = if self.cores == 1 { "" } else { "s" }
+            s = if self.cores == 1 { "" } else { "s" },
+            // `an 2-core host` — the article was a literal in a sentence whose noun is a
+            // measured number. English chooses it from the *spoken* leading sound: 8 and 11
+            // take `an`, every other leading digit takes `a`.
+            a = if matches!(self.cores, 8 | 11 | 18 | 80..=89) {
+                "an"
+            } else {
+                "a"
+            }
         )
     }
 
@@ -1417,6 +1460,81 @@ mod provenance_cores_tests {
     /// container the sentence was written in, false of the ten-core reference host it was
     /// then published from, in the one paragraph whose job is to stop a reader extrapolating
     /// from the wrong machine.
+    /// The article agrees with the number, which a literal `an` could not.
+    ///
+    /// The sentence read `the saturation point of an {n}-core host` with `an` hard-coded, so
+    /// every E19 document this repository has published since the sentence was written says
+    /// "an 2-core host". English picks the article from the number's *spoken* leading sound,
+    /// which is why 8, 11, 18 and the eighties take `an` and everything else takes `a`.
+    /// **A dirty tree is reported however it got dirty.**
+    ///
+    /// The flag was stamped only at build time, by a script whose `rerun-if-changed` paths
+    /// are `.git/HEAD` and `.git/index`. Editing a tracked file without staging it moves
+    /// neither, so the script did not re-run and the stamp stayed at its last value —
+    /// usually `false`. This test runs in exactly that state whenever anyone is working, and
+    /// it is the state in which the old code was silent.
+    #[test]
+    fn an_uncommitted_change_to_a_tracked_file_is_reported() {
+        let out = std::process::Command::new("git")
+            .args(["status", "--porcelain", "--untracked-files=no"])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output();
+        let Ok(out) = out else {
+            return; // no git here; the build-time stamp is the only signal and this says nothing
+        };
+        if !out.status.success() {
+            return;
+        }
+        let tree_dirty = !String::from_utf8_lossy(&out.stdout).trim().is_empty();
+        // The run-time signal itself, asserted against git in both directions. This half is
+        // deterministic; the half below only exercises the repair when the build-time stamp
+        // happens to be stale, which depends on whether anything has touched `.git/index`
+        // since the last rebuild — and that unpredictability is the defect, not the test's.
+        assert_eq!(
+            Provenance::tree_is_dirty(),
+            tree_dirty,
+            "the run-time dirtiness check disagrees with `git status --porcelain \
+             --untracked-files=no` in this tree"
+        );
+        let p = Provenance::gather(None);
+        if tree_dirty {
+            assert!(
+                p.dirty,
+                "the working tree has an uncommitted change to a tracked file and the \
+                 provenance block would print a hash with no warning beside it"
+            );
+            assert!(
+                p.render(None)
+                    .contains("does not identify the code that ran"),
+                "the rendered block must carry the warning, not merely hold the flag"
+            );
+        }
+    }
+
+    #[test]
+    fn the_article_agrees_with_the_measured_core_count() {
+        for (n, want) in [
+            (1usize, "a 1-core"),
+            (2, "a 2-core"),
+            (4, "a 4-core"),
+            (8, "an 8-core"),
+            (10, "a 10-core"),
+            (11, "an 11-core"),
+            (16, "a 16-core"),
+            (18, "an 18-core"),
+            (48, "a 48-core"),
+            (80, "an 80-core"),
+        ] {
+            let mut p = Provenance::gather(None);
+            p.cores = n;
+            let s = p.cores_caveat();
+            assert!(
+                s.contains(&format!("point of {want} host")),
+                "with {n} cores the sentence should read `{want} host`:\n{s}"
+            );
+        }
+    }
+
     #[test]
     fn the_cores_caveat_is_measured_rather_than_typed() {
         let p = Provenance::gather(None);

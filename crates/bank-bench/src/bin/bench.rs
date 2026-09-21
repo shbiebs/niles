@@ -3134,7 +3134,16 @@ fn scaling_document(
          until this table existed nothing in the repository could have said whether either \
          target does.\n\n",
     );
+    // **The header this document did not have.** E19 carried no commit, host, toolchain or
+    // date for six cycles, which is what let its rows go on being read as current for a year
+    // of project time after the engine's lock changed underneath them. The block also
+    // carries the cross-instance warning, which matters more here than anywhere: this
+    // document's whole content is ratios.
+    s.push_str(&render::Provenance::gather(None).render(None));
     s.push_str(&render::Provenance::gather(None).cores_caveat());
+    s.push_str(
+        "> **The rows this table replaced are kept, not deleted.** `results/E19-scaling-historical.md` holds the cycle-7 rows, the lock they were measured under, and what may and may not be concluded by comparing the two sets. A measurement that is thrown away when a newer one arrives takes with it the fact worth knowing — that a published curve described an engine the repository no longer had.\n\n",
+    );
     s.push_str(&render::scaling_table(samples));
     s.push_str("\n### The top step\n\n");
     s.push_str(&render::scaling_verdicts(samples));

@@ -1,3 +1,5 @@
+# provenance: cargo run --release -p experiments -- e10
+# configuration: accounts=2000 skew=0.9 checkpoint_intervals=[0, 256, 64, 16] probe_anchor=head seeds=[1, 7, 42, 100, 2024]
 n_writes,checkpoint_interval,seed,rows_per_read
 5000,0,1,120.87
 5000,0,7,135.86

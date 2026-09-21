@@ -1,3 +1,5 @@
+# provenance: cargo run --release -p experiments -- e6
+# configuration: skew=0.9 budget_frac=0.05 mode=demand checkpoint_interval=0 policies=[random, lru, cost_aware] seeds=[1, 7, 42, 100, 2024]
 policy,service_time,seed,misses,rows_touched,aggregate_delay
 random,0,1,21208,87012,0.0
 random,0,7,21242,88955,0.0

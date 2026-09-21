@@ -371,18 +371,24 @@ the refuted figures.
 
 The only wall-clock measurement in this chapter. **In-memory, single-threaded, no durability, no consensus.** It measures what the commit rule and the hash chain cost, and nothing else. It is not a throughput claim and cannot be compared with any published database figure, all of which include durability.
 
+<!-- BEGIN:E7-medians results/e7_write_path.csv#e7medians -->
+
+*Generated from `results/e7_write_path.csv`. Do not edit by hand.*
+
 | Configuration | Hot-account share | Postings/sec (median) |
 |---|---|---|
-| chained | 0.0 | 1,526,384 |
-| chained | 0.5 | 1,739,657 |
-| chained | 0.9 | 1,686,866 |
-| unchained | 0.0 | 2,243,577 |
-| unchained | 0.5 | 2,107,468 |
-| unchained | 0.9 | 2,222,726 |
+| chained | 0.0 | 1,124,592 |
+| chained | 0.5 | 1,149,794 |
+| chained | 0.9 | 1,161,794 |
+| no-chain | 0.0 | 3,354,389 |
+| no-chain | 0.5 | 3,533,334 |
+| no-chain | 0.9 | 3,717,167 |
 
-*Table 9.10 — Mechanism cost only. Hash chaining costs roughly 30% of admission throughput on this platform.*
+*Table 9.10 — Mechanism cost only. Hash chaining costs 66-69% of admission throughput on this platform, across the three hot-account shares.*
 
-Two readings. The useful one: **hash chaining costs about 30%** of the in-memory admission path — a real number for a real mechanism, and one an implementer can weigh. The important one: **hot-account share has no effect, and that is a limitation of the instrument, not a finding about the design.** Contention is a concurrency phenomenon and this prototype is single-threaded, so the flat column measures the absence of an experiment rather than the absence of a problem. The contention question is genuinely open here and is answered in the literature rather than by this prototype: two independent production write-ups report that the shared settlement account is a structural hot key in double-entry systems, one reporting a per-account ceiling of 3–4 update operations per second raised to about 30 by 250 ms batching windows, the other routing hot-account entries to an asynchronous path with a 60-second bound rather than sharding the account. Those are the numbers a reader should weigh; §9.9 states the concurrency experiment that would let this thesis contribute its own.
+<!-- END:E7-medians -->
+
+Two readings, and a correction to both. The table above is now generated from `results/e7_write_path.csv`, including the figure in its caption, because until cycle 13 it was typed: the medians printed here (1,526,384 and 2,243,577) appear in no committed CSV, and the "roughly 30%" they imply is not what the committed data says. The committed medians put the cost of the chain at **66–69%** across the three hot-account shares. The useful reading is therefore that **hash chaining costs about two-thirds** of the in-memory admission path — a real number for a real mechanism, and one an implementer can weigh, now larger than the thesis claimed for eleven cycles. The important one: **hot-account share has no effect, and that is a limitation of the instrument, not a finding about the design.** Contention is a concurrency phenomenon and this prototype is single-threaded, so the flat column measures the absence of an experiment rather than the absence of a problem. The contention question is genuinely open here and is answered in the literature rather than by this prototype: two independent production write-ups report that the shared settlement account is a structural hot key in double-entry systems, one reporting a per-account ceiling of 3–4 update operations per second raised to about 30 by 250 ms batching windows, the other routing hot-account entries to an asynchronous path with a 60-second bound rather than sharding the account. Those are the numbers a reader should weigh; §9.9 states the concurrency experiment that would let this thesis contribute its own.
 
 ## 9.5 Evaluation Design for the Unmeasured Parts
 
@@ -534,17 +540,23 @@ The hand-written harness measured 6.8 → 8.3 → 8.0 → 8.5 for *C* = 16. The 
 
 ### 9.13.2 The phase diagram through the compiler (E12)
 
-20,000 epochs, 20,000 reads, 20,000 accounts, Zipf *s* = 1.1. Budget swept against the price of memory; cost is `resident_entry_epochs × price + deltas_applied + base_rows_read`, in counted-work units.
+20,000 epochs, 40,000 reads, 20,000 accounts, Zipf *s* = 1.1, per-key checkpoint interval *C* = 64. (This said "20,000 reads" until cycle 13. The command in `results/MANIFEST.csv` takes `Config::default()`, which is 40,000 — and the checkpoint interval, which decides whether the cost law of §9.4.1 applies at all, was stated nowhere. The sweep now writes both into the file's own configuration header, so neither can be asserted by a document again.) Budget swept against the price of memory; cost is `resident_entry_epochs × price + deltas_applied + base_rows_read`, in counted-work units.
+
+<!-- BEGIN:E12-phase results/e12_phase_compiled.csv#e12phase -->
+
+*Generated from `results/e12_phase_compiled.csv`. Do not edit by hand.*
 
 | Budget | 0.0001 | 0.0005 | 0.002 | 0.01 | 0.05 |
 |---:|---:|---:|---:|---:|---:|
-| 250 | 75,541 | 77,517 | 84,926 | **124,443** | **322,027** |
-| 500 | 51,746 | 55,636 | **70,223** | 148,021 | 537,007 |
-| 1,000 | 40,818 | **48,308** | 76,399 | 226,214 | 975,292 |
-| 2,000 | **38,619** | 52,145 | 102,871 | 373,406 | 1,726,084 |
-| 4,000 | 39,435 | 58,648 | 130,698 | 514,960 | 2,436,271 |
-| 8,000 | 39,439 | 58,663 | 130,752 | 515,226 | 2,437,599 |
-| full | 39,439 | 58,663 | 130,752 | 515,226 | 2,437,599 |
+| 250 | 75,196 | 77,172 | 84,581 | **124,098** | **321,682** |
+| 500 | 51,398 | 55,288 | **69,875** | 147,673 | 536,659 |
+| 1,000 | 40,470 | **47,960** | 76,051 | 225,866 | 974,944 |
+| 2,000 | **38,271** | 51,797 | 102,523 | 373,058 | 1,725,736 |
+| 4,000 | 39,087 | 58,300 | 130,350 | 514,612 | 2,435,923 |
+| 8,000 | 39,091 | 58,315 | 130,404 | 514,878 | 2,437,251 |
+| full | 39,091 | 58,315 | 130,404 | 514,878 | 2,437,251 |
+
+<!-- END:E12-phase -->
 
 Three things are visible, and the third is the one that matters.
 

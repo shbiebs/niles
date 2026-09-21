@@ -1,3 +1,5 @@
+# provenance: cargo run --release -p experiments -- e1
+# configuration: accounts=40 transfers=10000 budget=8 mode=demand policy=lru checkpoint_interval=0 anchors=whole-history oracle=conservation-suite seeds=[1, 7, 42, 100, 2024]
 seed,transfers,upqueries,evictions,view_oracle_divergences,conservation_ok,chain_ok,rebuild_mismatches,miss_not_zero_ok,idempotent_rejects,hit_path_comparisons,miss_path_comparisons,historical_anchor_reads
 1,10000,3018,2712,0,true,true,0,true,103,357,2977,3332
 7,10000,3023,2698,0,true,true,0,true,103,352,2982,3333

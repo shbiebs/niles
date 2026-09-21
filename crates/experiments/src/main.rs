@@ -36,6 +36,26 @@ fn out(path: &str, contents: &str) {
     fs::write(format!("results/{path}"), contents).expect("write results");
 }
 
+/// **What produced a results file, and under what configuration, written into the file.**
+///
+/// Every counted-work file here is a pure function of this code and the parameters below, so
+/// its provenance *is* its configuration: any host with the pinned toolchain reproduces the
+/// bytes, which is what `byte-deterministic` in `results/MANIFEST.csv` claims and what `make
+/// reproduce` diffs. That is also why the host, the moment and the commit are **not** here —
+/// a date in `e4_phase.csv` fails the gate on the second day and a hostname fails it on the
+/// second machine, and the file would stop being the thing its class says it is. Machine-
+/// dependent artefacts carry the full block instead; `bank_bench::render::Provenance` is it.
+///
+/// The configuration is formatted from the bindings the run actually uses, never transcribed
+/// beside them. A transcribed configuration is a second copy of a fact, and this cycle exists
+/// largely because of what happens to second copies: a thesis table typed beside a CSV, a
+/// recipe typed beside a results header, a roadmap row typed beside the code.
+fn provenance(tool: &str, config: &str) -> String {
+    format!(
+        "# provenance: cargo run --release -p experiments -- {tool}\n# configuration: {config}\n"
+    )
+}
+
 fn median(mut v: Vec<f64>) -> f64 {
     v.sort_by(|a, b| a.partial_cmp(b).unwrap());
     if v.is_empty() {
@@ -572,7 +592,13 @@ fn run_workload(
 // ---------------------------------------------------------------------------------------
 
 fn e3_memory_vs_skew(seeds: &[u64]) -> String {
-    let mut csv = String::from(
+    let mut csv = provenance(
+        "e3",
+        &format!(
+            "accounts=20000 ops=60000 budget=2000 read_share=0.9 mode=demand policy=lru checkpoint_interval=0 skews=[0.5, 0.7, 0.9, 1.0, 1.1, 1.3] seeds={seeds:?}"
+        ),
+    );
+    csv.push_str(
         "zipf_s,seed,partial_peak_resident,full_peak_resident,resident_ratio,partial_hit_rate,upqueries\n",
     );
     let mut summary = String::new();
@@ -639,13 +665,23 @@ fn e3_memory_vs_skew(seeds: &[u64]) -> String {
 // ---------------------------------------------------------------------------------------
 
 fn e4_phase_diagram(seeds: &[u64]) -> String {
-    let mut csv = String::from(
-        "zipf_s,budget_frac,seed,resident_entry_epochs_partial,resident_entry_epochs_full,rows_touched_partial,rows_touched_full,deltas_partial,deltas_full,hit_rate,z\n",
-    );
     let n_accounts = 10_000;
     let n_ops = 30_000;
     let s_values = [0.5f64, 0.7, 0.9, 1.1, 1.3];
     let budgets = [0.01f64, 0.02, 0.05, 0.10, 0.25, 0.50];
+    // `Ledger::new()` is `checkpoint_interval = 0`, and saying so here is not bookkeeping:
+    // section 9.4.1 states the cost law does not hold in that configuration, and no artefact
+    // recorded which configuration it was measured in.
+    let mut csv = provenance(
+        "e4",
+        &format!(
+            "accounts={n_accounts} ops={n_ops} read_share=0.9 mode=demand policy=lru \
+             checkpoint_interval=0 skews={s_values:?} budget_fracs={budgets:?} seeds={seeds:?}"
+        ),
+    );
+    csv.push_str(
+        "zipf_s,budget_frac,seed,resident_entry_epochs_partial,resident_entry_epochs_full,rows_touched_partial,rows_touched_full,deltas_partial,deltas_full,hit_rate,z\n",
+    );
 
     // Collect once; price under several memory prices afterwards. The comparison is
     // therefore over identical executions, so any change in the boundary is attributable to
@@ -780,8 +816,10 @@ fn e4_phase_diagram(seeds: &[u64]) -> String {
 // ---------------------------------------------------------------------------------------
 
 fn e5_history_independence(seeds: &[u64]) -> String {
-    let mut csv =
-        String::from("n_epochs,seed,indexed_rows_per_read,scan_rows_per_read,key_updates_mean\n");
+    let mut csv = provenance(
+        "e5",
+        &format!("accounts=2000 skew=0.9 checkpoint_interval=0 seeds={seeds:?}"),
+    ) + "n_epochs,seed,indexed_rows_per_read,scan_rows_per_read,key_updates_mean\n";
     println!("\n  History-independence: base rows read per reconstruction, workload shape fixed");
     println!("     ledger epochs   indexed (median)   unindexed scan (median)");
 
@@ -853,7 +891,12 @@ fn e5_history_independence(seeds: &[u64]) -> String {
 // ---------------------------------------------------------------------------------------
 
 fn e6_eviction_policies(seeds: &[u64]) -> String {
-    let mut csv = String::from("policy,service_time,seed,misses,rows_touched,aggregate_delay\n");
+    let mut csv = provenance(
+        "e6",
+        &format!(
+            "skew=0.9 budget_frac=0.05 mode=demand checkpoint_interval=0 policies=[random, lru, cost_aware] seeds={seeds:?}"
+        ),
+    ) + "policy,service_time,seed,misses,rows_touched,aggregate_delay\n";
     println!("\n  Eviction policy comparison (skew s=0.9, budget=5% of key space)");
     println!("     service_time  policy        misses(median)  rows_touched(median)  aggregate_delay(median)");
     let cm = CostModel::default();
@@ -913,7 +956,15 @@ fn e6_eviction_policies(seeds: &[u64]) -> String {
 
 fn e7_write_path(seeds: &[u64]) -> String {
     use std::time::Instant;
-    let mut csv = String::from("config,hot_share,seed,postings_per_sec,elapsed_ms\n");
+    // **Wall-clock, and the only file in this harness that is.** `MANIFEST.csv` classed it
+    // `byte-deterministic` for eleven cycles; it times with `Instant`, so its numbers are a
+    // property of the machine. The header says so where a reader of the file will see it.
+    let mut csv = provenance(
+        "e7",
+        &format!(
+            "WALL-CLOCK, machine-dependent; writes=60000 accounts=10000 hot_shares=[0.0, 0.5, 0.9] configs=[chained, no-chain] seeds={seeds:?}"
+        ),
+    ) + "config,hot_share,seed,postings_per_sec,elapsed_ms\n";
     println!("\n  Write path (in-memory, single-threaded, NO durability — mechanism cost only)");
     println!("     config          hot_share   postings/sec (median)");
 
@@ -979,7 +1030,11 @@ fn e7_write_path(seeds: &[u64]) -> String {
 /// the run that produced it. `thesis/include-results.py --check` fails if the two drift.
 fn render_medians(csv: &str, group: usize, cols: &[(usize, &str)]) -> String {
     use std::collections::BTreeMap;
-    let mut lines = csv.lines();
+    // **A provenance comment is not a row.** The configuration header added in cycle 13 sits
+    // above the column names; a reader that took `lines().next()` as the header and every
+    // other line as data indexed a one-field comment by column and panicked. Every reader of
+    // these files skips `#` first, which is the convention `MANIFEST.csv` already used.
+    let mut lines = csv.lines().filter(|l| !l.starts_with('#'));
     let _header = lines.next();
     let mut by: BTreeMap<String, Vec<Vec<f64>>> = BTreeMap::new();
     let mut order: Vec<String> = Vec::new();
@@ -1027,7 +1082,13 @@ fn render_medians(csv: &str, group: usize, cols: &[(usize, &str)]) -> String {
 }
 
 fn e8_consistency_rungs(seeds: &[u64]) -> String {
-    let mut csv = String::from(
+    let mut csv = provenance(
+        "e8",
+        &format!(
+            "accounts=10000 ops=40000 budget=500 skew=0.9 policy=lru mode=demand checkpoint_interval=0 seeds={seeds:?}"
+        ),
+    );
+    csv.push_str(
         "rung,staleness_epochs,seed,misses,rows_touched,deltas_applied,apply_calls,hit_rate,divergences\n",
     );
     println!("\n  Cost per consistency rung (skew s=0.9, budget=5%, identical workload)");
@@ -1137,7 +1198,10 @@ fn e8_consistency_rungs(seeds: &[u64]) -> String {
 // ---------------------------------------------------------------------------------------
 
 fn e9_history_refined(seeds: &[u64]) -> String {
-    let mut csv = String::from("n_writes,n_accounts,seed,rows_per_read,key_updates_mean,epochs\n");
+    let mut csv = provenance(
+        "e9",
+        &format!("skew=0.9 checkpoint_interval=0 seeds={seeds:?}"),
+    ) + "n_writes,n_accounts,seed,rows_per_read,key_updates_mean,epochs\n";
     println!("\n  Refined test: key space grows with history, so per-key updates stay fixed");
     println!(
         "     writes    accounts   rows read/reconstruction (median)   per-key updates (median)"
@@ -1206,7 +1270,12 @@ fn e9_history_refined(seeds: &[u64]) -> String {
 // ---------------------------------------------------------------------------------------
 
 fn e10_checkpoints(seeds: &[u64]) -> String {
-    let mut csv = String::from("n_writes,checkpoint_interval,seed,rows_per_read\n");
+    // The one experiment here that varies the checkpoint interval rather than inheriting
+    // `Ledger::new()`'s zero — which is why SC7 has an instrument and E8 does not.
+    let mut csv = provenance(
+        "e10",
+        &format!("accounts=2000 skew=0.9 checkpoint_intervals=[0, 256, 64, 16] probe_anchor=head seeds={seeds:?}"),
+    ) + "n_writes,checkpoint_interval,seed,rows_per_read\n";
     println!("\n  Reconstruction cost with per-key checkpoints (skew s=0.9, 2000 accounts)");
     print!("     writes  ");
     let intervals = [0usize, 256, 64, 16];
@@ -1378,7 +1447,15 @@ fn main() {
                 "FAILURE PRESENT"
             }
         );
-        out("e1_correctness.csv", &e1csv);
+        out(
+            "e1_correctness.csv",
+            &(provenance(
+                "e1",
+                &format!(
+                    "accounts=40 transfers=10000 budget=8 mode=demand policy=lru checkpoint_interval=0 anchors=whole-history oracle=conservation-suite seeds={seeds:?}"
+                ),
+            ) + &e1csv),
+        );
     }
 
     if want("e2") {
@@ -1398,8 +1475,14 @@ fn main() {
         out(
             "e2_duality.csv",
             &format!(
-                "epochs_compared,mismatches,control_epochs,control_mismatches\n\
-                 {checked},{mismatch},{control_checked},{control_mismatch}\n"
+                "{}epochs_compared,mismatches,control_epochs,control_mismatches\n\
+                 {checked},{mismatch},{control_checked},{control_mismatch}\n",
+                provenance(
+                    "e2",
+                    &format!(
+                        "accounts=50 epochs=200 mode=full budget=unbounded policy=lru control=one-epoch-withheld seeds={seeds:?}"
+                    )
+                )
             ),
         );
     }
@@ -1549,7 +1632,13 @@ fn main() {
                 views + funcs + rels + curs
             );
         }
-        out("E26-compile-cost.csv", &csv);
+        out(
+            "E26-compile-cost.csv",
+            &(provenance(
+                "e26",
+                "corpus=examples/*.niles + bootstrap/*.niles; counted work only, no wall clock",
+            ) + &csv),
+        );
         let table = csv
             .lines()
             .enumerate()

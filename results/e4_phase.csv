@@ -1,3 +1,5 @@
+# provenance: cargo run --release -p experiments -- e4
+# configuration: accounts=10000 ops=30000 read_share=0.9 mode=demand policy=lru checkpoint_interval=0 skews=[0.5, 0.7, 0.9, 1.1, 1.3] budget_fracs=[0.01, 0.02, 0.05, 0.1, 0.25, 0.5] seeds=[1, 7, 42, 100, 2024]
 zipf_s,budget_frac,seed,resident_entry_epochs_partial,resident_entry_epochs_full,rows_touched_partial,rows_touched_full,deltas_partial,deltas_full,hit_rate,z
 0.5,0.01,1,298442,17547267,43504,10082,145,4040,0.0241,307.4367
 0.5,0.01,7,304324,18224691,44032,9993,150,4177,0.0232,300.5170

@@ -1,3 +1,5 @@
+# provenance: cargo run --release -p experiments -- e5
+# configuration: accounts=2000 skew=0.9 checkpoint_interval=0 seeds=[1, 7, 42, 100, 2024]
 n_epochs,seed,indexed_rows_per_read,scan_rows_per_read,key_updates_mean
 5004,1,120.87,14000.00,120.87
 5004,7,135.86,14000.00,135.86

@@ -35,7 +35,20 @@ fn main() {
     println!("[E18] Memory, counted (allocations are exact; no wall clock appears here)");
     let rows = memprobe::scenarios::all();
 
-    let mut csv = String::from(CSV_HEADER);
+    // Toolchain-scoped: the byte columns are a property of the compiler and the platform, so
+    // this file names both. `E18-counts.csv` beside it is byte-deterministic and names
+    // neither, for the reason its own header gives.
+    let host_for_header = format!(
+        "{} {} / {}",
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        env!("MEMPROBE_RUSTC")
+    );
+    let mut csv = format!(
+        "# provenance: cargo run -q --release --manifest-path tools/memprobe/Cargo.toml\n\
+         # configuration: byte totals are host- and toolchain-shaped; measured on {host_for_header}\n"
+    );
+    csv.push_str(CSV_HEADER);
     csv.push('\n');
     for r in &rows {
         writeln!(csv, "{}", r.to_csv()).ok();
@@ -134,9 +147,19 @@ fn main() {
         "{} {} / {}",
         std::env::consts::OS,
         std::env::consts::ARCH,
-        option_env!("CARGO_PKG_RUST_VERSION").unwrap_or("rustc version not recorded")
+        env!("MEMPROBE_RUSTC")
     );
-    let mut counts = String::from("scenario,unit,operations,allocations,allocations_per_op\n");
+    // The configuration header every counted-work results file carries (cycle 13, E-3).
+    // `E18-counts.csv` is byte-deterministic, so it gets the configuration and not the host:
+    // a hostname in it would fail `make reproduce`'s diff on the second machine, which is the
+    // property the file exists to have. `E18-memory.{csv,md}` are toolchain-scoped and name
+    // the host and the compiler, because their byte columns are a property of both.
+    let scenarios: Vec<&str> = rows.iter().map(|r| r.scenario).collect();
+    let mut counts = format!(
+        "# provenance: cargo run -q --release --manifest-path tools/memprobe/Cargo.toml\n\
+         # configuration: allocation counts only, machine-independent; scenarios={scenarios:?}\n\
+         scenario,unit,operations,allocations,allocations_per_op\n"
+    );
     for r in &rows {
         counts.push_str(&format!(
             "{},{},{},{},{:.1}\n",

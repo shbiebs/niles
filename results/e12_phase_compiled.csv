@@ -1,3 +1,5 @@
+# provenance: cargo run --release -p nilestream -- sweep examples/demo_bank.niles ledger_balance
+# configuration: epochs=20000 reads=40000 accounts=20000 skew=1.1 seed=1 budgets=[250, 500, 1000, 2000, 4000, 8000, full] memory_prices=[0.0001, 0.0005, 0.002, 0.01, 0.05] checkpoint=64
 budget,memory_price,resident_entry_epochs,deltas_applied,base_rows_read,cost,hit_ratio,z
 250,0.0001,4939596,23418,51284,75195.960,0.5946,5.4019
 250,0.0005,4939596,23418,51284,77171.798,0.5946,5.4019

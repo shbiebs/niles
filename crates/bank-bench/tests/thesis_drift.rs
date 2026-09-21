@@ -342,15 +342,40 @@ fn appendix_b_keywords_match_registry() {
     );
 }
 
+/// Every fenced `sh` block in a document, joined.
+///
+/// **The recipe is the command, not the paragraph around it.** This guard used to search the
+/// whole of `BENCHMARK.md` for `--operations 2000`, which is why it passed while the recipe
+/// said 500: the figure it was looking for sat in a *sentence describing a previous instance
+/// of this same bug*. Prose that talks about a flag is not a flag, and a check that cannot
+/// tell them apart is satisfied by the discussion of its own failure.
+fn shell_blocks(doc: &str) -> String {
+    let mut out = String::new();
+    let mut inside = false;
+    for line in doc.lines() {
+        if line.trim_start().starts_with("```") {
+            inside =
+                line.trim_start().starts_with("```sh") || line.trim_start().starts_with("```bash");
+            continue;
+        }
+        if inside {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
 /// `BENCHMARK.md`'s one command is the command that produced the committed numbers.
 ///
 /// A reproduction recipe whose parameters differ from the run it documents reproduces
-/// something else. This one said `--operations 2000 --runs 10` beside a results file produced
-/// with 500 and 5.
+/// something else. It has been wrong twice: first `--operations 2000 --runs 10` beside a table
+/// measured at 500 and 5, then 500 and 5 beside a table measured at 2,000 and 10.
 #[test]
 fn the_benchmark_recipe_reproduces_the_committed_numbers() {
     let root = repo_root();
-    let doc = std::fs::read_to_string(root.join("docs/BENCHMARK.md")).expect("readable");
+    let doc =
+        shell_blocks(&std::fs::read_to_string(root.join("docs/BENCHMARK.md")).expect("readable"));
     let results = std::fs::read_to_string(root.join("results/E16-wallclock.md")).expect("readable");
 
     let field = |text: &str, prefix: &str| -> String {
@@ -398,6 +423,48 @@ fn the_benchmark_recipe_reproduces_the_committed_numbers() {
          rounds x 2 legs is {expected}. The header is what a reader checks the comparison \
          against; if it is not arithmetic, it is decoration."
     );
+}
+
+/// **The guard above reads the recipe, not the paragraph about the recipe.**
+///
+/// This is the regression for how the recipe stayed wrong through a cycle with a test
+/// watching it. The test searched the whole document for the flag it wanted; the document
+/// contained a sentence *explaining an earlier version of this same error*, that sentence
+/// quoted the flag, and the search found it there. The recipe itself said something else.
+///
+/// So the case here is a document whose fenced command is wrong and whose prose is right —
+/// the exact shape that passed — and the requirement is that the extractor sees only the
+/// command. A document cannot talk its way past this.
+#[test]
+fn the_guard_reads_the_recipe_and_not_the_prose_about_it() {
+    let doc = "\
+Prose first, quoting a flag while explaining a past mistake:
+this line said `--operations 2000 --runs 10` and the table came from 500.
+
+```sh
+cargo run -p bank-bench --bin bench -- --accounts 10000 --operations 500 --runs 5
+```
+
+And prose after, mentioning `--runs 10` again for good measure.
+";
+    let block = shell_blocks(doc);
+    assert!(
+        block.contains("--operations 500"),
+        "the extractor lost the command it is supposed to read: {block:?}"
+    );
+    assert!(
+        !block.contains("--operations 2000"),
+        "the extractor picked up a flag from the prose. That is precisely the defect: the \
+         committed recipe was wrong for a cycle and this guard passed because a sentence \
+         about the previous instance of the bug contained the figure being searched for."
+    );
+    assert!(
+        !block.contains("--runs 10"),
+        "prose after the block leaked into the extracted command: {block:?}"
+    );
+
+    // A document with no fenced command extracts to nothing, rather than to the whole text.
+    assert_eq!(shell_blocks("no code here, only `--operations 2000`"), "");
 }
 
 // ===================== the theorems say what their proofs prove =====================

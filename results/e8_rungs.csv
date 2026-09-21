@@ -1,3 +1,5 @@
+# provenance: cargo run --release -p experiments -- e8
+# configuration: accounts=10000 ops=40000 budget=500 skew=0.9 policy=lru mode=demand checkpoint_interval=0 seeds=[1, 7, 42, 100, 2024]
 rung,staleness_epochs,seed,misses,rows_touched,deltas_applied,apply_calls,hit_rate,divergences
 bounded(k=64),64,1,26829,107940,2146,61,0.2544,0
 bounded(k=64),64,7,26376,94887,2354,61,0.2671,0

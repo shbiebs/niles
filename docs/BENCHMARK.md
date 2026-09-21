@@ -26,7 +26,7 @@ pg_ctlcluster 16 main start            # or: initdb -D … && pg_ctl -D … star
 cargo run --release -p bank-bench --bin bench -- \
       --calibrate --run --render --publish \
       --pg-port 5432 --host-nls \
-      --accounts 10000 --operations 500 --runs 5 --rounds 1
+      --accounts 10000 --operations 2000 --runs 10 --rounds 1
 ```
 
 **`--publish` is what overwrites the committed `results/E16-wallclock.md`.** Without it a run
@@ -39,9 +39,16 @@ that run happened to use. `publish::destinations` holds the rule and
 **Those are the parameters the committed results were produced with**, and they are read back
 out of `results/E16-wallclock.md`'s own "How it was run" section by
 `the_benchmark_recipe_reproduces_the_committed_numbers` in `crates/bank-bench/tests/thesis_drift.rs`.
-This line said `--operations 2000 --runs 10` while the committed table came from 500 and 5, so
-the one command a reader would type was not the command that produced the numbers underneath
-it — which is the whole of what a reproduction recipe is for.
+
+This recipe has now been wrong twice, in opposite directions, and the second time the guard
+against it was the reason it survived. The first time the line said `--operations 2000 --runs
+10` beside a table measured at 500 and 5. Correcting *that* wrote 500 and 5 into the recipe
+while the committed table moved to 2,000 and 10 — so the recipe was wrong again, the other way
+round, and the test passed anyway: it searched the **whole document** for the literal
+`--operations 2000`, and found it in the sentence describing the first error. A guard that
+reads prose is a guard the prose can satisfy. It now reads the fenced command block alone, and
+`the_guard_reads_the_recipe_and_not_the_prose_about_it` keeps it that way by putting a
+plausible wrong figure in prose and requiring the check to still fail.
 
 `--rounds` is in that list for the same reason and is the newer half of the finding. It sets
 how many conserved pairs are seeded per account, and it used to be `--nls-rounds`, applied to

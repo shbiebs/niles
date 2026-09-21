@@ -122,7 +122,15 @@ fn every_committed_csv_carries_the_header_its_writer_writes_today() {
         };
         let path = repo_root().join("results").join(&p);
         let text = std::fs::read_to_string(&path).expect("a committed CSV");
-        let have = text.lines().next().unwrap_or("").trim_end();
+        // The column names, not the provenance comment above them. Cycle 13 put a
+        // `# provenance:`/`# configuration:` block at the top of every counted-work CSV, and
+        // a reader that takes the first line as the header would compare a comment against a
+        // schema. Every reader of these files skips `#` first.
+        let have = text
+            .lines()
+            .find(|l| !l.starts_with('#'))
+            .unwrap_or("")
+            .trim_end();
         if have != want {
             let missing: Vec<&str> = want
                 .split(',')
@@ -142,5 +150,76 @@ fn every_committed_csv_carries_the_header_its_writer_writes_today() {
          the reason — never hand-edit a header onto data that was measured without it.{}",
         stale.len(),
         stale.join("")
+    );
+}
+
+/// **Every regenerable results file says what produced it and under what configuration.**
+///
+/// The header is not decoration. Three findings in one cycle came from an artefact that did
+/// not carry its own configuration: `e7_write_path.csv` was classed byte-deterministic for
+/// eleven cycles while timing with `Instant`; section 9.13.2 says "20,000 reads" beside a
+/// table the sweep produced at 40,000; and E8's rungs and E10's checkpoints were compared as
+/// one claim while running at opposite `checkpoint_interval`s, which no file recorded.
+///
+/// **Why a configuration and not a commit, a host and a date.** A `byte-deterministic` file
+/// is one any host reproduces with the pinned toolchain, and `make reproduce` proves it by
+/// diffing. A date in it fails that diff on the second day and a hostname on the second
+/// machine, so the file would stop being the thing its class says it is. Its provenance is
+/// therefore exactly its configuration — the numbers are a pure function of that and the
+/// committed code. Machine-dependent artefacts are the opposite case and carry the full
+/// block: `bank_bench::render::Provenance` gathers host, instance, session, granted cores and
+/// the commit `build.rs` stamps.
+///
+/// **What this does not yet cover, named so the gap is not silent.** The markdown documents
+/// (a `#` line is a heading there, not a comment), `tools/memprobe`'s E18 files, and the
+/// machine-dependent documents E16/E19/E23, whose headers require a re-measure on a named
+/// host rather than a text edit — `MISMATCH-e16-header`, and cycle 13's E-2.
+#[test]
+fn every_regenerable_csv_carries_its_configuration() {
+    let root = repo_root();
+    let manifest = std::fs::read_to_string(root.join("results/MANIFEST.csv")).expect("readable");
+
+    let mut missing = Vec::new();
+    for line in manifest.lines() {
+        if line.starts_with('#') || !line.contains(',') {
+            continue;
+        }
+        let mut f = line.split(',');
+        let (Some(path), Some(class)) = (f.next(), f.next()) else {
+            continue;
+        };
+        // Historical files are not regenerable by definition; machine-dependent ones are the
+        // E-2 gap above; only CSVs are covered, because `#` is a heading in markdown.
+        if class != "byte-deterministic" && class != "toolchain-scoped" {
+            continue;
+        }
+        if !path.ends_with(".csv") || path == "MANIFEST.csv" {
+            continue;
+        }
+        // Written by a test rather than a harness, and its configuration is the corpus the
+        // test walks; it is listed here so the exemption is visible rather than implicit.
+        if path == "obligations.csv" {
+            continue;
+        }
+        let text = match std::fs::read_to_string(root.join("results").join(path)) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        let head: Vec<&str> = text.lines().take(2).collect();
+        let ok = head.first().is_some_and(|l| l.starts_with("# provenance:"))
+            && head
+                .get(1)
+                .is_some_and(|l| l.starts_with("# configuration:"));
+        if !ok {
+            missing.push(path.to_string());
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "these regenerable results files carry no provenance header: {missing:?}\n\
+         Each must begin with `# provenance: <the command>` and `# configuration: <the \
+         parameters>`, emitted by the producer from the bindings it runs with. Not \
+         transcribed beside them: a transcribed configuration is a second copy of a fact, \
+         and every defect this test exists for was a second copy going stale."
     );
 }

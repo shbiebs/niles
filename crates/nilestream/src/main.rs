@@ -317,6 +317,20 @@ fn report(view: &str, cfg: &Config, s: &Stats) {
 /// print the CSV. Pricing after the fact is what lets one measured run be re-scored under
 /// many cost models without re-running anything.
 fn sweep(path: &str, view: &str, base_cfg: Config) -> Result<(), String> {
+    // **The configuration, from the config that runs.** Section 9.13.2 said "20,000 reads"
+    // beside a table produced by this command, which takes `Config::default()`'s 40,000. A
+    // parameter a document states and the artefact does not carry is a parameter nobody can
+    // check, and this is the second time that exact shape has cost this project a cycle.
+    println!(
+        "# provenance: cargo run --release -p nilestream -- sweep {path} {view}\n\
+         # configuration: epochs={} reads={} accounts={} skew={} seed={} budgets=[250, 500, 1000, 2000, 4000, 8000, full] memory_prices=[0.0001, 0.0005, 0.002, 0.01, 0.05] checkpoint={}",
+        base_cfg.epochs,
+        base_cfg.reads,
+        base_cfg.accounts,
+        base_cfg.skew,
+        base_cfg.seed,
+        base_cfg.checkpoint,
+    );
     println!(
         "budget,memory_price,resident_entry_epochs,deltas_applied,base_rows_read,cost,hit_ratio,z"
     );

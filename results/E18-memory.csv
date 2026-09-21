@@ -1,3 +1,5 @@
+# provenance: cargo run -q --release --manifest-path tools/memprobe/Cargo.toml
+# configuration: byte totals are host- and toolchain-shaped; measured on linux x86_64 / rustc 1.95.0 (59807616e 2026-04-14)
 scenario,unit,operations,allocations,bytes,live_delta,peak_delta,allocations_per_op,bytes_per_op
 ledger_seeded,posting,40000,150269,21579818,8872525,9856518,3.8,539.5
 zset_base_at,row,40000,46665,9583856,9583856,9583856,1.2,239.6

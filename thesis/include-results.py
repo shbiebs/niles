@@ -201,6 +201,19 @@ def reserved_list(text: str) -> str:
     return f"{count}\n\n```\n{words}\n```"
 
 
+def _csv_rows_raw(text: str) -> list[str]:
+    """A results CSV's data lines, without the provenance comments or the column names.
+
+    Cycle 13 put a `# provenance:` / `# configuration:` block above the header of every
+    counted-work file. Three readers in this repository took "line 1 is the header, the rest
+    is data" as given and broke the hour it appeared — `render_medians` in the experiments
+    harness, `results_headers.rs`, and this file's `policy_table`. The convention is that a
+    reader skips `#` first, which is the one `results/MANIFEST.csv` has always used.
+    """
+    lines = [l for l in text.strip().splitlines() if l.strip() and not l.startswith("#")]
+    return lines[1:]
+
+
 def policy_table(text: str) -> str:
     """Table 9.8, computed from `results/e6_policies.csv`.
 
@@ -213,7 +226,7 @@ def policy_table(text: str) -> str:
     if that ever changes, the lower of the two middle values is taken, which is stated so
     that a reader can reproduce the arithmetic.
     """
-    rows = [ln.split(",") for ln in text.strip().splitlines()[1:] if ln.strip()]
+    rows = [ln.split(",") for ln in _csv_rows_raw(text)]
     by: dict[tuple[str, str], list[tuple[float, float, float]]] = {}
     for r in rows:
         policy, st = r[0], r[1]
@@ -243,7 +256,7 @@ def policy_table(text: str) -> str:
 
 def policy_deltas(text: str) -> str:
     """The two comparisons the prose of §9.4.2 makes, as one generated line."""
-    rows = [ln.split(",") for ln in text.strip().splitlines()[1:] if ln.strip()]
+    rows = [ln.split(",") for ln in _csv_rows_raw(text)]
     by: dict[tuple[str, str], list[tuple[float, float, float]]] = {}
     for r in rows:
         by.setdefault((r[1], r[0]), []).append((float(r[3]), float(r[4]), float(r[5])))
@@ -267,6 +280,88 @@ def policy_deltas(text: str) -> str:
     )
 
 
+def _csv_rows(text: str) -> list[dict]:
+    """A results CSV's data rows.
+
+    Skips the `# provenance:` / `# configuration:` block cycle 13 put above the column names.
+    A reader that treated the first line as the header would compare a comment to a schema,
+    which is how the same header broke `render_medians` the hour it was added.
+    """
+    lines = [l for l in text.splitlines() if l.strip() and not l.startswith("#")]
+    head = lines[0].split(",")
+    return [dict(zip(head, l.split(","))) for l in lines[1:]]
+
+
+def _median(v: list[float]) -> float:
+    v = sorted(v)
+    n = len(v)
+    if not n:
+        raise SystemExit("median of nothing")
+    return v[n // 2] if n % 2 else (v[n // 2 - 1] + v[n // 2]) / 2
+
+
+def e7_medians(text: str) -> str:
+    """Table 9.10 and the sentence that states the chain's cost, from `e7_write_path.csv`.
+
+    Both were typed. The table's medians (1,526,384 and 2,243,577) are in no committed CSV,
+    and the caption's "roughly 30%" is what those two numbers give; the committed data gives
+    66-69%. A figure in a caption is a second copy of a measurement and goes stale exactly
+    like the table above it, so the caption is generated too.
+
+    The configuration labels are the CSV's own — `chained` and `no-chain`. The thesis said
+    "unchained" for the second, which is a third name for one thing.
+    """
+    by: dict[tuple[str, str], list[float]] = {}
+    for r in _csv_rows(text):
+        by.setdefault((r["config"], r["hot_share"]), []).append(float(r["postings_per_sec"]))
+
+    order = sorted(by, key=lambda k: (k[0] != "chained", float(k[1])))
+    out = ["| Configuration | Hot-account share | Postings/sec (median) |", "|---|---|---|"]
+    for cfg, hot in order:
+        out.append(f"| {cfg} | {float(hot):.1f} | {_median(by[(cfg, hot)]):,.0f} |")
+
+    shares = sorted({h for _, h in by}, key=float)
+    costs = [
+        100.0 * (1.0 - _median(by[("chained", h)]) / _median(by[("no-chain", h)]))
+        for h in shares
+    ]
+    lo, hi = min(costs), max(costs)
+    span = f"{lo:.0f}%" if round(lo) == round(hi) else f"{lo:.0f}-{hi:.0f}%"
+    out += [
+        "",
+        f"*Table 9.10 \u2014 Mechanism cost only. Hash chaining costs {span} of admission "
+        f"throughput on this platform, across the three hot-account shares.*",
+    ]
+    return "\n".join(out)
+
+
+def e12_phase(text: str) -> str:
+    """The E12 grid from `e12_phase_compiled.csv`, minimum of each price column in bold.
+
+    Every committed cell differed from the committed CSV: 75,541 against 75,196 at
+    (250, 0.0001), 39,439 against 39,091 at (full, 0.0001). The bolding is not decoration —
+    it is where the interior optimum is, which is the finding the table carries.
+    """
+    rows = _csv_rows(text)
+    prices = sorted({r["memory_price"] for r in rows}, key=float)
+    budgets = sorted(
+        {r["budget"] for r in rows},
+        key=lambda b: (b == "full", float(b) if b != "full" else 0.0),
+    )
+    cost = {(r["budget"], r["memory_price"]): float(r["cost"]) for r in rows}
+    best = {p: min(budgets, key=lambda b: cost[(b, p)]) for p in prices}
+
+    out = ["| Budget | " + " | ".join(prices) + " |", "|---:|" + "---:|" * len(prices)]
+    for b in budgets:
+        label = b if b == "full" else f"{int(b):,}"
+        cells = [
+            (f"**{cost[(b, p)]:,.0f}**" if best[p] == b else f"{cost[(b, p)]:,.0f}")
+            for p in prices
+        ]
+        out.append(f"| {label} | " + " | ".join(cells) + " |")
+    return "\n".join(out)
+
+
 EXTRACTORS = {
     "contract": lambda t: first_table(t),
     "kwsql": lambda t: keyword_column(t, "## SQL-derived keywords"),
@@ -287,6 +382,8 @@ EXTRACTORS = {
     "verbatim": lambda t: t.strip(),
     "policytable": policy_table,
     "policydeltas": policy_deltas,
+    "e7medians": e7_medians,
+    "e12phase": e12_phase,
 }
 
 MARKER = re.compile(

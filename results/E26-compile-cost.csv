@@ -1,3 +1,5 @@
+# provenance: cargo run --release -p experiments -- e26
+# configuration: corpus=examples/*.niles + bootstrap/*.niles; counted work only, no wall clock
 file,bytes,lines,tokens,items,views,functions,relations,currencies,ir_ops,diagnostics,checks
 examples/available_balance.niles,5610,120,606,14,6,2,3,3,16,0,0
 examples/demo_bank.niles,7436,158,671,14,4,4,3,3,9,0,3

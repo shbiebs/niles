@@ -1,2 +1,4 @@
+# provenance: cargo run --release -p experiments -- e2
+# configuration: accounts=50 epochs=200 mode=full budget=unbounded policy=lru control=one-epoch-withheld seeds=[1, 7, 42, 100, 2024]
 epochs_compared,mismatches,control_epochs,control_mismatches
 1000,0,200,200

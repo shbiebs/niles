@@ -1,4 +1,4 @@
-*Byte totals below are host-shaped and were produced on **linux x86_64 / 1.95.0**. The allocation counts are not host-shaped and are gated separately in `results/E18-counts.csv`; a byte column that differs on another host is a difference in the standard library's own type sizes, not in this code.*
+*Byte totals below are host-shaped and were produced on **linux x86_64 / rustc 1.95.0 (59807616e 2026-04-14)**. The allocation counts are not host-shaped and are gated separately in `results/E18-counts.csv`; a byte column that differs on another host is a difference in the standard library's own type sizes, not in this code.*
 
 # E18 — Memory, counted
 

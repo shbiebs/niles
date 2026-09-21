@@ -161,7 +161,7 @@ These name concepts neither SQL nor Rust has: an immutable epoch-ordered base, a
 | `bounded` | unreserved | bare | 2026 | Consistency rung 0: anchored no more than K epochs or T milliseconds behind. | `serve { consistency: bounded(epochs: 4, millis: 200) }` |
 | `budget` | unreserved | bare | 2026 | Resident-state ceiling for a view, in entries or bytes. | `serve { materialize: demand, budget: 50_000 }` |
 | `capability` | unreserved | bare | 2026 | Declare an unforgeable authority token for an effect. | `capability Overdraft: Auth<debit<usd>>;` |
-| `committed` | unreserved | bare | 2026 | Confidentiality level: readable only inside the enclave that holds the key. | `owner: Text @confidential(committed)` |
+| `committed` | unreserved | bare | 2026 | Confidentiality level: an additively homomorphic commitment, usable in sum-checks only. | `amt: Money @confidential(committed)` |
 | `confidential` | unreserved | bare | 2026 | Mark a column end-to-end encrypted; the engine may not compute on it. | `owner: Text @confidential(e2ee)` |
 | `conserve` | unreserved | bare | 2026 | The double-entry rule: the group's amounts must sum to zero per currency. | `conserve per (txn, cur);` |
 | `consistency` | unreserved | bare | 2026 | The rung a view is served at. | `serve { consistency: ledger_consistent }` |

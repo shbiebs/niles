@@ -260,6 +260,8 @@ No ambient I/O or clock; capabilities passed as parameters; compiled to wasm32 a
 
 `@confidential(e2ee)` — server-blind; unusable in server-side predicates, joins or aggregates. `@confidential(committed)` — additively homomorphic commitment; usable in sum-checks only. `declassify(x, auth: Auth<declassify>)` — the only crossing, always audited. Labels are **static**; dynamic labels are not offered (Section 4.5).
 
+**`MISMATCH-committed-sum`.** The distinction above is not in the compiler. `typecheck.rs`'s NL0260 refuses *any* `@confidential(<level>)` column used in a predicate, key or aggregate, without consulting the level, so a `sum` over a `@confidential(committed)` column — the one operation the level exists to permit — is refused with the note that *an encrypted column is opaque to the engine*. `committed` and `e2ee` are therefore the same level in the implementation, and no commitment scheme exists behind either. The registry's description of `committed` was itself a second copy of `e2ee`'s meaning until cycle 13 corrected it to this section's; correcting it is what made the collapse visible. Until a level-aware NL0260 and a commitment backend exist, this section states a design rather than a mechanism, and the confidentiality check Section 9.13.5 reports firing once is the coarse one.
+
 ## B.14 Lineage and Audit Forms
 
 ```niles

@@ -462,7 +462,7 @@ pub static KEYWORDS: &[Keyword] = &[
     kw!("bounded", Bounded, Unreserved, Bare, Novel, "2026", "Consistency rung 0: anchored no more than K epochs or T milliseconds behind.", "serve { consistency: bounded(epochs: 4, millis: 200) }"),
     kw!("budget", Budget, Unreserved, Bare, Novel, "2026", "Resident-state ceiling for a view, in entries or bytes.", "serve { materialize: demand, budget: 50_000 }"),
     kw!("capability", Capability, Unreserved, Bare, Novel, "2026", "Declare an unforgeable authority token for an effect.", "capability Overdraft: Auth<debit<usd>>;"),
-    kw!("committed", Committed, Unreserved, Bare, Novel, "2026", "Confidentiality level: readable only inside the enclave that holds the key.", "owner: Text @confidential(committed)"),
+    kw!("committed", Committed, Unreserved, Bare, Novel, "2026", "Confidentiality level: an additively homomorphic commitment, usable in sum-checks only.", "amt: Money @confidential(committed)"),
     kw!("confidential", Confidential, Unreserved, Bare, Novel, "2026", "Mark a column end-to-end encrypted; the engine may not compute on it.", "owner: Text @confidential(e2ee)"),
     kw!("conserve", Conserve, Unreserved, Bare, Novel, "2026", "The double-entry rule: the group's amounts must sum to zero per currency.", "conserve per (txn, cur);"),
     kw!("consistency", Consistency, Unreserved, Bare, Novel, "2026", "The rung a view is served at.", "serve { consistency: ledger_consistent }"),

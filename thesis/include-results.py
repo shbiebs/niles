@@ -56,12 +56,46 @@ def table_after(text: str, heading: str) -> str:
     return first_table(text[idx:])
 
 
+# TOML basic-string escapes this reader understands. An escape outside this table is a
+# refusal rather than a pass-through: `\"` used to reach the thesis as a literal backslash
+# followed by a quote, because the reader stripped the surrounding quotes and never looked
+# inside. The register is the one file that says what is proved and what is not, so a reader
+# that silently alters its text is the worst kind of defect this project can hold.
+_TOML_ESCAPES = {'"': '"', "\\": "\\", "n": "\n", "t": "\t", "r": "\r"}
+
+
+def _unescape(v: str, key: str, claim: str) -> str:
+    """Decode a TOML basic string's body, refusing an escape this reader does not know."""
+    out, i = [], 0
+    while i < len(v):
+        if v[i] != "\\":
+            out.append(v[i])
+            i += 1
+            continue
+        if i + 1 >= len(v):
+            raise SystemExit(f"status.toml: {claim}.{key} ends in a lone backslash")
+        e = v[i + 1]
+        if e not in _TOML_ESCAPES:
+            raise SystemExit(
+                f"status.toml: {claim}.{key} contains the escape `\\{e}`, which this reader "
+                "does not decode. Add it to `_TOML_ESCAPES` or spell the character directly; "
+                "do not let it through, because it would reach the thesis verbatim."
+            )
+        out.append(_TOML_ESCAPES[e])
+        i += 2
+    return "".join(out)
+
+
 def parse_status(text: str) -> list[dict]:
     """Read `thesis/status.toml`.
 
-    A five-key subset of TOML, parsed in twenty lines rather than by taking a dependency.
+    A five-key subset of TOML, parsed in forty lines rather than by taking a dependency.
     The thesis build already refuses to depend on anything it does not need, and a parser
     for `[[claim]]` blocks of `key = "value"` is smaller than the argument for adding one.
+
+    It is a *subset*, and it says which: one-line basic strings only. A value that does not
+    begin and end with a quote on its own line is refused rather than guessed at, so a
+    multi-line string added later fails the build instead of arriving truncated.
     """
     claims, cur = [], None
     for raw in text.splitlines():
@@ -75,10 +109,15 @@ def parse_status(text: str) -> list[dict]:
         if cur is None or "=" not in line:
             continue
         k, _, v = line.partition("=")
+        k = k.strip()
         v = v.strip()
-        if v.startswith('"') and v.endswith('"'):
-            v = v[1:-1]
-        cur[k.strip()] = v
+        if not (len(v) >= 2 and v.startswith('"') and v.endswith('"')):
+            raise SystemExit(
+                f"status.toml: {cur.get('id', '?')}.{k} is not a one-line basic string. "
+                "This reader handles no other form; give it one, or replace it with a "
+                "real TOML parser."
+            )
+        cur[k] = _unescape(v[1:-1], k, cur.get("id", "?"))
     for c in claims:
         for k in ("id", "claim", "status", "where", "instrument"):
             if k not in c:
@@ -143,12 +182,14 @@ def status_row(text: str) -> str:
     refuted = sum(1 for c in claims if c["status"] == "refuted")
     specified = sum(1 for c in claims if c["status"] == "specified")
     argued = sum(1 for c in claims if c["status"] == "argued")
+    withdrawn = sum(1 for c in claims if c["status"] == "withdrawn")
     known = {"proved", "measured", "partly measured", "not measured", "refuted",
-             "specified", "argued"}
+             "specified", "argued", "withdrawn"}
     other = [c["id"] for c in claims if c["status"] not in known]
     tally = (
         f"{proved} proved, {measured} measured or partly measured, {specified} specified, "
-        f"{argued} argued, {refuted} refuted, {unrun} not measured"
+        f"{argued} argued, {refuted} refuted, {withdrawn} withdrawn, "
+        f"{unrun} not measured"
     )
     if other:
         tally += f", {len(other)} with an unrecognised status ({', '.join(other)})"

@@ -226,23 +226,41 @@ fn status_statement_is_single_sourced() {
         "§1.6 should declare thirteen hypotheses; found {declared:?}"
     );
     for id in &declared {
-        // **A withdrawn hypothesis keeps its paragraph and loses its entry.** H-S9 was
-        // withdrawn when the crate that would have been its instrument turned out to be
-        // three `pub mod` lines and was deleted: with no lineage mode there is no
+        // **A withdrawn hypothesis keeps its paragraph and gains an entry saying so.**
+        // H-S9 was withdrawn when the crate that would have been its instrument turned out
+        // to be three `pub mod` lines and was deleted: with no lineage mode there is no
         // independent variable, so there is nothing to hold constant and nothing to vary.
         // Deleting the paragraph would hide that a hypothesis was abandoned, which is the
-        // opposite of what this file is for; the paragraph says *Withdrawn* and gives the
-        // reason, and this check requires exactly that of any id with no entry.
-        if !toml.contains(&format!("id = \"{id}\"")) {
-            // The paragraph runs from the id's declaration to the next blank line.
+        // opposite of what this file is for.
+        //
+        // Until cycle 13 a withdrawal lived *only* in the §1.6 paragraph, and the register
+        // ran H-S8 -> H-S10 with no row between them — so the one file that is supposed to
+        // say where every claim stands was silent about a claim that had been abandoned.
+        // `withdrawn` is now a status like any other and H-S9 carries it. The no-entry
+        // branch below stays, because an id may be withdrawn before anyone adds its row,
+        // and it still demands the paragraph say so.
+        let para = {
             let at = intro.find(&format!("**{id} ")).unwrap_or(0);
-            let para: String = intro[at..].lines().take_while(|l| !l.is_empty()).collect();
+            let p: String = intro[at..].lines().take_while(|l| !l.is_empty()).collect();
+            p
+        };
+        let says_withdrawn = para.contains("Withdrawn") || para.contains("withdrawn");
+        if !toml.contains(&format!("id = \"{id}\"")) {
             assert!(
-                para.contains("Withdrawn") || para.contains("withdrawn"),
+                says_withdrawn,
                 "{id} is declared in §1.6, has no entry in status.toml, and does not say it \
                  is withdrawn — so its status is whatever the prose happens to say"
             );
             continue;
+        }
+        // And the converse, so the register and the prose cannot part company the other way.
+        let entry_at = toml.find(&format!("id = \"{id}\"")).expect("just checked");
+        let entry: String = toml[entry_at..].lines().take(4).collect();
+        if entry.contains("status = \"withdrawn\"") {
+            assert!(
+                says_withdrawn,
+                "{id} is `withdrawn` in status.toml and its §1.6 paragraph does not say so"
+            );
         }
     }
 
@@ -267,6 +285,46 @@ fn status_statement_is_single_sourced() {
             !text.contains("No measurements have been taken yet"),
             "{file} still says no measurements have been taken"
         );
+    }
+}
+
+/// **The register's text reaches the thesis as the register wrote it.**
+///
+/// `status.toml` is TOML, so a quotation mark inside a value is spelled `\"`. The reader in
+/// `include-results.py` stripped the surrounding quotes and never looked inside, so the
+/// first instrument text to quote a thesis sentence — H-S3's, in cycle 13 — rendered into
+/// §1.6's table as a literal backslash before every quote. Nothing failed: the generator
+/// wrote it, `--check` compared it against itself and agreed.
+///
+/// That is the failure mode this whole file exists for, one level down: not two copies that
+/// disagree, but one copy that is silently altered on its way to the reader. A register
+/// whose text is transformed in transit is not a single source.
+#[test]
+fn the_rendered_status_register_carries_no_undecoded_escape() {
+    let root = repo_root();
+    for file in [
+        "thesis/01-introduction.md",
+        "thesis/00-front-matter.md",
+        "thesis/03-theoretical-framework.md",
+        "thesis/appendix-k.md",
+    ] {
+        let text = std::fs::read_to_string(root.join(file)).expect("readable");
+        for (n, line) in text.lines().enumerate() {
+            // Only the generated rows: prose elsewhere may legitimately show an escape
+            // while discussing one, and this test is about what the generator emits.
+            if !line.starts_with("| **") {
+                continue;
+            }
+            for esc in ["\\\"", "\\n", "\\t", "\\\\"] {
+                assert!(
+                    !line.contains(esc),
+                    "{file}:{} renders the TOML escape `{esc}` verbatim. `status.toml` says \
+                     one thing and the thesis prints another; teach `_unescape` in \
+                     thesis/include-results.py to decode it.\n{line}",
+                    n + 1
+                );
+            }
+        }
     }
 }
 

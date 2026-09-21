@@ -17,12 +17,19 @@
 #   id         the identifier used in the text: H-F1..H-F4, H-S1..H-S10, C1..C6, SC7
 #   claim      one line, in the present tense
 #   status     one of: measured | partly measured | proved | specified | argued |
-#              not measured | refuted
+#              not measured | refuted | withdrawn
 #
 #              `specified` means a design exists and nothing implements it, which is a
 #              different thing from an unmeasured implementation. `argued` means the claim is
 #              established by argument and no instrument will settle it -- recording those as
 #              `not measured` promised a measurement that was never coming.
+#              `withdrawn` means the claim has been taken back: it is not awaiting a
+#              measurement and it is not refuted by one, the project has stopped making it.
+#              **This status exists because H-S9 did not have a row here at all.** It was
+#              withdrawn in §1.6.2 and nowhere else, so the one file that is supposed to be
+#              the single source of claim status ran H-S8 -> H-S10 and a reader checking the
+#              register would not have found the claim to learn it was gone. A withdrawn
+#              claim that the register does not mention is a claim that can walk back in.
 #   where      the section that reports it, or the section that states what would
 #   instrument for anything not measured: the thing that does not exist yet. Required.
 #              "A hypothesis with no runner is a hypothesis with no status" — naming the
@@ -73,16 +80,16 @@ instrument = "a crossover in memory price exists and was located. **The theorem'
 [[claim]]
 id = "H-S3"
 claim = "The price of consistency is workload-shaped, not history-shaped, given a bounding mechanism."
-status = "measured"
+status = "partly measured"
 where = "§9.4.1, §9.4.3"
-instrument = ""
+instrument = "**the two halves ran at opposite checkpoint intervals and nothing recorded it.** The rung half (E8, §9.4.3: \"2.5x more base rows\", 102,624 against 40,869) runs at `checkpoint_interval = 0` -- `Ledger::new()`'s default -- which is the configuration §9.4.1 states the cost law does *not* hold in, so the read-side gap it reports is the C=0 gap. The history half (E10) is the only experiment here that varies C, and it is what SC7 rests on. A claim whose proviso is \"given a bounding mechanism\" cannot be `measured` on a leg measured without one. Both configurations are now in the files' own headers (cycle 13, E-3); E-4 runs E8 at C=16 and restores the status this claim can support."
 
 [[claim]]
 id = "H-S4"
 claim = "Niles soundness holds in the implementation, not only in the calculus."
 status = "partly measured"
 where = "§9.14.2, crates/niles-lang/tests/calculus_mutants.rs"
-instrument = "seventeen mutants are refused, each by its own diagnostic code, and the well-typed neighbour of each is accepted. What does not exist is the *execution* half: no corpus of well-typed programs is run on Nilestream under crash-recovery, eviction and adversarial schedules with an oracle counting violations. The claim quantifies over executions and the evidence is about the checker."
+instrument = "seventeen mutants are refused, each by its own diagnostic code, and the well-typed neighbour of each is accepted. Two halves are missing, and the second is the more serious. (i) The *execution* half: no corpus of well-typed programs is run on Nilestream under crash-recovery, eviction and adversarial schedules with an oracle counting violations -- the claim quantifies over executions and the evidence is about the checker. (ii) **The checker does not yet establish the antecedent.** `let z: Text = m` with `m: Money<usd>`, a call to an undefined function, and an unbound identifier are all reported `ok`: `resolve.rs` does not report an unbound name and `typecheck.rs` does not unify a `let` annotation against the inferred type. Every sentence in this thesis of the form *a well-typed program cannot ...* is, today, a sentence about programs this checker accepted, which is a weaker set than the calculus means. Cycle 13's L-1 refuses the three Appendix C controls with named codes and adds them to `calculus_mutants.rs`; until it lands, the soundness theorem's implementation half rests on a checker with a hole in its type discipline."
 
 [[claim]]
 id = "H-S5"
@@ -113,11 +120,18 @@ where = "§6.6, §9.11.1, §11.3, examples/inventory.niles"
 instrument = "the falsifier was built and run: `examples/inventory.niles` conserves units of a SKU across warehouses, is proved to conserve by the currency-row solver, posts and seals through `nilesc run`, and required no change to the compiler, the IR or the runtime -- a test asserts that none of them contains the word `inventory`, `widget`, `sprocket`, `warehouse` or `sku`. So the refutation condition of §11.3 is **not** met. It is `partly measured` and not `measured` because of what the falsifier found: a money literal's grade must be exactly three lowercase letters in the lexer, so `5 widget` does not lex and every quantity in that file arrives as a parameter. The machinery is general; the notation carries a banking assumption. Recorded as MISMATCH-T-22-currency-literal and deliberately not applied."
 
 [[claim]]
+id = "H-S9"
+claim = "Lineage is complete and affordable."
+status = "withdrawn"
+where = "§1.6.2 (the withdrawal), Remark 4.1.2 (what survives), §12 (future work)"
+instrument = "**withdrawn, not unmeasured.** `nilestream-lineage` was three `pub mod` lines over three one-line files and is deleted from the workspace (`docs/ROADMAP.md`), so there is no lineage mode to switch between -- no independent variable, nothing to hold constant, nothing to vary. A hypothesis in that state is not awaiting an instrument; it has stopped being a hypothesis. What survives is Remark 4.1.2, which says what the algebra would give over the RA+ fragment and claims nothing about the rest, and §12's semiring-factorization route. Recorded here in cycle 13 because until then this register ran H-S8 -> H-S10 and the withdrawal lived only in §1.6.2."
+
+[[claim]]
 id = "H-S10"
 claim = "Holds and hot accounts do not break the model."
 status = "not measured"
 where = "§9.4.4"
-instrument = "the contention experiment requires concurrency the instruments do not have: the research prototype is single-threaded, the ledger benchmark serialises through one sealer, and the daemon serves every query under one mutex. §9.4.4's flat hot-account column measures the absence of an experiment."
+instrument = "the contention experiment requires concurrency the instruments do not have: the research prototype is single-threaded and the ledger benchmark serialises through one sealer. **The clause that said the daemon serves every query under one mutex is struck: it has held an `RwLock<RevEngine>` since `d681f0d` (cycle 6), and `lockstats.rs` says so in its first line.** This register, §9.4.4 and `docs/BENCHMARK.md` all described the older lock for seven cycles, and the only connection-scaling evidence in the thesis (E19) was measured under it and never re-run. Cycle 13's E-2 re-measures on the lock the daemon actually has; until it lands, no statement here about many readers is supported either way. §9.4.4's flat hot-account column still measures the absence of an experiment."
 
 [[claim]]
 id = "C1"

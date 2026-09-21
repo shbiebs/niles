@@ -432,6 +432,38 @@ fn a_confidential_column_cannot_be_filtered_on() {
     assert!(c.diags.contains("leak through timing"), "{}", c.diags);
 }
 
+/// **`MISMATCH-committed-sum`: `committed` and `e2ee` are the same level in this compiler.**
+///
+/// Appendix B.13 defines `@confidential(committed)` as an additively homomorphic commitment
+/// that is *usable in sum-checks only* — summing is the one operation that distinguishes it
+/// from `e2ee`, and the reason the level exists. `typecheck.rs`'s NL0260 never reads the
+/// level: it refuses every confidential column used in a predicate, key or aggregate, so the
+/// permitted operation is refused with the `e2ee` message about an opaque encrypted column.
+///
+/// This test asserts the *defect*, deliberately, so that the day NL0260 becomes level-aware
+/// it fails and takes Appendix B.13's mismatch note and `docs/reading-the-code.md` Section 17
+/// down with it. A mismatch nobody is holding is a mismatch that gets re-discovered.
+#[test]
+fn summing_a_committed_column_is_refused_as_if_it_were_e2ee() {
+    let c = compile(&with_body(
+        "    table commitments { id: Id<Account> primary key, amt: Money @confidential(committed, subject = id) }
+    view totals = commitments.group_by(|c| c.id).sum(|c| c.amt) serve { consistency: snapshot };
+}",
+    ));
+    assert!(
+        c.error_codes.contains(&"NL0260"),
+        "MISMATCH-committed-sum has been repaired -- NL0260 no longer refuses a sum over a \
+         `committed` column. Strike the mismatch note in thesis/appendix-b.md B.13 and the \
+         paragraph in docs/reading-the-code.md Section 17, then delete this test:\n{}",
+        c.diags
+    );
+    assert!(
+        c.diags.contains("opaque to the engine"),
+        "and it is refused with the `e2ee` reason, which is the mismatch:\n{}",
+        c.diags
+    );
+}
+
 // ============ contract feasibility ============
 
 #[test]

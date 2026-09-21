@@ -362,10 +362,19 @@ on; a gap attributed to "it is a prototype" is not attributed at all.
    probe shows it costs what a barrier costs (a wrongly-named barrier passes this on a host
    where `fsync` and `fdatasync` are the same call, which this container is).
 
-1. **One mutex over the whole engine.** `daemon::accept_loop` hands every connection an
-   `Arc<Mutex<RevEngine>>`, so reads serialise against each other and against writes. The
-   benchmark drives one connection, so this does not affect these numbers — and it is the
-   first thing that would, at any concurrency.
+1. **One `RwLock` over the whole engine, and it is a reader-shared one.**
+   `daemon::accept_loop` hands every connection an `Arc<dyn Serving>` whose implementation is
+   `std::sync::RwLock<RevEngine>`; `query` takes the **shared** borrow for one query step and
+   drops it before any wait. Reads therefore do not serialise against each other. Writes do
+   exclude them, and `std::sync::RwLock` is writer-preferring on both hosts this project
+   measures, so a queued exclusive acquisition stops readers arriving behind it.
+
+   This entry read *One mutex over the whole engine … so reads serialise against each other
+   and against writes* from cycle 6, when `d681f0d` changed the lock, until cycle 13. The
+   benchmark drives one connection, so the sentence never affected the numbers beneath it —
+   which is exactly why nothing caught it for seven cycles. E19 measures the concurrency it
+   was wrong about: `results/E19-scaling.md`, with the mutex-era rows kept in
+   `results/E19-scaling-historical.md` rather than deleted.
 2. **A thread per connection.** Right at this scale and stated rather than defended; not a
    design for thousands of connections.
 3. **A compiled-circuit cache, per session.** The simple query path compiled every statement

@@ -39,7 +39,11 @@ fn expected(path: &str) -> Option<Option<&'static str>> {
         | "E16-wallclock/point.csv"
         | "E16-wallclock/durable.csv"
         | "E16-wallclock/report.csv" => Some(CSV_HEADER),
-        "E19-scaling/point.csv" | "E19-scaling/durable.csv" => Some(SCALING_CSV_HEADER),
+        // `fold` joined the scaling experiment in cycle 13: it is the scan-heavy arm, and
+        // the one whose flatness above four connections is the host rather than the lock.
+        "E19-scaling/point.csv" | "E19-scaling/durable.csv" | "E19-scaling/fold.csv" => {
+            Some(SCALING_CSV_HEADER)
+        }
         "E19-scaling/mixed.csv" => Some(MIXED_CSV_HEADER),
         // The device ceiling: written inline by `bench`, four figures and a count.
         "E16-wallclock/device.csv" => Some("median,mad,lowest,highest,probes"),

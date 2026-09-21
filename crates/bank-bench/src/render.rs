@@ -646,6 +646,11 @@ pub fn mixed_table_refusals(samples: &[crate::workloads::MixedSample]) -> usize 
     refused.len()
 }
 
+/// The invocation id and the tree's dirtiness, read once per process by
+/// `Provenance::init`. See that method for why *once* and why *first*.
+static SESSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+static DIRTY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
 /// **Where a number came from, so two of them are never compared by accident.**
 ///
 /// F-29 is what this exists for. E16's `report` row read 2.68× MET on one instance of host class
@@ -664,11 +669,6 @@ pub fn mixed_table_refusals(samples: &[crate::workloads::MixedSample]) -> usize 
 ///   5,825/s across this project's hosts. A durable ratio without it says nothing.
 /// * **commit** — which code produced the numbers, stamped at build time (see `build.rs`).
 /// * **baseline commit** — what it is being compared *against*, when the caller names one.
-/// The invocation id and the tree's dirtiness, read once per process by
-/// [`Provenance::init`]. See its doc comment for why *once* and why *first*.
-static SESSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-static DIRTY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-
 pub struct Provenance {
     host: String,
     instance: String,

@@ -65,18 +65,31 @@ who subtracts a 2026-09-04 figure from a 2026-09-21 one and attributes the diffe
 lock is reading host variance.
 
 **What survives that objection** is the *within-session* comparison against the PostgreSQL
-arm, which is the same software in both eras and absorbs the instance. At the 2 → 4 step of
-the `point` workload:
+arm, which is the same software in both eras and absorbs the instance. Read on `durable`,
+which is the workload whose replicates are tight enough to carry a ratio: MADs are 3–10% of
+their medians on both arms at every level, against 22% and 28% at `point`'s four-connection
+level, where no ratio is separated from noise and none is claimed.
 
-| era | nilestream 2 → 4 | postgres 2 → 4 (control) | nilestream relative to its control |
+| era | engine 2 → 4 | PostgreSQL 2 → 4 (control) | engine relative to its control |
 |---|--:|--:|--:|
-| mutex (2026-09-04) | 0.85× | 1.16× | **0.73** |
-| `RwLock` (2026-09-21) | 1.30× | 0.97× | **1.34** |
+| mutex (2026-09-04) | 0.98× — *flat* | 1.40× | **0.70** |
+| `RwLock` (2026-09-21) | 1.72× ± 0.24 | 1.23× ± 0.07 | **1.40** |
 
-In the mutex era the engine scaled at roughly three-quarters of what the same host gave
-PostgreSQL over the same step; on the current engine it scales at roughly a third more. That
-is a real change in sign — from *below* the control to *above* it — and it is the strongest
-statement these two sets of rows support. It is **not** an attribution: cycles 6 through 12
-changed more than the lock, and no experiment here holds the rest fixed. An experiment that
-did would build both engine versions and run them interleaved in one session, and this
-project has not run it.
+In the mutex era the engine scaled at roughly seven-tenths of what the same host gave
+PostgreSQL over the same step, and the document's own verdict column read **flat — the added
+connection buys nothing measurable**. On the current engine it scales at about 1.4× its
+control over that step and keeps rising to eight connections (1.74× ± 0.19, against the
+control's 1.22× ± 0.04). That is a change in sign — from below the control to above it — and
+it is the strongest statement these two sets of rows support.
+
+It is **not** an attribution. Cycles 6 through 12 changed more than the lock, and no
+experiment here holds the rest fixed. The experiment that would builds both engine versions
+and runs them interleaved in one session on one instance, which is what
+`Provenance::render`'s `--baseline` field exists for and what its *none named* value records
+the absence of. This project has not run it.
+
+A third reading is available and is worth stating because it costs nothing: on `fold` — the
+scan-heavy workload, which did not exist in the scaling experiment at the older date — both
+arms are flat above four connections (engine 0.95× ± 0.04, PostgreSQL 0.99× ± 0.07). Two
+granted cores saturate there, and a workload that saturates on both arms at the same level is
+telling you about the host.

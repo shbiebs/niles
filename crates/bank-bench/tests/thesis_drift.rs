@@ -288,6 +288,91 @@ fn status_statement_is_single_sourced() {
     }
 }
 
+/// **The lock three normative places describe is the lock the daemon has.**
+///
+/// `d681f0d` (cycle 6) changed the daemon's engine from `Arc<Mutex<RevEngine>>` to a
+/// `Serving` trait object implemented by `std::sync::RwLock<RevEngine>`. Three places went
+/// on describing the mutex as current until cycle 13: `status.toml`'s H-S10 instrument,
+/// `thesis/09-evaluation.md` in two paragraphs, and `docs/BENCHMARK.md`'s list of stated
+/// limitations. Each drew a *conclusion* from it — that reads serialise against each other,
+/// that a second core cannot be used for reads over an immutable base, that a client-side
+/// version of the group-commit experiment would measure the lock rather than the sealer —
+/// and none of those conclusions was ever tested, because the benchmark that would have
+/// tested them drives one connection.
+///
+/// The failure mode is specific and worth naming: a sentence that no measurement depends on
+/// is a sentence no measurement can contradict. This test is the substitute for the
+/// measurement that would have caught it.
+#[test]
+fn the_lock_the_documents_name_is_the_lock_the_engine_has() {
+    let root = repo_root();
+    let engine = std::fs::read_to_string(root.join("crates/nilestream-server/src/rev_engine.rs"))
+        .expect("rev_engine.rs is readable");
+    // The claim under test is about what the daemon serves through, which is the `Serving`
+    // implementation — not about any lock the engine happens to hold internally.
+    assert!(
+        engine.contains("impl crate::session::Serving for std::sync::RwLock<RevEngine>"),
+        "the daemon's `Serving` implementation is no longer `RwLock<RevEngine>`. Every \
+         sentence this test guards describes it by name; find them and re-measure E19 \
+         before changing them, because the last time this changed the documents were not \
+         updated for seven cycles"
+    );
+
+    // No normative place may describe the daemon as holding a mutex. Occurrences that
+    // *record* the old lock as history are allowed and are the point of keeping them: each
+    // of these files now says what it used to say and when it stopped being true, so the
+    // test looks for the claim in the present tense rather than for the word.
+    for (file, claims) in [
+        (
+            "thesis/status.toml",
+            &["serves every query under one mutex.**"][..],
+        ),
+        (
+            "thesis/09-evaluation.md",
+            &[
+                "holds an `Arc<Mutex<RevEngine>>` and takes it once per query",
+                "**the daemon serves every query under one mutex.**",
+            ][..],
+        ),
+        (
+            "docs/BENCHMARK.md",
+            &["1. **One mutex over the whole engine.**"][..],
+        ),
+    ] {
+        let text = std::fs::read_to_string(root.join(file)).expect("readable");
+        for claim in claims {
+            assert!(
+                !text.contains(claim),
+                "{file} states in the present tense that the daemon serves under a mutex: \
+                 {claim:?}. It has been an `RwLock` since d681f0d (cycle 6)."
+            );
+        }
+        assert!(
+            text.contains("RwLock"),
+            "{file} describes the daemon's concurrency and does not name `RwLock`"
+        );
+    }
+
+    // And the measurement exists, with its predecessor kept rather than deleted.
+    for f in [
+        "results/E19-scaling.md",
+        "results/E19-scaling-historical.md",
+    ] {
+        let text = std::fs::read_to_string(root.join(f)).expect(f);
+        assert!(!text.is_empty(), "{f} is empty");
+    }
+    let current = std::fs::read_to_string(root.join("results/E19-scaling.md")).expect("readable");
+    assert!(
+        current.contains("E19-scaling-historical.md"),
+        "the current E19 document must point at the rows it replaced, or they are deleted in \
+         every sense that matters to a reader"
+    );
+    assert!(
+        current.contains("Engine commit"),
+        "E19 must carry the provenance header it went six cycles without"
+    );
+}
+
 /// **H-S4's mutant count is the number of mutants.**
 ///
 /// The row said `seventeen` from the cycle the file was created until cycle 13, during

@@ -64,11 +64,20 @@ E16-wallclock/point.csv,machine-dependent,cargo run --release -p bank-bench --bi
 E16-wallclock/durable.csv,machine-dependent,cargo run --release -p bank-bench --bin bench -- --run --publish
 E16-wallclock/report.csv,machine-dependent,cargo run --release -p bank-bench --bin bench -- --run --publish
 E16-wallclock/device.csv,machine-dependent,cargo run --release -p bank-bench --bin bench -- --run --publish
-E19-scaling.md,machine-dependent,cargo run --release -p bank-bench --bin bench -- --run --scaling-only --connections 1,2,4 --publish
-E19-scaling/E19-scaling.md,machine-dependent,cargo run --release -p bank-bench --bin bench -- --run --scaling-only --connections 1,2,4 --publish
-E19-scaling/point.csv,machine-dependent,cargo run --release -p bank-bench --bin bench -- --run --scaling-only --connections 1,2,4 --publish
-E19-scaling/durable.csv,machine-dependent,cargo run --release -p bank-bench --bin bench -- --run --scaling-only --connections 1,2,4 --publish
-E19-scaling/mixed.csv,machine-dependent,cargo run --release -p bank-bench --bin bench -- --run --scaling-only --connections 1,2,4 --publish
+E19-scaling.md,machine-dependent,cargo run --release -p bank-bench --bin bench -- --run --render --scaling-only --publish --pg-port 5432 --host-nls --accounts 10000 --operations 500 --runs 3 --connections 1,2,4,8
+E19-scaling/E19-scaling.md,machine-dependent,cargo run --release -p bank-bench --bin bench -- --run --render --scaling-only --publish --pg-port 5432 --host-nls --accounts 10000 --operations 500 --runs 3 --connections 1,2,4,8
+E19-scaling/point.csv,machine-dependent,cargo run --release -p bank-bench --bin bench -- --run --render --scaling-only --publish --pg-port 5432 --host-nls --accounts 10000 --operations 500 --runs 3 --connections 1,2,4,8
+E19-scaling/durable.csv,machine-dependent,cargo run --release -p bank-bench --bin bench -- --run --render --scaling-only --publish --pg-port 5432 --host-nls --accounts 10000 --operations 500 --runs 3 --connections 1,2,4,8
+E19-scaling/mixed.csv,machine-dependent,cargo run --release -p bank-bench --bin bench -- --run --render --scaling-only --publish --pg-port 5432 --host-nls --accounts 10000 --operations 500 --runs 3 --connections 1,2,4,8
+E19-scaling/fold.csv,machine-dependent,cargo run --release -p bank-bench --bin bench -- --run --render --scaling-only --publish --pg-port 5432 --host-nls --accounts 10000 --operations 500 --runs 3 --connections 1,2,4,8
+# `E19-scaling-historical.md` is the cycle-7 E19 rows as `fa012ed` published them on
+# 2026-09-04. It is kept because the engine they measured -- a daemon holding
+# `Arc<Mutex<RevEngine>>` -- has not existed since `d681f0d` on 2026-09-05, and
+# deleting a measurement when a newer one replaces it hides the fact worth keeping:
+# that a published curve described an engine the repository no longer had. The file
+# itself states what may and may not be concluded by comparing it with the current
+# rows, which is less than a reader would assume.
+E19-scaling-historical.md,historical,none
 E21-wire-cost.md,machine-dependent,cargo run --release -p bank-bench --example wire_cost
 E13-durability.md,machine-dependent,cargo run --release -p nilestream-ledger --bin durability-bench > results/E13-durability.md
 e2_duality.csv,byte-deterministic,cargo run --release -p experiments -- e2

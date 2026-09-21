@@ -9,7 +9,7 @@ Reproduce with `./crates/counterproposal/run.sh` against PostgreSQL 16.13 and a 
 
 ## Method
 
-A differential defect corpus. Twelve defect classes, each written twice — once against a
+A differential defect corpus. Thirteen defect classes in Niles, **ten of them written twice** — the paired copy against a
 **good-faith** PostgreSQL 16 schema and once in Niles — recording for each the *stage* at
 which it is caught: compile time, runtime, or never.
 
@@ -60,17 +60,42 @@ for that reason.
 | D3 | `100.50 jpy` — half a yen, where JPY has scale 0 | **never** — persisted | **compile** | `NL0240` |
 | D4 | Mixed-currency transaction: 100 USD → 100 EUR | **runtime** — rolled back | **compile** | `NL0300` |
 | D5 | Strict view derived from a bounded-stale view | **never** | **compile** | `NL0311` |
-| D6 | View predicate reading the wall clock | **never** | **compile** | `IR013` |
-| D7 | Materializing that view | **never** | **compile** | `IR013` |
+| D6 | View predicate reading the wall clock | **never** | **compile** | `NL0205`, `IR013` |
+| D7 | Materializing that view | **never** | **compile** | `NL0310` |
 | D8 | Filtering on a column that should be encrypted | **never** | **compile** | `NL0260` |
 | D9 | Overdraft with no authorization | **never** — persisted | **compile** | `NL0312` |
-| D10 | `drop trigger` removes conservation | **never** — money destroyed | **not expressible** | — |
+| D10 | `drop trigger` removes conservation | **never** — money destroyed | **compile** | `NL0211`, `NL0300` |
 | D11 | `update` against the ledger | **runtime** | **compile** | `NL0230` |
 | D12 | `ledger_consistent` + `spilled` contract | **not expressible** | **compile** | `NL0220`, `IR010` |
 | D13 | Missing anchor index on a demand view | **never** (silent slowdown) | **compile warning** | `NL0223` |
 
-**Totals.** PostgreSQL: 3 caught at runtime, 0 at compile time, 9 never. Niles: 11 at
-compile time, 1 as a compile-time warning, 1 with no spelling in the language.
+**Totals.** PostgreSQL: 3 caught at runtime, 0 at compile time, 9 never, 1 not expressible.
+Niles: **12 at compile time, 1 as a compile-time warning, 0 accepted in silence, 0 with no
+spelling in the language.**
+
+**Two of those cells moved in cycle 13 and neither moved because anyone was looking at this
+table.**
+
+* `D6` was the one case Niles accepted with no diagnostic at all: a view predicate calling
+  `month_start()`, a helper that does not exist. The language has no `now()`, so the defect
+  has no direct spelling — but an unknown function in a view predicate was simply not
+  checked, which is a different thing, and this document counted it as a gap in the checker
+  rather than a win. L-1 taught `resolve` to report an unbound name and an undeclared
+  function, and `month_start` became `NL0205`. The instance fell when the hole did.
+* `D10` was listed as **not expressible** in Niles, on the reasoning that a language with no
+  run-time rule-dropping has no way to write "drop the conservation rule". The Niles file
+  writes the nearer thing — a `ledger` declared with no `conserve` clause — and that is
+  refused with `NL0211` and `NL0300`. A rule that cannot be dropped at run time because it
+  cannot be *omitted at compile time* is the stronger result, and the cell was
+  under-reporting it.
+
+**And the numbers above were being produced by the wrong compiler.**
+`crates/bank-bench/tests/counterproposal.rs` took whatever `nilesc` binary it found in
+`target/`, preferring `release`, and built one only if none existed. In the working
+container that binary was dated two weeks and six cycles before HEAD, so every verdict this
+table carried for six cycles came from a cycle-8 compiler. A stale binary is a present
+binary, and presence was the only thing checked. The test builds the compiler in its own
+profile first now.
 
 PostgreSQL wins one comparison outright: **D4 is caught**, because the deferred trigger
 groups by `(txn, cur)` and both groups are non-zero. That is a correct and complete
@@ -140,6 +165,12 @@ checkpoints and delta-proportional maintenance all work in PostgreSQL 16, and th
 reconstruction-equivalence property holds exactly. Anyone who wants REVs can have them
 today without adopting anything from this thesis.
 
+**This experiment contains no Nilestream measurement.** Part 1 builds the REV mechanism in
+stock PostgreSQL and measures it against itself; Part 2 scores a defect corpus by what each
+side's *static* tooling catches. Neither half runs the engine. A sentence citing E14 as
+evidence about Nilestream's performance, or as a comparison between the two engines, is
+citing an experiment that does not contain one.
+
 **Q: Do we need an SQL replacement, or only a MySQL/PostgreSQL replacement with REVs?**
 Neither framing survives. The evidence says the *opposite* of the thesis's own emphasis:
 
@@ -147,11 +178,14 @@ Neither framing survives. The evidence says the *opposite* of the thesis's own e
   asymptotics. What a custom engine buys is that the REV is a first-class object the
   database maintains and verifies, rather than application code each team rewrites — a real
   benefit, but an engineering one, not a capability one.
-* The **language** case is the stronger one. Nine of twelve defect classes are undetectable
-  in SQL *at any stage*, because SQL has nothing to state the property against: no
-  per-currency scale in the type, no per-view rung, no linearity, no effect row, no
-  reproducibility obligation on a predicate. These are not gaps PostgreSQL could close with
-  more triggers; a trigger is a runtime check, and D10 shows what a runtime check is worth.
+* The **language** case is the stronger one. Seven of the ten paired defect classes are
+  undetectable in SQL *at any stage*, because SQL has nothing to state the property
+  against: no per-currency scale in the type, no per-view rung, no linearity, no effect
+  row, no reproducibility obligation on a predicate. These are not gaps PostgreSQL could
+  close with more triggers; a trigger is a runtime check, and D10 shows what a runtime
+  check is worth. Three further classes are not paired at all, and that is the sharper
+  version of the same point: `d12` (an infeasible serve contract) and `d13` (a missing
+  anchor index) are properties SQL cannot state, so there is no second copy to write.
 
 **Q: What would it take to prove Niles should exist?**
 This table is the shape of the argument but not yet a proof, and three things are missing.
@@ -159,7 +193,7 @@ This table is the shape of the argument but not yet a proof, and three things ar
 1. **A frequency premise.** The table shows these defects are *undetectable*, not that they
    are *common*. A defect class nobody writes costs nothing to miss. Establishing frequency
    needs a corpus of real banking code or an incident study, and this thesis has neither.
-2. **A cost side.** Against 9 avoided defect classes stands the cost of a new language:
+2. **A cost side.** Against 12 avoided defect classes stands the cost of a new language:
    training, tooling, hiring, the reserved-word collisions of §9.13.5, and the risk that the
    compiler itself is wrong. This experiment measures only the benefit column.
 3. **A human trial.** Whether a compile-time rejection actually prevents the production
@@ -175,7 +209,7 @@ which is the position §6.10.1 now takes, and E14 is its evidence.
   use the strongest available tool for each job and to say where PostgreSQL's idiom is
   better than Nilestream's, but this is a single-author artifact and adversarial review by
   a PostgreSQL specialist is the obvious next step.
-* **Twelve defect classes are not a corpus.** They were chosen because the thesis claims to
+* **Thirteen defect classes are not a corpus.** They were chosen because the thesis claims to
   catch them, which biases toward Niles. A corpus drawn independently — from CVEs, from
   bank incident reports, from `git log` on an open-source ledger — would be much stronger,
   and its absence is the largest single weakness of this experiment.
@@ -184,5 +218,5 @@ which is the position §6.10.1 now takes, and E14 is its evidence.
   Neither was tested, and either could shift Part 1's conclusion further toward PostgreSQL.
   Neither would touch Part 2, which is about static checking.
 * **The Niles side is checked by the compiler this thesis wrote.** A compiler that agrees
-  with its author's expectations is weak evidence. The twelve programs are in the
+  with its author's expectations is weak evidence. The thirteen programs are in the
   repository so that a reader can disagree with them.

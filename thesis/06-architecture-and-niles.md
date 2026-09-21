@@ -257,28 +257,53 @@ every team writes it again. And PostgreSQL isolation is a property of a transact
 than of a view, so "this balance may be four epochs stale and that one may not" has no SQL
 spelling at all — which is why the consistency ladder cannot be expressed, let alone checked.
 
-**The defect corpus is where the case inverts.** Thirteen defect classes, written twice,
-scored by the stage at which each is caught. The Niles column is computed from the corpus by
-`crates/bank-bench/tests/counterproposal.rs`, which fails the build if these numbers stop
-describing it — they had already stopped: two classes the SQL side scored (`D7`, a stale read
-after a period boundary; `D10`, dropping the conservation rule) had **no Niles file at all**,
-so "written twice" was true of nine of them and the counts below could not be derived from
-anything in the repository. Both are written now, in the form the defect takes in a language
-with no run-time rule-dropping and no wall clock.
+**The defect corpus is where the case inverts.** Thirteen defect classes, scored on both
+sides by the stage at which each is caught. The Niles column is computed
+from the corpus by `crates/bank-bench/tests/counterproposal.rs`, which fails the build if
+these numbers stop describing it — they had already stopped twice, and both episodes are
+worth the space.
+
+The first: two classes the SQL side scored (`D7`, a stale read after a period boundary;
+`D10`, dropping the conservation rule) had **no Niles file at all**, so "written twice" was
+true of nine of them and the counts could not be derived from anything in the repository.
+Both are written now, in the form the defect takes in a language with no run-time
+rule-dropping and no wall clock.
+
+The second was found in cycle 13 and is the more serious, because the test that exists to
+prevent exactly this was the thing that hid it. `counterproposal.rs` took whatever `nilesc`
+binary was already in `target/`, preferring `release`, and built one only if none existed.
+The release binary in the working container was dated two weeks and six cycles before HEAD,
+so **every verdict this table reported for six cycles came from a cycle-8 compiler**. A
+stale binary is a present binary, and presence was the only thing checked. The test builds
+the compiler in its own profile first now, and the table below is the current one.
 
 | Stage | PostgreSQL | Niles |
 |---|---:|---:|
-| Compile time | 0 | 11 (+1 warning) |
+| Compile time | 0 | 12 (+1 warning) |
 | Runtime | 3 | — |
 | Never caught | 9 | — |
-| Not expressible | 1 | 1 |
+| Not expressible | 1 | 0 |
 
-**One case is accepted in silence, and it is not a win.** `d6` writes a view predicate over
-a wall-clock helper. Niles has no `now()`, so the defect has no direct spelling — but the
-file is accepted with *no diagnostic whatsoever*, which is a different thing from being
-inexpressible: an unknown function in a view predicate is simply not checked. A reader
-scoring this corpus should count it as a gap in the checker, and the test above names it so
-that it cannot quietly become a twelfth compile-time catch.
+**Ten of the thirteen are executed cases on both sides; three are scored without one, and
+that is worth saying rather than hiding in a total.** `defects.sql` runs `D2`..`D11`. `D1`'s
+PostgreSQL verdict comes from the schema itself — the `postings_conserve` constraint trigger
+catches an unbalanced transaction at COMMIT, which is *runtime*, and `D10` is the case that
+drops that trigger to show what a runtime check is worth. `D12` (an infeasible serve
+contract) and `D13` (a missing anchor index) are scored `not expressible` and `never`
+because SQL has no construct to write them against, which is a finding and not a gap in the
+harness. The Niles column's `not expressible` entry is now **zero**: `d10`, writing a ledger
+with no conservation rule, was listed as having no Niles spelling and is refused with
+`NL0211` and `NL0300` — a ledger declaration without `conserve` does not compile.
+
+**No case is now accepted in silence, and the one that was is how the gap closed.** `d6`
+writes a view predicate over a wall-clock helper, `month_start()`. Niles has no `now()`, so
+the defect has no direct spelling — but the file used to be accepted with *no diagnostic
+whatsoever*, which is a different thing from being inexpressible: an unknown function in a
+view predicate was simply not checked. This paragraph reported it as a gap in the checker
+rather than a win, and cycle 13's L-1 closed it: `month_start` is NL0205, *cannot find
+function `month_start` in this scope*. Nobody went looking for `d6`. The checker began
+resolving its names, and the instance fell when the hole did — which is the argument for
+fixing holes rather than instances, made by accident.
 
 PostgreSQL wins one comparison outright: a mixed-currency transaction moving 100 USD to 100
 EUR is caught at COMMIT, because the deferred trigger groups by `(txn, cur)` and both groups
@@ -287,9 +312,10 @@ are non-zero. That is a complete and correct detection.
 The nine it never catches are the ones without an SQL spelling to check against: adding USD
 to EUR in a query; `100.50 jpy` where JPY has scale zero, which PostgreSQL stores as
 `-100.5000` without complaint; an authorization derived from a bounded-stale view; a
-materialized view whose predicate reads `now()`; a filter on a column that should be
-encrypted; an unauthorized overdraft; a missing anchor index. These are not gaps PostgreSQL
-could close with more triggers, because a trigger is a runtime object.
+materialized view whose predicate reads `now()`, and a read of it after the period rolls
+over; a filter on a column that should be encrypted; an unauthorized overdraft; a dropped
+conservation trigger; a missing anchor index. These are not gaps PostgreSQL could close with
+more triggers, because a trigger is a runtime object.
 
 **Which the tenth defect demonstrates.** One statement —
 
@@ -307,13 +333,24 @@ program without a balancing posting has no executable form from which to remove 
 
 **What E14 settles, and what it does not.** It settles that the engine case is the weaker of
 the two and the language case the stronger — the opposite of where this thesis spends its
-pages, and §12 records the rebalancing as work the document still needs. It does not settle
-that Niles should exist, and three premises are missing before it could:
+pages, and §12 records the rebalancing as work the document still needs.
+
+**E14 contains no Nilestream measurement, and no sentence should be read as though it did.**
+Both halves compare PostgreSQL to PostgreSQL or PostgreSQL to the Niles *compiler*: Part 1
+builds the REV mechanism in stock PostgreSQL and measures it against itself, and Part 2
+scores a defect corpus by what each side's *static* tooling catches. The engine is absent
+from both. What a comparator between Nilestream and PostgreSQL under eviction would show —
+on one host, one window, one seed set, with a resolution floor stated before the run — is
+not measured anywhere in this thesis, and §11.5.3's verdict on the engine rests on the
+argument of §6.10.4 rather than on E14 or on any other experiment.
+
+It does not settle that Niles should exist either, and three premises are missing before it
+could:
 
 1. **Frequency.** The table shows these defects are undetectable, not that they are common.
    A defect class nobody writes costs nothing to miss. Establishing frequency needs a corpus
    of real banking code or an incident study, and this thesis has neither.
-2. **Cost.** Against nine avoided defect classes stands training, tooling, hiring, the
+2. **Cost.** Against twelve avoided defect classes stands training, tooling, hiring, the
    reserved-word collisions of §9.13.5, and the risk that the compiler is itself wrong. E14
    measures only the benefit column.
 3. **Human effect.** Whether a compile-time rejection prevents an incident that a runtime

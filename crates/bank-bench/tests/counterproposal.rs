@@ -52,24 +52,39 @@ fn nilesc_binary() -> &'static PathBuf {
         let target = std::env::var_os("CARGO_TARGET_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| root.join("target"));
-        for profile in ["release", "debug"] {
-            let p = target.join(profile).join("nilesc");
-            if p.is_file() {
-                return p;
-            }
-        }
-        // Build it once, and only if it is absent. A build failure is reported as
-        // `BLOCKED-nilesc` by the caller when the binary still does not exist — never as a
-        // verdict about the language.
+        // **Build first, always, and take the profile this test is itself running in.**
+        //
+        // This used to take whatever binary was already lying in `target/`, preferring
+        // `release`, and build only if none existed. Cycle 13 found the consequence:
+        // `target/release/nilesc` in this container was dated 2026-09-07 while HEAD was
+        // 2026-09-21, so every verdict the test had produced for six cycles came from a
+        // cycle-8 compiler. It scored a fossil and the suite was green, because a stale
+        // binary is a *present* binary and presence was the only thing checked.
+        //
+        // That is worse than the defect above it. A blocked test announces itself; a test
+        // scoring an old compiler reports confident numbers about a language state that no
+        // longer exists — and those numbers are §6.10.3's table and §11.5's sentence.
+        //
+        // An unconditional `cargo build` is cheap when it is a no-op and correct when it is
+        // not. The profile is the one this test binary was compiled in, so a `cargo test`
+        // and a `cargo test --release` each score the compiler they just built rather than
+        // the other profile's leftovers.
         let _ = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
-            .args(["build", "--quiet", "-p", "nilesc"])
+            .args(if cfg!(debug_assertions) {
+                ["build", "--quiet", "-p", "nilesc"].as_slice()
+            } else {
+                ["build", "--quiet", "--release", "-p", "nilesc"].as_slice()
+            })
             .current_dir(&root)
             .status();
-        for profile in ["release", "debug"] {
-            let p = target.join(profile).join("nilesc");
-            if p.is_file() {
-                return p;
-            }
+        let profile = if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        };
+        let p = target.join(profile).join("nilesc");
+        if p.is_file() {
+            return p;
         }
         panic!(
             "BLOCKED-nilesc: no `nilesc` binary under {} and `cargo build -p nilesc` did not \
@@ -145,16 +160,43 @@ fn corpus() -> Vec<(String, Verdict)> {
 }
 
 #[test]
-fn both_sides_of_the_corpus_carry_the_same_defect_classes() {
+fn the_corpus_is_thirteen_classes_and_ten_of_them_run_a_sql_case() {
+    // **Thirteen classes are scored; ten of them run an executed SQL case.**
+    //
+    // The Niles side is `d1`..`d13`. `defects.sql` runs `D2`..`D11`, and the other three are
+    // scored on the PostgreSQL side without a case of their own: `D1`'s verdict comes from
+    // the `postings_conserve` constraint trigger in `schema.sql` — runtime, at COMMIT —
+    // which is exactly what `D10` drops in order to show what a runtime check is worth; and
+    // `D12` (an infeasible serve contract) and `D13` (a missing anchor index) are scored
+    // against constructs SQL has no spelling for.
+    //
+    // The distinction is asserted rather than left to prose because the totals depend on it:
+    // "thirteen written twice" and "ten executed cases" are both true of different things,
+    // and a reader who conflates them gets PostgreSQL's `never` count wrong by two.
     let names: Vec<String> = corpus().into_iter().map(|(n, _)| n).collect();
+    assert_eq!(
+        names.len(),
+        13,
+        "the Niles corpus is thirteen files: {names:?}"
+    );
     for n in 1..=13 {
         assert!(
             names.iter().any(|f| f.starts_with(&format!("d{n}_"))),
-            "the corpus has no `d{n}`: {names:?}. The SQL side numbers its cases D2..D11 and \
-             the Niles side is scored against them; a gap on one side makes \"the same \
-             classes written twice\" false of the pair."
+            "the corpus has no `d{n}`: {names:?}"
         );
     }
+
+    let sql = std::fs::read_to_string(repo_root().join("crates/counterproposal/sql/defects.sql"))
+        .expect("defects.sql");
+    let paired: Vec<usize> = (1..=13)
+        .filter(|n| sql.contains(&format!("### D{n} ")))
+        .collect();
+    assert_eq!(
+        paired,
+        vec![2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+        "`defects.sql` runs D2..D11. If that changed, §6.10.3's paragraph about which three \
+         are scored without an executed case has to change with it."
+    );
 }
 
 #[test]
@@ -193,24 +235,62 @@ fn the_thesis_reports_the_verdicts_the_corpus_produces() {
     );
 }
 
-/// The one case the compiler accepts in silence, named so that it cannot be forgotten.
+/// **E14's own document reports the counts the corpus produces.**
 ///
-/// `d6` writes a view predicate over a wall-clock helper. Niles has no `now()`, so the
-/// defect has no direct spelling — but the file is accepted with *no diagnostic at all*,
-/// which is not the same as being inexpressible: an unknown function in a view predicate
-/// simply is not checked. That is a real gap and it is recorded here rather than counted as
-/// a win.
+/// `results/E14-minimal-counterproposal.md` is classed `historical` and is written by hand,
+/// so nothing regenerated it and nothing compared it. Its Totals line said *11 at compile
+/// time, 1 warning, 1 with no spelling in the language* while the corpus produced 12, 1 and
+/// 0 — and two of its per-case cells named diagnostics the compiler no longer emits. A
+/// hand-written results document beside a harness that produces different numbers is the
+/// defect this whole file exists to prevent, one level out.
 #[test]
-fn the_silently_accepted_case_is_the_one_the_thesis_names() {
+fn the_e14_document_reports_the_counts_the_corpus_produces() {
+    let v = corpus();
+    let refused = v.iter().filter(|(_, x)| *x == Verdict::Refused).count();
+    let warned = v.iter().filter(|(_, x)| *x == Verdict::Warned).count();
+    let accepted = v.iter().filter(|(_, x)| *x == Verdict::Accepted).count();
+    let doc = std::fs::read_to_string(repo_root().join("results/E14-minimal-counterproposal.md"))
+        .expect("E14's document");
+    let want = format!(
+        "Niles: **{refused} at compile time, {warned} as a compile-time warning, \
+         {accepted} accepted in silence,"
+    );
+    assert!(
+        doc.contains(&want),
+        "E14's document must carry the corpus's own totals. Expected a line containing:\n  \
+         {want}\nThe corpus produces {refused} refusals, {warned} warnings and {accepted} \
+         silent acceptances."
+    );
+}
+
+/// **No case is accepted in silence, and the one that was is how the gap got closed.**
+///
+/// `d6` writes a view predicate over a wall-clock helper, `month_start()`. Niles has no
+/// `now()`, so the defect has no direct spelling — but the file used to be accepted with *no
+/// diagnostic at all*, which is a different thing from being inexpressible: an unknown
+/// function in a view predicate simply was not checked. This test named it so it could not
+/// be forgotten, and §6.10.3 reported it as the one silent acceptance.
+///
+/// Cycle 13's L-1 closed it. `month_start` is now NL0205, *cannot find function
+/// `month_start` in this scope* — not because anyone went looking for `d6`, but because the
+/// checker began resolving its names. The gap this test was holding open was one instance
+/// of a hole in the type discipline, and the instance fell when the hole did.
+///
+/// The test stays, inverted. A future silent acceptance is a regression in exactly the way
+/// `d6` was, and it should fail here by name rather than be noticed in a table.
+#[test]
+fn no_case_is_accepted_in_silence() {
     let silent: Vec<String> = corpus()
         .into_iter()
         .filter(|(_, v)| *v == Verdict::Accepted)
         .map(|(n, _)| n)
         .collect();
-    assert_eq!(
-        silent,
-        vec!["d6_wall_clock_predicate".to_string()],
-        "exactly one case is accepted with no diagnostic, and §6.10.3 says which"
+    assert!(
+        silent.is_empty(),
+        "these cases are accepted with no diagnostic at all: {silent:?}. That is not the \
+         same as being inexpressible — it is the compiler not looking. `d6` was in this \
+         position until L-1 taught the checker to resolve names; if something is here \
+         again, §6.10.3's table is wrong and so is §11.5's sentence."
     );
 }
 

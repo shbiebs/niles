@@ -124,10 +124,10 @@ The burden has three parts, and they are conjunctive.
 
 **Status: (i) discharged, (ii) discharged, (iii) partially discharged.**
 
-On (i): the differential-defect experiment (§6.10.3, E14) writes thirteen defect classes twice — once against a good-faith PostgreSQL 16 schema using the strongest tool PostgreSQL offers for each job, once in Niles — and records the *stage* at which each is caught. PostgreSQL catches three at run time, none at compile time, and never catches nine. Niles catches eleven at compile time, warns on one, and **accepts one in silence** — the wall-clock predicate, where an unchecked helper in a view is a gap in the checker rather than a defect with no spelling.
+On (i): the differential-defect experiment (§6.10.3, E14) writes thirteen defect classes twice — once against a good-faith PostgreSQL 16 schema using the strongest tool PostgreSQL offers for each job, once in Niles — and records the *stage* at which each is caught. PostgreSQL catches three at run time, none at compile time, never catches nine, and cannot state one. **Niles catches twelve at compile time, warns on one, and accepts none in silence.** Two cycle-13 corrections stand behind the Niles column and both are worth a clause: the one silent acceptance — a view predicate calling an undeclared helper — closed when the checker began resolving its names (L-1), nobody having gone looking for it; and the harness stopped scoring a compiler six cycles old that it had found lying in `target/`, which is what it had been reporting this table from.
 
 **And a second experiment answers the objection that reading raises.** A checker with a
-`Undecided` verdict can catch eleven of twelve *deliberate* defects and still be undecided on
+`Undecided` verdict can catch twelve of thirteen *deliberate* defects and still be undecided on
 ordinary code, in which case the soundness theorem is true and applies to a fragment nobody
 writes. E18 (§9.14.3) measures it: forty correct banking functions — transfers, fee sets,
 syndicated allocations, symbolic amounts, multi-currency legs, holds, and guarded paths — run

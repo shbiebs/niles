@@ -39,6 +39,37 @@
 #                       without checking the citation.
 #
 # regenerated_by: the exact command, or `none` for historical.
+#
+# checkpoint interval (C), for machine-dependent artefacts only:
+#   C is the ledger's per-key checkpoint interval. `0` is off, and a reconstruction then
+#   folds a key from genesis -- the configuration §9.4.1 says the cost law excludes. It is
+#   recorded here rather than edited into the artefacts, because a configuration line
+#   written onto data measured before the flag existed would be indistinguishable from a
+#   measured column, and this project's rule is that a header is not edited onto data that
+#   was taken without it.
+#
+#   For everything below, C = 0, and it is known from the code that produced it rather than
+#   from the file: `RevEngine::seeded` built `Ledger::new()` unconditionally until cycle 13
+#   added `seeded_with_checkpoints` and `bench --nls-checkpoint`. That is
+#   `MISMATCH-daemon-checkpoints`. What cycle 13 also measured is that at E16's own seeding
+#   (`--rounds 1`, one posting per account) **no interval above 1 covers any account key**:
+#   at C = 16 the mechanism covers one key of 10,001, and that key is the house, which the
+#   `point` workload does not read. Coverage of the accounts begins exactly at `rounds = C`.
+#   `nilestream-server`'s `at_e16_seeding_no_interval_above_one_covers_an_account` holds
+#   those numbers, so the day a recipe deepens the accounts a test fails rather than a
+#   reader noticing.
+#
+#   C=0 E16-wallclock.md E16-wallclock/oltp.csv E16-wallclock/analytical.csv
+#   C=0 E16-wallclock/analytical-statements.csv E16-wallclock/point.csv
+#   C=0 E16-wallclock/durable.csv E16-wallclock/report.csv E16-wallclock/device.csv
+#   C=0 E19-scaling.md E19-scaling/E19-scaling.md E19-scaling/point.csv
+#   C=0 E19-scaling/durable.csv E19-scaling/mixed.csv E19-scaling/fold.csv
+#   C=0 E23-scaling/E23-scaling.csv E21-wire-cost.md E13-durability.md e7_write_path.csv
+#
+#   E23's two series are additionally *insensitive* to C, and that is measured rather than
+#   assumed: `serve_path` in its own CSV reads `fold` and `report-from-view`, and the path a
+#   checkpoint bounds is `IndexFold`. The marker that attributed the caveat to §9.14.5 is
+#   struck; see that section.
 path,class,regenerated_by
 E1-correctness.md,byte-deterministic,cargo run --release -p experiments -- e1
 e1_correctness.csv,byte-deterministic,cargo run --release -p experiments -- e1

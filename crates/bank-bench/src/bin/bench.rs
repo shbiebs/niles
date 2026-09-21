@@ -125,6 +125,17 @@ struct Args {
     /// same thing on both sides.
     rounds: u32,
     nls_budget: usize,
+    /// **C: the hosted engine's per-key checkpoint interval.** `0` is off, and is what every
+    /// published E16 and E19 figure was measured at.
+    ///
+    /// It was not a flag. `RevEngine::seeded` built `Ledger::new()`, so the daemon behind
+    /// every wall-clock row in this repository reconstructed each key from genesis, in the
+    /// configuration §9.4.1 says the cost law excludes — and no artefact said so, which is
+    /// `MISMATCH-daemon-checkpoints`. It matters to exactly one row of E16: `point` is the
+    /// only workload whose `miss_rate` column is not `n/a`, so it is the only one that
+    /// reconstructs at all. The `analytical` rows serve by a report fold over the whole
+    /// base, which is O(base rows) whatever C is.
+    nls_checkpoint: usize,
     /// Connection counts for the scaling experiment (E19), e.g. `1,2,4`.
     ///
     /// Empty means the experiment does not run, and that is the default: the contract table
@@ -212,6 +223,7 @@ impl Args {
             // space forces the miss path to run, which is the path the phase diagram is
             // about. Override with `--nls-budget`.
             nls_budget: 2_500,
+            nls_checkpoint: 0,
             connections: Vec::new(),
             scaling_only: false,
             oltp_connections: Vec::new(),
@@ -355,6 +367,10 @@ impl Args {
                 }
                 "--nls-budget" => {
                     a.nls_budget = argv[i + 1].parse().unwrap_or(a.nls_budget);
+                    i += 1;
+                }
+                "--nls-checkpoint" => {
+                    a.nls_checkpoint = argv[i + 1].parse().unwrap_or(a.nls_checkpoint);
                     i += 1;
                 }
                 other => eprintln!("bench: ignoring unknown argument `{other}`"),
@@ -846,12 +862,13 @@ fn run(args: &Args) -> i32 {
                     let _ = std::fs::create_dir_all(parent);
                 }
                 let _ = std::fs::remove_file(&seg);
-                let base = nilestream_server::rev_engine::RevEngine::seeded(
+                let base = nilestream_server::rev_engine::RevEngine::seeded_with_checkpoints(
                     args.accounts,
                     args.rounds,
                     args.nls_budget,
                     proto_engine::ViewMode::Demand,
                     proto_engine::EvictionPolicy::Lru,
+                    args.nls_checkpoint,
                 );
                 let base = match base.with_durable(&seg) {
                     Ok(e) => {
@@ -878,6 +895,7 @@ fn run(args: &Args) -> i32 {
                     accounts: args.accounts,
                     rounds: args.rounds,
                     budget: args.nls_budget,
+                    checkpoint: args.nls_checkpoint,
                 });
                 let schema = nilestream_server::daemon::DEFAULT_SCHEMA.to_string();
                 std::thread::spawn(move || {
@@ -911,12 +929,13 @@ fn run(args: &Args) -> i32 {
                     let _ = std::fs::create_dir_all(parent);
                 }
                 let _ = std::fs::remove_file(&seg);
-                let base = nilestream_server::rev_engine::RevEngine::seeded(
+                let base = nilestream_server::rev_engine::RevEngine::seeded_with_checkpoints(
                     args.accounts,
                     args.rounds,
                     usize::MAX,
                     proto_engine::ViewMode::Demand,
                     proto_engine::EvictionPolicy::Lru,
+                    args.nls_checkpoint,
                 );
                 match base.with_durable(&seg) {
                     Ok(e) => {
@@ -932,6 +951,7 @@ fn run(args: &Args) -> i32 {
                             accounts: args.accounts,
                             rounds: args.rounds,
                             budget: usize::MAX,
+                            checkpoint: args.nls_checkpoint,
                         });
                         let schema = nilestream_server::daemon::DEFAULT_SCHEMA.to_string();
                         std::thread::spawn(move || {
@@ -1276,6 +1296,9 @@ struct Hosted {
     accounts: i64,
     rounds: u32,
     budget: usize,
+    /// C, carried so a reseed rebuilds the engine the run was configured for rather than
+    /// silently dropping back to `Ledger::new()` between levels.
+    checkpoint: usize,
 }
 
 impl Hosted {
@@ -1296,12 +1319,13 @@ impl Hosted {
             proto_engine::EvictionPolicy::Lru,
         );
         let _ = std::fs::remove_file(&self.seg);
-        *guard = RevEngine::seeded(
+        *guard = RevEngine::seeded_with_checkpoints(
             accounts,
             rounds,
             self.budget,
             proto_engine::ViewMode::Demand,
             proto_engine::EvictionPolicy::Lru,
+            self.checkpoint,
         )
         .with_durable(&self.seg)
         .map_err(|e| e.to_string())?;
@@ -1324,12 +1348,13 @@ impl Hosted {
             proto_engine::EvictionPolicy::Lru,
         );
         let _ = std::fs::remove_file(&self.seg);
-        *guard = RevEngine::seeded(
+        *guard = RevEngine::seeded_with_checkpoints(
             self.accounts,
             self.rounds,
             self.budget,
             proto_engine::ViewMode::Demand,
             proto_engine::EvictionPolicy::Lru,
+            self.checkpoint,
         )
         .with_durable(&self.seg)
         .map_err(|e| e.to_string())?;

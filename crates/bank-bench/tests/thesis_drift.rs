@@ -71,7 +71,7 @@ fn the_corrected_e1_and_e8_tables_are_generated_blocks() {
     let ch = std::fs::read_to_string(root.join("thesis/09-evaluation.md")).unwrap();
     for marker in [
         "<!-- BEGIN:E1-correctness results/E1-correctness.md#table -->",
-        "<!-- BEGIN:E8-rungs results/E8-rungs.md#table -->",
+        "<!-- BEGIN:E8-rungs results/e8_rungs.csv#e8rungs -->",
     ] {
         assert!(ch.contains(marker), "missing generated block: {marker}");
     }

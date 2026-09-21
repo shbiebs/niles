@@ -601,6 +601,25 @@ impl Ledger {
     /// the cost law says reconstruction should depend on.
     /// One account's postings, in epoch order, up to and including `anchor`.
     ///
+    /// **How much of this ledger the bounding mechanism actually covers.**
+    ///
+    /// `(keys with at least one checkpoint, checkpoints in total)`. A per-key checkpoint is
+    /// recorded every `checkpoint_interval` postings *on that key*, so an interval above a
+    /// key's history depth records nothing for it and reconstruction on that key folds from
+    /// genesis exactly as it would at `checkpoint_interval = 0`.
+    ///
+    /// That is not a hypothetical. E8 at C = 64 reproduces its C = 0 row counts *exactly*
+    /// for two of three rungs, because with 8,000 postings spread Zipf-0.9 over 10,000
+    /// accounts almost no key reaches 64. Without this accessor that coincidence has to be
+    /// explained by argument; with it, the experiment reports the coverage beside the cost
+    /// and the explanation is a column.
+    pub fn checkpoint_coverage(&self) -> (usize, usize) {
+        (
+            self.checkpoints.values().filter(|v| !v.is_empty()).count(),
+            self.checkpoints.values().map(|v| v.len()).sum(),
+        )
+    }
+
     /// Through the **anchor index**, which is the mechanism the whole thesis is about: the
     /// alternative is a scan of history, and the difference between the two is the
     /// measured two orders of magnitude of §9.4.1.

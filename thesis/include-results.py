@@ -376,6 +376,106 @@ def e7_medians(text: str) -> str:
     return "\n".join(out)
 
 
+def e8_rungs(text: str) -> str:
+    """The consistency-rung table from `e8_rungs.csv`, across checkpoint intervals.
+
+    Every figure in §9.4.3 was typed: 102,624 and 40,869 for the read-row gap, 26,644 and
+    19,658 for misses, 61 and 4,017 for maintenance passes, 0.259 and 0.455 for hit rates,
+    and the 2.5x and 1.67x ratios computed from them. They were correct for the run that
+    produced them and they were correct for one configuration — `checkpoint_interval = 0`,
+    which is `Ledger::new()`'s default and is the configuration §9.4.1 says the cost law
+    excludes. H-S3 is stated *given a bounding mechanism* and its read-side leg was measured
+    without one.
+
+    Cycle 13's E-4 runs E8 at C in {0, 16, 64}. The table is generated so that the next
+    person to add an interval does not have to retype nine rows, and the ratio line is
+    generated for the same reason a caption is: a figure in a sentence is a second copy of a
+    measurement.
+
+    The ratio is computed **per seed and then medianed**, not from the medians. A ratio of
+    medians is not the median of ratios, and the seeds are paired — the same workload runs
+    on both rungs — so the paired statistic is the one the pairing earns.
+    """
+    rows = _csv_rows(text)
+    cs = sorted({int(r["checkpoint_interval"]) for r in rows})
+    rungs = ["bounded(k=64)", "bounded(k=8)", "strict(k=0)"]
+    seeds = sorted({r["seed"] for r in rows}, key=int)
+
+    def cell(rung: str, c: int, col: str) -> float:
+        return _median(
+            [
+                float(r[col])
+                for r in rows
+                if r["rung"] == rung and int(r["checkpoint_interval"]) == c
+            ]
+        )
+
+    def one(rung: str, c: int, seed: str, col: str) -> float:
+        for r in rows:
+            if (
+                r["rung"] == rung
+                and int(r["checkpoint_interval"]) == c
+                and r["seed"] == seed
+            ):
+                return float(r[col])
+        raise SystemExit(f"e8_rungs.csv has no row for {rung} at C={c}, seed {seed}")
+
+    out = [
+        "| Rung | C | Misses | Base rows read | Deltas applied | Maintenance passes "
+        "| Hit rate | Keys checkpointed | Checkpoints |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for c in cs:
+        for rung in rungs:
+            out.append(
+                f"| {rung} | {c} | {cell(rung, c, 'misses'):,.0f} "
+                f"| {cell(rung, c, 'rows_touched'):,.0f} "
+                f"| {cell(rung, c, 'deltas_applied'):,.0f} "
+                f"| {cell(rung, c, 'apply_calls'):,.0f} "
+                f"| {cell(rung, c, 'hit_rate'):.3f} "
+                f"| {cell(rung, c, 'checkpointed_keys'):,.0f} "
+                f"| {cell(rung, c, 'checkpoints'):,.0f} |"
+            )
+
+    out += ["", "**The read-side gap, per checkpoint interval.** Paired by seed:", ""]
+    out += [
+        "| C | Lax:strict base rows | MAD | Keys checkpointed | Checkpoints |",
+        "|---:|---:|---:|---:|---:|",
+    ]
+    for c in cs:
+        rs = [
+            one("bounded(k=64)", c, sd, "rows_touched")
+            / one("strict(k=0)", c, sd, "rows_touched")
+            for sd in seeds
+        ]
+        m = _median(rs)
+        mad = _median([abs(x - m) for x in rs])
+        out.append(
+            f"| {c} | {m:.2f}x | {mad:.2f} "
+            f"| {cell('strict(k=0)', c, 'checkpointed_keys'):,.0f} "
+            f"| {cell('strict(k=0)', c, 'checkpoints'):,.0f} |"
+        )
+
+    # Everything but the read column is identical across C, and saying so is the finding:
+    # a checkpoint changes what a reconstruction costs, not whether a read misses.
+    invariant = all(
+        cell(rung, c, col) == cell(rung, cs[0], col)
+        for rung in rungs
+        for c in cs
+        for col in ("misses", "deltas_applied", "apply_calls", "hit_rate")
+    )
+    out += [
+        "",
+        "*Misses, deltas applied, maintenance passes and hit rate are "
+        + ("**identical** at every interval" if invariant else "**not** identical across intervals")
+        + ": a checkpoint changes what a reconstruction costs, not whether a read misses. "
+        "`Keys checkpointed` is of 10,000, and it is the column that explains the rest — "
+        "an interval above a key's history depth records nothing for that key, so a C that "
+        "covers few keys is indistinguishable from C = 0 in the read column.*",
+    ]
+    return "\n".join(out)
+
+
 def e12_phase(text: str) -> str:
     """The E12 grid from `e12_phase_compiled.csv`, minimum of each price column in bold.
 
@@ -424,6 +524,7 @@ EXTRACTORS = {
     "policytable": policy_table,
     "policydeltas": policy_deltas,
     "e7medians": e7_medians,
+    "e8rungs": e8_rungs,
     "e12phase": e12_phase,
 }
 

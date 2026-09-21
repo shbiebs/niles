@@ -707,6 +707,25 @@ impl RevEngine {
         (l.idem_window_keys(), l.idem_window())
     }
 
+    /// A seeded engine whose ledger has no per-key checkpoints.
+    ///
+    /// Kept as the zero-argument-for-C spelling because that is what every caller meant
+    /// before cycle 13, and because a default that has to be passed is a default nobody
+    /// reads. What changed in cycle 13 is that the *configuration is now sayable*: E16's
+    /// `point` row, the one row in that experiment whose serve path reconstructs, was
+    /// measured at C = 0 and no artefact said so (`MISMATCH-daemon-checkpoints`).
+    /// **How many keys this engine's bounding mechanism actually covers.**
+    ///
+    /// `(keys with at least one checkpoint, checkpoints in total)`, forwarded from the
+    /// ledger. Exposed because a caveat about `checkpoint_interval` is only worth carrying
+    /// if the interval binds at the base shape it is a caveat about, and that is a number
+    /// rather than an argument: a checkpoint is recorded every C postings *on a key*, so at
+    /// `--rounds 1` — E16's own seeding — every ordinary account holds one posting and no
+    /// interval above 1 records anything for it.
+    pub fn checkpoint_coverage(&self) -> (usize, usize) {
+        self.base().checkpoint_coverage()
+    }
+
     pub fn seeded(
         accounts: i64,
         postings_per_account: u32,
@@ -714,7 +733,29 @@ impl RevEngine {
         mode: ViewMode,
         policy: EvictionPolicy,
     ) -> RevEngine {
-        let mut ledger = Ledger::new();
+        Self::seeded_with_checkpoints(accounts, postings_per_account, budget, mode, policy, 0)
+    }
+
+    /// The same, with the per-key bounding mechanism set.
+    ///
+    /// `checkpoint_interval` is C: a checkpoint `(epoch, running balance)` is recorded every
+    /// C postings **on a key**, so a later reconstruction of that key folds from the
+    /// checkpoint rather than from genesis. `0` is off. An interval above a key's history
+    /// depth records nothing for that key, which is why the experiments report coverage
+    /// beside cost (`Ledger::checkpoint_coverage`).
+    pub fn seeded_with_checkpoints(
+        accounts: i64,
+        postings_per_account: u32,
+        budget: usize,
+        mode: ViewMode,
+        policy: EvictionPolicy,
+        checkpoint_interval: usize,
+    ) -> RevEngine {
+        let mut ledger = if checkpoint_interval == 0 {
+            Ledger::new()
+        } else {
+            Ledger::with_checkpoints(checkpoint_interval)
+        };
         let mut txn = 0u64;
         for round in 0..postings_per_account {
             for a in 1..=accounts as u64 {
@@ -2639,6 +2680,75 @@ mod tests {
         assert!(!ld.has_errors(), "`{sql}`: {:?}", ld.items);
         assert!(niles_ir::verify::verify(&lowered.circuit).is_ok());
         lowered
+    }
+
+    /// **`MISMATCH-daemon-checkpoints`, measured at the base shape it is a caveat about.**
+    ///
+    /// Every wall-clock row in this repository was measured from a daemon built by
+    /// `RevEngine::seeded`, which used `Ledger::new()` — `checkpoint_interval = 0`, the
+    /// configuration §9.4.1 says the cost law excludes. The caveat has ridden on §9.14.1 and
+    /// §9.14.5 since cycle 9 and has been read as *these numbers would be different with
+    /// checkpoints on*.
+    ///
+    /// At E16's own seeding it would not be. `--rounds 1` seeds one conserved pair per
+    /// account: every ordinary account key holds exactly one posting, and a checkpoint is
+    /// recorded every C postings **on a key**, so no interval above 1 records anything for
+    /// any of the ten thousand accounts. The single key with depth is the house, which
+    /// takes the other leg of all of them — and the `point` workload reads accounts.
+    ///
+    /// So the honest form of the caveat is not *the figures would move*; it is *the
+    /// configuration was not stated, and at this base shape the mechanism does not engage*.
+    /// This test is what lets the thesis say the second thing instead of the first.
+    #[test]
+    fn at_e16_seeding_no_interval_above_one_covers_an_account() {
+        // E16's committed recipe: `--accounts 10000 --rounds 1`.
+        for c in [2usize, 4, 16, 64] {
+            let e = RevEngine::seeded_with_checkpoints(
+                10_000,
+                1,
+                2_500,
+                ViewMode::Demand,
+                EvictionPolicy::Lru,
+                c,
+            );
+            let (keys, _total) = e.checkpoint_coverage();
+            assert!(
+                keys <= 1,
+                "at C = {c} the bounding mechanism covers {keys} keys at E16's seeding. If \
+                 that is above one, an account now has depth and §9.14.1's caveat has become \
+                 material — re-measure the `point` row at C = 16 rather than editing this."
+            );
+        }
+        // And the control: C = 0 covers nothing at all, which is what every published
+        // wall-clock figure was measured at.
+        let off = RevEngine::seeded_with_checkpoints(
+            10_000,
+            1,
+            2_500,
+            ViewMode::Demand,
+            EvictionPolicy::Lru,
+            0,
+        );
+        assert_eq!(off.checkpoint_coverage(), (0, 0));
+
+        // **Where the caveat would become material**, so the threshold is a number and not
+        // a warning. An account's depth is the round count, and a checkpoint needs C
+        // postings on a key, so coverage of the accounts begins exactly at `rounds = C`.
+        for (rounds, want_keys) in [(15u32, 1usize), (16, 10_001)] {
+            let e = RevEngine::seeded_with_checkpoints(
+                10_000,
+                rounds,
+                2_500,
+                ViewMode::Demand,
+                EvictionPolicy::Lru,
+                16,
+            );
+            assert_eq!(
+                e.checkpoint_coverage().0,
+                want_keys,
+                "at rounds = {rounds} and C = 16 the mechanism should cover {want_keys} keys"
+            );
+        }
     }
 
     /// Render a Z-set the way `Serving::query` renders one, so the two can be compared.

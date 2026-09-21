@@ -215,6 +215,20 @@ pub fn budget(scenario: &str) -> Option<f64> {
         // 3.8. That is the maintenance side of the trade the thesis is about, and it is
         // reported rather than absorbed: the write path pays it so that a single-account
         // read costs 20 allocations instead of 29 and touches no base rows at all.
+        //
+        // **+40 in cycle 13, and it is the name-resolution pass.** L-1 added
+        // `niles_lang::names::check_program`, called from the end of `resolve_program`, so
+        // every compile in this process now builds a scope stack and two `BTreeSet`s of
+        // declared names. A seeded engine compiles its view once, so the cost is 40
+        // allocations *per process*, not per posting: 150,269 -> 150,309 over 40,000
+        // postings, and the per-op figure does not move off 3.8. It is written here rather
+        // than absorbed because E18's job is to make a movement visible, and a movement with
+        // no explanation beside it is one somebody has to re-derive.
+        //
+        // It also found a hole in the gate. `make gate` does not run `make reproduce`, so
+        // this drift survived the gate on L-1's own commit; `make reproduce` caught it two
+        // cards later. A byte-deterministic artefact whose regeneration is not in the gate
+        // is guarded only by whoever remembers to run it.
         "ledger_seeded" => 4.2,
         // **The three served analytical statements, after the fold replaced the copy.**
         //

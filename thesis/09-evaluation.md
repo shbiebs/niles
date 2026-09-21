@@ -312,15 +312,31 @@ The delayed-hit weighting changes which entries it keeps, and that trade costs i
 Identical workload; the rung sets both the anchor a read demands and how far maintenance
 may be batched.
 
-<!-- BEGIN:E8-rungs results/E8-rungs.md#table -->
+<!-- BEGIN:E8-rungs results/e8_rungs.csv#e8rungs -->
 
-*Generated from `results/E8-rungs.md`. Do not edit by hand.*
+*Generated from `results/e8_rungs.csv`. Do not edit by hand.*
 
-| rung | deltas applied | maintenance passes | misses | base rows read | divergences |
-|---|---|---|---|---|---|
-| bounded(k=64) | 2171 | 61 | 26644 | 102624 | 0 |
-| bounded(k=8) | 2514 | 446 | 24700 | 73811 | 0 |
-| strict(k=0) | 3621 | 4017 | 19658 | 40869 | 0 |
+| Rung | C | Misses | Base rows read | Deltas applied | Maintenance passes | Hit rate | Keys checkpointed | Checkpoints |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| bounded(k=64) | 0 | 26,644 | 102,624 | 2,171 | 61 | 0.259 | 0 | 0 |
+| bounded(k=8) | 0 | 24,700 | 73,811 | 2,514 | 446 | 0.315 | 0 | 0 |
+| strict(k=0) | 0 | 19,658 | 40,869 | 3,621 | 4,017 | 0.456 | 0 | 0 |
+| bounded(k=64) | 16 | 26,644 | 76,612 | 2,171 | 61 | 0.259 | 54 | 178 |
+| bounded(k=8) | 16 | 24,700 | 62,742 | 2,514 | 446 | 0.315 | 54 | 178 |
+| strict(k=0) | 16 | 19,658 | 38,977 | 3,621 | 4,017 | 0.456 | 54 | 178 |
+| bounded(k=64) | 64 | 26,644 | 101,553 | 2,171 | 61 | 0.259 | 11 | 43 |
+| bounded(k=8) | 64 | 24,700 | 73,811 | 2,514 | 446 | 0.315 | 11 | 43 |
+| strict(k=0) | 64 | 19,658 | 40,869 | 3,621 | 4,017 | 0.456 | 11 | 43 |
+
+**The read-side gap, per checkpoint interval.** Paired by seed:
+
+| C | Lax:strict base rows | MAD | Keys checkpointed | Checkpoints |
+|---:|---:|---:|---:|---:|
+| 0 | 2.52x | 0.05 | 0 | 0 |
+| 16 | 1.98x | 0.00 | 54 | 178 |
+| 64 | 2.49x | 0.04 | 11 | 43 |
+
+*Misses, deltas applied, maintenance passes and hit rate are **identical** at every interval: a checkpoint changes what a reconstruction costs, not whether a read misses. `Keys checkpointed` is of 10,000, and it is the column that explains the rest — an interval above a key's history depth records nothing for that key, so a C that covers few keys is indistinguishable from C = 0 in the read column.*
 
 <!-- END:E8-rungs -->
 
@@ -348,15 +364,49 @@ Corrected, so that a pass folds every epoch in its window:
   and a materially weaker claim: the same work in fewer, larger passes, which amortizes
   per-pass overhead and lets an operator schedule maintenance rather than run it
   continuously.
-* **The read path is where the cost moved, not where it is absent.** A lax rung now reads
-  **2.5× more base rows** (102,624 against 40,869) and misses 26,644 times against 19,658;
-  its hit rate is 0.259, not the 0.455 previously reported. Its entries are genuinely less
-  current, so more reads reconstruct.
+* **The read path is where the cost moved, not where it is absent.** A lax rung reads
+  substantially more base rows than a strict one and misses more often, at a materially
+  lower hit rate. Its entries are genuinely less current, so more reads reconstruct. Every
+  figure is in the block above rather than in this sentence, for the reason the next
+  paragraph gives.
 
 The honest statement, which is less convenient than the one it replaces: **a bounded rung
 buys fewer maintenance passes and pays for them in reconstruction.** The trade is visible
 on both sides rather than free on one, and an operator provisioning for it must size the
 reconstruction path as well as the maintenance path.
+
+**The size of that trade was measured in the one configuration H-S3 excludes, and nobody
+noticed for six cycles.** H-S3 is stated *given a bounding mechanism*, and §9.4.1 says
+plainly that without one the cost of a rung is a function of how much history there is
+rather than of the workload's shape. E8 is H-S3's read-side leg and ran at
+`Ledger::new()`'s default, `checkpoint_interval = 0`. Its other leg, E10, is the one
+experiment in this chapter that varies C. So `measured` rested on two experiments at
+opposite ends of the condition the claim is conditioned on, and the read-side figure the
+thesis quoted — the lax rung reading 2.5× the strict rung's base rows — was the C = 0
+figure carrying no such label.
+
+Cycle 13 ran E8 at C ∈ {0, 16, 64}, and the block above is generated so that the figures
+cannot be typed beside the run again. Three things it says:
+
+* **With a bounding mechanism the gap narrows, and by a quarter.** The paired lax:strict
+  read ratio is 2.52× ± 0.05 at C = 0 and **1.98× ± 0.00** at C = 16. The MAD is zero to
+  two places: every seed gives the same ratio, which is what a ratio between two
+  deterministic counts over one workload should do and is worth stating because the C = 0
+  ratio does not.
+* **Everything except the read column is invariant in C.** Misses, deltas applied,
+  maintenance passes and hit rate are identical, to the unit, at all three intervals. A
+  checkpoint changes what a reconstruction costs; it does not change whether a read misses.
+  That is the cleanest available statement of what the bounding mechanism is *for*, and it
+  falls out of the table rather than being argued.
+* **C = 64 behaves like C = 0, and the coverage column says why.** At C = 64 the ratio
+  returns to 2.49× and two of the three rungs reproduce their C = 0 row counts exactly. A
+  per-key checkpoint is recorded every C postings *on that key*, so an interval above a
+  key's history depth records nothing for it: C = 16 covers 54 keys of 10,000 with 178
+  checkpoints, C = 64 covers 11 with 43. **Removing a quarter of a lax rung's read cost
+  took bounding 0.54% of the keys** — which is the Pareto argument of §1.2 appearing in a
+  place it was not put on purpose. `Ledger::checkpoint_coverage` was added so that this
+  explanation is a column rather than a paragraph; without it the C = 64 coincidence has to
+  be explained by argument, and an argument is what a measurement is supposed to replace.
 
 The first attempt at this experiment measured only misses and hit rate and found no
 difference at all between rungs. That null was reported, investigated, and attributed to
@@ -691,7 +741,13 @@ The instrument is deliberately outside the workspace; §9.10 says why.
 
 `results/E16-wallclock.md`, generated by `bank-bench --run`; nothing in it is typed by hand.
 
-**`MISMATCH-daemon-checkpoints`: every table in this section was measured from a daemon whose ledger has `checkpoint_interval = 0`.** `RevEngine::seeded` builds `Ledger::new()`, and §9.4.1's own conclusion is that the cost law holds "only with checkpointing". The reconstructions behind the `point` and `report` rows therefore fold each key's entire history, which is also what the within-level decay in cycle 8's mixed data looks like. The configuration is not stated anywhere in the artefacts either; cycle 9's C9-07 adds the flag, a default, and a provenance column, and C9-12 republishes on Host C. Until then the figures below are "at C = 0" whether or not they say so.
+**`MISMATCH-daemon-checkpoints`, narrowed to what it is: every table in this section was measured from a daemon whose ledger has `checkpoint_interval = 0`, and at this section's base shape no other value would change them.** Cycle 13 measured both halves of that sentence rather than asserting either.
+
+The configuration half stands and was real: `RevEngine::seeded` built `Ledger::new()`, §9.4.1's own conclusion is that the cost law holds *only with checkpointing*, and no artefact stated C. There is a `--nls-checkpoint` flag now and `seeded_with_checkpoints` behind it, so the configuration is sayable.
+
+The *materiality* half does not stand, and this is the correction. A checkpoint is recorded every C postings **on a key**. E16's committed recipe seeds `--rounds 1` — one conserved pair per account — so every one of the ten thousand account keys holds a single posting and no interval above 1 records anything for any of them. At C = 16 the mechanism covers **one key of 10,001**, with 625 checkpoints, and that key is the house, which takes the other leg of every pair; the `point` workload reads accounts. Coverage of the accounts begins exactly at `rounds = C`: at C = 16 it is 1 key at `rounds = 15` and all 10,001 at `rounds = 16`. `at_e16_seeding_no_interval_above_one_covers_an_account` holds those numbers, so if a future recipe deepens the accounts this caveat becomes material and a test says so rather than a reader noticing.
+
+The caveat has been read for four cycles as *these figures would be different with checkpointing on*. It should be read as *the configuration was not stated, and at this seeding the mechanism does not engage on any key this experiment reads*. Those are different claims and only the second is supported. What the mechanism is worth when it does engage is §9.4.3's table, where bounding 0.54% of the keys removes a quarter of a lax rung's read cost.
 
 Every measurement in §§9.1–9.4 and §9.13 reported *counted work* inside the prototype, and the one wall-clock table (§9.4.4) was in-memory, single-threaded and compared to nothing. §7's performance contract states its targets relative to PostgreSQL. They were predictions in the typography of results. E16 is the first measurement against the baseline the specification names.
 
@@ -766,7 +822,11 @@ Two defects, and neither was in the engine.
 
 ### 9.14.5 The two asymptotic rows: cost per row of base, cost per row of answer (E23)
 
-**`MISMATCH-daemon-checkpoints` applies here too:** the daemon these curves were driven against runs with `checkpoint_interval = 0`, so the cost-per-row-of-base axis is measured on a fold whose length is the key's whole history. That is the configuration in which §9.4.1 says the cost law does *not* hold, and the slope below should be read as the un-checkpointed one until Host C republishes (cycle 9, C9-07/C9-12).
+**`MISMATCH-daemon-checkpoints` was attributed here and does not belong here.** The marker said the cost-per-row-of-base axis is measured on a fold whose length is the key's whole history, so the slope should be read as the un-checkpointed one. That reading requires the series to reconstruct a key, and neither series does.
+
+`serve_path` is a committed column of `results/E23-scaling/E23-scaling.csv`, and it reads `fold` for the cold series and `report-from-view` for the warm one. The engine's own classification of `ServePath::Fold` is *one pass over the base with a per-group accumulator and no intermediate Z-set; O(base rows + groups)* — a whole-base pass, not a per-key reconstruction. The path checkpoints bound is `IndexFold`, *one pass over one account's postings, reached through the anchor index*, and it appears in neither series. A per-key checkpoint cannot shorten a scan of every row.
+
+The marker is struck as of cycle 13. It was a plausible caveat applied by resemblance rather than by reading the column that settles it, and the struck text is kept in this paragraph rather than deleted, because a caveat that quietly disappears is indistinguishable from one that was silently resolved.
 
 `results/E23-scaling.md`, generated by `bank-bench --run --e23`; nothing in it is typed by hand.
 

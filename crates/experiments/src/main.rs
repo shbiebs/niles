@@ -1028,14 +1028,46 @@ fn e7_write_path(seeds: &[u64]) -> String {
 ///
 /// The thesis block is filled from *this* file, so no figure in Chapter 9 is typed beside
 /// the run that produced it. `thesis/include-results.py --check` fails if the two drift.
-fn render_medians(csv: &str, group: usize, cols: &[(usize, &str)]) -> String {
+///
+/// # Columns are named, not numbered
+///
+/// This took `&[(usize, &str)]` — a column *index* and the heading to print over it — until
+/// cycle 13, when E-4 added `checkpoint_interval` as E8's third column. Every index after it
+/// shifted by one, and the renderer went on printing the same headings over the wrong
+/// fields: `deltas applied` became the row count, `misses` became the literal seed, and the
+/// document published `42 misses` for all three rungs because 42 is a seed. Nothing failed.
+/// The table was well-formed, plausible, and about different quantities than its headings
+/// said.
+///
+/// That is the defect `results_headers.rs`'s `a_stale_header_is_refused_rather_than_read_by_
+/// position` exists to prevent in the CSV readers, and this markdown renderer was the one
+/// reader that still counted. It resolves each name against the header row now, and an
+/// unknown name is a panic with the header printed beside it rather than a column of `NaN`.
+fn render_medians(csv: &str, group: &[&str], cols: &[&str]) -> String {
     use std::collections::BTreeMap;
     // **A provenance comment is not a row.** The configuration header added in cycle 13 sits
     // above the column names; a reader that took `lines().next()` as the header and every
     // other line as data indexed a one-field comment by column and panicked. Every reader of
     // these files skips `#` first, which is the convention `MANIFEST.csv` already used.
     let mut lines = csv.lines().filter(|l| !l.starts_with('#'));
-    let _header = lines.next();
+    let header: Vec<&str> = lines
+        .next()
+        .expect("a results CSV has a header row")
+        .split(',')
+        .map(str::trim)
+        .collect();
+    let at = |name: &str| -> usize {
+        header
+            .iter()
+            .position(|h| *h == name)
+            .unwrap_or_else(|| panic!("no column `{name}` in header {header:?}"))
+    };
+    // A composite key, because a table may have more than one thing to hold fixed: E8's
+    // rows are one per (rung, checkpoint interval, seed), and grouping on the rung alone
+    // would take a median *across* the intervals — which is a number about nothing.
+    let group_at: Vec<usize> = group.iter().map(|g| at(g)).collect();
+    let col_at: Vec<usize> = cols.iter().map(|c| at(c)).collect();
+
     let mut by: BTreeMap<String, Vec<Vec<f64>>> = BTreeMap::new();
     let mut order: Vec<String> = Vec::new();
     for ln in lines {
@@ -1043,28 +1075,30 @@ fn render_medians(csv: &str, group: usize, cols: &[(usize, &str)]) -> String {
             continue;
         }
         let f: Vec<&str> = ln.split(',').collect();
-        let k = f[group].to_string();
+        let k = group_at
+            .iter()
+            .map(|i| f[*i])
+            .collect::<Vec<_>>()
+            .join(" | ");
         if !order.contains(&k) {
             order.push(k.clone());
         }
-        let row: Vec<f64> = cols
+        let row: Vec<f64> = col_at
             .iter()
-            .map(|(i, _)| f[*i].parse::<f64>().unwrap_or(f64::NAN))
+            .map(|i| f[*i].parse::<f64>().unwrap_or(f64::NAN))
             .collect();
         by.entry(k).or_default().push(row);
     }
     let mut out = String::new();
     out.push('|');
-    for (_, name) in cols.iter() {
-        let _ = name;
+    for g in group {
+        out.push_str(&format!(" {g} |"));
     }
-    out.clear();
-    out.push_str("| rung |");
-    for (_, name) in cols {
+    for name in cols {
         out.push_str(&format!(" {name} |"));
     }
-    out.push_str("\n|---|");
-    for _ in cols {
+    out.push_str("\n|");
+    for _ in group.iter().chain(cols.iter()) {
         out.push_str("---|");
     }
     out.push('\n');
@@ -1081,18 +1115,35 @@ fn render_medians(csv: &str, group: usize, cols: &[(usize, &str)]) -> String {
     out
 }
 
+/// The checkpoint intervals E8 runs at, and why there is more than one.
+///
+/// **H-S3 is stated with a proviso: *given a bounding mechanism*.** §9.4.1 says the cost law
+/// does not hold without one — reconstruction folds from genesis, so the cost of a rung
+/// depends on how much history there is rather than on the workload's shape. E8 is H-S3's
+/// read-side evidence and ran only at `Ledger::new()`'s default, which is
+/// `checkpoint_interval = 0`: the configuration the proviso excludes. H-S3's other leg, E10,
+/// is the one experiment that varies C. So `measured` rested on two experiments at opposite
+/// ends of the very condition the claim is conditioned on, and nothing recorded it.
+///
+/// 0 is kept because it is what every published E8 number was measured at and deleting it
+/// would make this table incomparable with the thesis it replaces. 16 is the interval E10
+/// and the daemon's own default use, and `results/E10-*` measures checkpoints at 0.4% of
+/// the base there. 64 is the next octave, to show the direction rather than one point.
+const E8_CHECKPOINT_INTERVALS: [usize; 3] = [0, 16, 64];
+
 fn e8_consistency_rungs(seeds: &[u64]) -> String {
     let mut csv = provenance(
         "e8",
         &format!(
-            "accounts=10000 ops=40000 budget=500 skew=0.9 policy=lru mode=demand checkpoint_interval=0 seeds={seeds:?}"
+            "accounts=10000 ops=40000 budget=500 skew=0.9 policy=lru mode=demand checkpoint_intervals={E8_CHECKPOINT_INTERVALS:?} seeds={seeds:?}"
         ),
     );
     csv.push_str(
-        "rung,staleness_epochs,seed,misses,rows_touched,deltas_applied,apply_calls,hit_rate,divergences\n",
+        "rung,staleness_epochs,checkpoint_interval,seed,misses,rows_touched,deltas_applied,\
+         apply_calls,hit_rate,divergences,checkpointed_keys,checkpoints\n",
     );
     println!("\n  Cost per consistency rung (skew s=0.9, budget=5%, identical workload)");
-    println!("     rung                misses(med)  rows_read(med)  deltas_applied(med)  apply_calls(med)  hit-rate");
+    println!("     rung                    C  misses(med)  rows_read(med)  deltas_applied(med)  apply_calls(med)  hit-rate");
 
     let n_accounts = 10_000usize;
     let n_ops = 40_000usize;
@@ -1103,84 +1154,97 @@ fn e8_consistency_rungs(seeds: &[u64]) -> String {
         ("bounded(k=8)", 8),
         ("strict(k=0)", 0),
     ] {
-        let mut misses = Vec::new();
-        let mut rows = Vec::new();
-        let mut hitrates = Vec::new();
-        let mut deltas = Vec::new();
-        let mut applies = Vec::new();
-        for &seed in seeds {
-            let mut ledger = Ledger::new();
-            fund(&mut ledger, n_accounts as u64, 1_000_000);
-            let mut view = PartialView::new(ViewMode::Demand, budget, EvictionPolicy::Lru);
-            let mut zipf = Zipf::new(n_accounts, 0.9, seed);
-            let mut rng = Lcg::new(seed ^ 0x5DEE);
-            let mut txn = 0u64;
-            let mut pending: u64 = 0;
-            let mut apply_calls: u64 = 0;
-            let mut divergences: u64 = 0;
-
-            for i in 0..n_ops {
-                if rng.next_f64() < 0.9 {
-                    let a = zipf.sample() as u64;
-                    // The rung sets the anchor the read demands.
-                    let head = ledger.head();
-                    let anchor = head.saturating_sub(k.min(head));
-                    let (v, served_at, _) = view.read(&mut ledger, a, USD, anchor, 0.0, 0.0);
-                    // The oracle column this experiment did not have. A rung that is
-                    // cheap because it drops deltas is not a cheap rung, and only a
-                    // value check can tell the two apart.
-                    if v != ledger.reconstruct_balance_scan(a, USD, served_at) {
-                        divergences += 1;
-                    }
+        for checkpoint in E8_CHECKPOINT_INTERVALS {
+            let mut misses = Vec::new();
+            let mut rows = Vec::new();
+            let mut hitrates = Vec::new();
+            let mut deltas = Vec::new();
+            let mut applies = Vec::new();
+            for &seed in seeds {
+                let mut ledger = if checkpoint == 0 {
+                    Ledger::new()
                 } else {
-                    let from = zipf.sample() as u64;
-                    let mut to = zipf.sample() as u64;
-                    if to == from {
-                        to = (to + 1) % n_accounts as u64;
-                    }
-                    txn += 1;
-                    if transfer(&mut ledger, &format!("c-{seed}-{i}"), txn, from, to, 10) {
-                        pending += 1;
-                        // A tolerant rung may batch maintenance across up to k epochs; the
-                        // strict rung must apply every epoch before it can serve at head.
-                        //
-                        // Batching is not discarding. The earlier version of this loop
-                        // applied only `ledger.head()` at the boundary and left the k-1
-                        // epochs before it unfolded, while the view was nevertheless
-                        // certified through the boundary. Its "66x cheaper maintenance"
-                        // was the count of deltas thrown away, and the values the view
-                        // then served were wrong rather than stale. Every epoch in the
-                        // window is folded, in order; the saving a lax rung actually buys
-                        // is that there are fewer, larger passes.
-                        if pending > k {
-                            view.apply_through(&ledger, ledger.head());
-                            apply_calls += 1;
-                            pending = 0;
+                    Ledger::with_checkpoints(checkpoint)
+                };
+                fund(&mut ledger, n_accounts as u64, 1_000_000);
+                let mut view = PartialView::new(ViewMode::Demand, budget, EvictionPolicy::Lru);
+                let mut zipf = Zipf::new(n_accounts, 0.9, seed);
+                let mut rng = Lcg::new(seed ^ 0x5DEE);
+                let mut txn = 0u64;
+                let mut pending: u64 = 0;
+                let mut apply_calls: u64 = 0;
+                let mut divergences: u64 = 0;
+
+                for i in 0..n_ops {
+                    if rng.next_f64() < 0.9 {
+                        let a = zipf.sample() as u64;
+                        // The rung sets the anchor the read demands.
+                        let head = ledger.head();
+                        let anchor = head.saturating_sub(k.min(head));
+                        let (v, served_at, _) = view.read(&mut ledger, a, USD, anchor, 0.0, 0.0);
+                        // The oracle column this experiment did not have. A rung that is
+                        // cheap because it drops deltas is not a cheap rung, and only a
+                        // value check can tell the two apart.
+                        if v != ledger.reconstruct_balance_scan(a, USD, served_at) {
+                            divergences += 1;
+                        }
+                    } else {
+                        let from = zipf.sample() as u64;
+                        let mut to = zipf.sample() as u64;
+                        if to == from {
+                            to = (to + 1) % n_accounts as u64;
+                        }
+                        txn += 1;
+                        if transfer(&mut ledger, &format!("c-{seed}-{i}"), txn, from, to, 10) {
+                            pending += 1;
+                            // A tolerant rung may batch maintenance across up to k epochs; the
+                            // strict rung must apply every epoch before it can serve at head.
+                            //
+                            // Batching is not discarding. The earlier version of this loop
+                            // applied only `ledger.head()` at the boundary and left the k-1
+                            // epochs before it unfolded, while the view was nevertheless
+                            // certified through the boundary. Its "66x cheaper maintenance"
+                            // was the count of deltas thrown away, and the values the view
+                            // then served were wrong rather than stale. Every epoch in the
+                            // window is folded, in order; the saving a lax rung actually buys
+                            // is that there are fewer, larger passes.
+                            if pending > k {
+                                view.apply_through(&ledger, ledger.head());
+                                apply_calls += 1;
+                                pending = 0;
+                            }
                         }
                     }
                 }
+                let hr =
+                    view.stats.hits as f64 / (view.stats.hits + view.stats.misses).max(1) as f64;
+                misses.push(view.stats.misses as f64);
+                rows.push(view.stats.rows_touched as f64);
+                hitrates.push(hr);
+                deltas.push(view.stats.deltas_applied as f64);
+                applies.push(apply_calls as f64);
+                // Reported beside the cost, not inferred from it: an interval above a
+                // key's history depth records nothing for that key, so a C that covers
+                // nothing is indistinguishable from C = 0 in the row counts and
+                // distinguishable here.
+                let (ck_keys, ck_total) = ledger.checkpoint_coverage();
+                writeln!(
+                    csv,
+                    "{rung},{k},{checkpoint},{seed},{},{},{},{apply_calls},{hr:.4},\
+                     {divergences},{ck_keys},{ck_total}",
+                    view.stats.misses, view.stats.rows_touched, view.stats.deltas_applied
+                )
+                .ok();
             }
-            let hr = view.stats.hits as f64 / (view.stats.hits + view.stats.misses).max(1) as f64;
-            misses.push(view.stats.misses as f64);
-            rows.push(view.stats.rows_touched as f64);
-            hitrates.push(hr);
-            deltas.push(view.stats.deltas_applied as f64);
-            applies.push(apply_calls as f64);
-            writeln!(
-                csv,
-                "{rung},{k},{seed},{},{},{},{apply_calls},{hr:.4},{divergences}",
-                view.stats.misses, view.stats.rows_touched, view.stats.deltas_applied
-            )
-            .ok();
+            println!(
+                "     {rung:<18}  {checkpoint:>3}  {:>11.0}  {:>14.0}  {:>19.0}  {:>16.0}  {:>8.3}",
+                median(misses),
+                median(rows),
+                median(deltas),
+                median(applies),
+                median(hitrates)
+            );
         }
-        println!(
-            "     {rung:<18}  {:>11.0}  {:>14.0}  {:>19.0}  {:>16.0}  {:>8.3}",
-            median(misses),
-            median(rows),
-            median(deltas),
-            median(applies),
-            median(hitrates)
-        );
     }
     csv
 }
@@ -1536,13 +1600,14 @@ fn main() {
         // The thesis's Table 9.9 is filled from this file, not typed beside it.
         let table = render_medians(
             &e8,
-            0,
+            &["rung", "checkpoint_interval"],
             &[
-                (5, "deltas applied"),
-                (6, "maintenance passes"),
-                (3, "misses"),
-                (4, "base rows read"),
-                (8, "divergences"),
+                "deltas_applied",
+                "apply_calls",
+                "misses",
+                "rows_touched",
+                "divergences",
+                "checkpointed_keys",
             ],
         );
         let doc = format!(
@@ -1553,12 +1618,18 @@ fn main() {
              `divergences` compares every served value against an independent fold at the \
              anchor it was served with. A rung that is cheap because it drops deltas is \
              not a cheap rung, and only a value check tells the two apart.\n\n\
+             `checkpoint_interval` is C, the per-key bounding mechanism H-S3's proviso \
+             names. Every published E8 figure before cycle 13 was measured at C = 0, which \
+             is `Ledger::new()`'s default and is the configuration §9.4.1 says the cost law \
+             excludes. `checkpointed_keys` is of 10,000 and is the column that explains the \
+             rest: an interval above a key's history depth records nothing for that key.\n\n\
              ### The table\n\n{table}\n\
              **Reading it.** The rung's saving is in *passes*, not in deltas: a bounded \
              rung is dragged to the frontier less often and folds the same deltas when it \
              is. The read columns are not indistinguishable across rungs — a lax rung \
              misses more and reconstructs more, because its entries are genuinely less \
-             current.\n"
+             current. Everything but the read column is invariant in C: a checkpoint \
+             changes what a reconstruction costs, not whether a read misses.\n"
         );
         out("E8-rungs.md", &doc);
     }

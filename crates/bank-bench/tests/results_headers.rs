@@ -22,6 +22,68 @@ fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
+/// **Every machine-dependent results file states the checkpoint interval it ran at.**
+///
+/// `MISMATCH-daemon-checkpoints` is what this exists for. The daemon behind every wall-clock
+/// figure in this repository ran with `checkpoint_interval = 0` — the configuration §9.4.1
+/// says the cost law excludes — and no artefact said so, for four cycles, because C was not
+/// a flag and therefore not a thing a header could carry. Cycle 13 made it a flag
+/// (`--nls-checkpoint`) and made saying so a rule.
+///
+/// The rule applies to `machine-dependent` files, which is where it matters: those are the
+/// ones `make reproduce` never regenerates, so nothing else can notice that the
+/// configuration behind them is unstated. `historical` rows are exempt by definition — they
+/// record a configuration that no longer exists — and byte-deterministic files are covered
+/// by `every_regenerable_csv_carries_its_configuration`.
+#[test]
+fn every_machine_dependent_results_file_states_its_checkpoint_interval() {
+    let root = repo_root();
+    let manifest =
+        std::fs::read_to_string(root.join("results/MANIFEST.csv")).expect("MANIFEST.csv");
+    let mut silent = Vec::new();
+    for line in manifest.lines() {
+        if line.starts_with('#') || line.trim().is_empty() {
+            continue;
+        }
+        let mut it = line.splitn(3, ',');
+        let (Some(path), Some(class)) = (it.next(), it.next()) else {
+            continue;
+        };
+        if class.trim() != "machine-dependent" {
+            continue;
+        }
+        let text = match std::fs::read_to_string(root.join("results").join(path.trim())) {
+            Ok(t) => t,
+            Err(_) => continue, // `results_manifest.rs` owns "is it on disk"
+        };
+        // Either the artefact states it, or `MANIFEST.csv`'s checkpoint block does.
+        //
+        // The second is not a loophole, it is the honest form for data taken before the
+        // flag existed: a configuration line written onto such a file would be
+        // indistinguishable from a measured column, and this project's rule is that a
+        // header is not edited onto data taken without it. The manifest says C and says how
+        // it is known, in one place, where a reader comparing two artefacts will see both.
+        let stated_in_file = text.contains("checkpoint_interval")
+            || text.contains("checkpoint interval")
+            || text.contains("`--nls-checkpoint`");
+        let stated_in_manifest = manifest
+            .lines()
+            .filter(|l| l.trim_start().starts_with("#   C="))
+            .any(|l| l.split_whitespace().any(|w| w == path.trim()));
+        if !stated_in_file && !stated_in_manifest {
+            silent.push(path.trim().to_string());
+        }
+    }
+    assert!(
+        silent.is_empty(),
+        "these machine-dependent results say nothing about the checkpoint interval they were \
+         measured at: {silent:?}\n\
+         C is `--nls-checkpoint` on `bench` and `checkpoint_interval` in the experiments' \
+         configuration line. A wall-clock figure whose bounding mechanism is unstated is the \
+         defect `MISMATCH-daemon-checkpoints` records; state it, do not delete this test."
+    );
+}
+
 /// Every `.csv` under `results/`, and the constant its header must equal.
 ///
 /// `None` means "written by something outside this crate" — the experiments binary, the

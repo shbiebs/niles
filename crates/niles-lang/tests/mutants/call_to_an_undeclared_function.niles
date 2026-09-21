@@ -1,0 +1,16 @@
+// RULE: T-App. The application rule's premise is that the callee has a type; a name that
+// denotes nothing has none, so there is no derivation to be had.
+// WHY IT MATTERS: **Appendix C control 2.** `typecheck::call` looked the callee up in the
+// program's summaries and, finding nothing, fell through silently — so the call
+// contributed no effects to its caller's row and no movement to its conservation
+// obligation. The obligation did not move to the runtime seal. It ceased to exist, and
+// `nilesc check` printed `ok`.
+// EXPECT: NL0205
+// STAGE: check
+fn f(from: Id<Account>, to: Id<Account>) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("f") {
+        post(debit(from, no_such_helper(10.00 usd))?, credit(to, 10.00 usd))
+    }
+}

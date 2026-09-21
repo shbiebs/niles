@@ -53,3 +53,20 @@ schema corpus {
     index ix_postings on postings (acct) anchor;
     index ix_holds on holds (acct) anchor;
 }
+
+// --- host declarations ---
+//
+// Two names this corpus calls and never declared. Until cycle 13 that was invisible:
+// `typecheck::call` looked a callee up in the summaries and, finding nothing, did nothing
+// at all — no effects, no conservation movement, no diagnostic. So `helper_computes_the_amount`,
+// which exists to establish that *an opaque call is a symbol and a symbol cancels with
+// itself*, was calling a function that did not exist, and `transfer_if_sufficient`'s
+// `else` arm aborted through a name that denoted nothing.
+//
+// Declared here without bodies, which is what they always meant: a signature the checker
+// reads and a body it cannot see. The verdicts are unchanged, and now they are verdicts
+// about the programs the comments describe.
+
+fn abort(e: TxnError) -> ();
+
+fn daily_accrual(principal: Money<usd>) -> Money<usd>;

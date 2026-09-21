@@ -288,6 +288,34 @@ fn status_statement_is_single_sourced() {
     }
 }
 
+/// **H-S4's mutant count is the number of mutants.**
+///
+/// The row said `seventeen` from the cycle the file was created until cycle 13, during
+/// which mutants were added in four separate cycles. Nothing was wrong with the claim — the
+/// mutants are refused — but the register's job is to say how much evidence there is, and a
+/// hand-typed count only ever moves in one direction: out of date. Twenty-five is not a
+/// number anyone has to remember now.
+#[test]
+fn the_mutant_count_in_the_status_register_is_the_number_of_mutants() {
+    let root = repo_root();
+    let dir = root.join("crates/niles-lang/tests/mutants");
+    let n = std::fs::read_dir(&dir)
+        .expect("the mutants directory exists")
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("niles"))
+        .filter(|p| p.file_name().and_then(|x| x.to_str()) != Some("schema.niles"))
+        .count();
+    let toml = std::fs::read_to_string(root.join("thesis/status.toml")).expect("readable");
+    let at = toml.find("id = \"H-S4\"").expect("H-S4 has a row");
+    let row: String = toml[at..].lines().take(5).collect::<Vec<_>>().join("\n");
+    assert!(
+        row.contains(&format!("{n} mutants are refused")),
+        "H-S4 states a mutant count that is not {n}, the number of files in \
+         crates/niles-lang/tests/mutants/. Update the row; the count is the evidence."
+    );
+}
+
 /// **The register's text reaches the thesis as the register wrote it.**
 ///
 /// `status.toml` is TOML, so a quotation mark inside a value is spelled `\"`. The reader in

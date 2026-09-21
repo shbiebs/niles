@@ -1,0 +1,14 @@
+// RULE: T-Var. A variable's type comes from the environment; a name that is not in the
+// environment has no rule to be typed by.
+// WHY IT MATTERS: **Appendix C control 3.** An unbound name reached the type checker as
+// `Shape::Opaque` — the same classification a value of a user type gets — so it was
+// indistinguishable from a value the checker could not see inside. Every soundness
+// sentence of the form *a well-typed program cannot ...* quantified over a set that
+// included programs whose names denote nothing.
+// EXPECT: NL0204
+// STAGE: check
+fn f(from: Id<Account>, to: Id<Account>) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("f") { post(debit(from, amount_never_bound)?, credit(to, 10.00 usd)) }
+}

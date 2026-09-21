@@ -226,6 +226,36 @@ fn the_well_typed_neighbour_of_each_mutant_is_accepted() {
                    ! { append, debit<usd>, credit<usd> }
                { txn idem("sweep") { post(debit(a, m)?, credit(b, m)) } }"#,
         ),
+        (
+            // The neighbour of `let_annotation_contradicts_its_initializer`: the same
+            // `let`, annotated with the type the initializer actually has. Without this
+            // case NL0256 could be "fixed" by rejecting every annotated `let`.
+            "the scalar annotation agrees with the initializer",
+            r#"fn f(from: Id<Account>, to: Id<Account>, m: Money<usd>) -> Result<TxnId, TxnError>
+                   ! { append, debit<usd>, credit<usd> }
+               { let z: Text = "memo";
+                 let n: Int = 1;
+                 txn idem("f") { post(debit(from, m)?, credit(to, m)) } }"#,
+        ),
+        (
+            // The neighbour of `call_to_an_undeclared_function`: the helper exists. This is
+            // the case that keeps NL0205 from being satisfiable by refusing every call.
+            "the helper the call names is declared",
+            r#"fn helper(m: Money<usd>) -> Money<usd> ! { } { m }
+               fn f(from: Id<Account>, to: Id<Account>) -> Result<TxnId, TxnError>
+                   ! { append, debit<usd>, credit<usd> }
+               { txn idem("f") { post(debit(from, helper(10.00 usd))?, credit(to, 10.00 usd)) } }"#,
+        ),
+        (
+            // The neighbour of `unbound_identifier`: the name is a parameter. Together with
+            // the schema's own relations — which this file's other cases name freely — it
+            // is the control on NL0204 reporting a binding it simply failed to record.
+            "the name is bound",
+            r#"fn f(from: Id<Account>, to: Id<Account>, amount: Money<usd>)
+                   -> Result<TxnId, TxnError>
+                   ! { append, debit<usd>, credit<usd> }
+               { txn idem("f") { post(debit(from, amount)?, credit(to, amount)) } }"#,
+        ),
     ];
     for (what, src) in cases {
         let full = format!("{schema}\n{src}\n");
@@ -236,8 +266,8 @@ fn the_well_typed_neighbour_of_each_mutant_is_accepted() {
             .iter()
             .filter(|c| {
                 [
-                    "NL0216", "NL0252", "NL0253", "NL0255", "NL0300", "NL0310", "NL0311", "NL0312",
-                    "NL0322", "NL0330", "NL0331", "NL0332",
+                    "NL0204", "NL0205", "NL0216", "NL0252", "NL0253", "NL0255", "NL0256", "NL0300",
+                    "NL0310", "NL0311", "NL0312", "NL0322", "NL0330", "NL0331", "NL0332",
                 ]
                 .contains(&c.as_str())
             })

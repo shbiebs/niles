@@ -10,6 +10,7 @@ pub mod effects;
 pub mod keywords;
 pub mod lexer;
 pub mod lower;
+pub mod names;
 pub mod parser;
 pub mod postings;
 pub mod resolve;

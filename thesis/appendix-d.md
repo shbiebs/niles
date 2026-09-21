@@ -25,7 +25,7 @@ component is for is not derivable from its source.
 | `experiments` | The E-series measurement harness | 0 |
 | `niles-interp` | The imperative-subset interpreter `nilesc run` drives, and the ledger it posts to | 16 |
 | `niles-ir` | Typed IR: circuit types, verifier, reference interpreter, upquery paths | 65 |
-| `niles-lang` | Stage-0 compiler: lexer, parser, type/effect checker, lowering; SQL surface | 134 |
+| `niles-lang` | Stage-0 compiler: lexer, parser, type/effect checker, lowering; SQL surface | 139 |
 | `nilesc` | The compiler driver: `check`, `verify`, `run` | 0 |
 | `nilestream` | The engine binary: sweep and serve | 0 |
 | `nilestream-consensus` | A single-process, deterministic simulator for replication and cross-shard commit. No sockets, no clock | 21 |

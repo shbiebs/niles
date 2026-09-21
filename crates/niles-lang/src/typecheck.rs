@@ -888,6 +888,68 @@ impl<'a> Cx<'a> {
                     };
                     shape = Shape::Money(c, Amount::symbol(sym));
                 }
+                // **The other direction of the same rule (NL0256).**
+                //
+                // The paragraph above checks a `Money` annotation against a non-money
+                // initializer. The converse was never checked at all, so `let z: Text = m;`
+                // with `m: Money<usd>` reported `ok` and exit 0 — and so did `let n: Int =
+                // "four";`. A `let` is the one place in this language where a programmer
+                // states a type and the checker can see the value, and it was the one place
+                // the statement was taken on faith.
+                //
+                // This is not cosmetic. Every sentence of the form *a well-typed program
+                // cannot ...* quantifies over the programs this checker accepts, so an
+                // annotation it does not check widens that set by exactly the programs whose
+                // types are wrong. `status.toml`'s H-S4 said so before this landed.
+                if let Some(want) = ty.as_ref().and_then(scalar_annotation_of) {
+                    let tsp = ty.as_ref().map(|t| t.span()).unwrap_or_default();
+                    let isp = init.as_ref().map(|e| e.span()).unwrap_or_default();
+                    match &init_shape {
+                        Some(Shape::Scalar(got)) if !scalar_initialises(want, *got) => {
+                            self.push(
+                                Diagnostic::error(
+                                    "NL0256",
+                                    format!("this is `{}`, not `{}`", got.name(), want.name()),
+                                )
+                                .primary(isp, format!("`{}`", got.name()))
+                                .secondary(tsp, format!("annotated `{}` here", want.name()))
+                                .note("an annotation tells the checker what it could not see; it does not overrule what it can"),
+                            );
+                        }
+                        Some(Shape::Money(c, _)) => {
+                            self.push(
+                                Diagnostic::error(
+                                    "NL0256",
+                                    format!("this is money, not `{}`", want.name()),
+                                )
+                                .primary(isp, format!("`Money<{c}>`"))
+                                .secondary(tsp, format!("annotated `{}` here", want.name()))
+                                .note("money carries a currency and a scale; a binding that drops them is how an amount reaches a report with no unit attached")
+                                .note("to take the number out deliberately, say so: there is no implicit projection from money to a scalar"),
+                            );
+                        }
+                        Some(Shape::Auth(eff)) => {
+                            self.push(
+                                Diagnostic::error(
+                                    "NL0256",
+                                    format!("this is a capability, not `{}`", want.name()),
+                                )
+                                .primary(isp, format!("`Auth<{eff}>`"))
+                                .secondary(tsp, format!("annotated `{}` here", want.name()))
+                                .note("a capability is unforgeable in both directions: it cannot be built from a value, and it does not decay into one"),
+                            );
+                        }
+                        // `Linear` and `Opaque` are the honest silences. A linear half in a
+                        // scalar annotation is already NL0320/NL0321's business, and
+                        // `Opaque` means the checker did not see what this is — reporting a
+                        // mismatch there would be an accusation, not a finding.
+                        _ => {}
+                    }
+                    if !matches!(init_shape, None | Some(Shape::Linear(_))) {
+                        shape = Shape::Scalar(want);
+                    }
+                }
+
                 if matches!(&shape, Shape::Money(..) | Shape::Auth(_) | Shape::Scalar(_)) {
                     for n in pat.bindings() {
                         sc.bindings.insert(n.text.clone(), shape.clone());
@@ -2209,6 +2271,44 @@ fn currency_annotation_mismatch(
     .note("an annotation tells the checker what it could not see; it does not overrule what it can, and a currency is something it can see")
     .note("taking the annotation's word here would let every later use of this value claim a currency it does not have, which is how a `debit<usd>` effect row comes to describe a EUR leg")
     .note("to move value between currencies, use an `fx { leg .., leg .., rate: .. }` form, which conserves each currency separately and records the rate")
+}
+
+/// The scalar an annotation names, where the checker can name it.
+///
+/// **Deliberately partial.** A type outside this table yields `None` and no judgement is
+/// made, which is the same discipline `ParamKind::Other` follows: a checker that guessed at
+/// a user type would report an error it could not justify, and users would learn to ignore
+/// it. What is in the table is what the checker already has a `ScalarKind` for, so a
+/// mismatch against it is decidable rather than plausible.
+fn scalar_annotation_of(t: &Ty) -> Option<ScalarKind> {
+    match t {
+        Ty::Unit(_) => Some(ScalarKind::Unit),
+        Ty::Ref { inner, .. } => scalar_annotation_of(inner),
+        Ty::Path { path, args, .. } if args.is_empty() => match path.last().text.as_str() {
+            "bool" | "Bool" => Some(ScalarKind::Bool),
+            "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64"
+            | "u128" | "usize" | "Int" => Some(ScalarKind::Int),
+            "f32" | "f64" | "Float" => Some(ScalarKind::Float),
+            "Text" | "String" | "str" => Some(ScalarKind::Text),
+            "Bytes" => Some(ScalarKind::Bytes),
+            "Epoch" => Some(ScalarKind::Epoch),
+            "Instant" => Some(ScalarKind::Instant),
+            "Duration" => Some(ScalarKind::Duration),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Whether a value of kind `got` may initialise a binding annotated `want`.
+///
+/// Equality, plus the one widening the rest of the checker already grants: an integer
+/// literal in an `Epoch` position, which `ScalarKind::compares_to` also allows, because an
+/// epoch *is* a count and `#4200` and `4200` denote the same frontier. Nothing else widens:
+/// every other pair someone might want is a coercion, and the argument against coercions
+/// here is the same one `adds_to` makes.
+fn scalar_initialises(want: ScalarKind, got: ScalarKind) -> bool {
+    want == got || matches!((want, got), (ScalarKind::Epoch, ScalarKind::Int))
 }
 
 fn money_currency_of(t: &Ty) -> Option<Option<String>> {

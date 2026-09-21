@@ -1,0 +1,16 @@
+// RULE: T-Let, the annotation clause. An annotation tells the checker what it could not
+// see; it does not overrule what it can. §4.5's typing rules give `let x: t = e` the
+// premise that `e : t`, and a checker that skips the premise is not checking the rule.
+// WHY IT MATTERS: **Appendix C control 1.** `let z: Text = m` with `m: Money<usd>`
+// reported `ok` and exited 0. The converse direction was checked (NL0253 refuses an
+// integer under a `Money` annotation) and this one was not, so the currency and scale a
+// money value carries could be dropped by writing a scalar type over it — and every later
+// use of `z` was `Text` on the checker's word.
+// EXPECT: NL0256
+// STAGE: check
+fn f(from: Id<Account>, to: Id<Account>, m: Money<usd>) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    let z: Text = m;
+    txn idem("f") { post(debit(from, m)?, credit(to, m)) }
+}

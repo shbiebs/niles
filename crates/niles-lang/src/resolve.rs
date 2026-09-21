@@ -218,6 +218,15 @@ pub fn resolve_program(prog: &Program, epoch: Epoch) -> (Catalog, Diagnostics) {
     for item in &prog.items {
         check_item(item, &cat, &mut d);
     }
+    // **Name resolution for the imperative sublanguage.** Last, because it needs the
+    // catalog complete: a relation declared after the function that reads it is still in
+    // scope, and a two-pass collection is what makes that a property of the language
+    // rather than an artefact of declaration order.
+    //
+    // It is called from *here*, rather than offered as a pass every caller must remember,
+    // because there are thirteen call sites of the compiler in these two repositories and a
+    // check wired into one of them is a check the project does not have.
+    d.extend(crate::names::check_program(prog, &cat));
     (cat, d)
 }
 

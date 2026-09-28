@@ -40,6 +40,7 @@ fn a_numeric_flag_that_does_not_parse_is_refused_by_name() {
         ("--accounts", "10_000"),
         ("--rounds", "two"),
         ("--budget", "2,500"),
+        ("--checkpoint", "sixteen"),
     ] {
         let (code, err) = refused(&["--volatile", "--idem-window", "unbounded", flag, bad]);
         assert_ne!(

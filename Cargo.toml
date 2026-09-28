@@ -15,6 +15,7 @@ members = [
     "crates/nilestream",
     "crates/nilestream-consensus",
     "crates/niles-interp",
+    "crates/comparator",
 ]
 
 # **The memory instrument is not part of the system.** `GlobalAlloc` cannot be implemented

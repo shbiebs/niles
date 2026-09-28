@@ -89,6 +89,7 @@ fn main() {
     let mut accounts = 1000i64;
     let mut rounds = 3u32;
     let mut budget = 100_000usize;
+    let mut checkpoint = 0usize;
     let mut full = false;
     let mut durable: Option<String> = None;
     // **Durability is a choice that has to be made out loud (LC-16).** Neither flag is a
@@ -119,6 +120,11 @@ fn main() {
             "--accounts" => accounts = flag("--accounts", &args[i + 1]),
             "--rounds" => rounds = flag("--rounds", &args[i + 1]),
             "--budget" => budget = flag("--budget", &args[i + 1]),
+            // C, the per-key checkpoint interval (SC7): a checkpoint every C postings on a
+            // key, so a reconstruction folds from it rather than from genesis. `0` is off,
+            // and was the only setting the daemon could run at until cycle 14 (R2-02), which
+            // is why E16, E19 and E23 all ran without the mechanism the cost law needs.
+            "--checkpoint" => checkpoint = flag("--checkpoint", &args[i + 1]),
             "--mode" => match args[i + 1].as_str() {
                 "full" => full = true,
                 "demand" => full = false,
@@ -267,12 +273,16 @@ fn main() {
             std::process::exit(2);
         }
     };
-    let base = RevEngine::seeded(
+    if checkpoint > 0 {
+        eprintln!("  per-key checkpoints every {checkpoint} postings (C = {checkpoint})");
+    }
+    let base = RevEngine::seeded_with_checkpoints(
         accounts,
         rounds,
         budget,
         mode,
         proto_engine::EvictionPolicy::Lru,
+        checkpoint,
     )
     .with_idem_window(idem_window);
     let base = match &durable {

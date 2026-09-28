@@ -1,0 +1,18 @@
+[package]
+name = "comparator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+# E27 — the engine measured against its alternatives on one host, one universe, one clock
+# (cycle 14, R2-02). Arms: Nilestream (N), the E14 mechanism over PostgreSQL (P+), PostgreSQL
+# with ordinary materialised views (P), and a deliberately mutable PostgreSQL base (M, for the
+# five-anomalies probe only). No dependency outside this repository.
+[dependencies]
+bank-bench = { path = "../bank-bench" }
+nilestream-ledger = { path = "../nilestream-ledger" }
+
+[[bin]]
+name = "comparator"
+path = "src/bin/comparator.rs"

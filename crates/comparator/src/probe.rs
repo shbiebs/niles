@@ -159,8 +159,7 @@ pub fn probe(arm: &mut dyn Arm, cfg: &ProbeConfig, mutate: bool) -> Result<Probe
     // The appender's transactions, drawn now so the oracle knows them in order.
     let mut r = Rng::new(0x5EED);
     let mut writes = Vec::new();
-    let mut next_id = u.params.history_txns + 1;
-    for _ in 0..cfg.appends {
+    for next_id in (u.params.history_txns + 1..).take(cfg.appends as usize) {
         let idx = oracle.head() + 1;
         let from = hot[r.below(hot.len() as u64) as usize].0;
         let mut to = hot[r.below(hot.len() as u64) as usize].0;
@@ -185,7 +184,6 @@ pub fn probe(arm: &mut dyn Arm, cfg: &ProbeConfig, mutate: bool) -> Result<Probe
             ],
             value_day: (idx / 50) as i32,
         };
-        next_id += 1;
         oracle.apply(idx, t.clone());
         writes.push((idx, t));
     }

@@ -127,6 +127,20 @@ impl Oracle {
         self.by_key.get(&key)?.first().map(|&(e, _, _)| e)
     }
 
+    /// The amounts of `key`'s legs sealed at or before epoch index `at` — what a delta that
+    /// was applied twice, or skipped, would add to or remove from an answer.
+    pub fn legs_through(&self, key: Key, at: u64) -> Vec<i64> {
+        self.by_key
+            .get(&key)
+            .map(|legs| {
+                legs.iter()
+                    .take_while(|&&(e, _, _)| e <= at)
+                    .map(|&(_, a, _)| a)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// The keys of one account.
     pub fn keys_of(&self, acct: u64) -> Vec<Key> {
         self.by_key

@@ -115,6 +115,10 @@ pub trait Arm: Sync {
     /// Whether the arm's last sealed epoch is the oracle's head — checked after every run,
     /// so a write that sealed zero or two epochs is caught where it happened.
     fn at_head(&self, c: &mut Client, head: u64) -> Result<bool, String>;
+    /// The oracle's epoch index for an anchor this arm stamped on a reply.
+    fn oracle_index(&self, arm_epoch: u64) -> u64 {
+        arm_epoch
+    }
     fn stop(&mut self);
 }
 
@@ -451,6 +455,9 @@ impl Arm for NArm {
     }
     fn at_head(&self, c: &mut Client, head: u64) -> Result<bool, String> {
         self.frontier_is(c, self.epoch(head))
+    }
+    fn oracle_index(&self, arm_epoch: u64) -> u64 {
+        (arm_epoch as i64 - self.f_start) as u64
     }
     fn stop(&mut self) {
         if let Some(mut c) = self.child.take() {

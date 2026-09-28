@@ -14,9 +14,48 @@ fn clean(s: &str) -> String {
     s.replace(['\t', '\n'], " ")
 }
 
-pub fn write(path: &Path, series: &str, p: &PointResult) -> std::io::Result<()> {
+/// Where and with what a point was measured: recorded in every point file at the moment it
+/// is written, so a report rendered later cannot attribute a number to the wrong build.
+pub fn provenance(repo: &Path) -> Vec<(String, String)> {
+    let sh = |cmd: &str| {
+        std::process::Command::new("sh")
+            .args(["-c", cmd])
+            .current_dir(repo)
+            .output()
+            .ok()
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .trim()
+                    .replace(['\t', '\n'], " ")
+            })
+            .unwrap_or_default()
+    };
+    vec![
+        ("commit".into(), sh("git rev-parse HEAD")),
+        (
+            "worktree".into(),
+            sh("if git diff --quiet HEAD -- crates Cargo.toml Cargo.lock; then echo clean; else echo MODIFIED; fi"),
+        ),
+        ("host".into(), sh("uname -srm")),
+        ("cpus".into(), sh("nproc")),
+        ("mem_mib".into(), sh("free -m | awk '/^Mem:/{print $2}'")),
+        ("toolchain".into(), sh("cargo --version")),
+        ("postgres".into(), sh("/usr/lib/postgresql/16/bin/postgres --version")),
+        ("date".into(), sh("date -u +%Y-%m-%dT%H:%M:%SZ")),
+    ]
+}
+
+pub fn write(
+    path: &Path,
+    series: &str,
+    p: &PointResult,
+    prov: &[(String, String)],
+) -> std::io::Result<()> {
     let mut s = String::new();
     let _ = writeln!(s, "meta\tseries\t{series}");
+    for (k, v) in prov {
+        let _ = writeln!(s, "meta\t{k}\t{v}");
+    }
     let _ = writeln!(s, "meta\taccounts\t{}", p.accounts);
     let _ = writeln!(s, "meta\tseed\t{}", p.seed);
     let _ = writeln!(s, "meta\tkeys\t{}", p.keys);

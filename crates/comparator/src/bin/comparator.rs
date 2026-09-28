@@ -89,7 +89,8 @@ fn main() {
                     }
                     let t0 = std::time::Instant::now();
                     let p = run_point(&mut arms, &cfg, size, seed, &mut |m| eprintln!("{m}"));
-                    comparator::store::write(&path, &series, &p).expect("write point");
+                    let prov = comparator::store::provenance(&root);
+                    comparator::store::write(&path, &series, &p, &prov).expect("write point");
                     eprintln!(
                         "wrote {} in {:.0}s{}",
                         path.display(),
@@ -105,6 +106,55 @@ fn main() {
             for a in arms.iter_mut() {
                 a.stop();
             }
+        }
+        "probe" => {
+            // The five anomalies (§5.7): N, P+ and M+ in both modes. M and P are a full
+            // materialised view with no partial state and no anchor on a read, so the five —
+            // anomalies of partial maintenance — have nothing to act on there; E27 says so.
+            let scratch = PathBuf::from("/var/tmp/e27-probe");
+            let names: Vec<String> = arg(&args, "--arms")
+                .unwrap_or_else(|| "N,P+,M+".into())
+                .split(',')
+                .map(String::from)
+                .collect();
+            let mut arms = build_arms(&names, false, &scratch);
+            let cfg = comparator::probe::ProbeConfig::default();
+            let reps: usize = arg(&args, "--reps")
+                .map(|r| r.parse().expect("--reps"))
+                .unwrap_or(5);
+            let mut out = String::new();
+            for (k, v) in comparator::store::provenance(&root) {
+                out += &format!("meta\t{k}\t{v}\n");
+            }
+            for arm in arms.iter_mut() {
+                for mutate in [false, true] {
+                    for rep in 0..reps {
+                        match comparator::probe::probe(arm.as_mut(), &cfg, mutate) {
+                            Ok(r) => {
+                                eprintln!(
+                                    "{} {} rep {rep}: exhibited {:?}; reads {}",
+                                    r.arm,
+                                    r.mode,
+                                    r.exhibited(),
+                                    r.reads
+                                );
+                                out += &comparator::probe::to_tsv(rep, &r);
+                            }
+                            Err(e) => {
+                                eprintln!("{} probe failed: {e}", arm.name());
+                                out += &format!(
+                                    "failure\t{rep}\t{}\t{}\n",
+                                    arm.name(),
+                                    e.replace(['\t', '\n'], " ")
+                                );
+                            }
+                        }
+                    }
+                }
+                arm.stop();
+            }
+            std::fs::create_dir_all(&dir).expect("dir");
+            std::fs::write(dir.join("probe.tsv"), out).expect("write probe.tsv");
         }
         _ => {
             eprintln!("usage: comparator run --series single|multi --sizes 1000,10000 --seeds 1,7 [--arms N,P+,P,M] [--runs 10] [--warmups 3] [--skip-existing]");

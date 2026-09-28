@@ -128,6 +128,10 @@ impl Sampler {
         let i = self.cumulative.partition_point(|&c| c < u);
         self.account_of_rank[i.min(self.account_of_rank.len() - 1)]
     }
+    /// The account at activity rank `rank` (1 = the busiest).
+    pub fn account_at(&self, rank: usize) -> u64 {
+        self.account_of_rank[rank.clamp(1, self.account_of_rank.len()) - 1]
+    }
     /// The share of total weight held by the top `k` ranks — reported in the header so a
     /// reader can check the skew against the author's ~10% / ~40%.
     pub fn top_share(&self, k: usize) -> f64 {

@@ -1,0 +1,21 @@
+[package]
+name = "rev-sidecar"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+# Arm H3 of E27 (cycle 14, R2-03; decision D-6): a PostgreSQL append-only ledger with a REV
+# sidecar that reads logical replication (`pgoutput`) and serves partial, epoch-anchored views
+# through nilestream-core. No dependency outside this repository: the replication protocol and
+# the pgoutput decoder are written here, over the harness's own wire client.
+[dependencies]
+bank-bench = { path = "../bank-bench" }
+nilestream-core = { path = "../nilestream-core" }
+nilestream-server = { path = "../nilestream-server" }
+niles-ir = { path = "../niles-ir" }
+niles-lang = { path = "../niles-lang" }
+
+[[bin]]
+name = "rev-sidecar"
+path = "src/main.rs"

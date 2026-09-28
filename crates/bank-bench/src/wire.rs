@@ -164,6 +164,32 @@ pub enum AuthMethod {
 impl Client {
     /// Connect, start up, and wait for `ReadyForQuery`.
     pub fn connect(host: &str, port: u16, user: &str, database: &str) -> Result<Client, WireError> {
+        Client::connect_with(host, port, user, database, &[])
+    }
+
+    /// A **logical replication** connection (`replication=database`), for a consumer of
+    /// `pgoutput` (the comparator's H3 sidecar, cycle 14 R2-03). Authenticates exactly as
+    /// [`Client::connect`] does — SCRAM-SHA-256 against the provisioned role, which must hold
+    /// `REPLICATION` — and has no read timeout, because an idle stream is silent between the
+    /// server's keepalives.
+    pub fn connect_replication(
+        host: &str,
+        port: u16,
+        user: &str,
+        database: &str,
+    ) -> Result<Client, WireError> {
+        let c = Client::connect_with(host, port, user, database, &[("replication", "database")])?;
+        c.w.set_read_timeout(None)?;
+        Ok(c)
+    }
+
+    fn connect_with(
+        host: &str,
+        port: u16,
+        user: &str,
+        database: &str,
+        extra: &[(&str, &str)],
+    ) -> Result<Client, WireError> {
         let stream = TcpStream::connect((host, port))?;
         // Nagle would batch a small query with the next write and add a round trip's worth
         // of latency to every point lookup — which is the workload most sensitive to it, and
@@ -177,18 +203,26 @@ impl Client {
             auth: AuthMethod::Trust,
             prepared: 0,
         };
-        c.startup(user, database)?;
+        c.startup(user, database, extra)?;
         Ok(c)
     }
 
-    fn startup(&mut self, user: &str, database: &str) -> Result<(), WireError> {
+    fn startup(
+        &mut self,
+        user: &str,
+        database: &str,
+        extra: &[(&str, &str)],
+    ) -> Result<(), WireError> {
         let mut body = Vec::new();
         body.extend_from_slice(&196_608i32.to_be_bytes()); // protocol 3.0
         for (k, v) in [
             ("user", user),
             ("database", database),
             ("client_encoding", "UTF8"),
-        ] {
+        ]
+        .into_iter()
+        .chain(extra.iter().copied())
+        {
             body.extend_from_slice(k.as_bytes());
             body.push(0);
             body.extend_from_slice(v.as_bytes());
@@ -289,6 +323,60 @@ impl Client {
                 other as char
             ))),
         }
+    }
+
+    /// Enter COPY BOTH mode with a replication command such as `START_REPLICATION SLOT …
+    /// LOGICAL …`: sends it and waits for `CopyBothResponse`. Only on a connection from
+    /// [`Client::connect_replication`].
+    pub fn start_copy_both(&mut self, command: &str) -> Result<(), WireError> {
+        let mut body = command.as_bytes().to_vec();
+        body.push(0);
+        self.send(b'Q', &body)?;
+        loop {
+            let (tag, body) = self.read_message()?;
+            match tag {
+                b'W' => return Ok(()),
+                b'N' | b'S' => {}
+                b'E' => {
+                    let e = error_from(&body);
+                    // The server follows an error with ReadyForQuery; consume it so the
+                    // connection stays usable.
+                    let _ = self.collect_until_ready();
+                    return Err(e);
+                }
+                other => {
+                    return Err(WireError::Protocol(format!(
+                        "expected CopyBothResponse, got `{}`",
+                        other as char
+                    )))
+                }
+            }
+        }
+    }
+
+    /// The next message of a COPY BOTH stream: `Some(data)` for a `CopyData`, `None` when the
+    /// server ends the copy (`CopyDone`).
+    pub fn copy_recv(&mut self) -> Result<Option<Vec<u8>>, WireError> {
+        loop {
+            let (tag, body) = self.read_message()?;
+            match tag {
+                b'd' => return Ok(Some(body)),
+                b'c' => return Ok(None),
+                b'N' | b'S' => {}
+                b'E' => return Err(error_from(&body)),
+                other => {
+                    return Err(WireError::Protocol(format!(
+                        "unexpected message `{}` in COPY BOTH",
+                        other as char
+                    )))
+                }
+            }
+        }
+    }
+
+    /// Send one `CopyData` message on a COPY BOTH stream (e.g. a standby status update).
+    pub fn copy_send(&mut self, data: &[u8]) -> Result<(), WireError> {
+        self.send(b'd', data)
     }
 
     /// Run one statement with the **simple** query protocol.

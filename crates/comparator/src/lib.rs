@@ -7,12 +7,13 @@
 //! warm-up runs. The specification is §5 of `claude/cycle-14-round-2-work-order.md`.
 //!
 //! Modules: [`universe`] (the generator), [`oracle`] (the answers), [`arms`] (N, P+, P, M,
-//! H2 and the probe's M+), [`h1`] (ReadySet), [`pgcluster`] (one PostgreSQL cluster per arm), [`run`] (one size and
+//! H2 and the probe's M+), [`h1`] (ReadySet), [`h3`] (PostgreSQL ledger + REV sidecar), [`pgcluster`] (one PostgreSQL cluster per arm), [`run`] (one size and
 //! seed), [`stats`] (the gate), [`store`] (one file per point), [`render`] (E27), [`probe`]
 //! (the five anomalies).
 
 pub mod arms;
 pub mod h1;
+pub mod h3;
 pub mod oracle;
 pub mod pgcluster;
 pub mod probe;

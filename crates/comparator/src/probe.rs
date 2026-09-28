@@ -93,7 +93,7 @@ impl ProbeReport {
 /// The head read this probe issues, returning (value, anchor stamped by the arm).
 fn head_sql(arm: &dyn Arm, (a, c): Key) -> String {
     match arm.name() {
-        "N" => arm.sql(&Query::Point((a, c))),
+        "N" | "H3" => arm.sql(&Query::Point((a, c))),
         _ => format!(
             "select value, anchor from arm.rev_read({a}, {c}::smallint, (select applied_through from arm.rev_meta))"
         ),
@@ -617,7 +617,7 @@ pub fn probe(arm: &mut dyn Arm, cfg: &ProbeConfig, mutate: bool) -> Result<Probe
                 }
             }
         }
-    } else if arm.name() == "N" {
+    } else if arm.name() == "N" || arm.name() == "H3" {
         for &k in &hot {
             let mut wrong = 0;
             for _ in 0..2 {

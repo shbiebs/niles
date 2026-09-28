@@ -17,6 +17,7 @@ members = [
     "crates/niles-interp",
     "crates/comparator",
     "crates/nilescheck-sql",
+    "crates/rev-sidecar",
 ]
 
 # **The memory instrument is not part of the system.** `GlobalAlloc` cannot be implemented

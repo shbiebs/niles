@@ -133,3 +133,14 @@ dependencies = [
  "nilestream-core",
  "nilestream-ledger",
 ]
+
+[[package]]
+name = "rev-sidecar"
+version = "0.1.0"
+dependencies = [
+ "bank-bench",
+ "niles-ir",
+ "niles-lang",
+ "nilestream-core",
+ "nilestream-server",
+]

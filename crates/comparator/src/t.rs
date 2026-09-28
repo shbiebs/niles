@@ -348,7 +348,9 @@ impl Arm for TArm {
             ]),
             "tigerbeetle.log",
         )?);
-        Self::wait_port(self.tb_port, "TigerBeetle", 60)?;
+        // TigerBeetle allocates its ~2.3 GiB and opens its 1 GiB journal before it listens;
+        // with the other seven arms loaded at 10⁵ that took more than a minute.
+        Self::wait_port(self.tb_port, "TigerBeetle", 600)?;
         self.driver = Some(
             self.spawn(
                 Command::new(Self::python()).args([

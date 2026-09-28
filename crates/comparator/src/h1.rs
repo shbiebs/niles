@@ -357,9 +357,10 @@ impl Arm for H1Arm {
             } else {
                 "append-only trigger"
             },
-            match self.memory_limit {
-                Some(m) => format!("--memory-limit {m} bytes"),
-                None => "no --memory-limit (ReadySet evicts by process memory, not by key count)".into(),
+            match (&self.calibration, self.memory_limit) {
+                (Some(_), _) => "--memory-limit per series and size = its allocation after the load + budget/keys of what holding every key cost it, calibrated on H1 alone (`results/E27-comparator/h1-calibration.tsv`)".to_string(),
+                (None, Some(m)) => format!("--memory-limit {m} bytes"),
+                (None, None) => "no --memory-limit (ReadySet evicts by allocator bytes, not by key count)".into(),
             }
         )
     }
@@ -534,8 +535,21 @@ impl Arm for H1Arm {
                 .unwrap_or(false)
         })?;
         for (_, text) in CACHES {
-            rs.simple(&format!("create deep cache from {text}"))
-                .map_err(|e| format!("create deep cache from {text}: {e}"))?;
+            // "The leader is not ready … ongoing snapshotting" (SQLSTATE 55000) is transient:
+            // at 10⁵ the tables report Online before the controller accepts migrations
+            // (measured 2026-09-28). Retried for up to ten minutes; any other error refuses.
+            let deadline = Instant::now() + Duration::from_secs(600);
+            loop {
+                match rs.simple(&format!("create deep cache from {text}")) {
+                    Ok(_) => break,
+                    Err(bank_bench::wire::WireError::Server { sqlstate, .. })
+                        if sqlstate == "55000" && Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(Duration::from_secs(1));
+                    }
+                    Err(e) => return Err(format!("create deep cache from {text}: {e}")),
+                }
+            }
         }
         // Every loaded leg is in the snapshot, which ReadySet took after the load committed.
         // Checked rather than assumed: the cached q6 must equal the universe's balances. (A

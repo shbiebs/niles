@@ -86,13 +86,16 @@ fn main() {
                 .collect();
             // `--shape p99` is the targeted re-run of 2026-09-28 (Config::p99); its points go
             // to their own directory so the two shapes are never pooled.
-            let p99 = arg(&args, "--shape").as_deref() == Some("p99");
+            let p99e = arg(&args, "--shape").as_deref() == Some("p99-engine");
+            let p99 = p99e || arg(&args, "--shape").as_deref() == Some("p99");
             let mut cfg = if p99 {
                 Config::p99(multi)
             } else {
                 Config::declared(multi)
             };
-            let dir = if p99 && arg(&args, "--dir").is_none() {
+            let dir = if p99e && arg(&args, "--dir").is_none() {
+                root.join("results/E27-p99-engine")
+            } else if p99 && arg(&args, "--dir").is_none() {
                 root.join("results/E27-p99")
             } else {
                 dir.clone()
@@ -161,8 +164,10 @@ fn main() {
             }
         }
         "render" => {
+            // Every arm this comparator knows, described; the renderer lists those that appear
+            // in the points (or, for the probe's mutable twins, in the probe file).
             let arms = build_arms(
-                &["N".into(), "P+".into(), "P".into(), "M".into(), "M+".into()],
+                &["N", "P+", "P", "M", "H1", "H2", "H3", "T", "M+", "H1M"].map(String::from),
                 false,
                 Path::new("/var/tmp/e27"),
             );
@@ -170,10 +175,25 @@ fn main() {
                 .iter()
                 .map(|a| (a.name().to_string(), a.describe()))
                 .collect();
-            let refs: Vec<&dyn Arm> = arms.iter().take(4).map(|a| a.as_ref()).collect();
+            let refs: Vec<&dyn Arm> = arms
+                .iter()
+                .filter(|a| !matches!(a.name(), "M+" | "H1M"))
+                .map(|a| a.as_ref())
+                .collect();
             let table = comparator::arms::sql_table(&refs);
             let p99 = arg(&args, "--shape").as_deref() == Some("p99");
-            let (shape, stem, dir) = if p99 {
+            let p99e = arg(&args, "--shape").as_deref() == Some("p99-engine");
+            let (shape, stem, dir) = if p99e {
+                (
+                    &comparator::render::P99_ENGINE,
+                    "E27-p99-engine",
+                    if arg(&args, "--dir").is_some() {
+                        dir.clone()
+                    } else {
+                        root.join("results/E27-p99-engine")
+                    },
+                )
+            } else if p99 {
                 (
                     &comparator::render::P99,
                     "E27-p99",

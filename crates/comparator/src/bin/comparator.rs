@@ -227,13 +227,22 @@ fn main() {
                 .collect();
             let scratch = PathBuf::from("/var/tmp/e27-cal");
             let path = root.join("results/E27-comparator/h1-calibration.tsv");
-            let mut out = String::new();
-            for (k, v) in comparator::store::provenance(&root) {
-                out += &format!("meta\t{k}\t{v}\n");
+            // Written after every entry and resumed from what is on disk, so a container
+            // restart costs one size, not the whole calibration.
+            let mut out = std::fs::read_to_string(&path).unwrap_or_default();
+            if out.is_empty() {
+                for (k, v) in comparator::store::provenance(&root) {
+                    out += &format!("meta\t{k}\t{v}\n");
+                }
             }
+            let done = comparator::h1::read_calibration(&path).unwrap_or_default();
             let mut arm = H1Arm::new(5457, 5458, scratch.join("h1"), &root);
             for se in &series {
                 for &size in &sizes {
+                    if done.contains_key(&(se == "multi", size)) {
+                        eprintln!("H1 {se} {size}: already calibrated");
+                        continue;
+                    }
                     let u = comparator::universe::Universe::generate(
                         &comparator::universe::Params::declared(size, 1, 0.6, se == "multi"),
                     );
@@ -246,10 +255,10 @@ fn main() {
                         "h1cal\t{se}\t{size}\t{}\t{}\t{}\t{}\n",
                         c.a0, c.a1, c.keys, c.limit
                     );
+                    std::fs::create_dir_all(path.parent().unwrap()).expect("dir");
+                    std::fs::write(&path, &out).expect("write h1-calibration.tsv");
                 }
             }
-            std::fs::create_dir_all(path.parent().unwrap()).expect("dir");
-            std::fs::write(&path, out).expect("write h1-calibration.tsv");
             eprintln!("wrote {}", path.display());
         }
         "probe" => {

@@ -3,7 +3,7 @@
 | Crate | Role | public items |
 |---|---|--:|
 | `bank-bench` | NilesBank generator, wall-clock harness, thesis drift tests | 114 |
-| `comparator` | E27: Nilestream against PostgreSQL arms under eviction, across bank sizes; the five-anomalies probe | 75 |
+| `comparator` | E27: Nilestream against PostgreSQL, pg_ivm, ReadySet, a REV sidecar and TigerBeetle under eviction, across bank sizes; the five-anomalies probe | 90 |
 | `conservation-suite` | Reference oracle and the conservation property tests | 23 |
 | `experiments` | The E-series measurement harness | 0 |
 | `niles-interp` | The imperative-subset interpreter `nilesc run` drives, and the ledger it posts to | 16 |
@@ -18,3 +18,4 @@
 | `nilestream-optimizer` | Plan-time mode selection and the eviction policies (the adaptive optimizer of §4.6 is specified and not built) | 37 |
 | `nilestream-server` | Daemon: sessions, PostgreSQL wire surface, conformance | 87 |
 | `proto-engine` | The research prototype the counted-work experiments run on | 24 |
+| `rev-sidecar` | E27 arms H3 and T: a nilestream-core REV fed by PostgreSQL logical replication (pgoutput) or TigerBeetle CDC, served over the PostgreSQL wire | 12 |

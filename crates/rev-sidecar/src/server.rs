@@ -12,6 +12,9 @@ use std::time::Duration;
 /// How long a write waits for the stream to deliver its epoch before it is reported failed.
 const WRITE_VISIBLE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long a read as of a committed but undelivered epoch waits for it.
+const ANCHOR_WAIT: Duration = Duration::from_secs(30);
+
 pub fn serve(listener: TcpListener, shared: Arc<Shared>) {
     for (n, conn) in listener.incoming().enumerate() {
         let Ok(stream) = conn else { continue };
@@ -95,13 +98,23 @@ fn answer(shared: &Shared, upstream: &mut Option<Client>, sql: &str) -> Vec<Back
 
 fn read(shared: &Shared, a: i64, c: i64, at: Option<u64>) -> Vec<Backend> {
     let base = shared.base.as_ref();
-    let frontier = base.frontier();
+    let mut frontier = base.frontier();
     let anchor = at.unwrap_or(frontier);
+    // A read *as of* an epoch the ledger has committed but the stream has not yet delivered
+    // is a question the view can answer exactly once it has that epoch: wait for it, as
+    // a read-your-epoch replica does, and refuse only if it does not arrive. On H3 the case
+    // cannot arise (a write returns only after its epoch is applied); on T, whose writes
+    // return at the ledger's commit, it can — the first run of the sweep found it.
     if anchor > frontier {
-        return vec![error(
-            "22023",
-            format!("epoch {anchor} is beyond the view's frontier {frontier}"),
-        )];
+        frontier = base.wait_for(anchor, ANCHOR_WAIT);
+        if anchor > frontier {
+            return vec![error(
+                "22023",
+                format!(
+                    "epoch {anchor} did not reach the view within {ANCHOR_WAIT:?} (frontier {frontier})"
+                ),
+            )];
+        }
     }
     let key = vec![a, c];
     // The two-phase read of `nilestream-core`: decide under the view lock, fold without it,

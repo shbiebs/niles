@@ -110,8 +110,14 @@ pub struct H1Arm {
     pub port: u16,
     pub dir: PathBuf,
     pub repo: PathBuf,
-    /// ReadySet's `--memory-limit`, bytes; `None` runs it without one.
+    /// ReadySet's `--memory-limit`, bytes; `None` runs it without one. Set per load from
+    /// [`H1Arm::calibration`] when that has an entry for the universe's series and size.
     pub memory_limit: Option<u64>,
+    /// The author's decision of 2026-09-28: H1's byte budget, per (multi-currency, size),
+    /// measured on H1 alone before any measured run (`comparator calibrate-h1`, see
+    /// [`calibrate`]). When set, a load for a (series, size) it has no entry for is refused.
+    /// Values are (allocated after the load, allocated with every key held, keys).
+    pub calibration: Option<BTreeMap<(bool, u64), (u64, u64, u64)>>,
     /// No append-only trigger on the base: `H1M`, the mutable twin used only by the anomaly
     /// probe's mutating mode (as M+ is to P+).
     pub mutable: bool,
@@ -137,6 +143,7 @@ impl H1Arm {
             dir,
             repo: repo.to_path_buf(),
             memory_limit: None,
+            calibration: None,
             mutable: false,
             child: None,
             upstream: Mutex::new(None),
@@ -220,6 +227,105 @@ impl H1Arm {
             let _ = c.wait();
         }
     }
+}
+
+impl H1Arm {
+    /// ReadySet's Prometheus text, from its loopback metrics endpoint.
+    fn metrics(&self) -> Result<String, String> {
+        use std::io::{Read, Write};
+        let mut s = std::net::TcpStream::connect(("127.0.0.1", self.port + 1000))
+            .map_err(|e| format!("metrics endpoint: {e}"))?;
+        s.write_all(b"GET /metrics HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n")
+            .map_err(|e| e.to_string())?;
+        let mut body = String::new();
+        s.read_to_string(&mut body).map_err(|e| e.to_string())?;
+        Ok(body)
+    }
+
+    /// Every metric whose name mentions eviction, summed over its labels, plus the
+    /// allocator's figure: what the memory table reports for H1.
+    fn eviction_metrics(&self) -> Vec<(String, i128)> {
+        let Ok(body) = self.metrics() else {
+            return Vec::new();
+        };
+        let mut sums: BTreeMap<String, f64> = BTreeMap::new();
+        for l in body.lines().filter(|l| !l.starts_with('#')) {
+            let name = l.split(['{', ' ']).next().unwrap_or("");
+            if name.contains("evict") || name == "readyset_allocator_allocated_bytes" {
+                if let Some(v) = l.rsplit(' ').next().and_then(|v| v.parse::<f64>().ok()) {
+                    *sums.entry(name.to_string()).or_default() += v;
+                }
+            }
+        }
+        sums.into_iter().map(|(k, v)| (k, v as i128)).collect()
+    }
+
+    /// ReadySet's own count of allocated heap bytes (`readyset_allocator_allocated_bytes` on
+    /// its metrics endpoint) — the allocator's figure, which is what a byte budget for it
+    /// has to be stated in.
+    pub fn allocated_bytes(&self) -> Result<u64, String> {
+        self.metrics()?
+            .lines()
+            .find(|l| l.starts_with("readyset_allocator_allocated_bytes{"))
+            .and_then(|l| l.rsplit(' ').next())
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .map(|v| v as u64)
+            .ok_or_else(|| "readyset_allocator_allocated_bytes not reported".to_string())
+    }
+}
+
+/// One size's calibration of H1's byte budget (the author's decision of 2026-09-28): load
+/// H1 with no limit, read ReadySet's allocated bytes (`a0`), read q1 for **every** key once,
+/// wait for the allocator figure to settle, read it again (`a1`), and set the limit to
+/// `a0 + 5% × (a1 − a0)` — the load's footprint plus five percent of what holding every key
+/// costs, the same share of keys the other arms' budgets hold. Measured on H1 alone and
+/// before any measured run, so it is not tuned against any arm's numbers.
+pub struct Calibration {
+    pub a0: u64,
+    pub a1: u64,
+    pub keys: usize,
+    pub limit: u64,
+}
+
+pub fn calibrate(arm: &mut H1Arm, u: &Universe) -> Result<Calibration, String> {
+    arm.calibration = None;
+    arm.memory_limit = None;
+    arm.load(u, 0)?;
+    std::thread::sleep(Duration::from_secs(2));
+    let a0 = arm.allocated_bytes()?;
+    let o = crate::oracle::Oracle::of(u);
+    let mut c = arm.connect()?;
+    let keys = o.keys();
+    for k in &keys {
+        c.simple(&arm.sql(&Query::Point(*k)))
+            .map_err(|e| format!("calibration read of {k:?}: {e}"))?;
+    }
+    std::thread::sleep(Duration::from_secs(5));
+    let a1 = arm.allocated_bytes()?;
+    arm.stop();
+    let grown = a1.saturating_sub(a0);
+    Ok(Calibration {
+        a0,
+        a1,
+        keys: keys.len(),
+        limit: a0 + grown / 20,
+    })
+}
+
+/// Read `h1-calibration.tsv` (lines `h1cal <series> <size> <a0> <a1> <keys> <limit>`).
+pub fn read_calibration(path: &Path) -> Option<BTreeMap<(bool, u64), (u64, u64, u64)>> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut m = BTreeMap::new();
+    for l in text.lines() {
+        let f: Vec<&str> = l.split('\t').collect();
+        if f.len() == 7 && f[0] == "h1cal" {
+            m.insert(
+                (f[1] == "multi", f[2].parse().ok()?),
+                (f[3].parse().ok()?, f[4].parse().ok()?, f[5].parse().ok()?),
+            );
+        }
+    }
+    Some(m)
 }
 
 fn first_cell(rows: &Rows) -> Option<String> {
@@ -323,9 +429,25 @@ impl Arm for H1Arm {
             .max(must);
         (must, may)
     }
-    fn load(&mut self, u: &Universe, _budget: usize) -> Result<LoadReport, String> {
+    fn load(&mut self, u: &Universe, budget: usize) -> Result<LoadReport, String> {
         let t0 = Instant::now();
         self.kill();
+        if let Some(cal) = &self.calibration {
+            let k = (u.params.multi_currency, u.params.accounts);
+            // The same share of keys as every other arm's budget: the load's allocation plus
+            // `budget / keys` of what holding every key costs. For the measured runs that is
+            // 5%; for the anomaly probe's budget of 5 keys it is five keys' worth.
+            let (a0, a1, keys) = *cal.get(&k).ok_or_else(|| {
+                format!(
+                    "H1 has no calibrated memory limit for {} at {} accounts; run `comparator \
+                     calibrate-h1` for it first (the author's decision of 2026-09-28)",
+                    if k.0 { "multi" } else { "single" },
+                    k.1
+                )
+            })?;
+            let grown = a1.saturating_sub(a0) as u128;
+            self.memory_limit = Some(a0 + (grown * budget as u128 / keys.max(1) as u128) as u64);
+        }
         *self.upstream.lock().unwrap() = None;
         self.positions.lock().unwrap().clear();
         self.routing.clear();
@@ -497,6 +619,10 @@ impl Arm for H1Arm {
         if let Some(p) = self.cluster.pss_bytes() {
             out.push(("postgres cluster PSS".into(), p as i128));
         }
+        if let Some(m) = self.memory_limit {
+            out.push(("readyset --memory-limit".into(), m as i128));
+        }
+        out.extend(self.eviction_metrics());
         if let Ok(rows) = c.simple("select pg_total_relation_size('arm.postings')") {
             if let Some(v) = rows.nth(0) {
                 out.push(("bytes arm.postings".into(), v));

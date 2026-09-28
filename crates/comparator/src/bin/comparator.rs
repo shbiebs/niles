@@ -38,7 +38,14 @@ fn build_arms(names: &[String], multi: bool, scratch: &Path) -> Vec<Box<dyn Arm>
                 "M" => Box::new(PgArm::new(PgKind::M, 5453, &root)),
                 "M+" => Box::new(PgArm::new(PgKind::MPlus, 5454, &root)),
                 "H2" => Box::new(PgArm::new(PgKind::H2, 5456, &root)),
-                "H1" => Box::new(H1Arm::new(5457, 5458, scratch.join("h1"), &root)),
+                "H1" => {
+                    let mut a = H1Arm::new(5457, 5458, scratch.join("h1"), &root);
+                    // The calibrated byte budget, when one has been measured (calibrate-h1).
+                    a.calibration = comparator::h1::read_calibration(
+                        &root.join("results/E27-comparator/h1-calibration.tsv"),
+                    );
+                    Box::new(a)
+                }
                 "H3" => Box::new(H3Arm::new(5461, 5462, scratch.join("h3"), &root)),
                 "T" => Box::new(TArm::new(scratch.join("t"), &root)),
                 "H1M" => {
@@ -187,6 +194,43 @@ fn main() {
             comparator::render::render(&dir, &main, &detail, &lines, &table, shape)
                 .expect("render");
             eprintln!("wrote {} and {}", main.display(), detail.display());
+        }
+        "calibrate-h1" => {
+            // The author's decision of 2026-09-28: H1's --memory-limit per (series, size),
+            // measured on H1 alone before the measured runs. Seed 1's universe per size.
+            let sizes: Vec<u64> =
+                list(&arg(&args, "--sizes").unwrap_or_else(|| "1000,10000,100000".into()));
+            let series: Vec<String> = arg(&args, "--series")
+                .unwrap_or_else(|| "single,multi".into())
+                .split(',')
+                .map(String::from)
+                .collect();
+            let scratch = PathBuf::from("/var/tmp/e27-cal");
+            let path = root.join("results/E27-comparator/h1-calibration.tsv");
+            let mut out = String::new();
+            for (k, v) in comparator::store::provenance(&root) {
+                out += &format!("meta\t{k}\t{v}\n");
+            }
+            let mut arm = H1Arm::new(5457, 5458, scratch.join("h1"), &root);
+            for se in &series {
+                for &size in &sizes {
+                    let u = comparator::universe::Universe::generate(
+                        &comparator::universe::Params::declared(size, 1, 0.6, se == "multi"),
+                    );
+                    let c = comparator::h1::calibrate(&mut arm, &u).expect("calibrate H1");
+                    eprintln!(
+                        "H1 {se} {size}: allocated {} after load, {} after reading all {} keys; limit {}",
+                        c.a0, c.a1, c.keys, c.limit
+                    );
+                    out += &format!(
+                        "h1cal\t{se}\t{size}\t{}\t{}\t{}\t{}\n",
+                        c.a0, c.a1, c.keys, c.limit
+                    );
+                }
+            }
+            std::fs::create_dir_all(path.parent().unwrap()).expect("dir");
+            std::fs::write(&path, out).expect("write h1-calibration.tsv");
+            eprintln!("wrote {}", path.display());
         }
         "probe" => {
             // The five anomalies (§5.7): N, P+ and M+ in both modes, and (R2-03) H1 with its

@@ -77,6 +77,18 @@ fn main() {
             } else {
                 dir.clone()
             };
+            // `--q1-only`: the author's decision of 2026-09-28 for the p99 re-run on the
+            // multi-currency series at 10⁵ and 10⁶ — q1 alone (1,000 reads per run at one
+            // client, 4 × 250 at four), q2 recorded NOT RUN with the reason, because there
+            // Nilestream answers each anchored read by folding the whole ledger (a 10⁴ point
+            // took 21 minutes; 10⁵ was estimated at ~3.5 h per point).
+            let q1_only = args.iter().any(|a| a == "--q1-only");
+            if q1_only {
+                cfg.ops = 1000;
+                cfg.mix = vec![("q1", 1.0)];
+                cfg.conc_reads = 250;
+                cfg.conc_q1_share = 1.0;
+            }
             if let Some(r) = arg(&args, "--runs") {
                 cfg.runs = r.parse().expect("--runs");
             }
@@ -100,7 +112,15 @@ fn main() {
                         continue;
                     }
                     let t0 = std::time::Instant::now();
-                    let p = run_point(&mut arms, &cfg, size, seed, &mut |m| eprintln!("{m}"));
+                    let mut p = run_point(&mut arms, &cfg, size, seed, &mut |m| eprintln!("{m}"));
+                    if q1_only {
+                        for a in arms.iter() {
+                            p.not_run.entry(a.name().into()).or_default().push((
+                                "q2".into(),
+                                "the author's decision of 2026-09-28: on the multi-currency series at 10⁵ and above, Nilestream answers every anchored read by folding the whole ledger, so 1,000 q2 reads per run cost hours per point (a 10⁴ point took 21 minutes); q2's p50 verdict is in E27".into(),
+                            ));
+                        }
+                    }
                     let prov = comparator::store::provenance(&root);
                     comparator::store::write(&path, &series, &p, &prov).expect("write point");
                     eprintln!(
@@ -145,6 +165,9 @@ fn main() {
             } else {
                 (&comparator::render::MAIN, "E27-comparator", dir.clone())
             };
+            // `--stem` renders another directory (e.g. Host C's) into its own files, so a
+            // rendering of one host can never overwrite another's.
+            let stem = arg(&args, "--stem").unwrap_or_else(|| stem.to_string());
             let main = root.join(format!("results/{stem}.md"));
             let detail = root.join(format!("results/{stem}-detail.md"));
             comparator::render::render(&dir, &main, &detail, &lines, &table, shape)

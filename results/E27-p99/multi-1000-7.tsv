@@ -1,0 +1,332 @@
+meta	series	multi
+meta	commit	1ae17cdab0e5788e5883b27b8eadd9802833d7de
+meta	worktree	MODIFIED
+meta	host	Linux 6.18.44-fc-v37 x86_64
+meta	cpus	2
+meta	mem_mib	8032
+meta	toolchain	cargo 1.95.0 (f2d3ce0bd 2026-03-21)
+meta	postgres	postgres (PostgreSQL) 16.13 (Ubuntu 16.13-0ubuntu0.24.04.1)
+meta	date	2026-09-28T09:59:43Z
+meta	accounts	1000
+meta	seed	7
+meta	keys	1318
+meta	budget	66
+meta	history_txns	10000
+meta	batches	50
+meta	universe_legs	20000
+meta	universe_sha256	839763c8261817ecaa912774bc27a4d8ac8566600721cbabf1e99b0704f0bd48
+meta	end_legs	20000
+meta	end_sha256	839763c8261817ecaa912774bc27a4d8ac8566600721cbabf1e99b0704f0bd48
+load	N	0.135	20000	839763c8261817ecaa912774bc27a4d8ac8566600721cbabf1e99b0704f0bd48	20000	839763c8261817ecaa912774bc27a4d8ac8566600721cbabf1e99b0704f0bd48	one insert statement per batch, one epoch each; N epoch = oracle index -1; frontier #49 after the load, asserted by an `as of system time` probe
+load	P+	1.040	20000	839763c8261817ecaa912774bc27a4d8ac8566600721cbabf1e99b0704f0bd48	20000	839763c8261817ecaa912774bc27a4d8ac8566600721cbabf1e99b0704f0bd48	one multi-row insert per batch with explicit epoch ids 1..50; epochs sealed in order by arm.seal (sha256 chain); arm.after_load: checkpoints every 16 legs per key, key counts, budget; vacuum analyze
+pss_loaded	N	5822464
+pss_loaded	P+	62131200
+state	N	resident	0
+state	N	reads	52017
+state	N	hits	0
+state	N	misses	52017
+state	N	rows_touched	285882737
+state	N	view_answers	0
+state	N	fallbacks	0
+state	N	view_metadata_keys	0
+state	P+	bytes arm.rev	892928
+state	P+	bytes arm.checkpoints	131072
+state	P+	bytes arm.key_counts	188416
+state	P+	bytes arm.postings	3997696
+state	P+	resident	66
+notrun	N	q3	Nilestream's served relation is fixed at (txn, acct, cur, amt, idem) — crates/nilestream-server/src/session.rs parse_insert takes four columns — so it holds no value day and no desk
+notrun	N	q4	Nilestream's served relation is fixed at (txn, acct, cur, amt, idem) — crates/nilestream-server/src/session.rs parse_insert takes four columns — so it holds no value day and no desk
+val	N	-3	c4_q1_p50_us	126.49
+val	N	-3	c4_q1_p99_us	6128.8460000000005
+val	N	-3	c4_q2_p50_us	8526.955
+val	N	-3	c4_q2_p99_us	26041.962
+val	N	-3	pss_growth_bytes_per_key_read	4829.007194244605
+val	N	-3	pss_mib	10.673828125
+val	N	-3	q1_p50_us	168.202
+val	N	-3	q1_p99_us	457.397
+val	N	-3	q2_p50_us	4804.472
+val	N	-3	q2_p99_us	13865.789999999999
+val	N	-3	read_deadlock_retries	0
+val	P+	-3	c4_q1_p50_us	1458.6480000000001
+val	P+	-3	c4_q1_p99_us	6641.269
+val	P+	-3	c4_q2_p50_us	1218.341
+val	P+	-3	c4_q2_p99_us	5041.139
+val	P+	-3	pss_growth_bytes_per_key_read	-4099.6834532374105
+val	P+	-3	pss_mib	54.9052734375
+val	P+	-3	q1_p50_us	556.2339999999999
+val	P+	-3	q1_p99_us	1336.309
+val	P+	-3	q2_p50_us	404.802
+val	P+	-3	q2_p99_us	1191.8980000000001
+val	P+	-3	read_deadlock_retries	2
+val	P+	-2	c4_q1_p50_us	1544.6299999999999
+val	P+	-2	c4_q1_p99_us	6844.548
+val	P+	-2	c4_q2_p50_us	1359.5910000000001
+val	P+	-2	c4_q2_p99_us	6131.073
+val	P+	-2	pss_growth_bytes_per_key_read	-4004.6003159557663
+val	P+	-2	pss_mib	54.41796875
+val	P+	-2	q1_p50_us	512.719
+val	P+	-2	q1_p99_us	1408.059
+val	P+	-2	q2_p50_us	394.498
+val	P+	-2	q2_p99_us	919.2570000000001
+val	P+	-2	read_deadlock_retries	3
+val	N	-2	c4_q1_p50_us	122.273
+val	N	-2	c4_q1_p99_us	5677.629
+val	N	-2	c4_q2_p50_us	8614.419
+val	N	-2	c4_q2_p99_us	24823.07
+val	N	-2	pss_growth_bytes_per_key_read	4374.243285939969
+val	N	-2	pss_mib	10.833984375
+val	N	-2	q1_p50_us	154.341
+val	N	-2	q1_p99_us	399.16700000000003
+val	N	-2	q2_p50_us	4463.478
+val	N	-2	q2_p99_us	10831.695
+val	N	-2	read_deadlock_retries	0
+val	N	-1	c4_q1_p50_us	118.79
+val	N	-1	c4_q1_p99_us	5866.455
+val	N	-1	c4_q2_p50_us	8518.135
+val	N	-1	c4_q2_p99_us	26967.095
+val	N	-1	pss_growth_bytes_per_key_read	4240.269525267994
+val	N	-1	pss_mib	10.833984375
+val	N	-1	q1_p50_us	159.126
+val	N	-1	q1_p99_us	415.685
+val	N	-1	q2_p50_us	4609.089
+val	N	-1	q2_p99_us	11912.016
+val	N	-1	read_deadlock_retries	0
+val	P+	-1	c4_q1_p50_us	1675.431
+val	P+	-1	c4_q1_p99_us	10102.432999999999
+val	P+	-1	c4_q2_p50_us	1510.104
+val	P+	-1	c4_q2_p99_us	6267.9839999999995
+val	P+	-1	pss_growth_bytes_per_key_read	-3767.4732006125573
+val	P+	-1	pss_mib	54.560546875
+val	P+	-1	q1_p50_us	592.3159999999999
+val	P+	-1	q1_p99_us	1532.625
+val	P+	-1	q2_p50_us	455.297
+val	P+	-1	q2_p99_us	1412.3980000000001
+val	P+	-1	read_deadlock_retries	1
+val	P+	0	c4_q1_p50_us	1541.0739999999998
+val	P+	0	c4_q1_p99_us	4713.865000000001
+val	P+	0	c4_q2_p50_us	1358.953
+val	P+	0	c4_q2_p99_us	3878.763
+val	P+	0	pss_growth_bytes_per_key_read	-3664.7189642041126
+val	P+	0	pss_mib	54.6640625
+val	P+	0	q1_p50_us	505.974
+val	P+	0	q1_p99_us	1179.575
+val	P+	0	q2_p50_us	390.942
+val	P+	0	q2_p99_us	990.4449999999999
+val	P+	0	read_deadlock_retries	2
+val	N	0	c4_q1_p50_us	108.574
+val	N	0	c4_q1_p99_us	5973.157
+val	N	0	c4_q2_p50_us	8455.476
+val	N	0	c4_q2_p99_us	27335.679
+val	N	0	pss_growth_bytes_per_key_read	4089.7608530083776
+val	N	0	pss_mib	10.673828125
+val	N	0	q1_p50_us	155.974
+val	N	0	q1_p99_us	419.823
+val	N	0	q2_p50_us	4609.9169999999995
+val	N	0	q2_p99_us	11335.707
+val	N	0	read_deadlock_retries	0
+val	N	1	c4_q1_p50_us	132.59099999999998
+val	N	1	c4_q1_p99_us	5769.406
+val	N	1	c4_q2_p50_us	9868.259
+val	N	1	c4_q2_p99_us	28168.282
+val	N	1	pss_growth_bytes_per_key_read	4208.048632218845
+val	N	1	pss_mib	10.833984375
+val	N	1	q1_p50_us	162.788
+val	N	1	q1_p99_us	454.222
+val	N	1	q2_p50_us	4769.647999999999
+val	N	1	q2_p99_us	13224.717
+val	N	1	read_deadlock_retries	0
+val	P+	1	c4_q1_p50_us	1536.045
+val	P+	1	c4_q1_p99_us	6177.217
+val	P+	1	c4_q2_p50_us	1325.1779999999999
+val	P+	1	c4_q2_p99_us	4509.103
+val	P+	1	pss_growth_bytes_per_key_read	-3720.9483282674773
+val	P+	1	pss_mib	54.5830078125
+val	P+	1	q1_p50_us	598.863
+val	P+	1	q1_p99_us	1814.83
+val	P+	1	q2_p50_us	458.757
+val	P+	1	q2_p99_us	1454.8059999999998
+val	P+	1	read_deadlock_retries	4
+val	P+	2	c4_q1_p50_us	1560.692
+val	P+	2	c4_q1_p99_us	4741.664
+val	P+	2	c4_q2_p50_us	1330.924
+val	P+	2	c4_q2_p99_us	4650.722000000001
+val	P+	2	pss_growth_bytes_per_key_read	-3801.3181473044797
+val	P+	2	pss_mib	54.478515625
+val	P+	2	q1_p50_us	533.683
+val	P+	2	q1_p99_us	1452.661
+val	P+	2	q2_p50_us	412.37
+val	P+	2	q2_p99_us	843.552
+val	P+	2	read_deadlock_retries	1
+val	N	2	c4_q1_p50_us	126.90999999999998
+val	N	2	c4_q1_p99_us	5792.032
+val	N	2	c4_q2_p50_us	8805.541
+val	N	2	c4_q2_p99_us	27129.444
+val	N	2	pss_growth_bytes_per_key_read	4204.853454821564
+val	N	2	pss_mib	10.833984375
+val	N	2	q1_p50_us	161.72
+val	N	2	q1_p99_us	429.515
+val	N	2	q2_p50_us	4820.427000000001
+val	N	2	q2_p99_us	12702.286
+val	N	2	read_deadlock_retries	0
+val	N	3	c4_q1_p50_us	104.116
+val	N	3	c4_q1_p99_us	5590.152
+val	N	3	c4_q2_p50_us	8302.033
+val	N	3	c4_q2_p99_us	23853.683
+val	N	3	pss_growth_bytes_per_key_read	4201.663125948407
+val	N	3	pss_mib	10.833984375
+val	N	3	q1_p50_us	167.55700000000002
+val	N	3	q1_p99_us	394.71200000000005
+val	N	3	q2_p50_us	4503.594
+val	N	3	q2_p99_us	11906.854
+val	N	3	read_deadlock_retries	0
+val	P+	3	c4_q1_p50_us	1802.232
+val	P+	3	c4_q1_p99_us	5753.063
+val	P+	3	c4_q2_p50_us	1556.574
+val	P+	3	c4_q2_p99_us	4732.870999999999
+val	P+	3	pss_growth_bytes_per_key_read	-3716.0789074355084
+val	P+	3	pss_mib	54.58203125
+val	P+	3	q1_p50_us	598.992
+val	P+	3	q1_p99_us	1240.383
+val	P+	3	q2_p50_us	452.988
+val	P+	3	q2_p99_us	1042.85
+val	P+	3	read_deadlock_retries	1
+val	P+	4	c4_q1_p50_us	1749.798
+val	P+	4	c4_q1_p99_us	8264.797
+val	P+	4	c4_q2_p50_us	1424.151
+val	P+	4	c4_q2_p99_us	4708.777
+val	P+	4	pss_growth_bytes_per_key_read	-1976.5220030349014
+val	P+	4	pss_mib	56.7685546875
+val	P+	4	q1_p50_us	593.898
+val	P+	4	q1_p99_us	1268.5159999999998
+val	P+	4	q2_p50_us	451.15900000000005
+val	P+	4	q2_p99_us	868.3570000000001
+val	P+	4	read_deadlock_retries	2
+val	N	4	c4_q1_p50_us	141.79000000000002
+val	N	4	c4_q1_p99_us	5895.216
+val	N	4	c4_q2_p50_us	9277.149
+val	N	4	c4_q2_p99_us	28778.702999999998
+val	N	4	pss_growth_bytes_per_key_read	4201.663125948407
+val	N	4	pss_mib	10.833984375
+val	N	4	q1_p50_us	165.743
+val	N	4	q1_p99_us	434.10299999999995
+val	N	4	q2_p50_us	4533.2970000000005
+val	N	4	q2_p99_us	11734.217
+val	N	4	read_deadlock_retries	0
+val	N	5	c4_q1_p50_us	134.148
+val	N	5	c4_q1_p99_us	5799.133
+val	N	5	c4_q2_p50_us	9341.489
+val	N	5	c4_q2_p99_us	26636.453
+val	N	5	pss_growth_bytes_per_key_read	4201.663125948407
+val	N	5	pss_mib	10.833984375
+val	N	5	q1_p50_us	163.828
+val	N	5	q1_p99_us	429.819
+val	N	5	q2_p50_us	4811.6410000000005
+val	N	5	q2_p99_us	13715.962
+val	N	5	read_deadlock_retries	0
+val	P+	5	c4_q1_p50_us	1559.387
+val	P+	5	c4_q1_p99_us	1001300.0009999999
+val	P+	5	c4_q2_p50_us	1302.244
+val	P+	5	c4_q2_p99_us	3995.566
+val	P+	5	pss_growth_bytes_per_key_read	-3766.5796661608497
+val	P+	5	pss_mib	54.5185546875
+val	P+	5	q1_p50_us	600.8489999999999
+val	P+	5	q1_p99_us	1432.499
+val	P+	5	q2_p50_us	469.777
+val	P+	5	q2_p99_us	933.378
+val	P+	5	read_deadlock_retries	4
+val	P+	6	c4_q1_p50_us	1702.516
+val	P+	6	c4_q1_p99_us	5764.875
+val	P+	6	c4_q2_p50_us	1508.377
+val	P+	6	c4_q2_p99_us	5054.601
+val	P+	6	pss_growth_bytes_per_key_read	6988.528072837633
+val	P+	6	pss_mib	68.037109375
+val	P+	6	q1_p50_us	546.34
+val	P+	6	q1_p99_us	1209.56
+val	P+	6	q2_p50_us	414.919
+val	P+	6	q2_p99_us	1667.112
+val	P+	6	read_deadlock_retries	3
+val	N	6	c4_q1_p50_us	136.289
+val	N	6	c4_q1_p99_us	5858.215
+val	N	6	c4_q2_p50_us	9000.065999999999
+val	N	6	c4_q2_p99_us	25799.149
+val	N	6	pss_growth_bytes_per_key_read	4201.663125948407
+val	N	6	pss_mib	10.833984375
+val	N	6	q1_p50_us	169.868
+val	N	6	q1_p99_us	450.757
+val	N	6	q2_p50_us	4574.394
+val	N	6	q2_p99_us	12157.418
+val	N	6	read_deadlock_retries	0
+val	N	7	c4_q1_p50_us	113.738
+val	N	7	c4_q1_p99_us	5667.635
+val	N	7	c4_q2_p50_us	8794.565
+val	N	7	c4_q2_p99_us	26824.287
+val	N	7	pss_growth_bytes_per_key_read	4201.663125948407
+val	N	7	pss_mib	10.833984375
+val	N	7	q1_p50_us	166.869
+val	N	7	q1_p99_us	404.20300000000003
+val	N	7	q2_p50_us	4909.505
+val	N	7	q2_p99_us	13225.5
+val	N	7	read_deadlock_retries	0
+val	P+	7	c4_q1_p50_us	1579.5629999999999
+val	P+	7	c4_q1_p99_us	8277.547999999999
+val	P+	7	c4_q2_p50_us	1376.258
+val	P+	7	c4_q2_p99_us	5563.978
+val	P+	7	pss_growth_bytes_per_key_read	-3717.6327769347495
+val	P+	7	pss_mib	54.580078125
+val	P+	7	q1_p50_us	529.771
+val	P+	7	q1_p99_us	946.8480000000001
+val	P+	7	q2_p50_us	401.048
+val	P+	7	q2_p99_us	1014.6440000000001
+val	P+	7	read_deadlock_retries	2
+val	P+	8	c4_q1_p50_us	1817.086
+val	P+	8	c4_q1_p99_us	6213.291
+val	P+	8	c4_q2_p50_us	1532.587
+val	P+	8	c4_q2_p99_us	6815.992
+val	P+	8	pss_growth_bytes_per_key_read	-3751.8179059180575
+val	P+	8	pss_mib	54.537109375
+val	P+	8	q1_p50_us	571.3190000000001
+val	P+	8	q1_p99_us	992.717
+val	P+	8	q2_p50_us	428.004
+val	P+	8	q2_p99_us	932.244
+val	P+	8	read_deadlock_retries	3
+val	N	8	c4_q1_p50_us	126.186
+val	N	8	c4_q1_p99_us	7186.0869999999995
+val	N	8	c4_q2_p50_us	8197.672
+val	N	8	c4_q2_p99_us	25321.487
+val	N	8	pss_growth_bytes_per_key_read	4201.663125948407
+val	N	8	pss_mib	10.833984375
+val	N	8	q1_p50_us	172.237
+val	N	8	q1_p99_us	491.76500000000004
+val	N	8	q2_p50_us	4857.862999999999
+val	N	8	q2_p99_us	11622.858
+val	N	8	read_deadlock_retries	0
+val	N	9	c4_q1_p50_us	136.635
+val	N	9	c4_q1_p99_us	6933.295
+val	N	9	c4_q2_p50_us	8991.962
+val	N	9	c4_q2_p99_us	28302.565
+val	N	9	pss_growth_bytes_per_key_read	4201.663125948407
+val	N	9	pss_mib	10.833984375
+val	N	9	q1_p50_us	166.225
+val	N	9	q1_p99_us	389.107
+val	N	9	q2_p50_us	4584.912
+val	N	9	q2_p99_us	12123.698
+val	N	9	read_deadlock_retries	0
+val	P+	9	c4_q1_p50_us	1711.903
+val	P+	9	c4_q1_p99_us	5693.068
+val	P+	9	c4_q2_p50_us	1434.173
+val	P+	9	c4_q2_p99_us	5635.514
+val	P+	9	pss_growth_bytes_per_key_read	-3750.2640364188164
+val	P+	9	pss_mib	54.5390625
+val	P+	9	q1_p50_us	611.1800000000001
+val	P+	9	q1_p99_us	2045.1750000000002
+val	P+	9	q2_p50_us	461.544
+val	P+	9	q2_p99_us	1259.086
+val	P+	9	read_deadlock_retries	1
+pooled	N	c4_q1	10045	125.268	5862.759	9145.690999999999
+pooled	N	c4_q2	9955	8902.976	27138.194	33224.021
+pooled	N	q1	9961	164.96300000000002	420.695	2490.023
+pooled	N	q2	10039	4701.016	12564.928	18160.715
+pooled	P+	c4_q1	10045	1651.703	6072.664	2003949.7100000002
+pooled	P+	c4_q2	9955	1419.46	4976.3150000000005	1003732.241
+pooled	P+	q1	9961	566.4720000000001	1308.7	5018.003
+pooled	P+	q2	10039	432.372	1055.494	3047.9610000000002

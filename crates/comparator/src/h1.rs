@@ -117,7 +117,7 @@ pub struct H1Arm {
     /// measured on H1 alone before any measured run (`comparator calibrate-h1`, see
     /// [`calibrate`]). When set, a load for a (series, size) it has no entry for is refused.
     /// Values are (allocated after the load, allocated with every key held, keys).
-    pub calibration: Option<BTreeMap<(bool, u64), (u64, u64, u64)>>,
+    pub calibration: Option<CalibrationTable>,
     /// No append-only trigger on the base: `H1M`, the mutable twin used only by the anomaly
     /// probe's mutating mode (as M+ is to P+).
     pub mutable: bool,
@@ -312,8 +312,11 @@ pub fn calibrate(arm: &mut H1Arm, u: &Universe) -> Result<Calibration, String> {
     })
 }
 
+/// Per (multi-currency, size): (allocated after the load, allocated with every key held, keys).
+pub type CalibrationTable = BTreeMap<(bool, u64), (u64, u64, u64)>;
+
 /// Read `h1-calibration.tsv` (lines `h1cal <series> <size> <a0> <a1> <keys> <limit>`).
-pub fn read_calibration(path: &Path) -> Option<BTreeMap<(bool, u64), (u64, u64, u64)>> {
+pub fn read_calibration(path: &Path) -> Option<CalibrationTable> {
     let text = std::fs::read_to_string(path).ok()?;
     let mut m = BTreeMap::new();
     for l in text.lines() {

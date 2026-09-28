@@ -1343,7 +1343,38 @@ impl Session {
         // answer.
         let (served, named) = match self.compile_cached(trimmed) {
             Ok(lowered) => {
-                let served = engine.query(&lowered.circuit, "__wire_result", anchor);
+                // **A pinned read is answered at its pin, not at the frontier** (cycle 14,
+                // R2-02). The IR has carried `Anchor::Pinned` since `Op::AsOf` existed and
+                // nothing in this server read it, so an `as_of` was compiled, verified and
+                // then answered at the frontier — the one reading an as-of must never give.
+                // The session's own anchor stays where it is: a historical read does not move
+                // the session backwards, and a later frontier read is still monotone.
+                let read_anchor = match pinned_anchor(&lowered.circuit) {
+                    Pin::None => anchor,
+                    Pin::At(e) if e <= engine.frontier() => e,
+                    Pin::At(e) => {
+                        return vec![pg_wire::sqlstate_error(
+                            "22023",
+                            "the requested epoch is beyond the frontier",
+                            Some(&format!(
+                                "as of system time {e}: the ledger's frontier is #{}; an answer \
+                                 at an epoch that has not been sealed would be a guess",
+                                engine.frontier()
+                            )),
+                        )]
+                    }
+                    Pin::Conflicting(a, b) => {
+                        return vec![pg_wire::sqlstate_error(
+                            "0A000",
+                            "a statement pinned to two epochs",
+                            Some(&format!(
+                                "the statement reads at #{a} and at #{b}; one statement is \
+                                 answered at one anchor"
+                            )),
+                        )]
+                    }
+                };
+                let served = engine.query(&lowered.circuit, "__wire_result", read_anchor);
                 // **The column names come from the lowering**, which is the only place that
                 // knows them: a circuit carries indices, so the engine can only name columns
                 // positionally. Taking them from `Lowered::schemas` means a client sees the
@@ -2042,6 +2073,31 @@ fn minor_units(text: &str, scale: Option<u32>) -> Result<Option<i128>, String> {
         })
         .ok_or_else(|| text.to_string())?;
     Ok(Some(magnitude))
+}
+
+/// The pin a circuit's read carries, if any. One statement is answered at one anchor, so two
+/// different pins are a conflict rather than a choice.
+enum Pin {
+    None,
+    At(u64),
+    Conflicting(u64, u64),
+}
+
+fn pinned_anchor(c: &niles_ir::circuit::Circuit) -> Pin {
+    let mut pin: Option<u64> = None;
+    for n in &c.nodes {
+        if let niles_ir::operator::Op::AsOf { epoch: Some(e) } = &n.op {
+            match pin {
+                None => pin = Some(*e),
+                Some(p) if p == *e => {}
+                Some(p) => return Pin::Conflicting(p, *e),
+            }
+        }
+    }
+    match pin {
+        None => Pin::None,
+        Some(e) => Pin::At(e),
+    }
 }
 
 #[cfg(test)]

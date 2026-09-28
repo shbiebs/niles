@@ -844,6 +844,12 @@ pub struct SelectStmt {
     pub limit: Option<Expr>,
     pub offset: Option<Expr>,
     pub set_op: Option<(SetOp, Box<SelectStmt>)>,
+    /// `as of system time <epoch>` after the from-list — the SQL spelling of `.as_of(#e)`
+    /// (cycle 14, R2-02). The sql-surface table marked the mapping `Lowered` since cycle 2,
+    /// and it was: the *Niles* form lowered. The SQL form did not parse, so no client of the
+    /// served engine could ask for an anchor other than the frontier — which is the read the
+    /// thesis's second item is about.
+    pub as_of: Option<(u64, Span)>,
     pub span: Span,
 }
 

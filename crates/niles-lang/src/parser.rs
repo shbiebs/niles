@@ -143,6 +143,21 @@ impl<'a> Parser<'a> {
     fn text(&self, s: Span) -> &str {
         s.text(self.src)
     }
+    /// Whether the token `n` ahead is the identifier `word`, compared case-insensitively as
+    /// SQL compares its keywords. For the words SQL treats as keywords and Niles does not
+    /// (`system`, `time`), which lex as identifiers.
+    fn nth_ident_is(&self, n: usize, word: &str) -> bool {
+        let i = (self.pos + n).min(self.toks.len() - 1);
+        matches!(self.toks[i].tok, Tok::Ident)
+            && self.toks[i].span.text(self.src).eq_ignore_ascii_case(word)
+    }
+    /// At `as of system time`?
+    fn at_as_of_system_time(&self) -> bool {
+        self.at_kw(Kw::As)
+            && matches!(self.nth(1), Tok::Kw(Kw::Of))
+            && self.nth_ident_is(2, "system")
+            && self.nth_ident_is(3, "time")
+    }
 
     fn err(&mut self, code: &'static str, msg: impl Into<String>, label: impl Into<String>) {
         let span = self.cur_span();
@@ -2649,6 +2664,37 @@ impl<'a> Parser<'a> {
                 }
             }
         }
+        // `as of system time <epoch>` — CockroachDB's spelling, after the from-list. An
+        // epoch is written as an integer or as a Niles epoch literal (`#4200`); anything else
+        // is refused rather than read as the frontier, the one answer an as-of read must
+        // never give (the same rule as NL0510 on `.as_of`).
+        let as_of = if self.at_as_of_system_time() {
+            let at = self.cur_span();
+            for _ in 0..4 {
+                self.bump();
+            }
+            match self.cur().clone() {
+                Tok::Int(v) if v >= 0 && v <= u64::MAX as i128 => {
+                    let sp = self.bump();
+                    Some((v as u64, at.to(sp)))
+                }
+                Tok::EpochLit(v) => {
+                    let sp = self.bump();
+                    Some((v, at.to(sp)))
+                }
+                _ => {
+                    let span = self.cur_span();
+                    self.diags.push(
+                        Diagnostic::error("NL0510", "`as of system time` takes an epoch")
+                            .primary(span, "not an epoch")
+                            .note("the system axis is ordered by epoch: write a non-negative integer or `#4200`"),
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let filter = if self.eat_kw(Kw::Where) {
             Some(self.expr())
         } else {
@@ -2730,6 +2776,7 @@ impl<'a> Parser<'a> {
             limit,
             offset,
             set_op,
+            as_of,
             span: start.to(self.cur_span()),
         }
     }
@@ -2753,8 +2800,11 @@ impl<'a> Parser<'a> {
             }
         } else {
             let name = self.ident("a relation name");
-            // `as x` and a bare `x` are the same alias; the `as` is optional sugar.
-            let alias = if self.eat_kw(Kw::As) || matches!(self.cur(), Tok::Ident) {
+            // `as x` and a bare `x` are the same alias; the `as` is optional sugar. Not when
+            // the `as` begins `as of system time`, which belongs to the statement.
+            let alias = if self.at_as_of_system_time() {
+                None
+            } else if self.eat_kw(Kw::As) || matches!(self.cur(), Tok::Ident) {
                 Some(self.ident("an alias"))
             } else {
                 None

@@ -1053,6 +1053,26 @@ impl<'a> Lx<'a> {
             return None;
         };
         let mut cur = self.table_ref(first, c)?;
+        // `as of system time e` pins the whole statement's read to epoch e. Placed above the
+        // first relation (and, below, above the rest) — every base the statement reads is
+        // read at the one anchor, because a statement answered at two moments is answered at
+        // none.
+        let pin = |this: &mut Self, node: NodeId| -> NodeId {
+            match s.as_of {
+                Some((e, _)) => {
+                    let id = this.circuit.add(
+                        Op::AsOf { epoch: Some(e) },
+                        vec![node],
+                        c,
+                        "as of system time",
+                    );
+                    this.schemas.insert(id, this.schema_of(node).to_vec());
+                    id
+                }
+                None => node,
+            }
+        };
+        cur = pin(self, cur);
         // **The rest of the from-list.** `s.from.first()` was the whole of it, so
         // `select ... from t, u` silently dropped `u` and answered from `t` alone. A
         // comma-separated from-list is a cross join, and it is written as one — which also
@@ -1060,6 +1080,7 @@ impl<'a> Lx<'a> {
         // schemas to resolve against.
         for extra in s.from.iter().skip(1) {
             let r = self.table_ref(extra, c)?;
+            let r = pin(self, r);
             let mut names = self.schema_of(cur).to_vec();
             names.extend(self.schema_of(r).iter().cloned());
             let lk = self.circuit.node(cur).key.clone().unwrap_or_default();

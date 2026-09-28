@@ -234,6 +234,8 @@ fn main() {
                 for (k, v) in comparator::store::provenance(&root) {
                     out += &format!("meta\t{k}\t{v}\n");
                 }
+                out +=
+                    "meta\tcheckpoint_interval\tn/a (ReadySet has no per-key ledger checkpoint)\n";
             }
             let done = comparator::h1::read_calibration(&path).unwrap_or_default();
             let mut arm = H1Arm::new(5457, 5458, scratch.join("h1"), &root);

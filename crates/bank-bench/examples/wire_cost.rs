@@ -42,6 +42,7 @@ fn block(rows: usize) -> RowBlock {
         z,
         anchor: 9_999,
         formats: vec![Format::Text, Format::Text, Format::Text],
+        order: Vec::new(),
     }
 }
 

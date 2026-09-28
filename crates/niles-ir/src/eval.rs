@@ -1015,6 +1015,48 @@ pub fn fold(a: Agg, vals: &[(Value, i128)]) -> Value {
 /// *choice*, and it is written down here rather than left to whatever order a hash map
 /// happened to produce — an engine that answered `limit 2` differently from this would be
 /// disagreeing with the reference semantics, which is a thing a test can catch.
+/// **The order a result set is presented in**, if its query asked for one.
+///
+/// Ordering is not part of a Z-set's denotation (see `Op::OrderBy` in [`Evaluator`]), so
+/// the answer the engine returns is a map with no order; `order by` decides how the *result
+/// set* is presented, one level below. That level is the wire, and it needs the keys: the
+/// ones of the nearest `OrderBy` beneath the output, reached only through operators that
+/// neither reorder nor reshape rows — the same walk `limit` uses. Empty when there is none,
+/// or when a projection or anything else stands between, because keys that index the
+/// `OrderBy`'s input do not index a reshaped output.
+///
+/// Until cycle 14 nothing called this and the wire sent every reply in the rows' own
+/// lexicographic order, so `order by sum(amt) desc limit 10` returned the right ten rows in
+/// ascending account order — found by E27's correctness pass (R2-02).
+pub fn presentation_order(c: &Circuit, output: &str) -> Vec<(ColIdx, bool)> {
+    let Some(mut id) = c.outputs.get(output).copied() else {
+        return Vec::new();
+    };
+    loop {
+        let Some(n) = c.nodes.iter().find(|n| n.id == id) else {
+            return Vec::new();
+        };
+        match &n.op {
+            Op::OrderBy { keys } => return keys.clone(),
+            Op::Limit { .. }
+            | Op::Filter { .. }
+            | Op::Distinct
+            | Op::AsOf { .. }
+            | Op::ValidAt { .. } => match n.inputs.first() {
+                Some(i) => id = *i,
+                None => return Vec::new(),
+            },
+            _ => return Vec::new(),
+        }
+    }
+}
+
+/// The comparison [`presentation_order`]'s keys mean — the one `limit` selects by, so the
+/// rows a limit kept and the order they are shown in cannot disagree.
+pub fn presented_cmp(a: &Row, b: &Row, keys: &[(ColIdx, bool)]) -> std::cmp::Ordering {
+    order_rows(a, b, keys)
+}
+
 fn order_rows(a: &Row, b: &Row, keys: &[(ColIdx, bool)]) -> std::cmp::Ordering {
     for (c, asc) in keys {
         let (x, y) = (

@@ -1341,7 +1341,7 @@ impl Session {
         // text with a digit scanner, and asked the engine for `sum(amt)` on the first of
         // them. The compiler ran, the verifier ran, and neither had any bearing on the
         // answer.
-        let (served, named) = match self.compile_cached(trimmed) {
+        let (served, named, order) = match self.compile_cached(trimmed) {
             Ok(lowered) => {
                 // **A pinned read is answered at its pin, not at the frontier** (cycle 14,
                 // R2-02). The IR has carried `Anchor::Pinned` since `Op::AsOf` existed and
@@ -1386,7 +1386,8 @@ impl Session {
                     .and_then(|id| lowered.schemas.get(id))
                     .cloned()
                     .unwrap_or_default();
-                (served, named)
+                let order = niles_ir::eval::presentation_order(&lowered.circuit, "__wire_result");
+                (served, named, order)
             }
             Err(e) => return e,
         };
@@ -1454,9 +1455,12 @@ impl Session {
             // function of how many rows it has. This used to build the whole reply here: a
             // hundred-thousand-row answer was a hundred-thousand-row allocation before the
             // first byte reached the socket.
-            RowSource::Evaluated { z, anchor } => {
-                Backend::Rows(pg_wire::RowBlock { z, anchor, formats })
-            }
+            RowSource::Evaluated { z, anchor } => Backend::Rows(pg_wire::RowBlock {
+                z,
+                anchor,
+                formats,
+                order,
+            }),
             // The diagnostic statements: a handful of rows whose cells are text.
             RowSource::Text(text) => {
                 let mut buf = Vec::new();

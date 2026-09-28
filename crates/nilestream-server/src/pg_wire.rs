@@ -206,6 +206,10 @@ pub struct RowBlock {
     /// One entry per column of the `RowDescription`, in order. `Text` for every column
     /// unless a client negotiated otherwise, which is what keeps `psql` unaffected.
     pub formats: Vec<Format>,
+    /// The query's `order by`, as `niles_ir::eval::presentation_order` found it: empty
+    /// sends rows in their own order, as before. A Z-set has no order, so the reply is the
+    /// only place one can be kept.
+    pub order: Vec<(niles_ir::operator::ColIdx, bool)>,
 }
 
 /// How one column is sent.
@@ -330,11 +334,8 @@ pub fn put_rows_streaming(
 ) -> std::io::Result<()> {
     use niles_ir::value::Value;
     let anchor = block.anchor as i128;
-    for (r, w) in &block.z {
-        if *w <= 0 {
-            continue;
-        }
-        for _ in 0..*w {
+    let mut emit = |out: &mut Vec<u8>, r: &niles_ir::eval::Row, w: i128| {
+        for _ in 0..w {
             put_data_row_formatted(
                 out,
                 r.iter()
@@ -348,6 +349,28 @@ pub fn put_rows_streaming(
             if out.len() >= REPLY_BUFFER {
                 flush(out)?;
             }
+        }
+        Ok::<(), std::io::Error>(())
+    };
+    if block.order.is_empty() {
+        for (r, w) in &block.z {
+            if *w > 0 {
+                emit(out, r, *w)?;
+            }
+        }
+    } else {
+        // An ordered reply is sorted before the first row is sent — a vector of references,
+        // not of rows. `order by` is not incremental in the IR either (`Op::OrderBy`), and a
+        // row cannot be sent before every row that sorts ahead of it has been seen.
+        let mut rows: Vec<(&niles_ir::eval::Row, i128)> = block
+            .z
+            .iter()
+            .filter(|(_, w)| **w > 0)
+            .map(|(r, w)| (r, *w))
+            .collect();
+        rows.sort_by(|a, b| niles_ir::eval::presented_cmp(a.0, b.0, &block.order));
+        for (r, w) in rows {
+            emit(out, r, w)?;
         }
     }
     Ok(())
@@ -1059,6 +1082,7 @@ mod tests {
                 z,
                 anchor: 4_200,
                 formats: vec![Format::Text; 3],
+                order: Vec::new(),
             })
         };
 

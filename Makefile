@@ -1,4 +1,4 @@
-.PHONY: gate check test fmt lint reproduce bootstrap
+.PHONY: gate gate-full preflight check test fmt lint reproduce bootstrap
 
 # The results files `make reproduce` regenerates but must not compare across hosts, read out
 # of results/MANIFEST.csv rather than listed here, so the exclusion set cannot drift from the
@@ -46,8 +46,20 @@ lint:
 	# The measurement tool is outside the workspace and is held to the same lints.
 	cargo clippy --manifest-path tools/memprobe/Cargo.toml --all-targets -- -D warnings
 
+# Every precondition of the gate, named at once (cycle 14, D-1): the toolchain pin, a running
+# PostgreSQL, and the `bench` role that tools/pg-provision.sh creates without touching
+# pg_hba.conf. Run first, so a fresh machine fails with a list rather than a test.
+preflight:
+	sh tools/preflight.sh
+
 # The gate every task must pass before it is done.
-gate: fmt lint generated test measurements memory
+gate: preflight fmt lint generated test measurements memory
+
+# The gate plus `make reproduce`. Separate because reproduce took 404 s on a two-core host
+# (cycle 14, R2-01, measured 2026-09-28, warm build cache) against the five-minute bound the
+# round set for folding it into `gate`; required at the end of every round, since a byte-deterministic
+# artefact went stale in cycle 13 precisely because the gate did not regenerate it.
+gate-full: gate reproduce
 
 # **The measurements that are also assertions.** `#[ignore]`d because they are shapes rather
 # than thresholds and because they cost seconds, not because they are optional: each one

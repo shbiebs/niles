@@ -9,4 +9,5 @@ authors.workspace = true
 conservation-suite = { path = "../conservation-suite" }
 nilestream-server = { path = "../nilestream-server" }
 niles-ir = { path = "../niles-ir" }
+nilestream-ledger = { path = "../nilestream-ledger" }
 proto-engine = { path = "../proto-engine" }

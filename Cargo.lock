@@ -8,6 +8,7 @@ version = "0.1.0"
 dependencies = [
  "conservation-suite",
  "niles-ir",
+ "nilestream-ledger",
  "nilestream-server",
  "proto-engine",
 ]

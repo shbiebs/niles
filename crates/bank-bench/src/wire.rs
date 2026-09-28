@@ -17,14 +17,22 @@
 //!
 //! # Scope, stated plainly
 //!
-//! Simple query protocol, extended query protocol (parse/bind/describe/execute/sync), trust
-//! authentication, no TLS, text result format. That is what the benchmark sends and it is
-//! deliberately not more: every message type implemented here is one that has to be correct,
-//! and an unused one is a liability rather than an asset.
+//! Simple query protocol, extended query protocol (parse/bind/describe/execute/sync), `trust`
+//! and **SCRAM-SHA-256** authentication, no TLS, text result format. That is what the
+//! benchmark sends and it is deliberately not more: every message type implemented here is
+//! one that has to be correct, and an unused one is a liability rather than an asset.
 //!
-//! MD5 and SCRAM authentication are **refused with a named error** rather than half-supported
-//! — a client that silently failed to authenticate would look like a slow server.
+//! SCRAM was added in cycle 14 (decision D-1): a stock PostgreSQL 16 authenticates 127.0.0.1
+//! with `scram-sha-256`, and a harness that spoke only `trust` could pass its gate only on a
+//! machine whose `pg_hba.conf` had been weakened by hand — a precondition written nowhere.
+//! The exchange is in [`crate::scram`]; the password comes from `PGPASSWORD` or the file
+//! `tools/pg-provision.sh` writes, and is never logged.
+//!
+//! MD5 and cleartext authentication are **refused with a named error** rather than
+//! half-supported — a client that silently failed to authenticate would look like a slow
+//! server, and neither method should be in use against a PostgreSQL this project provisions.
 
+use crate::scram::{self, Scram, ScramError};
 use std::io::{BufReader, Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
@@ -39,6 +47,10 @@ pub enum WireError {
     /// `trust` is the single most likely reason a benchmark run fails to start, and
     /// "authentication failed" would send an operator to the wrong file.
     Auth(String),
+    /// The SCRAM exchange was refused — no password, a forged nonce, or a server that could
+    /// not prove it knows the verifier. Distinct from `Auth`: the method is supported and the
+    /// exchange itself failed.
+    Scram(ScramError),
     /// The server returned an `ErrorResponse`. Carries the SQLSTATE and the message.
     Server {
         sqlstate: String,
@@ -55,8 +67,10 @@ impl std::fmt::Display for WireError {
             WireError::Auth(m) => write!(
                 f,
                 "the server requires {m}, which this client does not implement. The harness \
-                 expects `trust` authentication; check pg_hba.conf"
+                 authenticates with SCRAM-SHA-256 (tools/pg-provision.sh) or `trust`; check \
+                 pg_hba.conf"
             ),
+            WireError::Scram(e) => write!(f, "SCRAM-SHA-256: {e:?}"),
             WireError::Server { sqlstate, message } => write!(f, "[{sqlstate}] {message}"),
             WireError::Protocol(m) => write!(f, "protocol: {m}"),
         }
@@ -132,7 +146,19 @@ pub struct Client {
     /// The backend's process id, from `BackendKeyData`. Useful in a server log when a run
     /// misbehaves.
     pub backend_pid: i32,
+    /// How this connection authenticated. Recorded so a test can hold that a provisioned
+    /// PostgreSQL was reached through SCRAM rather than through a weakened `pg_hba.conf`.
+    pub auth: AuthMethod,
     prepared: u32,
+}
+
+/// The authentication a connection completed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthMethod {
+    /// The server asked for nothing (`trust`, or Nilestream's own listener).
+    Trust,
+    /// A verified SCRAM-SHA-256 exchange.
+    ScramSha256,
 }
 
 impl Client {
@@ -148,6 +174,7 @@ impl Client {
             r: BufReader::new(stream.try_clone()?),
             w: stream,
             backend_pid: 0,
+            auth: AuthMethod::Trust,
             prepared: 0,
         };
         c.startup(user, database)?;
@@ -181,7 +208,10 @@ impl Client {
                     match code {
                         0 => {} // AuthenticationOk
                         5 => return Err(WireError::Auth("MD5 password authentication".into())),
-                        10 => return Err(WireError::Auth("SCRAM-SHA-256 authentication".into())),
+                        10 => {
+                            self.sasl(&body[4..])?;
+                            self.auth = AuthMethod::ScramSha256;
+                        }
                         3 => {
                             return Err(WireError::Auth("cleartext password authentication".into()))
                         }
@@ -203,6 +233,61 @@ impl Client {
                     )))
                 }
             }
+        }
+    }
+
+    /// The SASL exchange (protocol §55.3.1), entered on `AuthenticationSASL`. `mechanisms`
+    /// is the message body after its code: null-terminated names, then an empty one. Returns
+    /// once the server's final signature has been verified; `AuthenticationOk` follows and is
+    /// read by the startup loop.
+    fn sasl(&mut self, mechanisms: &[u8]) -> Result<(), WireError> {
+        let offered: Vec<&[u8]> = mechanisms
+            .split(|&b| b == 0)
+            .filter(|m| !m.is_empty())
+            .collect();
+        if !offered.iter().any(|m| *m == b"SCRAM-SHA-256") {
+            let names: Vec<String> = offered
+                .iter()
+                .map(|m| String::from_utf8_lossy(m).into_owned())
+                .collect();
+            return Err(WireError::Auth(format!("SASL with {}", names.join(", "))));
+        }
+        let password = scram::password().map_err(WireError::Scram)?;
+        let nonce = scram::fresh_nonce().map_err(WireError::Scram)?;
+        let exchange = Scram::new(&password, nonce);
+
+        let first = exchange.client_first();
+        let mut body = Vec::new();
+        put_cstr(&mut body, "SCRAM-SHA-256");
+        body.extend_from_slice(&(first.len() as i32).to_be_bytes());
+        body.extend_from_slice(first.as_bytes());
+        self.send(b'p', &body)?; // SASLInitialResponse
+
+        let server_first = self.sasl_step(11)?;
+        let (client_final, awaiting) = exchange
+            .client_final(&server_first)
+            .map_err(WireError::Scram)?;
+        self.send(b'p', client_final.as_bytes())?; // SASLResponse
+
+        let server_final = self.sasl_step(12)?;
+        awaiting.verify(&server_final).map_err(WireError::Scram)
+    }
+
+    /// Read one `Authentication` message with the given code (11 continue, 12 final) and
+    /// return its data as text; an `ErrorResponse` is returned as the error it carries.
+    fn sasl_step(&mut self, want: i32) -> Result<String, WireError> {
+        let (tag, body) = self.read_message()?;
+        match tag {
+            b'R' if body.len() >= 4
+                && i32::from_be_bytes(body[0..4].try_into().unwrap()) == want =>
+            {
+                Ok(String::from_utf8_lossy(&body[4..]).into_owned())
+            }
+            b'E' => Err(error_from(&body)),
+            other => Err(WireError::Protocol(format!(
+                "expected SASL step {want}, got `{}`",
+                other as char
+            ))),
         }
     }
 

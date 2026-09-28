@@ -20,3 +20,7 @@ results/E23-scaling/E23-scaling.md
 # be accounted for.
 __pycache__/
 *.py[cod]
+
+# The local test role's password, written by tools/pg-provision.sh on the machine that uses
+# it (cycle 14, D-1). A credential never enters history.
+.pg-bench-password

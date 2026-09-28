@@ -26,6 +26,7 @@ pub mod publish;
 pub mod render;
 pub mod scenarios;
 pub mod score;
+pub mod scram;
 pub mod storage;
 pub mod summary;
 pub mod target;

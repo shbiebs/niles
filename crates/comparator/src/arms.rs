@@ -487,6 +487,9 @@ pub enum PgKind {
     M,
     /// P+ without the append-only trigger — the probe's second mutable arm (see run.rs).
     MPlus,
+    /// pg_ivm 1.15: the balances view maintained incrementally inside each writing
+    /// transaction, fully materialised (R2-03).
+    H2,
 }
 
 pub struct PgArm {
@@ -499,6 +502,7 @@ const COMMON: &str = include_str!("../sql/common.sql");
 const IMMUTABLE: &str = include_str!("../sql/immutable.sql");
 const P_SQL: &str = include_str!("../sql/p.sql");
 const PPLUS_SQL: &str = include_str!("../sql/pplus.sql");
+const H2_SQL: &str = include_str!("../sql/h2.sql");
 
 impl PgArm {
     pub fn new(kind: PgKind, port: u16, repo: &Path) -> PgArm {
@@ -507,12 +511,20 @@ impl PgArm {
             PgKind::PPlus => "pplus",
             PgKind::M => "m",
             PgKind::MPlus => "mplus",
+            PgKind::H2 => "h2",
         };
-        PgArm {
+        let mut arm = PgArm {
             kind,
             cluster: Cluster::new(name, port),
             repo: repo.to_path_buf(),
-        }
+        };
+        let label = arm.name();
+        arm.cluster.extra = crate::pgcluster::ARM_SETTINGS
+            .iter()
+            .filter(|(a, ..)| *a == label)
+            .map(|(_, k, v, why)| (*k, *v, *why))
+            .collect();
+        arm
     }
     fn mechanism(&self) -> bool {
         matches!(self.kind, PgKind::PPlus | PgKind::MPlus)
@@ -526,6 +538,7 @@ impl Arm for PgArm {
             PgKind::PPlus => "P+",
             PgKind::M => "M",
             PgKind::MPlus => "M+",
+            PgKind::H2 => "H2",
         }
     }
     fn describe(&self) -> String {
@@ -534,6 +547,7 @@ impl Arm for PgArm {
             PgKind::PPlus => "the E14 mechanism (partial slots, LRU, C = 16 checkpoints, anchored reconstruction) with the two cycle-14 repairs of sql/pplus.sql; append-only trigger",
             PgKind::M => "P without the append-only trigger (mutable base)",
             PgKind::MPlus => "P+ without the append-only trigger (mutable base)",
+            PgKind::H2 => "pg_ivm 1.15 IMMV `balances` (sum per acct, cur), maintained inside each writing transaction, fully materialised, no eviction; append-only trigger; `shared_preload_libraries = pg_ivm`",
         };
         format!(
             "PostgreSQL 16, own cluster on 127.0.0.1:{}, SCRAM-SHA-256 as role bench: {what}",
@@ -588,7 +602,7 @@ impl Arm for PgArm {
             "select arm.post_txn({idx}, {}, {}, {}, {}::smallint, {}, {})",
             t.id, a.acct, b.acct, a.cur, b.amt, t.value_day
         );
-        if self.mechanism() {
+        if self.mechanism() || self.kind == PgKind::H2 {
             vec![call]
         } else {
             vec![
@@ -605,11 +619,27 @@ impl Arm for PgArm {
             return Err("the cluster did not authenticate with SCRAM-SHA-256".into());
         }
         let run = |c: &mut Client, sql: &str| c.simple(sql).map(|_| ()).map_err(|e| e.to_string());
+        if self.kind == PgKind::H2 {
+            // `create extension pg_ivm` needs a superuser (the extension is not marked
+            // trusted); run it over the local socket as the cluster's superuser, then let the
+            // harness role call pg_ivm's functions. The harness role stays unprivileged.
+            self.cluster.admin_sql(
+                "bank",
+                "create extension if not exists pg_ivm; grant usage on schema pgivm to bench",
+            )?;
+        }
         run(&mut c, COMMON)?;
-        if matches!(self.kind, PgKind::P | PgKind::PPlus) {
+        if matches!(self.kind, PgKind::P | PgKind::PPlus | PgKind::H2) {
             run(&mut c, IMMUTABLE)?;
         }
-        run(&mut c, if self.mechanism() { PPLUS_SQL } else { P_SQL })?;
+        run(
+            &mut c,
+            match self.kind {
+                _ if self.mechanism() => PPLUS_SQL,
+                PgKind::H2 => H2_SQL,
+                _ => P_SQL,
+            },
+        )?;
         let mut statements = 3;
         let mut rows: Vec<String> = Vec::new();
         let mut current = 1;
@@ -655,6 +685,8 @@ impl Arm for PgArm {
         )?;
         if self.mechanism() {
             run(&mut c, &format!("select arm.after_load({budget})"))?;
+        } else if self.kind == PgKind::H2 {
+            run(&mut c, "select arm.after_load_h2()")?;
         } else {
             run(&mut c, "refresh materialized view arm.balances")?;
         }
@@ -668,6 +700,8 @@ impl Arm for PgArm {
                 u.batches(),
                 if self.mechanism() {
                     "arm.after_load: checkpoints every 16 legs per key, key counts, budget"
+                } else if self.kind == PgKind::H2 {
+                    "IMMV created and populated by pgivm.create_immv after the load"
                 } else {
                     "materialised view refreshed"
                 }

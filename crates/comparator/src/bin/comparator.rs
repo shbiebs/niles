@@ -34,6 +34,7 @@ fn build_arms(names: &[String], multi: bool, scratch: &Path) -> Vec<Box<dyn Arm>
                 "P+" => Box::new(PgArm::new(PgKind::PPlus, 5452, &root)),
                 "M" => Box::new(PgArm::new(PgKind::M, 5453, &root)),
                 "M+" => Box::new(PgArm::new(PgKind::MPlus, 5454, &root)),
+                "H2" => Box::new(PgArm::new(PgKind::H2, 5456, &root)),
                 other => panic!("unknown arm {other}"),
             }
         })

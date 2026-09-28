@@ -97,10 +97,22 @@ pub const SETTINGS: &[(&str, &str, &str)] = &[
     ),
 ];
 
+/// Settings only one arm's cluster carries: (arm, setting, value, why). Applied by
+/// `PgArm::new` and printed under E27's configuration table.
+pub const ARM_SETTINGS: &[(&str, &str, &str, &str)] = &[(
+    "H2",
+    "shared_preload_libraries",
+    "pg_ivm",
+    "pg_ivm's README requires it (or session_preload_libraries) for IMMVs to be maintained correctly",
+)];
+
 pub struct Cluster {
     pub name: String,
     pub port: u16,
     pub dir: PathBuf,
+    /// Settings one arm needs and the others do not (e.g. H2's `shared_preload_libraries`),
+    /// each with its reason; printed in E27's header beside [`SETTINGS`].
+    pub extra: Vec<(&'static str, &'static str, &'static str)>,
 }
 
 /// Run an administrative shell command: as the `postgres` OS user under root, as the current
@@ -129,7 +141,21 @@ impl Cluster {
             name: name.into(),
             port,
             dir: base_dir().join(name),
+            extra: Vec::new(),
         }
+    }
+
+    /// Run SQL as the cluster's superuser over the local socket (peer authentication): for
+    /// the few statements the harness role may not run, such as `create extension`.
+    pub fn admin_sql(&self, db: &str, sql: &str) -> Result<String, String> {
+        let quoted = sql.replace('\'', "'\\''");
+        let user = if is_root() { "-U postgres" } else { "" };
+        as_postgres(&format!(
+            "{}/psql -X -q -v ON_ERROR_STOP=1 -h {} -p {} {user} -d {db} -c '{quoted}'",
+            bin(),
+            socket_dir(),
+            self.port
+        ))
     }
 
     /// Initialise if absent, start if stopped, provision the harness role. Idempotent.
@@ -162,6 +188,7 @@ impl Cluster {
                         format!("-c {k}={v}")
                     }
                 })
+                .chain(self.extra.iter().map(|(k, v, _)| format!("-c {k}={v}")))
                 .collect();
             as_postgres(&format!(
                 "{bin}/pg_ctl -D {dir} -w -l {dir}/log.txt -o \"-p {} {}\" start >/dev/null",

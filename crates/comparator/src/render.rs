@@ -308,6 +308,12 @@ pub fn render(
     for (k, v, why) in crate::pgcluster::SETTINGS {
         let _ = writeln!(s, "| `{k}` | `{v}` | {why} |");
     }
+    let present: BTreeSet<&str> = arm_lines.iter().map(|(n, _)| n.as_str()).collect();
+    for (a, k, v, why) in crate::pgcluster::ARM_SETTINGS {
+        if present.contains(a) {
+            let _ = writeln!(s, "| `{k}` ({a} only) | `{v}` | {why} |");
+        }
+    }
     let _ = writeln!(
         s,
         "\n### The six questions, as each arm is asked them (§5.5)\n\n{sql_table}"

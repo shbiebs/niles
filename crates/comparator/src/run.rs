@@ -19,7 +19,7 @@
 //!   counted and the first examples kept; any divergence refuses every comparison involving
 //!   that arm at that size and seed.
 
-use crate::arms::{expected, parse, Answer, Arm, LoadReport, Query};
+use crate::arms::{expected, expected_at, parse, Answer, Arm, LoadReport, Query};
 use crate::oracle::{Key, Oracle};
 use crate::universe::{checksum_of, Params, Rng, Universe};
 use bank_bench::wire::Client;
@@ -100,6 +100,9 @@ pub enum Op {
 /// One run's script: the mixed phase, then one list of reads per client per level.
 #[derive(Debug, Clone)]
 pub struct Script {
+    /// The oracle head when the script begins — the head every read before the first write
+    /// is answered at.
+    pub start_head: u64,
     pub mixed: Vec<Op>,
     pub conc: Vec<(usize, Vec<Vec<Op>>)>,
     pub keys_read: BTreeSet<Key>,
@@ -160,6 +163,7 @@ pub fn script(
     r: &mut Rng,
     next_txn: &mut u64,
 ) -> Script {
+    let start_head = o.head();
     let mut mixed = Vec::with_capacity(cfg.ops);
     let mut keys_read = BTreeSet::new();
     let note = |q: &Query, ks: &mut BTreeSet<Key>| match q {
@@ -203,6 +207,7 @@ pub fn script(
         conc.push((level, clients));
     }
     Script {
+        start_head,
         mixed,
         conc,
         keys_read,
@@ -236,7 +241,33 @@ pub struct Divergence {
     /// retry's answer is checked like any other, and its latency includes the failed attempt,
     /// because that is what the client waited for.
     pub deadlock_retries: u64,
+    /// On an arm that answers from a lagging replica (H1): answers equal to the oracle at an
+    /// epoch the replica had applied, but not at the head. Not a divergence.
+    pub stale: u64,
+    /// The largest lag of a stale answer, in epochs behind the head it was asked at.
+    pub stale_lag_max: u64,
+    /// On such an arm: answers equal to the oracle at no epoch the replica could have
+    /// applied — wrong answers. Each is also counted in `count`.
+    pub inexact: u64,
+    /// Reads checked against a bracket (the denominator of the inexactness rate).
+    pub bracketed: u64,
     pub examples: Vec<String>,
+}
+
+impl Divergence {
+    fn absorb(&mut self, d: Divergence) {
+        self.count += d.count;
+        self.deadlock_retries += d.deadlock_retries;
+        self.stale += d.stale;
+        self.stale_lag_max = self.stale_lag_max.max(d.stale_lag_max);
+        self.inexact += d.inexact;
+        self.bracketed += d.bracketed;
+        for e in d.examples {
+            if self.examples.len() < 5 {
+                self.examples.push(e);
+            }
+        }
+    }
 }
 
 /// What one arm did in one run.
@@ -249,16 +280,35 @@ pub struct RunOut {
     pub errors: Vec<String>,
 }
 
+/// The oracle and the head a read was asked at, for checking an answer from a lagging replica.
+struct AtHead<'a> {
+    oracle: &'a Oracle,
+    head: u64,
+}
+
+#[allow(clippy::too_many_arguments)]
 fn exec_read(
     arm: &dyn Arm,
     c: &mut Client,
     q: &Query,
     want: &Answer,
+    at: &AtHead,
     out: &mut Vec<f64>,
     d: &mut Divergence,
     errs: &mut Vec<String>,
 ) {
     let sql = arm.sql(q);
+    // For a replica, where it stood just before the read (outside the timed region).
+    let before = match arm.replica_offsets() {
+        Some(Ok(p)) => Some(p),
+        Some(Err(e)) => {
+            if errs.len() < 5 {
+                errs.push(format!("replica offsets before {q:?}: {e}"));
+            }
+            None
+        }
+        None => None,
+    };
     let t0 = Instant::now();
     let mut res = c.simple(&sql);
     let mut tries = 1;
@@ -271,12 +321,35 @@ fn exec_read(
         res = c.simple(&sql);
     }
     let us = t0.elapsed().as_secs_f64() * 1e6;
+    let after = before.and_then(|_| arm.replica_offsets().and_then(Result::ok));
+    let bracket = match (before, after) {
+        (Some((lo, _)), Some((_, hi))) => Some(arm.epochs_between(lo, hi)),
+        _ => None,
+    };
+    if bracket.is_some() {
+        d.bracketed += 1;
+    }
     match res {
         Ok(rows) => {
             out.push(us);
             match parse(q, &rows) {
                 Ok(got) if &got == want => {}
+                Ok(got)
+                    if bracket.is_some_and(|(must, may)| {
+                        (must..=may.min(at.head)).rev().any(|e| {
+                            if expected_at(at.oracle, q, e) == got {
+                                d.stale += 1;
+                                d.stale_lag_max = d.stale_lag_max.max(at.head - e);
+                                true
+                            } else {
+                                false
+                            }
+                        })
+                    }) => {}
                 Ok(got) => {
+                    if bracket.is_some() {
+                        d.inexact += 1;
+                    }
                     d.count += 1;
                     if d.examples.len() < 5 {
                         let show = |a: &Answer| {
@@ -312,11 +385,12 @@ fn exec_read(
 }
 
 /// Run one script on one arm.
-pub fn run_arm(arm: &dyn Arm, s: &Script) -> Result<RunOut, String> {
+pub fn run_arm(arm: &dyn Arm, s: &Script, oracle: &Oracle) -> Result<RunOut, String> {
     let mut out = RunOut::default();
     let mut c = arm.connect()?;
     let mut lat: BTreeMap<&'static str, Vec<f64>> = BTreeMap::new();
     let mut writes = Vec::new();
+    let mut head = s.start_head;
     for op in &s.mixed {
         match op {
             Op::Read(q, want) => {
@@ -329,6 +403,7 @@ pub fn run_arm(arm: &dyn Arm, s: &Script) -> Result<RunOut, String> {
                     &mut c,
                     q,
                     want,
+                    &AtHead { oracle, head },
                     v,
                     &mut out.divergence,
                     &mut out.errors,
@@ -336,12 +411,15 @@ pub fn run_arm(arm: &dyn Arm, s: &Script) -> Result<RunOut, String> {
             }
             Op::Write(idx, t) => {
                 let stmts = arm.write_sql(*idx, t);
+                arm.before_write(*idx)?;
                 let t0 = Instant::now();
                 for st in &stmts {
                     c.simple(st)
                         .map_err(|e| format!("{} write #{idx} `{st}`: {e}", arm.name()))?;
                 }
                 writes.push(t0.elapsed().as_secs_f64() * 1e6);
+                arm.after_write(*idx)?;
+                head = *idx;
             }
         }
     }
@@ -379,10 +457,11 @@ pub fn run_arm(arm: &dyn Arm, s: &Script) -> Result<RunOut, String> {
                         let mut d = Divergence::default();
                         let mut errs = Vec::new();
                         b.wait();
+                        let at = AtHead { oracle, head };
                         for op in ops {
                             if let Op::Read(q, want) = op {
                                 let v = lat.entry(q.id()).or_default();
-                                exec_read(arm, &mut c, q, want, v, &mut d, &mut errs);
+                                exec_read(arm, &mut c, q, want, &at, v, &mut d, &mut errs);
                             }
                         }
                         (lat, d, errs)
@@ -398,13 +477,7 @@ pub fn run_arm(arm: &dyn Arm, s: &Script) -> Result<RunOut, String> {
             for (k, v) in lat {
                 merged.entry(k).or_default().extend(v);
             }
-            out.divergence.count += d.count;
-            out.divergence.deadlock_retries += d.deadlock_retries;
-            for e in d.examples {
-                if out.divergence.examples.len() < 5 {
-                    out.divergence.examples.push(e);
-                }
-            }
+            out.divergence.absorb(d);
             out.errors.extend(errs);
         }
         for (id, v) in merged {
@@ -421,6 +494,17 @@ pub fn run_arm(arm: &dyn Arm, s: &Script) -> Result<RunOut, String> {
         "read_deadlock_retries".into(),
         out.divergence.deadlock_retries as f64,
     );
+    if out.divergence.bracketed > 0 {
+        let n = out.divergence.bracketed as f64;
+        out.values
+            .insert("stale_read_share".into(), out.divergence.stale as f64 / n);
+        out.values.insert(
+            "stale_lag_epochs_max".into(),
+            out.divergence.stale_lag_max as f64,
+        );
+        out.values
+            .insert("inexactness_rate".into(), out.divergence.inexact as f64 / n);
+    }
     Ok(out)
 }
 
@@ -562,7 +646,7 @@ pub fn run_point(
         let idx = run as i64 - cfg.warmups as i64;
         for k in 0..n_arms {
             let arm = &arms[(k + run) % n_arms];
-            match run_arm(arm.as_ref(), &s) {
+            match run_arm(arm.as_ref(), &s, &o) {
                 Ok(mut out) => {
                     match arm
                         .connect()

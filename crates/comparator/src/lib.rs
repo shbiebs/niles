@@ -6,12 +6,13 @@
 //! oracle this crate owns, and verdicts by the joint gate with a resolution floor from
 //! warm-up runs. The specification is §5 of `claude/cycle-14-round-2-work-order.md`.
 //!
-//! Modules: [`universe`] (the generator), [`oracle`] (the answers), [`arms`] (N, P+, P, M and
-//! the probe's M+), [`pgcluster`] (one PostgreSQL cluster per arm), [`run`] (one size and
+//! Modules: [`universe`] (the generator), [`oracle`] (the answers), [`arms`] (N, P+, P, M,
+//! H2 and the probe's M+), [`h1`] (ReadySet), [`pgcluster`] (one PostgreSQL cluster per arm), [`run`] (one size and
 //! seed), [`stats`] (the gate), [`store`] (one file per point), [`render`] (E27), [`probe`]
 //! (the five anomalies).
 
 pub mod arms;
+pub mod h1;
 pub mod oracle;
 pub mod pgcluster;
 pub mod probe;

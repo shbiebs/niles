@@ -122,6 +122,55 @@ impl Oracle {
         out
     }
 
+    /// Every key's balance through epoch index `at` — the report a replica that had applied
+    /// exactly the epochs through `at` would give. Keys with no leg by then are absent.
+    pub fn report_at(&self, at: u64) -> BTreeMap<Key, i128> {
+        self.by_key
+            .keys()
+            .filter_map(|k| self.balance(*k, at).map(|b| (*k, b)))
+            .collect()
+    }
+
+    /// q5 through epoch index `at`.
+    pub fn top10_at(&self, cur: u32, at: u64) -> Vec<i128> {
+        let mut v: Vec<i128> = self
+            .report_at(at)
+            .into_iter()
+            .filter(|((_, c), _)| *c == cur)
+            .map(|(_, b)| b)
+            .collect();
+        v.sort_by(|a, b| b.cmp(a));
+        v.truncate(10);
+        v
+    }
+
+    /// q3 through epoch index `at`.
+    pub fn statement_at(&self, key: Key, from: i32, to: i32, at: u64) -> (u64, Option<i128>) {
+        let Some(legs) = self.by_key.get(&key) else {
+            return (0, None);
+        };
+        let hit: Vec<i128> = legs
+            .iter()
+            .filter(|&&(e, _, d)| e <= at && d >= from && d <= to)
+            .map(|&(_, a, _)| a as i128)
+            .collect();
+        let n = hit.len() as u64;
+        (n, if n == 0 { None } else { Some(hit.iter().sum()) })
+    }
+
+    /// q4 through epoch index `at`.
+    pub fn desk_at(&self, desk: u64, at: u64) -> BTreeMap<u32, i128> {
+        let mut out = BTreeMap::new();
+        for (acct, cur) in self.by_key.keys() {
+            if crate::universe::desk_of(*acct) == desk {
+                if let Some(b) = self.balance((*acct, *cur), at) {
+                    *out.entry(*cur).or_default() += b;
+                }
+            }
+        }
+        out
+    }
+
     /// The epoch index of `key`'s first leg — the earliest anchor at which it has a balance.
     pub fn first_epoch(&self, key: Key) -> Option<u64> {
         self.by_key.get(&key)?.first().map(|&(e, _, _)| e)
@@ -180,6 +229,16 @@ mod tests {
         let o = Oracle::of(&u);
         assert!(o.conserves());
         let head = o.head();
+        assert_eq!(o.report_at(head), o.report());
+        assert_eq!(o.top10_at(0, head), o.top10(0));
+        assert_eq!(o.desk_at(3, head), o.desk(3));
+        let k0 = o.keys()[0];
+        assert_eq!(
+            o.statement_at(k0, -100, 1000, head),
+            o.statement(k0, -100, 1000)
+        );
+        // Before the last batch, some key's balance differs: the `_at` forms really do stop.
+        assert_ne!(o.report_at(head - 1), o.report());
         for k in o.keys().into_iter().take(50) {
             assert_eq!(o.balance(k, head), o.report().get(&k).copied());
             // The balance at epoch 0 is absent: nothing is sealed before batch 1.

@@ -1,6 +1,7 @@
 //! `comparator run | render | probe` — see the crate documentation.
 
 use comparator::arms::{Arm, NArm, PgArm, PgKind};
+use comparator::h1::H1Arm;
 use comparator::run::{run_point, Config};
 use std::path::{Path, PathBuf};
 
@@ -35,6 +36,13 @@ fn build_arms(names: &[String], multi: bool, scratch: &Path) -> Vec<Box<dyn Arm>
                 "M" => Box::new(PgArm::new(PgKind::M, 5453, &root)),
                 "M+" => Box::new(PgArm::new(PgKind::MPlus, 5454, &root)),
                 "H2" => Box::new(PgArm::new(PgKind::H2, 5456, &root)),
+                "H1" => Box::new(H1Arm::new(5457, 5458, scratch.join("h1"), &root)),
+                "H1M" => {
+                    let mut a = H1Arm::new(5459, 5460, scratch.join("h1m"), &root);
+                    a.cluster = comparator::pgcluster::Cluster::new("h1m", 5459);
+                    a.mutable = true;
+                    Box::new(a)
+                }
                 other => panic!("unknown arm {other}"),
             }
         })
@@ -177,9 +185,10 @@ fn main() {
             eprintln!("wrote {} and {}", main.display(), detail.display());
         }
         "probe" => {
-            // The five anomalies (§5.7): N, P+ and M+ in both modes. M and P are a full
-            // materialised view with no partial state and no anchor on a read, so the five —
-            // anomalies of partial maintenance — have nothing to act on there; E27 says so.
+            // The five anomalies (§5.7): N, P+ and M+ in both modes, and (R2-03) H1 with its
+            // mutable twin H1M. M and P are a full materialised view with no partial state and
+            // no anchor on a read, so the five — anomalies of partial maintenance — have
+            // nothing to act on there; E27 says so.
             let scratch = PathBuf::from("/var/tmp/e27-probe");
             let names: Vec<String> = arg(&args, "--arms")
                 .unwrap_or_else(|| "N,P+,M+".into())
@@ -222,8 +231,11 @@ fn main() {
                 }
                 arm.stop();
             }
+            // `--out` names the file, so arms added later (R2-03's H1) are probed into their own
+            // file without re-running the arms already reported.
+            let file = arg(&args, "--out").unwrap_or_else(|| "probe.tsv".into());
             std::fs::create_dir_all(&dir).expect("dir");
-            std::fs::write(dir.join("probe.tsv"), out).expect("write probe.tsv");
+            std::fs::write(dir.join(&file), out).expect("write the probe file");
         }
         _ => {
             eprintln!("usage: comparator run --series single|multi --sizes 1000,10000 --seeds 1,7 [--arms N,P+,P,M] [--runs 10] [--warmups 3] [--skip-existing]");

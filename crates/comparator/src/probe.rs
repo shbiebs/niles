@@ -18,20 +18,28 @@
 //!
 //! # The five, as predicates over what was observed
 //!
-//! With `truth(k, e)` the balance of k through epoch e — the oracle's in the append-only mode;
-//! the final base's in the mutating mode, since a mutable base has no other — and
+//! With `truth(k, e)` the balance of k through epoch e — the oracle's, plus, in the mutating
+//! mode, every mutation of k's legs sealed at or before e that had landed when the read ran
+//! (a mutation that may have landed *during* the read is allowed either way: see
+//! `truth_range`) — and
 //! `d = value − truth` for each read:
 //! 1. **double application** — `d` equals the amount of one of k's own legs at or before e;
 //! 2. **skipped delta** — `d` equals minus such an amount, or (mutating) a nonzero multiple
 //!    of D;
 //! 3. **lost delta** — after the driver stops, a resident value that differs from the truth at
 //!    the view's frontier, or two quiescent head reads that are both wrong;
-//! 4. **upquery race** — two reads of the same `(k, e)` returned different values (an answer
-//!    at a fixed anchor is a function of the anchor);
+//! 4. **upquery race** — two reads of the same `(k, e)`, with the same mutations landed and
+//!    none in flight, returned different values (such an answer is a function of the anchor);
 //! 5. **upquery deadlock** — any SQLSTATE 40P01, or a read that did not return.
 //!
 //! A nonzero `d` that matches neither 1 nor 2 is reported as *other divergence*, never folded
 //! into a category it does not fit.
+//!
+//! On an arm that answers from a lagging replica (H1) a read carries no anchor; it is
+//! bracketed instead by the replica's applied position just before and after it, which gives
+//! a range of epochs it can be for, and it is right if it matches the truth at any of them
+//! (`h1.rs`). Mutations are placed on the same clock: the replica's log position on H1,
+//! nanoseconds since the probe began elsewhere.
 
 use crate::arms::{Arm, Query};
 use crate::oracle::{Key, Oracle};
@@ -97,6 +105,115 @@ fn sqlstate(e: &WireError) -> Option<String> {
         WireError::Server { sqlstate, .. } => Some(sqlstate.clone()),
         _ => None,
     }
+}
+
+/// One head read of `k`: `(first, last, value)`, where `first..=last` are the oracle epoch
+/// indexes the answer can be for. On an arm that stamps an anchor (N, P+, M+) that is one
+/// epoch. On an arm that answers from a lagging replica (H1) it is the bracket of epochs the
+/// replica must and may have applied around the read (see `h1.rs`). `Ok(None)` is a reply
+/// that could not be read as a value.
+fn read_head(
+    arm: &dyn Arm,
+    c: &mut Client,
+    k: Key,
+    clock: &dyn Fn() -> u64,
+) -> Result<Option<Observed>, WireError> {
+    if let Some(before) = arm.replica_offsets() {
+        let Ok((lo, _)) = before else {
+            return Ok(None);
+        };
+        let rows = c.simple(&arm.sql(&Query::Point(k)))?;
+        let Some(Ok((_, hi))) = arm.replica_offsets() else {
+            return Ok(None);
+        };
+        let (must, may) = arm.epochs_between(lo, hi);
+        let v = rows
+            .rows
+            .first()
+            .and_then(|r| r.last().cloned().flatten())
+            .and_then(|t| {
+                let t = t.trim().to_string();
+                t.parse::<i128>()
+                    .ok()
+                    .or_else(|| t.split_once('.').and_then(|(w, _)| w.parse().ok()))
+            });
+        return Ok(v.map(|v| Observed {
+            key: k,
+            first: must,
+            last: may,
+            value: v,
+            window: (lo, hi),
+        }));
+    }
+    let w0 = clock();
+    let rows = c.simple(&head_sql(arm, k))?;
+    let w1 = clock();
+    Ok(value_and_anchor(&rows).map(|(v, a)| {
+        let i = arm.oracle_index(a);
+        Observed {
+            key: k,
+            first: i,
+            last: i,
+            value: v,
+            window: (w0, w1),
+        }
+    }))
+}
+
+/// One read the probe observed. `first..=last` are the oracle epochs it can be for;
+/// `window` is where it stood on the arm's clock — for a replica, the applied log positions
+/// just before and after it; otherwise nanoseconds since the probe began, just before the
+/// request and just after the reply.
+#[derive(Debug, Clone, Copy)]
+struct Observed {
+    key: Key,
+    first: u64,
+    last: u64,
+    value: i128,
+    window: (u64, u64),
+}
+
+/// One applied mutation: +D on the first leg of `target`, −D on that leg's twin in the same
+/// transaction (on `twin`), both sealed at epoch `epoch`; `at` is where it stood on the arm's
+/// clock just before it was sent and just after it committed.
+#[derive(Debug, Clone, Copy)]
+struct Mutation {
+    target: Key,
+    twin: Key,
+    epoch: u64,
+    at: (u64, u64),
+}
+
+/// The values a read of `k` through epoch `e` may truthfully return in a window `w`, given the
+/// mutations applied so far: the oracle's balance, plus every mutation that had certainly
+/// landed before the window opened, plus any subset of those that may have landed during it.
+/// Returned as (the value with only the certain ones, the lowest and highest extra multiple of
+/// D the uncertain ones allow).
+fn truth_range(o: &Oracle, ms: &[Mutation], k: Key, e: u64, w: (u64, u64)) -> (i128, i128, i128) {
+    let mut base = o.balance(k, e).unwrap_or(0);
+    let (mut up, mut down) = (0i128, 0i128);
+    for m in ms {
+        if m.epoch > e {
+            continue;
+        }
+        let effect = if m.target == k {
+            D as i128
+        } else if m.twin == k {
+            -(D as i128)
+        } else {
+            continue;
+        };
+        if m.at.1 <= w.0 {
+            base += effect;
+        } else if m.at.0 < w.1 {
+            if effect > 0 {
+                up += 1;
+            } else {
+                down += 1;
+            }
+        }
+    }
+    (base, -down, up)
 }
 
 /// (value, anchor) from a head read: the value is the last non-anchor column, the anchor the
@@ -189,7 +306,26 @@ pub fn probe(arm: &mut dyn Arm, cfg: &ProbeConfig, mutate: bool) -> Result<Probe
     }
 
     let stop = AtomicBool::new(false);
-    let observed: Mutex<Vec<(Key, u64, i128)>> = Mutex::new(Vec::new());
+    let observed: Mutex<Vec<Observed>> = Mutex::new(Vec::new());
+    let mutations: Mutex<Vec<Mutation>> = Mutex::new(Vec::new());
+    // The arm's clock: its log position if it answers from a replica, else nanoseconds.
+    let t_start = std::time::Instant::now();
+    let clock_fn = || {
+        arm.log_position()
+            .unwrap_or_else(|| t_start.elapsed().as_nanos() as u64)
+    };
+    let clock: &(dyn Fn() -> u64 + Sync) = &clock_fn;
+    // Each hot key's first leg (the row the mutator rewrites: the lowest id, i.e. the first
+    // in load order) and the twin leg of the same transaction.
+    let mut first_leg: BTreeMap<Key, (Key, u64)> = BTreeMap::new();
+    for t in &u.txns {
+        for (i, l) in t.legs.iter().enumerate() {
+            let other = t.legs[1 - i];
+            first_leg
+                .entry((l.acct, l.cur))
+                .or_insert(((other.acct, other.cur), t.batch));
+        }
+    }
     let errors: Mutex<Vec<String>> = Mutex::new(Vec::new());
     let deadlocks = std::sync::atomic::AtomicU64::new(0);
     let read_errors = std::sync::atomic::AtomicU64::new(0);
@@ -211,13 +347,11 @@ pub fn probe(arm: &mut dyn Arm, cfg: &ProbeConfig, mutate: bool) -> Result<Probe
                 let mut local = Vec::new();
                 while !stop.load(Ordering::Relaxed) {
                     let k = hot[r.below(hot.len() as u64) as usize];
-                    match c.simple(&head_sql(arm, k)) {
-                        Ok(rows) => match value_and_anchor(&rows) {
-                            Some((v, a)) => local.push((k, a, v)),
-                            None => {
-                                read_errors.fetch_add(1, Ordering::Relaxed);
-                            }
-                        },
+                    match read_head(arm, &mut c, k, clock) {
+                        Ok(Some(o)) => local.push(o),
+                        Ok(None) => {
+                            read_errors.fetch_add(1, Ordering::Relaxed);
+                        }
                         Err(e) => {
                             if sqlstate(&e).as_deref() == Some("40P01") {
                                 deadlocks.fetch_add(1, Ordering::Relaxed);
@@ -236,7 +370,8 @@ pub fn probe(arm: &mut dyn Arm, cfg: &ProbeConfig, mutate: bool) -> Result<Probe
         }
         // The mutator, in its own thread, runs while the appender does.
         let mutator_handle = if mutate {
-            let (stop, errors, deadlocks, hot) = (&stop, &errors, &deadlocks, &hot);
+            let (stop, errors, deadlocks, hot, mutations, first_leg) =
+                (&stop, &errors, &deadlocks, &hot, &mutations, &first_leg);
             let mut c = mutator.take().expect("one mutator");
             let n = cfg.mutations;
             Some(sc.spawn(move || {
@@ -256,8 +391,21 @@ pub fn probe(arm: &mut dyn Arm, cfg: &ProbeConfig, mutate: bool) -> Result<Probe
                              commit"
                         )
                     };
-                    match c.simple(&sql) {
-                        Ok(_) => applied += 1,
+                    let t0 = clock();
+                    let res = c.simple(&sql);
+                    let t1 = clock();
+                    match res {
+                        Ok(_) => {
+                            applied += 1;
+                            if let Some(&(twin, epoch)) = first_leg.get(&(a, cur)) {
+                                mutations.lock().unwrap().push(Mutation {
+                                    target: (a, cur),
+                                    twin,
+                                    epoch,
+                                    at: (t0, t1),
+                                });
+                            }
+                        }
                         Err(e) => {
                             if sqlstate(&e).as_deref() == Some("40P01") {
                                 deadlocks.fetch_add(1, Ordering::Relaxed);
@@ -283,6 +431,12 @@ pub fn probe(arm: &mut dyn Arm, cfg: &ProbeConfig, mutate: bool) -> Result<Probe
         // not retried would make every later read of its keys look like a skipped delta.
         // The deadlock itself is still counted.
         for (idx, t) in &writes {
+            if let Err(e) = arm.before_write(*idx) {
+                errors
+                    .lock()
+                    .unwrap()
+                    .push(format!("appender #{idx}: before_write: {e}"));
+            }
             for st in arm.write_sql(*idx, t) {
                 let mut tries = 0;
                 loop {
@@ -306,6 +460,12 @@ pub fn probe(arm: &mut dyn Arm, cfg: &ProbeConfig, mutate: bool) -> Result<Probe
                         }
                     }
                 }
+            }
+            if let Err(e) = arm.after_write(*idx) {
+                errors
+                    .lock()
+                    .unwrap()
+                    .push(format!("appender #{idx}: after_write: {e}"));
             }
             rep.appends += 1;
         }
@@ -339,45 +499,65 @@ pub fn probe(arm: &mut dyn Arm, cfg: &ProbeConfig, mutate: bool) -> Result<Probe
         .ok()?
         .nth(0)
     };
-    let mut cache: BTreeMap<(Key, u64), i128> = BTreeMap::new();
-    let mut by_anchor: BTreeMap<(Key, u64), BTreeSet<i128>> = BTreeMap::new();
-    for &(k, a, v) in &obs {
-        by_anchor.entry((k, a)).or_default().insert(v);
-        let idx = arm.oracle_index(a);
-        let truth = if mutate && arm.name() != "N" {
-            match cache.get(&(k, a)) {
-                Some(t) => *t,
-                None => {
-                    let t = base_truth(&mut c, k, a).unwrap_or(i128::MIN);
-                    cache.insert((k, a), t);
-                    t
-                }
+    // Each read is held to what was true at an epoch it can be for, given the mutations that
+    // had or may have landed while it ran. (Before cycle 14's R2-03 the mutating mode held
+    // every read to the *final* base, so a read taken before a mutation landed counted as a
+    // skipped delta; see E27's deviations.)
+    let muts = mutations.into_inner().unwrap();
+    let mut by_anchor: BTreeMap<(Key, u64, i128), BTreeSet<i128>> = BTreeMap::new();
+    for o in &obs {
+        let (k, v) = (o.key, o.value);
+        // The upquery-race test compares reads at one exact epoch with no mutation of the key
+        // in flight: such an answer is a function of (key, epoch, mutations landed).
+        if o.first == o.last {
+            let (base, lo, hi) = truth_range(&oracle, &muts, k, o.first, o.window);
+            if lo == 0 && hi == 0 {
+                by_anchor.entry((k, o.first, base)).or_default().insert(v);
             }
-        } else {
-            oracle.balance(k, idx).unwrap_or(0)
-        };
-        let d = v - truth;
-        if d == 0 {
+        }
+        let fits = (o.first..=o.last).any(|e| {
+            let (base, lo, hi) = truth_range(&oracle, &muts, k, e, o.window);
+            let d = v - base;
+            d % D as i128 == 0 && (lo..=hi).contains(&(d / D as i128))
+        });
+        if fits {
             continue;
         }
-        let legs = oracle.legs_through(k, idx);
-        let kind = if legs.iter().any(|&x| x as i128 == d) {
-            rep.double_application += 1;
-            "double application"
-        } else if legs.iter().any(|&x| -(x as i128) == d) || (mutate && d % D as i128 == 0) {
-            rep.skipped_delta += 1;
-            "skipped delta"
-        } else {
-            rep.other_divergence += 1;
-            "other divergence"
-        };
+        let mut kind = "other divergence";
+        let mut shown = (o.last, truth_range(&oracle, &muts, k, o.last, o.window).0);
+        for e in (o.first..=o.last).rev() {
+            let truth = truth_range(&oracle, &muts, k, e, o.window).0;
+            let d = v - truth;
+            let legs = oracle.legs_through(k, e);
+            if legs.iter().any(|&x| x as i128 == d) {
+                kind = "double application";
+            } else if legs.iter().any(|&x| -(x as i128) == d) || (mutate && d % D as i128 == 0) {
+                kind = "skipped delta";
+            } else {
+                continue;
+            }
+            shown = (e, truth);
+            break;
+        }
+        match kind {
+            "double application" => rep.double_application += 1,
+            "skipped delta" => rep.skipped_delta += 1,
+            _ => rep.other_divergence += 1,
+        }
         if rep.examples.len() < 12 {
+            let (e, truth) = shown;
+            let at = if o.first == o.last {
+                format!("#{e}")
+            } else {
+                format!("#{e} (bracket #{}..#{})", o.first, o.last)
+            };
             rep.examples.push(format!(
-                "{kind}: key {k:?} at #{a}: read {v}, truth {truth}, d = {d}"
+                "{kind}: key {k:?} at {at}: read {v}, truth {truth}, d = {}",
+                v - truth
             ));
         }
     }
-    for ((k, a), vs) in &by_anchor {
+    for ((k, a, _), vs) in &by_anchor {
         if vs.len() > 1 {
             rep.upquery_race += 1;
             if rep.examples.len() < 16 {
@@ -387,7 +567,57 @@ pub fn probe(arm: &mut dyn Arm, cfg: &ProbeConfig, mutate: bool) -> Result<Probe
         }
     }
     // Quiescent: is what the view holds now right?
-    if arm.name() == "N" {
+    if arm.replica_offsets().is_some() {
+        // A replica: wait until it must have applied every append, then two head reads per
+        // hot key; both wrong is a lost delta. A replica that never reaches the head within
+        // a minute has lost a delta too, and is reported as such.
+        let head = oracle.head();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let caught_up = loop {
+            if let Some(Ok((lo, _))) = arm.replica_offsets() {
+                if arm.epochs_between(lo, lo).0 >= head {
+                    break true;
+                }
+            }
+            if std::time::Instant::now() > deadline {
+                break false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        };
+        if !caught_up {
+            rep.lost_delta += 1;
+            rep.examples.push(format!(
+                "lost delta: the replica had not applied through #{head} a minute after the last append"
+            ));
+        } else {
+            for &k in &hot {
+                let truth = if mutate {
+                    base_truth(&mut c, k, head).unwrap_or(i128::MIN)
+                } else {
+                    oracle.balance(k, head).unwrap_or(0)
+                };
+                let mut wrong = 0;
+                for _ in 0..2 {
+                    if let Ok(rows) = c.simple(&arm.sql(&Query::Point(k))) {
+                        let v = crate::arms::parse(&Query::Point(k), &rows)
+                            .ok()
+                            .and_then(|a| match a {
+                                crate::arms::Answer::Balance(b) => Some(b.unwrap_or(0)),
+                                _ => None,
+                            });
+                        if v != Some(truth) {
+                            wrong += 1;
+                        }
+                    }
+                }
+                if wrong == 2 {
+                    rep.lost_delta += 1;
+                    rep.examples
+                        .push(format!("lost delta: key {k:?} wrong on two quiescent reads at #{head}"));
+                }
+            }
+        }
+    } else if arm.name() == "N" {
         for &k in &hot {
             let mut wrong = 0;
             for _ in 0..2 {

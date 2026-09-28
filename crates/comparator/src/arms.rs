@@ -83,6 +83,23 @@ pub fn expected(o: &Oracle, q: &Query) -> Answer {
     }
 }
 
+/// What the oracle says the answer was through epoch index `at` — for an arm that answers
+/// from a replica which may lag the head (H1). An anchored read asks for its own epoch, so a
+/// replica that has applied only through `at` answers it as of `min(anchor, at)`.
+pub fn expected_at(o: &Oracle, q: &Query, at: u64) -> Answer {
+    match q {
+        Query::Point(k) => Answer::Balance(o.balance(*k, at)),
+        Query::Anchored(k, e) => Answer::Balance(o.balance(*k, (*e).min(at))),
+        Query::Statement(k, a, b) => {
+            let (n, s) = o.statement_at(*k, *a, *b, at);
+            Answer::Statement(n, s)
+        }
+        Query::Desk(d) => Answer::PerCurrency(o.desk_at(*d, at)),
+        Query::Top10(c) => Answer::Top(o.top10_at(*c, at)),
+        Query::Extract => Answer::Report(o.report_at(at)),
+    }
+}
+
 /// Why an arm does not run a query: printed as `NOT RUN (<reason>)` in its cells.
 pub type NotRun = &'static str;
 
@@ -118,6 +135,31 @@ pub trait Arm: Sync {
     /// The oracle's epoch index for an anchor this arm stamped on a reply.
     fn oracle_index(&self, arm_epoch: u64) -> u64 {
         arm_epoch
+    }
+    /// Called just before and just after each measured write, outside the timed region — for
+    /// an arm that must record where the write landed in its ledger's log (H1).
+    fn before_write(&self, _idx: u64) -> Result<(), String> {
+        Ok(())
+    }
+    fn after_write(&self, _idx: u64) -> Result<(), String> {
+        Ok(())
+    }
+    /// For an arm that answers from a replica which may lag its ledger (H1): the replica's
+    /// (minimum, maximum) applied position right now. `None` for every arm that answers at
+    /// its own head, whose answers are held to the head.
+    fn replica_offsets(&self) -> Option<Result<(u64, u64), String>> {
+        None
+    }
+    /// Where the arm's ledger log stands now, in the units of [`Arm::replica_offsets`] — for
+    /// placing a mutation relative to a replica's reads (the probe). `None` on arms without
+    /// a replica.
+    fn log_position(&self) -> Option<u64> {
+        None
+    }
+    /// The oracle epoch indexes a replica between positions `lo` and `hi` must and may have
+    /// applied (see `h1.rs`). Only called when [`Arm::replica_offsets`] is `Some`.
+    fn epochs_between(&self, _lo: u64, _hi: u64) -> (u64, u64) {
+        (0, 0)
     }
     fn stop(&mut self);
 }
@@ -201,7 +243,7 @@ pub fn parse(q: &Query, rows: &Rows) -> Result<Answer, String> {
     })
 }
 
-fn legs_from(rows: &Rows) -> Result<Vec<Leg>, String> {
+pub(crate) fn legs_from(rows: &Rows) -> Result<Vec<Leg>, String> {
     let mut out = Vec::with_capacity(rows.rows.len());
     for r in 0..rows.rows.len() {
         out.push(Leg {
@@ -503,6 +545,9 @@ const IMMUTABLE: &str = include_str!("../sql/immutable.sql");
 const P_SQL: &str = include_str!("../sql/p.sql");
 const PPLUS_SQL: &str = include_str!("../sql/pplus.sql");
 const H2_SQL: &str = include_str!("../sql/h2.sql");
+pub(crate) const POST_TXN_SQL: &str = include_str!("../sql/post_txn.sql");
+pub(crate) const COMMON_SQL: &str = COMMON;
+pub(crate) const IMMUTABLE_SQL: &str = IMMUTABLE;
 
 impl PgArm {
     pub fn new(kind: PgKind, port: u16, repo: &Path) -> PgArm {
@@ -632,6 +677,9 @@ impl Arm for PgArm {
         if matches!(self.kind, PgKind::P | PgKind::PPlus | PgKind::H2) {
             run(&mut c, IMMUTABLE)?;
         }
+        if self.kind == PgKind::H2 {
+            run(&mut c, POST_TXN_SQL)?;
+        }
         run(
             &mut c,
             match self.kind {
@@ -640,49 +688,7 @@ impl Arm for PgArm {
                 _ => P_SQL,
             },
         )?;
-        let mut statements = 3;
-        let mut rows: Vec<String> = Vec::new();
-        let mut current = 1;
-        let flush = |c: &mut Client, e: u64, rows: &mut Vec<String>| -> Result<(), String> {
-            if rows.is_empty() {
-                return Ok(());
-            }
-            let sql = format!(
-                "insert into arm.epochs values ({e}, '\\x00', '\\x00'); \
-                 insert into arm.postings (epoch, txn, acct, cur, amt, value_day, desk) values {}",
-                rows.join(", ")
-            );
-            rows.clear();
-            c.simple(&sql).map(|_| ()).map_err(|e| e.to_string())
-        };
-        for t in &u.txns {
-            if t.batch != current {
-                flush(&mut c, current, &mut rows)?;
-                statements += 1;
-                current = t.batch;
-            }
-            for l in t.legs {
-                rows.push(format!(
-                    "({}, {}, {}, {}, {}, {}, {})",
-                    t.batch,
-                    t.id,
-                    l.acct,
-                    l.cur,
-                    l.amt,
-                    t.value_day,
-                    crate::universe::desk_of(l.acct)
-                ));
-            }
-        }
-        flush(&mut c, current, &mut rows)?;
-        statements += 1;
-        run(
-            &mut c,
-            &format!(
-                "do $$ begin for e in 1..{} loop perform arm.seal(e); end loop; end $$",
-                u.batches()
-            ),
-        )?;
+        let mut statements = 3 + load_base(&mut c, u)?;
         if self.mechanism() {
             run(&mut c, &format!("select arm.after_load({budget})"))?;
         } else if self.kind == PgKind::H2 {
@@ -754,6 +760,58 @@ impl Arm for PgArm {
     fn stop(&mut self) {
         self.cluster.down();
     }
+}
+
+/// Load the universe into a PostgreSQL arm's `arm` schema: one multi-row insert per batch with
+/// explicit epoch ids, then every epoch sealed in order (the sha256 chain). Shared by every
+/// PostgreSQL-based arm, so they hold the same rows by the same statements. Returns the
+/// number of statements sent.
+pub(crate) fn load_base(c: &mut Client, u: &Universe) -> Result<u64, String> {
+    let run = |c: &mut Client, sql: &str| c.simple(sql).map(|_| ()).map_err(|e| e.to_string());
+    let mut statements = 0;
+    let mut rows: Vec<String> = Vec::new();
+    let mut current = 1;
+    let flush = |c: &mut Client, e: u64, rows: &mut Vec<String>| -> Result<(), String> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let sql = format!(
+            "insert into arm.epochs values ({e}, '\\x00', '\\x00'); \
+             insert into arm.postings (epoch, txn, acct, cur, amt, value_day, desk) values {}",
+            rows.join(", ")
+        );
+        rows.clear();
+        c.simple(&sql).map(|_| ()).map_err(|e| e.to_string())
+    };
+    for t in &u.txns {
+        if t.batch != current {
+            flush(c, current, &mut rows)?;
+            statements += 1;
+            current = t.batch;
+        }
+        for l in t.legs {
+            rows.push(format!(
+                "({}, {}, {}, {}, {}, {}, {})",
+                t.batch,
+                t.id,
+                l.acct,
+                l.cur,
+                l.amt,
+                t.value_day,
+                crate::universe::desk_of(l.acct)
+            ));
+        }
+    }
+    flush(c, current, &mut rows)?;
+    statements += 1;
+    run(
+        c,
+        &format!(
+            "do $$ begin for e in 1..{} loop perform arm.seal(e); end loop; end $$",
+            u.batches()
+        ),
+    )?;
+    Ok(statements)
 }
 
 /// The side-by-side texts for the header (§5.5), with placeholder values.

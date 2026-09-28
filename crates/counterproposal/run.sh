@@ -60,3 +60,17 @@ done
 echo
 echo "  $total defect classes: $rejected refused at compile time, $warned warned, $accepted accepted silently"
 if [ "$total" -eq 0 ]; then echo "no corpus files found" >&2; exit 1; fi
+
+echo
+echo "== part 4: the same classes in PostgreSQL + checker (crates/nilescheck-sql, R2-04) =="
+caught=0; total=0
+for f in crates/counterproposal/sql-checked/d*.sql; do
+  n=$(basename "$f" .sql)
+  out=$(cargo run -q -p nilescheck-sql -- crates/counterproposal/sql-checked/_preamble.sql "$f" 2>&1)
+  codes=$(echo "$out" | grep -oE "(error|warning)\[[A-Z0-9]+\]" | sort -u | tr '\n' ' ')
+  total=$((total + 1))
+  if [ -n "$codes" ]; then st="check"; caught=$((caught + 1)); else st="not caught"; fi
+  printf "  %-34s %-11s %s\n" "$n" "$st" "$codes"
+done
+echo
+echo "  $total defect classes: $caught caught at check time by the checker"

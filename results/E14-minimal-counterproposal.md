@@ -53,23 +53,42 @@ for that reason.
 `compile` = rejected before the program can run. `runtime` = raises when executed.
 `never` = accepted and executed, with the stated consequence.
 
-| # | Defect | PostgreSQL | Niles | Niles code |
-|---|---|---|---|---|
-| D1 | Transaction that does not balance | **runtime** | **compile** | `NL0300` |
-| D2 | Adding USD to EUR in a query | **never** | **compile** | `NL0250` |
-| D3 | `100.50 jpy` — half a yen, where JPY has scale 0 | **never** — persisted | **compile** | `NL0240` |
-| D4 | Mixed-currency transaction: 100 USD → 100 EUR | **runtime** — rolled back | **compile** | `NL0300` |
-| D5 | Strict view derived from a bounded-stale view | **never** | **compile** | `NL0311` |
-| D6 | View predicate reading the wall clock | **never** | **compile** | `NL0205`, `IR013` |
-| D7 | Materializing that view | **never** | **compile** | `NL0310` |
-| D8 | Filtering on a column that should be encrypted | **never** | **compile** | `NL0260` |
-| D9 | Overdraft with no authorization | **never** — persisted | **compile** | `NL0312` |
-| D10 | `drop trigger` removes conservation | **never** — money destroyed | **compile** | `NL0211`, `NL0300` |
-| D11 | `update` against the ledger | **runtime** | **compile** | `NL0230` |
-| D12 | `ledger_consistent` + `spilled` contract | **not expressible** | **compile** | `NL0220`, `IR010` |
-| D13 | Missing anchor index on a demand view | **never** (silent slowdown) | **compile warning** | `NL0223` |
+| # | Defect | PostgreSQL | PostgreSQL + checker | Niles | Niles code |
+|---|---|---|---|---|---|
+| D1 | Transaction that does not balance | **runtime** | **not caught** — needs the solver (R2-05) | **compile** | `NL0300` |
+| D2 | Adding USD to EUR in a query | **never** | **check** `NL0250` | **compile** | `NL0250` |
+| D3 | `100.50 jpy` — half a yen, where JPY has scale 0 | **never** — persisted | **check** `NL0240` | **compile** | `NL0240` |
+| D4 | Mixed-currency transaction: 100 USD → 100 EUR | **runtime** — rolled back | **not caught** — needs the solver (R2-05) | **compile** | `NL0300` |
+| D5 | Strict view derived from a bounded-stale view | **never** | **check** `NL0311` | **compile** | `NL0311` |
+| D6 | View predicate reading the wall clock | **never** | **check** `IR013` | **compile** | `NL0205`, `IR013` |
+| D7 | Materializing that view | **never** | **check** `NL0310` | **compile** | `NL0310` |
+| D8 | Filtering on a column that should be encrypted | **never** | **check** `NL0260` | **compile** | `NL0260` |
+| D9 | Overdraft with no authorization | **never** — persisted | **not caught** — no capability type in SQL | **compile** | `NL0312` |
+| D10 | `drop trigger` removes conservation | **never** — money destroyed | **check** `NL0211` | **compile** | `NL0211`, `NL0300` |
+| D11 | `update` against the ledger | **runtime** | **check** `NL0230` | **compile** | `NL0230` |
+| D12 | `ledger_consistent` + `spilled` contract | **not expressible** | **check** `NL0220` | **compile** | `NL0220`, `IR010` |
+| D13 | Missing anchor index on a demand view | **never** (silent slowdown) | **check warning** `NL0223` | **compile warning** | `NL0223` |
 
 **Totals.** PostgreSQL: 3 caught at runtime, 0 at compile time, 9 never, 1 not expressible.
+PostgreSQL + checker: 10 of 13 caught at check time, 3 not caught (d1 and d4 need the conservation solver, R2-05; d9 needs a capability SQL cannot type).
+
+**The "PostgreSQL + checker" column (cycle 14, R2-04)** is `crates/nilescheck-sql` — a
+hand-written PostgreSQL 16 SQL and PL/pgSQL parser (no external dependency, the author's
+decision of 2026-09-28) and the rules over it — run on `crates/counterproposal/sql-checked/`:
+the same thirteen classes written in stock PostgreSQL 16 DDL with the conventions the checker
+reads (money as a composite type per currency, a ledger by comment, contracts as rows of
+`serve_contract`). Counted by `crates/nilescheck-sql/tests/e14_column.rs`, which requires the
+line above verbatim. PostgreSQL alone accepts every one of those thirteen texts at definition
+time (`tests/postgres_agrees.rs` holds that too): with composite money types it refuses
+`usd + eur` in a *view* at `CREATE`, but the same sum inside PL/pgSQL is created and fails
+only when run, and `row(100.5)::jpy` is rounded into the bigint without a word — the three
+cells round 1 measured. The checker reaches both at check time. Two cells differ from Niles
+by stage, not by outcome: D10 is caught when the `drop trigger` is in the checked script,
+which is where a migration puts it; a drop typed at a live console is not in any script and
+PostgreSQL's column still describes it. What the checker cannot reach is exactly what E14's
+Part 3 predicted: conservation of a transaction's postings (the solver, R2-05's work) and an
+overdraft authority, which is a capability and has no type in SQL.
+
 Niles: **12 at compile time, 1 as a compile-time warning, 0 accepted in silence, 0 with no
 spelling in the language.**
 

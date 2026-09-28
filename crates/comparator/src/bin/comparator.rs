@@ -4,6 +4,7 @@ use comparator::arms::{Arm, NArm, PgArm, PgKind};
 use comparator::h1::H1Arm;
 use comparator::h3::H3Arm;
 use comparator::run::{run_point, Config};
+use comparator::t::TArm;
 use std::path::{Path, PathBuf};
 
 fn repo_root() -> PathBuf {
@@ -39,6 +40,7 @@ fn build_arms(names: &[String], multi: bool, scratch: &Path) -> Vec<Box<dyn Arm>
                 "H2" => Box::new(PgArm::new(PgKind::H2, 5456, &root)),
                 "H1" => Box::new(H1Arm::new(5457, 5458, scratch.join("h1"), &root)),
                 "H3" => Box::new(H3Arm::new(5461, 5462, scratch.join("h3"), &root)),
+                "T" => Box::new(TArm::new(scratch.join("t"), &root)),
                 "H1M" => {
                     let mut a = H1Arm::new(5459, 5460, scratch.join("h1m"), &root);
                     a.cluster = comparator::pgcluster::Cluster::new("h1m", 5459);

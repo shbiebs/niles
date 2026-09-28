@@ -84,6 +84,12 @@ fn answer(shared: &Shared, upstream: &mut Option<Client>, sql: &str) -> Vec<Back
     if sql.trim().eq_ignore_ascii_case("select rev_stats") {
         return stats(shared);
     }
+    if sql.trim().eq_ignore_ascii_case("select rev_frontier") {
+        return one_int("frontier", shared.base.frontier() as i128);
+    }
+    if shared.base.driver.is_some() {
+        return driver_relay(shared, sql);
+    }
     relay(shared, upstream, sql)
 }
 
@@ -156,6 +162,92 @@ fn stats(shared: &Shared) -> Vec<Backend> {
     ]
 }
 
+fn one_int(name: &str, v: i128) -> Vec<Backend> {
+    vec![
+        Backend::RowDescription(vec![Field::int8(name)]),
+        Backend::DataRow(vec![Some(v.to_string())]),
+        Backend::CommandComplete("SELECT 1".into()),
+    ]
+}
+
+/// The integers in `select arm.post_txn(e, txn, from, to, cur::smallint, amt, day)`.
+fn post_txn_args(sql: &str) -> Option<Vec<i64>> {
+    let s = sql.trim().to_ascii_lowercase();
+    let inner = s.strip_prefix("select arm.post_txn(")?.strip_suffix(')')?;
+    inner
+        .split(',')
+        .map(|x| x.trim().trim_end_matches("::smallint").parse().ok())
+        .collect()
+}
+
+/// Arm T: TigerBeetle has no SQL, so the statements the harness sends besides `rev_read`
+/// are translated to the driver's line protocol — a write, the legs for the checksum, the
+/// head — and anything else is refused by name. A write is acknowledged when TigerBeetle has
+/// committed it, not when the view has it: T's reads are checked at the frontier they were
+/// served from (bounded staleness), and T's write is the ledger floor the order asks about.
+fn driver_relay(shared: &Shared, sql: &str) -> Vec<Backend> {
+    let base = shared.base.as_ref();
+    let lower = sql.trim().to_ascii_lowercase();
+    if let Some(a) = post_txn_args(sql) {
+        if a.len() != 7 {
+            return vec![error(
+                "42601",
+                format!("post_txn takes 7 arguments, not {a:?}"),
+            )];
+        }
+        let line = format!(
+            "WRITE {} {} {} {} {} {} {}",
+            a[0], a[1], a[2], a[3], a[4], a[5], a[6]
+        );
+        return match base.driver_request(&line) {
+            Ok(_) => vec![
+                Backend::RowDescription(vec![Field::text("post_txn")]),
+                Backend::DataRow(vec![Some(String::new())]),
+                Backend::CommandComplete("SELECT 1".into()),
+            ],
+            Err(e) => vec![error("XX000", e)],
+        };
+    }
+    if lower == "select max(id) from arm.epochs" {
+        return match base.driver_request("HEAD") {
+            Ok(w) => one_int("max", w.first().and_then(|x| x.parse().ok()).unwrap_or(0)),
+            Err(e) => vec![error("XX000", e)],
+        };
+    }
+    if lower == "select acct, cur, amt from arm.postings" {
+        let lines = match base.driver_lines("LEGS", |l| l == "END" || l.starts_with("ERR")) {
+            Ok(l) => l,
+            Err(e) => return vec![error("XX000", e)],
+        };
+        let mut out = vec![Backend::RowDescription(vec![
+            Field::int8("acct"),
+            Field::int8("cur"),
+            Field::int8("amt"),
+        ])];
+        let mut n = 0;
+        for l in &lines {
+            if let Some(rest) = l.strip_prefix("L ") {
+                out.push(Backend::DataRow(
+                    rest.split_whitespace()
+                        .map(|w| Some(w.to_string()))
+                        .collect(),
+                ));
+                n += 1;
+            } else if l.starts_with("ERR") {
+                return vec![error("XX000", l.clone())];
+            }
+        }
+        out.push(Backend::CommandComplete(format!("SELECT {n}")));
+        return out;
+    }
+    vec![error(
+        "0A000",
+        "arm T answers q1 and q2 from its REV and has no SQL behind it: TigerBeetle is the \
+         ledger floor (§7), and a report over it would be a client-side fold of lookups"
+            .into(),
+    )]
+}
+
 fn relay(shared: &Shared, upstream: &mut Option<Client>, sql: &str) -> Vec<Backend> {
     if upstream.is_none() {
         match Client::connect("127.0.0.1", shared.base.port, "bench", "bank") {
@@ -213,6 +305,15 @@ fn relay(shared: &Shared, upstream: &mut Option<Client>, sql: &str) -> Vec<Backe
 #[cfg(test)]
 mod tests {
     use super::rev_read_args;
+
+    #[test]
+    fn post_txn_calls_are_read_as_their_seven_integers() {
+        assert_eq!(
+            super::post_txn_args("select arm.post_txn(51, 10001, 7, 9, 0::smallint, 250, 1)"),
+            Some(vec![51, 10001, 7, 9, 0, 250, 1])
+        );
+        assert_eq!(super::post_txn_args("select 1"), None);
+    }
 
     #[test]
     fn rev_read_is_recognised_and_nothing_else_is() {

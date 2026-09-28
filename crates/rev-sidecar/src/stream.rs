@@ -139,9 +139,7 @@ pub fn run(mut c: Client, shared: Arc<Shared>) -> Result<(), String> {
                         for (_, a, cur, amt) in pending.drain(..) {
                             *per_key.entry(vec![a, cur]).or_default() += amt;
                         }
-                        shared.base.record(e, per_key.into_iter().collect());
-                        shared.rt.lock().unwrap().advance(shared.base.as_ref(), e);
-                        shared.base.publish(e);
+                        commit(&shared, e, per_key);
                         c.copy_send(&pgoutput::status_update(applied_lsn, micros_now(), false))
                             .map_err(|e| format!("status update: {e}"))?;
                     }
@@ -156,6 +154,52 @@ pub fn run(mut c: Client, shared: Arc<Shared>) -> Result<(), String> {
             }
         }
     }
+}
+
+/// Record an epoch's deltas, apply them to the view, then publish it as the frontier — in
+/// that order, so a reader that sees the frontier sees a view that has it.
+fn commit(shared: &Shared, e: u64, per_key: BTreeMap<Key, Value>) {
+    shared.base.record(e, per_key.into_iter().collect());
+    shared.rt.lock().unwrap().advance(shared.base.as_ref(), e);
+    shared.base.publish(e);
+}
+
+/// Arm T: consume TigerBeetle's change stream as the driver forwards it from RabbitMQ —
+/// `E <epoch>`, then `D <acct> <cur> <delta>` lines, then `.` — one epoch per transfer.
+pub fn run_driver(addr: &str, shared: Arc<Shared>) -> Result<(), String> {
+    use std::io::{BufRead, BufReader, Write};
+    let mut s = std::net::TcpStream::connect(addr).map_err(|e| format!("driver {addr}: {e}"))?;
+    s.write_all(b"SUBSCRIBE\n").map_err(|e| e.to_string())?;
+    let r = BufReader::new(s);
+    let mut epoch: Option<u64> = None;
+    let mut per_key: BTreeMap<Key, Value> = BTreeMap::new();
+    for line in r.lines() {
+        let line = line.map_err(|e| format!("driver stream: {e}"))?;
+        let w: Vec<&str> = line.split_whitespace().collect();
+        match w.as_slice() {
+            ["E", e] => {
+                epoch = Some(e.parse().map_err(|_| format!("bad epoch line {line:?}"))?);
+                per_key.clear();
+            }
+            ["D", a, c, d] => {
+                let num = |x: &str| {
+                    x.parse::<i64>()
+                        .map_err(|_| format!("bad delta line {line:?}"))
+                };
+                *per_key.entry(vec![num(a)?, num(c)?]).or_default() += num(d)? as i128;
+            }
+            ["."] => {
+                let e = epoch.take().ok_or("a delta block without an epoch")?;
+                let f = shared.base.frontier();
+                if e <= f {
+                    return Err(format!("epoch {e} arrived at frontier {f}: out of order"));
+                }
+                commit(&shared, e, std::mem::take(&mut per_key));
+            }
+            _ => return Err(format!("unexpected line from the driver: {line:?}")),
+        }
+    }
+    Ok(())
 }
 
 use nilestream_core::rev::Base as _;

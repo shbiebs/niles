@@ -1,9 +1,14 @@
-//! `rev-sidecar` — arm H3's process. See the crate documentation.
+//! `rev-sidecar` — the process of arms H3 and T. See the crate documentation.
 //!
 //! ```text
 //! rev-sidecar --listen 127.0.0.1:5462 --upstream-port 5461 --budget 50 --loaded-head 50
 //!             [--slot h3] [--publication h3]
+//! rev-sidecar --listen 127.0.0.1:5465 --ledger driver:127.0.0.1:5464 --budget 50 --loaded-head 50
 //! ```
+//!
+//! The second form is arm T: TigerBeetle is the ledger, reached through the line protocol of
+//! `tools/arms/tigerbeetle/driver.py`, and its change stream arrives from RabbitMQ through
+//! the same driver.
 
 use nilestream_core::rev::{Policy, Runtime};
 use rev_sidecar::base::PgBase;
@@ -53,9 +58,15 @@ fn install(budget: u64) -> Runtime {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let listen = arg(&args, "--listen").unwrap_or_else(|| fail("--listen host:port"));
-    let port: u16 = arg(&args, "--upstream-port")
-        .and_then(|p| p.parse().ok())
-        .unwrap_or_else(|| fail("--upstream-port N"));
+    // `--ledger driver:HOST:PORT` is arm T (TigerBeetle behind tools/arms/tigerbeetle's
+    // driver); otherwise the ledger is PostgreSQL on `--upstream-port`.
+    let driver = arg(&args, "--ledger").and_then(|l| l.strip_prefix("driver:").map(String::from));
+    let port: u16 = match &driver {
+        Some(_) => 0,
+        None => arg(&args, "--upstream-port")
+            .and_then(|p| p.parse().ok())
+            .unwrap_or_else(|| fail("--upstream-port N or --ledger driver:HOST:PORT")),
+    };
     let budget: u64 = arg(&args, "--budget")
         .and_then(|p| p.parse().ok())
         .unwrap_or_else(|| fail("--budget N"));
@@ -70,7 +81,10 @@ fn main() {
     if plan.group_key.len() != 2 {
         fail(&format!("the view's key is not (acct, cur): {plan}"));
     }
-    let base = Arc::new(PgBase::new(plan, port, loaded));
+    let base = Arc::new(match &driver {
+        Some(addr) => PgBase::over_driver(plan, addr, loaded),
+        None => PgBase::new(plan, port, loaded),
+    });
     // Nothing is resident, so the loaded epochs carry no deltas this view could need: the
     // view starts certified through the loaded head, and the base says its deltas begin
     // after it (`deltas_available_from`), so no merge can reach behind the stream's start.
@@ -80,16 +94,29 @@ fn main() {
         rt: Mutex::new(rt),
         view: VIEW.into(),
     });
-    let conn = stream::open(port, &slot, &publication).unwrap_or_else(|e| fail(&e));
     let s2 = Arc::clone(&shared);
-    std::thread::spawn(move || {
-        if let Err(e) = stream::run(conn, s2) {
-            // A sidecar whose stream has failed would serve a view frozen at some epoch while
-            // the ledger moves on: stop, so every later read is a connection error.
-            fail(&format!("replication stream: {e}"));
+    match driver {
+        Some(addr) => {
+            std::thread::spawn(move || {
+                if let Err(e) = stream::run_driver(&addr, s2) {
+                    fail(&format!("change stream: {e}"));
+                }
+                fail("change stream ended");
+            });
         }
-        fail("replication stream ended");
-    });
+        None => {
+            let conn = stream::open(port, &slot, &publication).unwrap_or_else(|e| fail(&e));
+            std::thread::spawn(move || {
+                if let Err(e) = stream::run(conn, s2) {
+                    // A sidecar whose stream has failed would serve a view frozen at some
+                    // epoch while the ledger moves on: stop, so every later read is a
+                    // connection error.
+                    fail(&format!("replication stream: {e}"));
+                }
+                fail("replication stream ended");
+            });
+        }
+    }
     let listener =
         TcpListener::bind(&listen).unwrap_or_else(|e| fail(&format!("bind {listen}: {e}")));
     println!("rev-sidecar ready on {listen}, frontier #{loaded}");

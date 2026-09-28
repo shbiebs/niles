@@ -1,9 +1,13 @@
-//! `nilestream-core`'s `Base`, over PostgreSQL and the replication stream.
+//! `nilestream-core`'s `Base`, over a ledger and its change stream: PostgreSQL and its
+//! logical replication (H3), or TigerBeetle and its CDC through the line protocol of
+//! `tools/arms/tigerbeetle/driver.py` (T).
 
 use bank_bench::wire::Client;
 use nilestream_core::rev::{Base, BasePlan, Key, Value};
 use nilestream_core::Epoch;
 use std::collections::BTreeMap;
+use std::io::{BufRead, BufReader, Write};
+use std::net::TcpStream;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
@@ -13,10 +17,16 @@ use std::time::Duration;
 /// `deltas_available_from` true rather than zero.
 const RETAIN_EPOCHS: u64 = 64;
 
+/// One connection to arm T's driver.
+type DriverConn = (BufReader<TcpStream>, TcpStream);
+
 pub struct PgBase {
     plan: BasePlan,
     pub port: u16,
+    /// `Some(host:port)` when the ledger is TigerBeetle behind arm T's driver.
+    pub driver: Option<String>,
     pool: Mutex<Vec<Client>>,
+    dpool: Mutex<Vec<DriverConn>>,
     /// Per epoch, the per-key deltas the stream delivered.
     log: Mutex<BTreeMap<Epoch, Vec<(Key, Value)>>>,
     /// The first epoch whose deltas this base holds: the one after the loaded head, since the
@@ -35,7 +45,9 @@ impl PgBase {
         PgBase {
             plan,
             port,
+            driver: None,
             pool: Mutex::new(Vec::new()),
+            dpool: Mutex::new(Vec::new()),
             log: Mutex::new(BTreeMap::new()),
             from: AtomicU64::new(loaded_head + 1),
             frontier: AtomicU64::new(loaded_head),
@@ -81,6 +93,61 @@ impl PgBase {
         }
     }
 
+    /// A base whose ledger is arm T's driver.
+    pub fn over_driver(plan: BasePlan, addr: &str, loaded_head: Epoch) -> PgBase {
+        let mut b = PgBase::new(plan, 0, loaded_head);
+        b.driver = Some(addr.to_string());
+        b
+    }
+
+    /// Send one request line to the driver and read `until` returns true for a line; the
+    /// lines read are returned. A connection is taken from the pool and returned to it.
+    pub fn driver_lines(
+        &self,
+        request: &str,
+        mut until: impl FnMut(&str) -> bool,
+    ) -> Result<Vec<String>, String> {
+        let addr = self.driver.as_deref().ok_or("no driver configured")?;
+        let pooled = self.dpool.lock().unwrap().pop();
+        let (mut r, mut w) = match pooled {
+            Some(c) => c,
+            None => {
+                let s = TcpStream::connect(addr).map_err(|e| format!("driver {addr}: {e}"))?;
+                s.set_nodelay(true).map_err(|e| e.to_string())?;
+                (BufReader::new(s.try_clone().map_err(|e| e.to_string())?), s)
+            }
+        };
+        w.write_all(format!("{request}\n").as_bytes())
+            .map_err(|e| format!("driver: {e}"))?;
+        let mut out = Vec::new();
+        loop {
+            let mut line = String::new();
+            if r.read_line(&mut line).map_err(|e| format!("driver: {e}"))? == 0 {
+                return Err("the driver closed the connection".into());
+            }
+            let line = line.trim_end().to_string();
+            let done = until(&line);
+            out.push(line);
+            if done {
+                break;
+            }
+        }
+        self.dpool.lock().unwrap().push((r, w));
+        Ok(out)
+    }
+
+    /// One request, one `OK …` reply; the words after `OK`.
+    pub fn driver_request(&self, request: &str) -> Result<Vec<String>, String> {
+        let line = self
+            .driver_lines(request, |_| true)?
+            .pop()
+            .unwrap_or_default();
+        match line.strip_prefix("OK") {
+            Some(rest) => Ok(rest.split_whitespace().map(String::from).collect()),
+            None => Err(format!("driver: {line}")),
+        }
+    }
+
     fn client(&self) -> Client {
         if let Some(c) = self.pool.lock().unwrap().pop() {
             return c;
@@ -108,6 +175,23 @@ impl Base for PgBase {
     /// index, as the round-2 order specifies for H3, so its cost is the key's history.
     fn reconstruct(&self, key: &Key, anchor: Epoch) -> (Value, u64) {
         let (a, c) = (key[0], key[1]);
+        if self.driver.is_some() {
+            // T: the key's balance at the epoch's timestamp, from TigerBeetle's account
+            // history — an index lookup that reports one row, not a fold.
+            let words = self
+                .driver_request(&format!("UP {a} {c} {anchor}"))
+                .unwrap_or_else(|e| panic!("rev-sidecar: upquery for {key:?} at {anchor}: {e}"));
+            let num = |i: usize| -> i128 {
+                words
+                    .get(i)
+                    .and_then(|w| w.parse().ok())
+                    .unwrap_or_else(|| panic!("rev-sidecar: driver replied {words:?}"))
+            };
+            let (value, n) = (num(0), num(1) as u64);
+            self.upqueries.fetch_add(1, Ordering::Relaxed);
+            self.rows_read.fetch_add(n, Ordering::Relaxed);
+            return (value, n);
+        }
         let mut client = self.client();
         let rows = client
             .simple(&format!(

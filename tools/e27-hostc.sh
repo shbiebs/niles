@@ -41,6 +41,17 @@ export PATH="$PG_BIN:$PATH"
 export E27_PGDATA="$HOME/.e27-pg"
 
 echo "e27-hostc: $(uname -srm), $(sysctl -n hw.ncpu) CPUs, $(( $(sysctl -n hw.memsize) / 1048576 )) MiB"
+# Memory, estimated from the container's measurements (results/E27-comparator.md §5): at 10⁵
+# accounts the Nilestream daemon's PSS reached ~2.2 GB on the multi-currency series and the
+# comparator itself holds the universe, the oracle and each arm's 2 × 10⁶ legs for the
+# checksum. Ten times the accounts is roughly ten times each, so ~24 GB before PostgreSQL's
+# 1 GB of shared buffers. Below 32 GB the run would swap and its latencies would measure the
+# swap device; refuse rather than publish that.
+mem_gib=$(( $(sysctl -n hw.memsize) / 1073741824 ))
+if [ "$mem_gib" -lt 32 ] && [ -z "${E27_ALLOW_SMALL_MEMORY:-}" ]; then
+    echo "e27-hostc: this Mac has ${mem_gib} GiB; the 10⁶ point needs about 32 GiB (estimate in this script). Not running." >&2
+    exit 3
+fi
 echo "e27-hostc: $(cargo --version), $("$PG_BIN/postgres" --version)"
 echo "e27-hostc: commit $(git rev-parse HEAD)"
 

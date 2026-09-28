@@ -104,6 +104,8 @@ pub fn try_run_with(
 pub fn try_run_node_with(
 pub fn try_run(
 pub fn fold(a: Agg, vals: &[(Value, i128)]) -> Value
+pub fn presentation_order(c: &Circuit, output: &str) -> Vec<(ColIdx, bool)>
+pub fn presented_cmp(a: &Row, b: &Row, keys: &[(ColIdx, bool)]) -> std::cmp::Ordering
 pub enum Consistency
 pub enum Materialize
 pub enum Retention

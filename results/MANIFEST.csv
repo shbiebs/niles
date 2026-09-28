@@ -70,6 +70,36 @@
 #   assumed: `serve_path` in its own CSV reads `fold` and `report-from-view`, and the path a
 #   checkpoint bounds is `IndexFold`. The marker that attributed the caveat to §9.14.5 is
 #   struck; see that section.
+#
+#   E27 (cycle 14, R2-02) ran at C = 16 on N (`nilestreamd --checkpoint 16`) and on P+
+#   (`crates/comparator/sql/pplus.sql`); points measured before `checkpoint_interval` was
+#   written into each file are listed here rather than edited, as the rule above says.
+#   C=16 E27-comparator/multi-1000-1.tsv E27-comparator/multi-1000-100.tsv
+#   C=16 E27-comparator/multi-1000-2024.tsv E27-comparator/multi-1000-42.tsv
+#   C=16 E27-comparator/multi-1000-7.tsv E27-comparator/multi-10000-1.tsv
+#   C=16 E27-comparator/multi-10000-100.tsv E27-comparator/multi-10000-2024.tsv
+#   C=16 E27-comparator/multi-10000-42.tsv E27-comparator/multi-10000-7.tsv
+#   C=16 E27-comparator/multi-100000-1.tsv E27-comparator/multi-100000-100.tsv
+#   C=16 E27-comparator/multi-100000-2024.tsv E27-comparator/multi-100000-42.tsv
+#   C=16 E27-comparator/multi-100000-7.tsv E27-comparator/probe.tsv
+#   C=16 E27-comparator/single-1000-1.tsv E27-comparator/single-1000-100.tsv
+#   C=16 E27-comparator/single-1000-2024.tsv E27-comparator/single-1000-42.tsv
+#   C=16 E27-comparator/single-1000-7.tsv E27-comparator/single-10000-1.tsv
+#   C=16 E27-comparator/single-10000-100.tsv E27-comparator/single-10000-2024.tsv
+#   C=16 E27-comparator/single-10000-42.tsv E27-comparator/single-10000-7.tsv
+#   C=16 E27-comparator/single-100000-1.tsv E27-comparator/single-100000-100.tsv
+#   C=16 E27-comparator/single-100000-2024.tsv E27-comparator/single-100000-42.tsv
+#   C=16 E27-comparator/single-100000-7.tsv E27-p99/multi-1000-1.tsv E27-p99/multi-1000-100.tsv
+#   C=16 E27-p99/multi-1000-2024.tsv E27-p99/multi-1000-42.tsv E27-p99/multi-1000-7.tsv
+#   C=16 E27-p99/multi-10000-1.tsv E27-p99/multi-10000-100.tsv E27-p99/multi-10000-2024.tsv
+#   C=16 E27-p99/multi-10000-42.tsv E27-p99/multi-10000-7.tsv E27-p99/multi-100000-1.tsv
+#   C=16 E27-p99/multi-100000-100.tsv E27-p99/multi-100000-2024.tsv E27-p99/multi-100000-42.tsv
+#   C=16 E27-p99/multi-100000-7.tsv E27-p99/single-1000-1.tsv E27-p99/single-1000-100.tsv
+#   C=16 E27-p99/single-1000-2024.tsv E27-p99/single-1000-42.tsv E27-p99/single-1000-7.tsv
+#   C=16 E27-p99/single-10000-1.tsv E27-p99/single-10000-100.tsv E27-p99/single-10000-2024.tsv
+#   C=16 E27-p99/single-10000-42.tsv E27-p99/single-10000-7.tsv E27-p99/single-100000-1.tsv
+#   C=16 E27-p99/single-100000-100.tsv E27-p99/single-100000-2024.tsv
+#   C=16 E27-p99/single-100000-42.tsv E27-p99/single-100000-7.tsv
 path,class,regenerated_by
 E1-correctness.md,byte-deterministic,cargo run --release -p experiments -- e1
 e1_correctness.csv,byte-deterministic,cargo run --release -p experiments -- e1
@@ -132,3 +162,73 @@ E16-band.md,historical,none
 E17-unnesting.md,historical,none
 E26-compile-cost.csv,byte-deterministic,cargo run --release -p experiments -- e26
 E26-compile-cost.md,byte-deterministic,cargo run --release -p experiments -- e26
+E27-comparator/multi-1000-1.tsv,machine-dependent,cargo run --release -p comparator -- run (series/size/seed in the file; see E27-comparator.md)
+E27-comparator/multi-1000-100.tsv,machine-dependent,cargo run --release -p comparator -- run (series/size/seed in the file; see E27-comparator.md)
+E27-comparator/multi-1000-2024.tsv,machine-dependent,cargo run --release -p comparator -- run (series/size/seed in the file; see E27-comparator.md)
+E27-comparator/multi-1000-42.tsv,machine-dependent,cargo run --release -p comparator -- run (series/size/seed in the file; see E27-comparator.md)
+E27-comparator/multi-1000-7.tsv,machine-dependent,cargo run --release -p comparator -- run (series/size/seed in the file; see E27-comparator.md)
+E27-comparator/multi-10000-1.tsv,machine-dependent,cargo run --release -p comparator -- run (series/size/seed in the file; see E27-comparator.md)
+E27-comparator/multi-10000-100.tsv,machine-dependent,cargo run --release -p comparator -- run (series/size/seed in the file; see E27-comparator.md)
+E27-comparator/multi-10000-2024.tsv,machine-dependent,cargo run --release -p comparator -- run (series/size/seed in the file; see E27-comparator.md)
+E27-comparator/multi-10000-42.tsv,machine-dependent,cargo run --release -p comparator -- run (series/size/seed in the file; see E27-comparator.md)
+E27-comparator/multi-10000-7.tsv,machine-dependent,cargo run --release -p comparator -- run (series/size/seed in the file; see E27-comparator.md)
+E27-comparator/multi-100000-1.tsv,machine-dependent,cargo run --release -p comparator -- run (series/size/seed in the file; see E27-comparator.md)
+E27-comparator/multi-100000-100.tsv,machine-dependent,cargo run --release -p comparator -- run (series/size/seed in the file; see E27-comparator.md)
+E27-comparator/multi-100000-2024.tsv,machine-dependent,cargo run --release -p comparator -- run (series/size/seed in the file; see E27-comparator.md)
+E27-comparator/multi-100000-42.tsv,machine-dependent,cargo run --release -p comparator -- run (series/size/seed in the file; see E27-comparator.md)
+E27-comparator/multi-100000-7.tsv,machine-dependent,cargo run --release -p comparator -- run (series/size/seed in the file; see E27-comparator.md)
+E27-comparator/probe.tsv,machine-dependent,cargo run --release -p comparator -- run (series/size/seed in the file; see E27-comparator.md)
+E27-comparator/single-1000-1.tsv,machine-dependent,cargo run --release -p comparator -- run (series/size/seed in the file; see E27-comparator.md)
+E27-comparator/single-1000-100.tsv,machine-dependent,cargo run --release -p comparator -- run (series/size/seed in the file; see E27-comparator.md)
+E27-comparator/single-1000-2024.tsv,machine-dependent,cargo run --release -p comparator -- run (series/size/seed in the file; see E27-comparator.md)
+E27-comparator/single-1000-42.tsv,machine-dependent,cargo run --release -p comparator -- run (series/size/seed in the file; see E27-comparator.md)
+E27-comparator/single-1000-7.tsv,machine-dependent,cargo run --release -p comparator -- run (series/size/seed in the file; see E27-comparator.md)
+E27-comparator/single-10000-1.tsv,machine-dependent,cargo run --release -p comparator -- run (series/size/seed in the file; see E27-comparator.md)
+E27-comparator/single-10000-100.tsv,machine-dependent,cargo run --release -p comparator -- run (series/size/seed in the file; see E27-comparator.md)
+E27-comparator/single-10000-2024.tsv,machine-dependent,cargo run --release -p comparator -- run (series/size/seed in the file; see E27-comparator.md)
+E27-comparator/single-10000-42.tsv,machine-dependent,cargo run --release -p comparator -- run (series/size/seed in the file; see E27-comparator.md)
+E27-comparator/single-10000-7.tsv,machine-dependent,cargo run --release -p comparator -- run (series/size/seed in the file; see E27-comparator.md)
+E27-comparator/single-100000-1.tsv,machine-dependent,cargo run --release -p comparator -- run (series/size/seed in the file; see E27-comparator.md)
+E27-comparator/single-100000-100.tsv,machine-dependent,cargo run --release -p comparator -- run (series/size/seed in the file; see E27-comparator.md)
+E27-comparator/single-100000-2024.tsv,machine-dependent,cargo run --release -p comparator -- run (series/size/seed in the file; see E27-comparator.md)
+E27-comparator/single-100000-42.tsv,machine-dependent,cargo run --release -p comparator -- run (series/size/seed in the file; see E27-comparator.md)
+E27-comparator/single-100000-7.tsv,machine-dependent,cargo run --release -p comparator -- run (series/size/seed in the file; see E27-comparator.md)
+E27-comparator/discarded-attempt-1/single-1000-1.tsv,historical,none
+E27-comparator/discarded-attempt-1/single-1000-100.tsv,historical,none
+E27-comparator/discarded-attempt-1/single-1000-2024.tsv,historical,none
+E27-comparator/discarded-attempt-1/single-1000-42.tsv,historical,none
+E27-comparator/discarded-attempt-1/single-1000-7.tsv,historical,none
+E27-p99/multi-1000-1.tsv,machine-dependent,cargo run --release -p comparator -- run --shape p99 (see E27-p99.md)
+E27-p99/multi-1000-100.tsv,machine-dependent,cargo run --release -p comparator -- run --shape p99 (see E27-p99.md)
+E27-p99/multi-1000-2024.tsv,machine-dependent,cargo run --release -p comparator -- run --shape p99 (see E27-p99.md)
+E27-p99/multi-1000-42.tsv,machine-dependent,cargo run --release -p comparator -- run --shape p99 (see E27-p99.md)
+E27-p99/multi-1000-7.tsv,machine-dependent,cargo run --release -p comparator -- run --shape p99 (see E27-p99.md)
+E27-p99/multi-10000-1.tsv,machine-dependent,cargo run --release -p comparator -- run --shape p99 (see E27-p99.md)
+E27-p99/multi-10000-100.tsv,machine-dependent,cargo run --release -p comparator -- run --shape p99 (see E27-p99.md)
+E27-p99/multi-10000-2024.tsv,machine-dependent,cargo run --release -p comparator -- run --shape p99 (see E27-p99.md)
+E27-p99/multi-10000-42.tsv,machine-dependent,cargo run --release -p comparator -- run --shape p99 (see E27-p99.md)
+E27-p99/multi-10000-7.tsv,machine-dependent,cargo run --release -p comparator -- run --shape p99 (see E27-p99.md)
+E27-p99/multi-100000-1.tsv,machine-dependent,cargo run --release -p comparator -- run --shape p99 (see E27-p99.md)
+E27-p99/multi-100000-100.tsv,machine-dependent,cargo run --release -p comparator -- run --shape p99 (see E27-p99.md)
+E27-p99/multi-100000-2024.tsv,machine-dependent,cargo run --release -p comparator -- run --shape p99 (see E27-p99.md)
+E27-p99/multi-100000-42.tsv,machine-dependent,cargo run --release -p comparator -- run --shape p99 (see E27-p99.md)
+E27-p99/multi-100000-7.tsv,machine-dependent,cargo run --release -p comparator -- run --shape p99 (see E27-p99.md)
+E27-p99/single-1000-1.tsv,machine-dependent,cargo run --release -p comparator -- run --shape p99 (see E27-p99.md)
+E27-p99/single-1000-100.tsv,machine-dependent,cargo run --release -p comparator -- run --shape p99 (see E27-p99.md)
+E27-p99/single-1000-2024.tsv,machine-dependent,cargo run --release -p comparator -- run --shape p99 (see E27-p99.md)
+E27-p99/single-1000-42.tsv,machine-dependent,cargo run --release -p comparator -- run --shape p99 (see E27-p99.md)
+E27-p99/single-1000-7.tsv,machine-dependent,cargo run --release -p comparator -- run --shape p99 (see E27-p99.md)
+E27-p99/single-10000-1.tsv,machine-dependent,cargo run --release -p comparator -- run --shape p99 (see E27-p99.md)
+E27-p99/single-10000-100.tsv,machine-dependent,cargo run --release -p comparator -- run --shape p99 (see E27-p99.md)
+E27-p99/single-10000-2024.tsv,machine-dependent,cargo run --release -p comparator -- run --shape p99 (see E27-p99.md)
+E27-p99/single-10000-42.tsv,machine-dependent,cargo run --release -p comparator -- run --shape p99 (see E27-p99.md)
+E27-p99/single-10000-7.tsv,machine-dependent,cargo run --release -p comparator -- run --shape p99 (see E27-p99.md)
+E27-p99/single-100000-1.tsv,machine-dependent,cargo run --release -p comparator -- run --shape p99 (see E27-p99.md)
+E27-p99/single-100000-100.tsv,machine-dependent,cargo run --release -p comparator -- run --shape p99 (see E27-p99.md)
+E27-p99/single-100000-2024.tsv,machine-dependent,cargo run --release -p comparator -- run --shape p99 (see E27-p99.md)
+E27-p99/single-100000-42.tsv,machine-dependent,cargo run --release -p comparator -- run --shape p99 (see E27-p99.md)
+E27-p99/single-100000-7.tsv,machine-dependent,cargo run --release -p comparator -- run --shape p99 (see E27-p99.md)
+E27-comparator.md,byte-deterministic,cargo run -q --release -p comparator -- render
+E27-comparator-detail.md,byte-deterministic,cargo run -q --release -p comparator -- render
+E27-p99.md,byte-deterministic,cargo run -q --release -p comparator -- render --shape p99
+E27-p99-detail.md,byte-deterministic,cargo run -q --release -p comparator -- render --shape p99

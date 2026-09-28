@@ -121,7 +121,8 @@ fn main() {
                             ));
                         }
                     }
-                    let prov = comparator::store::provenance(&root);
+                    let mut prov = comparator::store::provenance(&root);
+                    prov.push(("checkpoint_interval".into(), cfg.checkpoint.to_string()));
                     comparator::store::write(&path, &series, &p, &prov).expect("write point");
                     eprintln!(
                         "wrote {} in {:.0}s{}",

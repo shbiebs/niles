@@ -3,10 +3,11 @@
 | Crate | Role | public items |
 |---|---|--:|
 | `bank-bench` | NilesBank generator, wall-clock harness, thesis drift tests | 114 |
+| `comparator` | E27: Nilestream against PostgreSQL arms under eviction, across bank sizes; the five-anomalies probe | 75 |
 | `conservation-suite` | Reference oracle and the conservation property tests | 23 |
 | `experiments` | The E-series measurement harness | 0 |
 | `niles-interp` | The imperative-subset interpreter `nilesc run` drives, and the ledger it posts to | 16 |
-| `niles-ir` | Typed IR: circuit types, verifier, reference interpreter, upquery paths | 65 |
+| `niles-ir` | Typed IR: circuit types, verifier, reference interpreter, upquery paths | 67 |
 | `niles-lang` | Stage-0 compiler: lexer, parser, type/effect checker, lowering; SQL surface | 139 |
 | `nilesc` | The compiler driver: `check`, `verify`, `run` | 0 |
 | `nilestream` | The engine binary: sweep and serve | 0 |

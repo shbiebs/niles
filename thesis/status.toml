@@ -181,3 +181,10 @@ claim = "Per-key checkpoints, and the bound C/2 + 1 in expectation over anchors 
 status = "measured"
 where = "§9.4.1"
 instrument = "promoted to a named contribution by measurement rather than stated in advance: without checkpoints the cost law of C3 is false, and the mechanism that makes it true was found by the experiment that refuted the claim without it."
+
+[[claim]]
+id = "H-E1"
+claim = "Nilestream is justified as a product: it beats PostgreSQL with the E14 mechanism (P+) and the hybrid (H3) on resident bytes per key ever read and on p99 read latency under eviction, per size range (the engine rule of the cycle-14 round-2 work order, section 7)."
+status = "partly measured"
+where = "results/E27-comparator.md sections 2 and 8; results/E27-p99.md section 2"
+instrument = "The P+ half is measured on the container (2 cores, 8 GB), declared synthetic universe (alpha 0.6), five seeds, 10^3 to 10^5 accounts, single- and multi-currency series. Memory: P+ is better at every size in both series on the metric E27 could take (process PSS growth per distinct key read, judged across seeds), so N does not meet the rule's memory condition against P+ anywhere in 10^3 to 10^5. p99 (the targeted re-run, E27-p99): single-currency, N is better on all four p99 cells at 10^3, on four-client q1 at 10^4 and four-client q2 at 10^5, and the rest are refused, mixed or no difference; multi-currency, P+ is better on anchored reads (q2) at 10^3 and 10^4 because N folds the whole ledger there, and N is better on one-client q1 at 10^3 and four-client q1 at 10^5. Not measured: H3 (card R2-03), the 10^6 big-lender point (Host C), and a view-state byte count (N's wire exposes a resident count only; its PSS includes its in-memory base and allocator retention after folds). The rule does not score correctness, which E27 also reports: no arm diverged from the oracle in the sweep, and under concurrent writers P+ exhibited upquery deadlocks and skipped deltas where N exhibited none (E27 section 7)."

@@ -43,6 +43,7 @@ ROLE = {
     "nilestream-server": "Daemon: sessions, PostgreSQL wire surface, conformance",
     "conservation-suite": "Reference oracle and the conservation property tests",
     "bank-bench": "NilesBank generator, wall-clock harness, thesis drift tests",
+    "comparator": "E27: Nilestream against PostgreSQL arms under eviction, across bank sizes; the five-anomalies probe",
     "experiments": "The E-series measurement harness",
     "proto-engine": "The research prototype the counted-work experiments run on",
     "counterproposal": "The differential defect corpus against PostgreSQL",

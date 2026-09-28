@@ -262,6 +262,25 @@ mod tests {
     }
 
     #[test]
+    fn one_changed_leg_changes_the_checksum_every_arm_is_held_to() {
+        // The self-test behind "all arms consumed identical data": the check E27 applies to
+        // each arm after loading and after the last run notices a single altered amount, a
+        // dropped leg and a duplicated one.
+        let u = Universe::generate(&Params::declared(200, 9, 0.6, true));
+        let good = u.checksum();
+        let mut legs: Vec<Leg> = u.txns.iter().flat_map(|t| t.legs).collect();
+        let mut altered = legs.clone();
+        altered[17].amt += 1;
+        assert_ne!(checksum_of(&mut altered), good);
+        let mut dropped = legs.clone();
+        dropped.pop();
+        assert_ne!(checksum_of(&mut dropped), good);
+        let dup = legs[3];
+        legs.push(dup);
+        assert_ne!(checksum_of(&mut legs), good);
+    }
+
+    #[test]
     fn every_transaction_conserves_per_currency() {
         let u = Universe::generate(&Params::declared(500, 1, 0.6, true));
         for t in &u.txns {

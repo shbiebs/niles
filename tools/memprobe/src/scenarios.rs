@@ -268,6 +268,8 @@ fn wire_write(scenario: &'static str, rows: i128, reps: u64) -> Row {
         z,
         anchor: 4_200,
         formats: vec![Format::Text; 3],
+        // No `order by`: the reply streams, which is the property this scenario measures.
+        order: Vec::new(),
     });
     // A sink that keeps nothing: what is being measured is what the *writer* holds, and a
     // buffer that grew to hold the whole reply would be measuring the test's own `Vec`.

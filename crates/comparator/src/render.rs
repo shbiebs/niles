@@ -148,6 +148,12 @@ pub fn cells(st: &Stored) -> Vec<(Cell, Option<String>)> {
         for (m, _) in METRICS {
             let nr = not_run(st, a, m).or_else(|| not_run(st, b, m));
             let (sa, sb) = (series_of(st, a, m), series_of(st, b, m));
+            // A metric neither arm reported in any run is absent by the run's design (the
+            // p99 shape has no 2-client phase), not refused: no row.
+            let reported = |x: &Series| x.0.iter().chain(&x.1).any(Option::is_some);
+            if nr.is_none() && !reported(&sa) && !reported(&sb) {
+                continue;
+            }
             let mut c = judge(
                 m,
                 a,
@@ -165,14 +171,6 @@ pub fn cells(st: &Stored) -> Vec<(Cell, Option<String>)> {
         }
     }
     out
-}
-
-fn cmd(c: &str) -> String {
-    std::process::Command::new("sh")
-        .args(["-c", c])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default()
 }
 
 /// Render both files. Returns the text of the main file.
@@ -234,6 +232,27 @@ pub fn render(
             "clean (crates/, Cargo.toml, Cargo.lock) at every point"
         }
     );
+    let mut by_build: BTreeMap<(String, String), usize> = BTreeMap::new();
+    for p in points.values() {
+        *by_build
+            .entry((
+                p.meta
+                    .get("commit")
+                    .map(|c| c[..c.len().min(7)].to_string())
+                    .unwrap_or_default(),
+                p.meta.get("worktree").cloned().unwrap_or_default(),
+            ))
+            .or_default() += 1;
+    }
+    let _ = writeln!(
+        s,
+        "| points by HEAD and worktree state when written | {} (the build that measured each is stated under Deviations) |",
+        by_build
+            .iter()
+            .map(|((c, w), n)| format!("`{c}` {w}: {n}"))
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
     let _ = writeln!(s, "| host | {} — {} CPUs, {} MiB (the cloud container: every concurrency figure is on 2 cores) |", meta("host"), meta("cpus"), meta("mem_mib"));
     let _ = writeln!(s, "| toolchain | {} |", meta("toolchain"));
     let _ = writeln!(s, "| PostgreSQL | {} |", meta("postgres"));
@@ -247,7 +266,6 @@ pub fn render(
         dates.iter().next().cloned().unwrap_or_default(),
         dates.iter().last().cloned().unwrap_or_default()
     );
-    let _ = writeln!(s, "| rendered | {} |", cmd("date -u +%Y-%m-%dT%H:%M:%SZ"));
     let _ = writeln!(s, "| universe | declared synthetic, α = 0.6 (the author's W5: ~10% of activity in the busiest 1%, ~40% in the busiest 10%); ten transactions of history per account in batches of 200 (one epoch per batch); 3% back-valued up to 22 business days; `multi` series: 35% of accounts hold a second currency, transfers between two such accounts in it half the time (W11) |");
     let _ = writeln!(
         s,
@@ -495,6 +513,7 @@ pub fn render(
         for (m, desc) in METRICS {
             for n in &sizes {
                 let mut row = format!("| {desc} | {} |", size_label(*n));
+                let mut any_value = false;
                 for a in &arms {
                     let meds: Vec<f64> = points
                         .iter()
@@ -518,10 +537,14 @@ pub fn render(
                     } else if meds.is_empty() {
                         " — |".to_string()
                     } else {
+                        any_value = true;
                         format!(" {} |", f(bank_bench::score::median(&meds)))
                     };
                 }
-                let _ = writeln!(s, "{row}");
+                // A metric no arm reported at this size is absent by design: no row.
+                if any_value {
+                    let _ = writeln!(s, "{row}");
+                }
             }
         }
         let _ = writeln!(s);
@@ -715,7 +738,7 @@ pub fn render(
 
     // H-E1.
     let _ = writeln!(s, "## 8. What this says about H-E1\n");
-    let _ = writeln!(s, "§7's engine rule needs N to beat **P+ and H3** by the joint gate on resident bytes per key ever read and on p99 read latency under eviction. H3 is R2-03's; this table is the P+ half, per series and size, as §2 found it.\n");
+    let _ = writeln!(s, "§7's engine rule needs N to beat **P+ and H3** by the joint gate on resident bytes per key ever read and on p99 read latency under eviction. H3 is R2-03's; this table is the P+ half, per series and size, as §2 found it.{}\n", if shape.flag.is_empty() { " Its p99 rows are the main sweep's, where a run held ~110 samples of a query; the targeted re-run the author chose, `results/E27-p99.md`, is the one that resolves p99." } else { "" });
     let _ = writeln!(
         s,
         "| series | metric | {} |\n|---|---|{}",
@@ -819,6 +842,7 @@ pub const P99: Shape = Shape {
 /// The deviations E27 states in its header. Each is a fact about this build, recorded in the
 /// round-2 log when it was found.
 pub const DEVIATIONS: &[&str] = &[
+    "**What `MODIFIED` means here, and which build measured each point.** The sweep ran from a binary copied out of the tree (`/var/tmp/e27-bin/comparator`) while work continued in the tree, so a point records HEAD and the worktree as they were when the point was *written*, not the build that *measured* it. The measuring builds were: `c3b04ff` for the first 21 main points; `4bdba3d` (copied when the sweep resumed after a container restart) for the remaining main points, the probe and the first 16 p99 points; `5ad7f29` for the last 14 p99 points. The uncommitted edits present while they ran were, in order: the p99 shape and the Host C portability of `pgcluster.rs` and `provenance()` (committed in `4bdba3d`), then `render --stem` and `--q1-only` (committed in `5ad7f29`). None changes the main shape's behaviour: `Config::declared` yields the constants the earlier code used (a write every tenth operation, the same mix, 70% q1 in the concurrent phases), and under root the cluster paths are unchanged.",
     "**A first sweep attempt was discarded, and two things were changed after seeing it.** It ran at commit `fed5238` and wrote the five `single` 10³ points kept in `results/E27-comparator/discarded-attempt-1/`: it counted a read chosen as a deadlock victim (SQLSTATE 40P01, which P+'s `rev_read` produces under concurrent readers) as an oracle divergence, which refused every P+ comparison, and it gated `pss_growth_bytes_per_key_read` per run although that value trends with the keys read so far, which refused it everywhere. Before the sweep reported here: deadlocked reads are retried, with the failed attempts inside the measured latency and their count reported (§6a); the memory-per-key metric is judged across seeds (§2). Nothing else changed — not the gate, the floor, the refusal rule, the run shape or any arm.",
     "**P+ is the E14 mechanism with two repairs** (`crates/comparator/sql/pplus.sql`; the E14 files are untouched): E14's `rev_read` served a resident slot for any anchor at or below its version, so a historical read after later postings returned the current value — a wrong answer that would have refused every q2 comparison; and its eviction ordered victims by last *change*, not last use. Here a slot answers anchor e only if its last change is at or before e and the view has applied e, and eviction is LRU on a read tick, as on N.",
     "**Nilestream did not honour `order by` in a reply** until commit `e82fac3` of this card: top-10 returned the right ten rows in account order. Found by this comparator's correctness pass on its first smoke run, fixed with a test and a sabotage control before any measured run.",
@@ -833,3 +857,69 @@ pub const DEVIATIONS: &[&str] = &[
     "**The 10⁶ point is not in this file**: the container holds 2 cores and 8 GB; it goes to Host C with a prepared `run.sh` (§11.3).",
     "**Concurrency phases are read-only** (writes run only in the 1-client mixed phase), so the concurrent figures are reads over a quiescent head; concurrent reads *with* writes are the anomaly probe's (§7).",
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A point file as `store::write` produces it, cut down to one metric.
+    fn point(n: f64, p: f64, diverged: bool) -> Stored {
+        let mut t = String::from(
+            "meta\tseries\tsingle\nmeta\taccounts\t1000\nmeta\tseed\t1\n\
+             load\tN\t0.1\t2\tx\t2\tx\tn\nload\tP+\t0.1\t2\tx\t2\tx\tn\n",
+        );
+        for run in -3..10i64 {
+            let j = (run.rem_euclid(3)) as f64;
+            t += &format!("val\tN\t{run}\tq1_p50_us\t{}\n", n + j);
+            t += &format!("val\tP+\t{run}\tq1_p50_us\t{}\n", p + j);
+        }
+        if diverged {
+            t += "div\tP+\t2\t1\texample\n";
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "e27-fixture-{}-{n}-{p}-{diverged}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("single-1000-1.tsv");
+        std::fs::write(&f, t).unwrap();
+        let st = Stored::read(&f).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        st
+    }
+
+    fn verdict(st: &Stored) -> Verdict {
+        cells(st)
+            .into_iter()
+            .find(|(c, _)| c.a == "N" && c.b == "P+" && c.metric == "q1_p50_us")
+            .map(|(c, _)| c.verdict)
+            .expect("the cell")
+    }
+
+    #[test]
+    fn the_scorer_reads_a_point_file_and_gates_it() {
+        assert_eq!(
+            verdict(&point(100.0, 200.0, false)),
+            Verdict::Better("N".into())
+        );
+        assert_eq!(
+            verdict(&point(200.0, 100.0, false)),
+            Verdict::Better("P+".into())
+        );
+        assert_eq!(verdict(&point(100.0, 101.0, false)), Verdict::BelowFloor);
+    }
+
+    #[test]
+    fn a_divergence_anywhere_in_the_point_refuses_the_comparison() {
+        assert!(matches!(
+            verdict(&point(100.0, 200.0, true)),
+            Verdict::Refused(_)
+        ));
+    }
+
+    #[test]
+    fn a_metric_no_arm_reported_is_absent_not_refused() {
+        let st = point(100.0, 200.0, false);
+        assert!(!cells(&st).iter().any(|(c, _)| c.metric == "c2_q1_p99_us"));
+    }
+}

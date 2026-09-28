@@ -208,7 +208,7 @@ bare row into this page, three unlabelled cells under a paragraph introducing th
 
 | Result | Status |
 |---|---|
-| **All 21 claims** | 6 proved, 9 measured or partly measured, 1 specified, 2 argued, 1 refuted, 1 withdrawn, 1 not measured. Source: `thesis/status.toml`, rendered here and into §1.9 |
+| **All 22 claims** | 6 proved, 10 measured or partly measured, 1 specified, 2 argued, 1 refuted, 1 withdrawn, 1 not measured. Source: `thesis/status.toml`, rendered here and into §1.9 |
 
 <!-- END:status-row -->
 

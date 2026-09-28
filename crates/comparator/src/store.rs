@@ -37,10 +37,10 @@ pub fn provenance(repo: &Path) -> Vec<(String, String)> {
             sh("if git diff --quiet HEAD -- crates Cargo.toml Cargo.lock; then echo clean; else echo MODIFIED; fi"),
         ),
         ("host".into(), sh("uname -srm")),
-        ("cpus".into(), sh("nproc")),
-        ("mem_mib".into(), sh("free -m | awk '/^Mem:/{print $2}'")),
+        ("cpus".into(), sh("nproc 2>/dev/null || sysctl -n hw.ncpu")),
+        ("mem_mib".into(), sh("free -m 2>/dev/null | awk '/^Mem:/{print $2}' | grep . || echo $(( $(sysctl -n hw.memsize) / 1048576 ))")),
         ("toolchain".into(), sh("cargo --version")),
-        ("postgres".into(), sh("/usr/lib/postgresql/16/bin/postgres --version")),
+        ("postgres".into(), sh(&format!("{}/postgres --version", crate::pgcluster::bin()))),
         ("date".into(), sh("date -u +%Y-%m-%dT%H:%M:%SZ")),
     ]
 }

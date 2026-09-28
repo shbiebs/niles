@@ -13,7 +13,44 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const BIN: &str = "/usr/lib/postgresql/16/bin";
+/// Where PostgreSQL 16's binaries are: `PG_BIN`, else Debian/Ubuntu's location. On a Mac,
+/// `PG_BIN=/opt/homebrew/opt/postgresql@16/bin` (Homebrew) or Postgres.app's `bin`.
+pub fn bin() -> String {
+    std::env::var("PG_BIN").unwrap_or_else(|_| "/usr/lib/postgresql/16/bin".into())
+}
+
+/// Whether this process is root — the cloud container, where clusters are administered as
+/// the `postgres` OS user over peer authentication. Elsewhere (Host C) the current user owns
+/// the clusters and is their superuser, as with a Homebrew or Postgres.app installation.
+pub fn is_root() -> bool {
+    Command::new("id")
+        .arg("-u")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
+        .unwrap_or(false)
+}
+
+/// The socket directory the clusters listen on, and where `tools/pg-provision.sh`'s `psql`
+/// looks by default: Debian's under root, `/tmp` (Homebrew's and Postgres.app's) elsewhere.
+pub fn socket_dir() -> &'static str {
+    if is_root() {
+        "/var/run/postgresql"
+    } else {
+        "/tmp"
+    }
+}
+
+/// Where the per-arm data directories live: `E27_PGDATA`, else a fixed place per host kind.
+pub fn base_dir() -> PathBuf {
+    if let Ok(d) = std::env::var("E27_PGDATA") {
+        return PathBuf::from(d);
+    }
+    if is_root() {
+        PathBuf::from("/var/lib/postgresql/e27")
+    } else {
+        PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".e27-pg")
+    }
+}
 
 /// §5.3's configuration, every setting with the reason it is set.
 pub const SETTINGS: &[(&str, &str, &str)] = &[
@@ -55,8 +92,8 @@ pub const SETTINGS: &[(&str, &str, &str)] = &[
     ("listen_addresses", "'127.0.0.1'", "local only"),
     (
         "unix_socket_directories",
-        "'/var/run/postgresql'",
-        "where tools/pg-provision.sh looks",
+        "'/var/run/postgresql' (root) or '/tmp' (elsewhere)",
+        "where tools/pg-provision.sh's psql looks by default",
     ),
 ];
 
@@ -66,11 +103,15 @@ pub struct Cluster {
     pub dir: PathBuf,
 }
 
+/// Run an administrative shell command: as the `postgres` OS user under root, as the current
+/// user elsewhere.
 fn as_postgres(cmd: &str) -> Result<String, String> {
-    let out = Command::new("su")
-        .args(["postgres", "-c", cmd])
-        .output()
-        .map_err(|e| format!("su postgres: {e}"))?;
+    let out = if is_root() {
+        Command::new("su").args(["postgres", "-c", cmd]).output()
+    } else {
+        Command::new("sh").args(["-c", cmd]).output()
+    }
+    .map_err(|e| format!("administrative shell: {e}"))?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     } else {
@@ -87,21 +128,25 @@ impl Cluster {
         Cluster {
             name: name.into(),
             port,
-            dir: PathBuf::from(format!("/var/lib/postgresql/e27/{name}")),
+            dir: base_dir().join(name),
         }
     }
 
     /// Initialise if absent, start if stopped, provision the harness role. Idempotent.
     pub fn up(&self, repo_root: &Path) -> Result<(), String> {
         let dir = self.dir.display().to_string();
+        let bin = bin();
         if !self.dir.join("PG_VERSION").exists() {
             as_postgres(&format!("mkdir -p {dir}"))?;
+            // Under root the superuser is `postgres`; elsewhere it is the current user, which
+            // is who tools/pg-provision.sh connects as.
+            let superuser = if is_root() { "-U postgres" } else { "" };
             as_postgres(&format!(
-                "{BIN}/initdb -D {dir} --auth-local=peer --auth-host=scram-sha-256 -U postgres -E UTF8 >/dev/null"
+                "{bin}/initdb -D {dir} --auth-local=peer --auth-host=scram-sha-256 {superuser} -E UTF8 >/dev/null"
             ))?;
         }
         let running = self.dir.join("postmaster.pid").exists()
-            && Command::new("pg_isready")
+            && Command::new(format!("{bin}/pg_isready"))
                 .args(["-q", "-h", "127.0.0.1", "-p", &self.port.to_string()])
                 .status()
                 .map(|s| s.success())
@@ -110,10 +155,16 @@ impl Cluster {
             let _ = std::fs::remove_file(self.dir.join("postmaster.pid"));
             let opts: Vec<String> = SETTINGS
                 .iter()
-                .map(|(k, v, _)| format!("-c {k}={v}"))
+                .map(|(k, v, _)| {
+                    if *k == "unix_socket_directories" {
+                        format!("-c {k}='{}'", socket_dir())
+                    } else {
+                        format!("-c {k}={v}")
+                    }
+                })
                 .collect();
             as_postgres(&format!(
-                "{BIN}/pg_ctl -D {dir} -w -l {dir}/log.txt -o \"-p {} {}\" start >/dev/null",
+                "{bin}/pg_ctl -D {dir} -w -l {dir}/log.txt -o \"-p {} {}\" start >/dev/null",
                 self.port,
                 opts.join(" ")
             ))?;
@@ -136,7 +187,8 @@ impl Cluster {
 
     pub fn down(&self) {
         let _ = as_postgres(&format!(
-            "{BIN}/pg_ctl -D {} -m fast stop >/dev/null",
+            "{}/pg_ctl -D {} -m fast stop >/dev/null",
+            bin(),
             self.dir.display()
         ));
     }

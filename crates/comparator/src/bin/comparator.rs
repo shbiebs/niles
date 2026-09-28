@@ -64,7 +64,19 @@ fn main() {
                 .split(',')
                 .map(String::from)
                 .collect();
-            let mut cfg = Config::declared(multi);
+            // `--shape p99` is the targeted re-run of 2026-09-28 (Config::p99); its points go
+            // to their own directory so the two shapes are never pooled.
+            let p99 = arg(&args, "--shape").as_deref() == Some("p99");
+            let mut cfg = if p99 {
+                Config::p99(multi)
+            } else {
+                Config::declared(multi)
+            };
+            let dir = if p99 && arg(&args, "--dir").is_none() {
+                root.join("results/E27-p99")
+            } else {
+                dir.clone()
+            };
             if let Some(r) = arg(&args, "--runs") {
                 cfg.runs = r.parse().expect("--runs");
             }
@@ -119,9 +131,24 @@ fn main() {
                 .collect();
             let refs: Vec<&dyn Arm> = arms.iter().take(4).map(|a| a.as_ref()).collect();
             let table = comparator::arms::sql_table(&refs);
-            let main = root.join("results/E27-comparator.md");
-            let detail = root.join("results/E27-comparator-detail.md");
-            comparator::render::render(&dir, &main, &detail, &lines, &table).expect("render");
+            let p99 = arg(&args, "--shape").as_deref() == Some("p99");
+            let (shape, stem, dir) = if p99 {
+                (
+                    &comparator::render::P99,
+                    "E27-p99",
+                    if arg(&args, "--dir").is_some() {
+                        dir.clone()
+                    } else {
+                        root.join("results/E27-p99")
+                    },
+                )
+            } else {
+                (&comparator::render::MAIN, "E27-comparator", dir.clone())
+            };
+            let main = root.join(format!("results/{stem}.md"));
+            let detail = root.join(format!("results/{stem}-detail.md"));
+            comparator::render::render(&dir, &main, &detail, &lines, &table, shape)
+                .expect("render");
             eprintln!("wrote {} and {}", main.display(), detail.display());
         }
         "probe" => {

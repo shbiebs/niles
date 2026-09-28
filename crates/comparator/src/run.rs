@@ -47,6 +47,12 @@ pub struct Config {
     pub checkpoint: usize,
     pub alpha: f64,
     pub multi_currency: bool,
+    /// Every `write_every`-th operation of the mixed phase is a write; 0 means none.
+    pub write_every: usize,
+    /// The read mix of the mixed phase.
+    pub mix: Vec<(&'static str, f64)>,
+    /// The share of q1 among the concurrent phases' reads (the rest are q2).
+    pub conc_q1_share: f64,
 }
 
 impl Config {
@@ -61,6 +67,26 @@ impl Config {
             checkpoint: 16,
             alpha: 0.6,
             multi_currency,
+            write_every: 10,
+            mix: MIX.to_vec(),
+            conc_q1_share: 0.7,
+        }
+    }
+
+    /// The targeted p99 re-run the author chose on 2026-09-28, its shape fixed before any of
+    /// its numbers existed: N vs P+, point reads only (q1 and q2, half each), 2,000 reads per
+    /// run at one client and 4 × 500 at four clients — 1,000 samples of each query per run and
+    /// level, so a p99 is the tenth-largest of a thousand rather than the second of a hundred.
+    /// No writes: the question is read latency under eviction, and the main sweep has writes.
+    pub fn p99(multi_currency: bool) -> Config {
+        Config {
+            ops: 2000,
+            conc_levels: vec![4],
+            conc_reads: 500,
+            write_every: 0,
+            mix: vec![("q1", 0.5), ("q2", 0.5)],
+            conc_q1_share: 0.5,
+            ..Config::declared(multi_currency)
         }
     }
 }
@@ -114,16 +140,16 @@ fn draw_read(id: &str, u: &Universe, o: &Oracle, r: &mut Rng) -> Query {
     }
 }
 
-fn pick(r: &mut Rng) -> &'static str {
+fn pick(mix: &[(&'static str, f64)], r: &mut Rng) -> &'static str {
     let x = r.unit();
     let mut acc = 0.0;
-    for (id, w) in MIX {
+    for (id, w) in mix {
         acc += w;
         if x < acc {
             return id;
         }
     }
-    MIX[MIX.len() - 1].0
+    mix[mix.len() - 1].0
 }
 
 /// Build one run's script and advance the oracle through its writes.
@@ -143,14 +169,14 @@ pub fn script(
         _ => {}
     };
     for i in 0..cfg.ops {
-        if i % 10 == 9 {
+        if cfg.write_every > 0 && i % cfg.write_every == cfg.write_every - 1 {
             let idx = o.head() + 1;
             let t = Universe::one(&u.params, &u.sampler, r, *next_txn, idx);
             *next_txn += 1;
             o.apply(idx, t.clone());
             mixed.push(Op::Write(idx, t));
         } else {
-            let q = draw_read(pick(r), u, o, r);
+            let q = draw_read(pick(&cfg.mix, r), u, o, r);
             note(&q, &mut keys_read);
             let a = expected(o, &q);
             mixed.push(Op::Read(q, a));
@@ -162,7 +188,11 @@ pub fn script(
         for _ in 0..level {
             let mut ops = Vec::with_capacity(cfg.conc_reads);
             for _ in 0..cfg.conc_reads {
-                let id = if r.unit() < 0.7 { "q1" } else { "q2" };
+                let id = if r.unit() < cfg.conc_q1_share {
+                    "q1"
+                } else {
+                    "q2"
+                };
                 let q = draw_read(id, u, o, r);
                 note(&q, &mut keys_read);
                 let a = expected(o, &q);

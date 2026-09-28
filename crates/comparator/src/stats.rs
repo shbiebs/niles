@@ -153,6 +153,31 @@ pub fn judge(
     cell
 }
 
+/// A verdict with seeds as the replicates: one value per seed per arm, the joint gate over
+/// them, no floor (there are no warm-up replicates of a once-per-seed value).
+pub fn judge_seeds(metric: &str, a: &str, b: &str, va: &[f64], vb: &[f64]) -> Verdict {
+    if va.len() < 3 || vb.len() < 3 {
+        return Verdict::Refused(format!(
+            "{} and {} seeds carried the value; 3 are required",
+            va.len(),
+            vb.len()
+        ));
+    }
+    let (ma, mb) = (median(va), median(vb));
+    let pm = pooled_mad(mad(va), mad(vb));
+    let d = mb - ma;
+    let rel = if ma != 0.0 { d / ma } else { f64::NAN };
+    if rel.abs() >= GATE_REL && (pm == 0.0 || d.abs() / pm >= GATE_MADS) {
+        Verdict::Better(if (d > 0.0) == more_is_better(metric) {
+            b.into()
+        } else {
+            a.into()
+        })
+    } else {
+        Verdict::NoDifference
+    }
+}
+
 /// The size verdict over seeds.
 pub fn aggregate(cells: &[&Cell]) -> Verdict {
     let mut wins: BTreeMap<String, usize> = BTreeMap::new();

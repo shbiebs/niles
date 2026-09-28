@@ -107,6 +107,23 @@ fn main() {
                 a.stop();
             }
         }
+        "render" => {
+            let arms = build_arms(
+                &["N".into(), "P+".into(), "P".into(), "M".into(), "M+".into()],
+                false,
+                Path::new("/var/tmp/e27"),
+            );
+            let lines: Vec<(String, String)> = arms
+                .iter()
+                .map(|a| (a.name().to_string(), a.describe()))
+                .collect();
+            let refs: Vec<&dyn Arm> = arms.iter().take(4).map(|a| a.as_ref()).collect();
+            let table = comparator::arms::sql_table(&refs);
+            let main = root.join("results/E27-comparator.md");
+            let detail = root.join("results/E27-comparator-detail.md");
+            comparator::render::render(&dir, &main, &detail, &lines, &table).expect("render");
+            eprintln!("wrote {} and {}", main.display(), detail.display());
+        }
         "probe" => {
             // The five anomalies (§5.7): N, P+ and M+ in both modes. M and P are a full
             // materialised view with no partial state and no anchor on a read, so the five —

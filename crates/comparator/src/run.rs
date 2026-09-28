@@ -202,6 +202,10 @@ pub type Checksum = (u64, String);
 #[derive(Debug, Clone, Default)]
 pub struct Divergence {
     pub count: u64,
+    /// Reads chosen as a deadlock victim (SQLSTATE 40P01) and retried. Not a divergence: the
+    /// retry's answer is checked like any other, and its latency includes the failed attempt,
+    /// because that is what the client waited for.
+    pub deadlock_retries: u64,
     pub examples: Vec<String>,
 }
 
@@ -226,7 +230,16 @@ fn exec_read(
 ) {
     let sql = arm.sql(q);
     let t0 = Instant::now();
-    let res = c.simple(&sql);
+    let mut res = c.simple(&sql);
+    let mut tries = 1;
+    while let Err(bank_bench::wire::WireError::Server { sqlstate, .. }) = &res {
+        if sqlstate != "40P01" || tries >= 20 {
+            break;
+        }
+        d.deadlock_retries += 1;
+        tries += 1;
+        res = c.simple(&sql);
+    }
     let us = t0.elapsed().as_secs_f64() * 1e6;
     match res {
         Ok(rows) => {
@@ -258,6 +271,9 @@ fn exec_read(
         }
         Err(e) => {
             d.count += 1;
+            if d.examples.len() < 5 {
+                d.examples.push(format!("{q:?}: error {e}"));
+            }
             if errs.len() < 5 {
                 errs.push(format!("{q:?} `{sql}`: {e}"));
             }
@@ -353,6 +369,7 @@ pub fn run_arm(arm: &dyn Arm, s: &Script) -> Result<RunOut, String> {
                 merged.entry(k).or_default().extend(v);
             }
             out.divergence.count += d.count;
+            out.divergence.deadlock_retries += d.deadlock_retries;
             for e in d.examples {
                 if out.divergence.examples.len() < 5 {
                     out.divergence.examples.push(e);
@@ -370,6 +387,10 @@ pub fn run_arm(arm: &dyn Arm, s: &Script) -> Result<RunOut, String> {
             out.samples.insert(format!("c{level}_{id}"), v);
         }
     }
+    out.values.insert(
+        "read_deadlock_retries".into(),
+        out.divergence.deadlock_retries as f64,
+    );
     Ok(out)
 }
 

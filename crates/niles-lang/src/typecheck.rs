@@ -956,6 +956,21 @@ impl<'a> Cx<'a> {
                     }
                 }
                 if let Shape::Linear(kind) = shape {
+                    // **`let _ = hold(..)?` drops the hold where it is made.** The wildcard
+                    // binds nothing, so the loop below tracked nothing and the program was
+                    // accepted with no diagnostic — found by R2-05's d14 spellings, which
+                    // measured Niles refusing three of the five and accepting this one.
+                    if let Pat::Wild(wsp) = pat {
+                        self.push(
+                            Diagnostic::error(
+                                "NL0320",
+                                format!("this {} is bound to `_` and dropped where it is made", kind.describe()),
+                            )
+                            .primary(*wsp, "`_` binds nothing")
+                            .note(format!("a {} must be consumed exactly once, by {}", kind.describe(), kind.consumer()))
+                            .note("dropping it would lose the movement silently, which is the failure mode double-entry exists to prevent"),
+                        );
+                    }
                     for n in pat.bindings() {
                         sc.linear.push(LinearValue {
                             name: n.text.clone(),
@@ -966,8 +981,24 @@ impl<'a> Cx<'a> {
                     }
                 }
             }
-            Stmt::Expr(e) | Stmt::Semi(e) => {
+            Stmt::Expr(e) => {
                 self.expr(e, sc);
+            }
+            Stmt::Semi(e) => {
+                // **A linear value in statement position is dropped where it is made**:
+                // `hold(a, 20.00 usd, ..)?;` was accepted with no diagnostic, because only a
+                // named binding was ever tracked (R2-05, d14's bare-call spelling).
+                if let Shape::Linear(kind) = self.expr(e, sc) {
+                    self.push(
+                        Diagnostic::error(
+                            "NL0320",
+                            format!("this {} is made here and never bound", kind.describe()),
+                        )
+                        .primary(e.span(), "its value is discarded")
+                        .note(format!("a {} must be consumed exactly once, by {}", kind.describe(), kind.consumer()))
+                        .note("dropping it would lose the movement silently, which is the failure mode double-entry exists to prevent"),
+                    );
+                }
             }
             Stmt::Item(i) => self.item(i),
             Stmt::Dml(dml) => self.dml(dml, sc),

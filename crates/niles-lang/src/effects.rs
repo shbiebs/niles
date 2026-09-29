@@ -475,14 +475,14 @@ pub enum LinearKind {
 }
 
 impl LinearKind {
-    fn describe(self) -> &'static str {
+    pub fn describe(self) -> &'static str {
         match self {
             LinearKind::Debit => "debit half",
             LinearKind::Credit => "credit half",
             LinearKind::Hold => "hold",
         }
     }
-    fn consumer(self) -> &'static str {
+    pub fn consumer(self) -> &'static str {
         match self {
             LinearKind::Debit | LinearKind::Credit => "`post(..)`",
             LinearKind::Hold => "`resolve .. post/void/expire`",

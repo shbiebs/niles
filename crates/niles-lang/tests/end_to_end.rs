@@ -396,6 +396,39 @@ fn t(a: Id<Account>) -> Result<(), E> ! { append, hold<usd> } {
     );
 }
 
+/// **A hold made and never bound** (R2-05, d14): in statement position and bound to `_`
+/// both were accepted with no diagnostic until R2-05 measured it — NL0320 tracked named
+/// bindings only. The control beside them resolves the hold and must stay accepted.
+#[test]
+fn a_hold_in_statement_position_or_bound_to_a_wildcard_is_dropped() {
+    for body in [
+        "    hold(a, 20.00 usd, expires: 7.days)?;\n    Ok(())\n",
+        "    let _ = hold(a, 20.00 usd, expires: 7.days)?;\n    Ok(())\n",
+    ] {
+        let c = compile(&with_body(&format!(
+            "}}\nfn t(a: Id<Account>) -> Result<(), E> ! {{ append, hold<usd> }} {{\n{body}}}\n"
+        )));
+        assert!(
+            c.error_codes.contains(&"NL0320"),
+            "a dropped hold must be caught:\n{body}\n{}",
+            c.diags
+        );
+    }
+    let resolved = compile(&with_body(
+        "}
+fn t(a: Id<Account>) -> Result<(), E> ! { append, hold<usd> } {
+    let h = hold(a, 20.00 usd, expires: 7.days)?;
+    resolve h void
+}
+",
+    ));
+    assert!(
+        !resolved.error_codes.contains(&"NL0320"),
+        "{}",
+        resolved.diags
+    );
+}
+
 // ============ base immutability ============
 
 #[test]

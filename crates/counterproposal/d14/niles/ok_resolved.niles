@@ -1,0 +1,14 @@
+// D14, control: the hold is resolved exactly once on every path; every checker must accept this.
+schema bank {
+    currency usd { scale: 2 }
+    currency eur { scale: 2 }
+    currency jpy { scale: 0 }
+    table accounts { id: Id<A> primary key, owner: Text @confidential(e2ee, subject = id) }
+    ledger postings { txn: TxnId, acct: Id<A>, cur: Currency, amt: Money,
+        idem: IdemKey window 50_000.epochs, conserve per (txn, cur); retain forever; }
+    index ix on postings (acct, cur) anchor;
+}
+fn f(a: Id<A>, capture: Bool) -> Result<(), E> ! { append, hold<usd> } {
+    let h = hold(a, 20.00 usd, expires: 7.days)?;
+    if capture { resolve h post 15.00 usd } else { resolve h void }
+}

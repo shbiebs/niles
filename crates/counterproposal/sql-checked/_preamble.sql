@@ -64,3 +64,35 @@ create table serve_contract (
 create view ledger_balance as
     select acct, cur, sum(amt_usd) as balance from postings group by acct, cur;
 insert into serve_contract values ('ledger_balance', 'read_your_writes', 'auto', 'evictable', null, 'off');
+
+-- R2-05's conventions, read by the SQL+C+L arm (R2-04's catalog checker ignores them):
+--
+-- * **A linear value** is a domain marked 'linear <kind>'. Every PL/pgSQL value of that domain
+--   must be consumed exactly once on every path that commits, by a function marked
+--   'consumes <kind>'; a function returning the domain produces one. Handing it to a function
+--   whose parameter has the domain moves it there, and that function must consume it.
+-- * **A capability** is a domain marked 'capability <effect>'. A function marked
+--   'requires <effect>' may be called only from a function that holds a parameter of that
+--   domain; no expression may build a value of the domain (a cast, a literal, a `select`).
+--   That is the whole of "unforgeable", as it is in Niles.
+create table holds (id bigserial primary key, acct bigint not null, amt usd not null,
+    state text not null default 'open');
+create domain hold_ref as bigint;
+comment on domain hold_ref is 'linear hold';
+create function hold(a bigint, amt usd) returns hold_ref language sql
+    as $$ insert into holds (acct, amt) values (a, amt) returning id::hold_ref $$;
+comment on function hold(bigint, usd) is 'produces hold';
+create function resolve_post(h hold_ref, amt usd) returns void language sql
+    as $$ update holds set state = 'posted' where id = h $$;
+comment on function resolve_post(hold_ref, usd) is 'consumes hold';
+create function resolve_void(h hold_ref) returns void language sql
+    as $$ update holds set state = 'void' where id = h $$;
+comment on function resolve_void(hold_ref) is 'consumes hold';
+
+create table overdraft_limits (acct bigint primary key, amt usd not null);
+create domain auth_overdraft as bigint;
+comment on domain auth_overdraft is 'capability overdraft';
+create function authorize_overdraft(a bigint, amt usd) returns void language sql
+    as $$ insert into overdraft_limits values (a, amt)
+          on conflict (acct) do update set amt = excluded.amt $$;
+comment on function authorize_overdraft(bigint, usd) is 'requires overdraft';

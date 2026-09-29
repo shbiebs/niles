@@ -1,0 +1,15 @@
+// D14, explicit drop or ignore: the bound hold is explicitly ignored with `let _ = h;` (Niles has no `drop`; this is its ignore).
+schema bank {
+    currency usd { scale: 2 }
+    currency eur { scale: 2 }
+    currency jpy { scale: 0 }
+    table accounts { id: Id<A> primary key, owner: Text @confidential(e2ee, subject = id) }
+    ledger postings { txn: TxnId, acct: Id<A>, cur: Currency, amt: Money,
+        idem: IdemKey window 50_000.epochs, conserve per (txn, cur); retain forever; }
+    index ix on postings (acct, cur) anchor;
+}
+fn f(a: Id<A>) -> Result<(), E> ! { append, hold<usd> } {
+    let h = hold(a, 20.00 usd, expires: 7.days)?;
+    let _ = h;
+    Ok(())
+}

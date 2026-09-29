@@ -339,7 +339,7 @@ fn visit_pl(s: &PlStmt, at: Option<Span>, f: &mut dyn FnMut(Item)) {
 }
 
 /// Every expression inside a query: select items, predicates, grouping, join conditions.
-fn query_exprs<'q>(q: &'q Query, out: &mut Vec<&'q Expr>) {
+pub(crate) fn query_exprs<'q>(q: &'q Query, out: &mut Vec<&'q Expr>) {
     fn from_on<'q>(fi: &'q FromItem, out: &mut Vec<&'q Expr>) {
         if let FromItem::Join {
             left, right, on, ..

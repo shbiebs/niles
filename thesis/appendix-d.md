@@ -28,7 +28,7 @@ component is for is not derivable from its source.
 | `niles-ir` | Typed IR: circuit types, verifier, reference interpreter, upquery paths | 67 |
 | `niles-lang` | Stage-0 compiler: lexer, parser, type/effect checker, lowering; SQL surface | 139 |
 | `nilesc` | The compiler driver: `check`, `verify`, `run` | 0 |
-| `nilescheck-sql` | Hand-written PostgreSQL 16 SQL and PL/pgSQL parser; the serve-contract and money checker over it (E14 column) | 73 |
+| `nilescheck-sql` | Hand-written PostgreSQL 16 SQL and PL/pgSQL parser; the catalog checker (E14 PostgreSQL + checker) and SQL+C+L: linearity, conservation through niles-lang's solver, capabilities (E14 columns) | 82 |
 | `nilestream` | The engine binary: sweep and serve | 0 |
 | `nilestream-consensus` | A single-process, deterministic simulator for replication and cross-shard commit. No sockets, no clock | 21 |
 | `nilestream-core` | REV runtime: resident maps, anchor indices, apply loop, upqueries, contracts | 28 |

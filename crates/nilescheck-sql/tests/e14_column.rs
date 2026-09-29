@@ -30,7 +30,7 @@ fn verdicts() -> Vec<(String, Vec<String>)> {
             let src = format!("{pre}\n{}", std::fs::read_to_string(f).unwrap());
             let (stmts, _) = nilescheck_sql::parse(&src)
                 .unwrap_or_else(|e| panic!("{}: {}", f.display(), e.msg));
-            let mut codes: Vec<String> = nilescheck_sql::check_all(&stmts)
+            let mut codes: Vec<String> = nilescheck_sql::check_catalog(&stmts)
                 .into_iter()
                 .map(|d| d.code.to_string())
                 .collect();

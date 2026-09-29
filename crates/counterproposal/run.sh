@@ -66,7 +66,7 @@ echo "== part 4: the same classes in PostgreSQL + checker (crates/nilescheck-sql
 caught=0; total=0
 for f in crates/counterproposal/sql-checked/d*.sql; do
   n=$(basename "$f" .sql)
-  out=$(cargo run -q -p nilescheck-sql -- crates/counterproposal/sql-checked/_preamble.sql "$f" 2>&1)
+  out=$(cargo run -q -p nilescheck-sql -- --catalog-only crates/counterproposal/sql-checked/_preamble.sql "$f" 2>&1)
   codes=$(echo "$out" | grep -oE "(error|warning)\[[A-Z0-9]+\]" | sort -u | tr '\n' ' ')
   total=$((total + 1))
   if [ -n "$codes" ]; then st="check"; caught=$((caught + 1)); else st="not caught"; fi

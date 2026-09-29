@@ -44,7 +44,7 @@ ROLE = {
     "conservation-suite": "Reference oracle and the conservation property tests",
     "bank-bench": "NilesBank generator, wall-clock harness, thesis drift tests",
     "comparator": "E27: Nilestream against PostgreSQL, pg_ivm, ReadySet, a REV sidecar and TigerBeetle under eviction, across bank sizes; the five-anomalies probe",
-    "nilescheck-sql": "Hand-written PostgreSQL 16 SQL and PL/pgSQL parser; the serve-contract and money checker over it (E14 column)",
+    "nilescheck-sql": "Hand-written PostgreSQL 16 SQL and PL/pgSQL parser; the catalog checker (E14 PostgreSQL + checker) and SQL+C+L: linearity, conservation through niles-lang's solver, capabilities (E14 columns)",
     "rev-sidecar": "E27 arms H3 and T: a nilestream-core REV fed by PostgreSQL logical replication (pgoutput) or TigerBeetle CDC, served over the PostgreSQL wire",
     "experiments": "The E-series measurement harness",
     "proto-engine": "The research prototype the counted-work experiments run on",

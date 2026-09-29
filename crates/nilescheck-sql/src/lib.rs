@@ -3,9 +3,13 @@
 //! 2026-09-28: a full hand-written parser).
 
 pub mod ast;
+pub mod capability;
 pub mod check;
 pub mod check2;
+pub mod conserve;
+pub mod conventions;
 pub mod lex;
+pub mod linear;
 pub mod parser;
 pub mod plpgsql;
 pub mod stmt;
@@ -68,10 +72,21 @@ pub fn parse_recovering(src: &str) -> (Vec<ast::Stmt>, Vec<parser::ParseError>) 
     }
 }
 
-/// Every rule over a parsed script: the serve-contract family (`check.rs`) and the typed and
-/// whole-script rules (`check2.rs`).
-pub fn check_all(stmts: &[ast::Stmt]) -> Vec<check::Diag> {
+/// **The catalog checker** (R2-04, E14's "PostgreSQL + checker" column): the serve-contract
+/// family (`check.rs`) and the typed and whole-script rules (`check2.rs`).
+pub fn check_catalog(stmts: &[ast::Stmt]) -> Vec<check::Diag> {
     let mut d = check::check(stmts);
     d.extend(check2::check(stmts));
+    d
+}
+
+/// **SQL+C+L** (R2-05, E14's column of that name): the catalog checker, plus linearity
+/// (`linear.rs`), conservation through `niles-lang`'s solver (`conserve.rs`) and capabilities
+/// (`capability.rs`).
+pub fn check_all(stmts: &[ast::Stmt]) -> Vec<check::Diag> {
+    let mut d = check_catalog(stmts);
+    d.extend(linear::check(stmts));
+    d.extend(conserve::check(stmts));
+    d.extend(capability::check(stmts));
     d
 }

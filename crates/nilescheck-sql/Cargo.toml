@@ -8,6 +8,8 @@ authors.workspace = true
 # A hand-written PostgreSQL 16 SQL and PL/pgSQL parser, and the serve-contract checker over it
 # (cycle 14, R2-04). No external dependency — the author's decision of 2026-09-28.
 [dependencies]
+# The currency-row solver, reused behind an adapter (R2-05; in-tree, not a new dependency).
+niles-lang = { path = "../niles-lang" }
 
 # The wire client, to hold PostgreSQL's parser to this one's verdicts (tests only; in-tree).
 [dev-dependencies]

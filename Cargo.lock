@@ -75,6 +75,7 @@ name = "nilescheck-sql"
 version = "0.1.0"
 dependencies = [
  "bank-bench",
+ "niles-lang",
 ]
 
 [[package]]

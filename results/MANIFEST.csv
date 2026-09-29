@@ -308,3 +308,4 @@ E27-p99-engine/single-100000-42.tsv,machine-dependent,cargo run --release -p com
 E27-p99-engine/single-100000-7.tsv,machine-dependent,cargo run --release -p comparator -- run --shape p99-engine --arms N,P+,H3,T (see E27-p99-engine.md)
 E27-p99-engine.md,byte-deterministic,cargo run -q --release -p comparator -- render --shape p99-engine
 E27-p99-engine-detail.md,byte-deterministic,cargo run -q --release -p comparator -- render --shape p99-engine
+E27-hostc.md,byte-deterministic,cargo run -q --release -p comparator -- render --shape counted

@@ -163,6 +163,17 @@ fn main() {
                 a.stop();
             }
         }
+        "render" if arg(&args, "--shape").as_deref() == Some("counted") => {
+            // The 10⁶ point from the author's Mac: counted work only (the author's decision of
+            // 2026-09-28), beside the container's sizes.
+            let host = arg(&args, "--dir")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| root.join("results/E27-hostc"));
+            let out = root.join("results/E27-hostc.md");
+            comparator::render::render_counted(&host, &root.join("results/E27-comparator"), &out)
+                .expect("render");
+            eprintln!("wrote {}", out.display());
+        }
         "render" => {
             // Every arm this comparator knows, described; the renderer lists those that appear
             // in the points (or, for the probe's mutable twins, in the probe file).

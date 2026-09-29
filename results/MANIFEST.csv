@@ -309,3 +309,4 @@ E27-p99-engine/single-100000-7.tsv,machine-dependent,cargo run --release -p comp
 E27-p99-engine.md,byte-deterministic,cargo run -q --release -p comparator -- render --shape p99-engine
 E27-p99-engine-detail.md,byte-deterministic,cargo run -q --release -p comparator -- render --shape p99-engine
 E27-hostc.md,byte-deterministic,cargo run -q --release -p comparator -- render --shape counted
+E14-checkcost.md,machine-dependent,cargo run --release -p nilescheck-sql --bin checkcost (check time and peak heap per KLOC; see E14-minimal-counterproposal.md Part 2b)

@@ -25,12 +25,18 @@ authors = ["Sergio"]
 proto-engine = { path = "../../crates/proto-engine" }
 niles-ir = { path = "../../crates/niles-ir" }
 niles-lang = { path = "../../crates/niles-lang" }
+nilescheck-sql = { path = "../../crates/nilescheck-sql" }
 nilestream-core = { path = "../../crates/nilestream-core" }
 nilestream-server = { path = "../../crates/nilestream-server" }
 
 [[bin]]
 name = "memprobe"
 path = "src/main.rs"
+
+# E14's check cost per KLOC (cycle 14, R2-05): here for the counting allocator.
+[[bin]]
+name = "checkcost"
+path = "src/bin/checkcost.rs"
 
 [lib]
 name = "memprobe"

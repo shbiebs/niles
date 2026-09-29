@@ -8,6 +8,7 @@ version = "0.1.0"
 dependencies = [
  "niles-ir",
  "niles-lang",
+ "nilescheck-sql",
  "nilestream-core",
  "nilestream-server",
  "proto-engine",
@@ -22,6 +23,13 @@ name = "niles-lang"
 version = "0.1.0"
 dependencies = [
  "niles-ir",
+]
+
+[[package]]
+name = "nilescheck-sql"
+version = "0.1.0"
+dependencies = [
+ "niles-lang",
 ]
 
 [[package]]

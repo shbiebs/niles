@@ -10,49 +10,19 @@
 //!
 //! 20 warm-up passes, then 200 timed passes; in each pass every file is checked once by each
 //! checker, alternating, so drift lands on both. Time: the median over passes of one pass's
-//! total, per thousand lines. Peak heap: a counting allocator, reset before each file's check,
-//! the largest excess over the bytes live at its start. Writes `results/E14-checkcost.md`.
+//! total, per thousand lines. Peak heap: E18's counting allocator (`memprobe::alloc::count`),
+//! the high-water mark above the bytes live when each file's check starts. It lives in this
+//! package, outside the workspace, because a counting allocator needs `unsafe` and §9.10
+//! confines that to the memory instrument. Writes `results/E14-checkcost.md`.
 //!
-//!     cargo run --release -p nilescheck-sql --bin checkcost
+//!     cargo run --release --manifest-path tools/memprobe/Cargo.toml --bin checkcost
 
-use std::alloc::{GlobalAlloc, Layout, System};
+use memprobe::alloc;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::time::Instant;
 
-struct Counting;
-static LIVE: AtomicUsize = AtomicUsize::new(0);
-static PEAK: AtomicUsize = AtomicUsize::new(0);
-
-unsafe impl GlobalAlloc for Counting {
-    unsafe fn alloc(&self, l: Layout) -> *mut u8 {
-        let p = unsafe { System.alloc(l) };
-        if !p.is_null() {
-            let now = LIVE.fetch_add(l.size(), Relaxed) + l.size();
-            PEAK.fetch_max(now, Relaxed);
-        }
-        p
-    }
-    unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
-        unsafe { System.dealloc(p, l) };
-        LIVE.fetch_sub(l.size(), Relaxed);
-    }
-    unsafe fn realloc(&self, p: *mut u8, l: Layout, new: usize) -> *mut u8 {
-        let q = unsafe { System.realloc(p, l, new) };
-        if !q.is_null() {
-            if new >= l.size() {
-                let now = LIVE.fetch_add(new - l.size(), Relaxed) + (new - l.size());
-                PEAK.fetch_max(now, Relaxed);
-            } else {
-                LIVE.fetch_sub(l.size() - new, Relaxed);
-            }
-        }
-        q
-    }
-}
-
 #[global_allocator]
-static A: Counting = Counting;
+static COUNTING: alloc::Counting = alloc::Counting;
 
 fn niles(src: &str) -> usize {
     let (prog, mut d) = niles_lang::parser::parse_program(src);
@@ -112,7 +82,10 @@ fn cmd(c: &str, args: &[&str]) -> String {
 }
 
 fn main() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("the repository root is two levels above this manifest");
     let cp = root.join("crates/counterproposal");
     let pre = std::fs::read_to_string(cp.join("sql-checked/_preamble.sql")).unwrap();
     let niles_src: Vec<(String, String)> = files(&cp.join("niles"), "d", ".niles")
@@ -138,12 +111,14 @@ fn main() {
     let lines = |v: &[(String, String)]| v.iter().map(|(_, s)| s.lines().count()).sum::<usize>();
     let (nl, sl) = (lines(&niles_src), lines(&sql_src));
 
-    // Peak heap per file, one check each, before any timing.
+    // Peak heap per file, one check each, before any timing. Single-threaded, as E18 is.
+    assert!(
+        alloc::installed(),
+        "checkcost: the counting allocator is not installed; every peak would read zero"
+    );
     let peak = |f: &dyn Fn(&str) -> usize, src: &str| -> usize {
-        let base = LIVE.load(Relaxed);
-        PEAK.store(base, Relaxed);
-        std::hint::black_box(f(src));
-        PEAK.load(Relaxed).saturating_sub(base)
+        let (_, c) = alloc::count(|| std::hint::black_box(f(src)));
+        c.peak_delta
     };
     let per_kloc = |bytes: usize, src: &str| bytes as f64 * 1000.0 / src.lines().count() as f64;
     let np: Vec<(usize, f64)> = niles_src
@@ -192,7 +167,7 @@ fn main() {
 
     let mut out = String::new();
     out += "# E14 — check cost per KLOC, Niles against SQL+C+L\n\n";
-    out += "*Written by `cargo run --release -p nilescheck-sql --bin checkcost` (cycle 14, R2-05). Machine-dependent: every figure is a measurement on the host below, and only the ratio between the two checkers on one host means anything.*\n\n";
+    out += "*Written by `cargo run --release --manifest-path tools/memprobe/Cargo.toml --bin checkcost` (cycle 14, R2-05). Machine-dependent: every figure is a measurement on the host below, and only the ratio between the two checkers on one host means anything.*\n\n";
     out += "| field | value |\n|---|---|\n";
     out += &format!(
         "| commit | `{}` |\n",
@@ -232,9 +207,10 @@ fn main() {
             .map(|n| n.get())
             .unwrap_or(0)
     );
-    out += &format!("| toolchain | `{}` |\n", cmd("rustc", &["--version"]));
+    // The compiler that built this binary (build.rs), not whatever `rustc` is on the PATH.
+    out += &format!("| toolchain | `{}` |\n", env!("MEMPROBE_RUSTC"));
     out += "| checkpoint_interval | n/a (no engine runs: a checker's parse and check) |\n";
-    out += &format!("| protocol | {warm} warm-up passes, then {reps} timed passes; each pass checks every file once with each checker, alternating; in-process, release build; peak heap from a counting allocator |\n\n");
+    out += &format!("| protocol | {warm} warm-up passes, then {reps} timed passes; each pass checks every file once with each checker, alternating; in-process, release build; peak heap from E18's counting allocator |\n\n");
     out += "| checker | corpus | files | lines | median pass µs (MAD) | µs per KLOC | peak heap per check, max over files, bytes | peak heap per KLOC, max over files, bytes |\n|---|---|--:|--:|--:|--:|--:|--:|\n";
     out += &format!(
         "| Niles (`nilesc check` front end) | 13 classes + 5 d14 spellings | {} | {nl} | {nmed:.0} ({nmad:.0}) | {nk:.0} | {} | {:.0} |\n",

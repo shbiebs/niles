@@ -316,3 +316,171 @@ fn the_corpus_verdicts_do_not_come_from_a_nested_cargo() {
          gets a number no compiler emitted. Invoke the binary and read its markers."
     );
 }
+
+/// **d14 — the forgotten hold, in five spellings** (cycle 14, R2-05): each is refused by
+/// `nilesc check`, and the control that resolves the hold is accepted. Measured on the
+/// compiler of `2699969`, before R2-05's fix, Niles refused three of the five — the bare call
+/// and `let _ = hold(..)?` were accepted with no diagnostic. The E14 document carries the
+/// count this run produces.
+#[test]
+fn every_d14_spelling_is_refused_and_the_control_is_accepted() {
+    let dir = repo_root().join("crates/counterproposal/d14/niles");
+    let mut files: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()))
+        .flatten()
+        .map(|e| e.path())
+        .collect();
+    files.sort();
+    let mut refused = 0;
+    let mut spellings = 0;
+    for f in &files {
+        let n = f.file_stem().unwrap().to_string_lossy().into_owned();
+        let v = verdict_of(f);
+        if n.starts_with("d14_") {
+            spellings += 1;
+            assert_eq!(v, Verdict::Refused, "{n} must be refused");
+            refused += 1;
+        } else {
+            assert_eq!(v, Verdict::Accepted, "the control {n} must be accepted");
+        }
+    }
+    assert_eq!(spellings, 5, "d14 is five spellings");
+    let doc = std::fs::read_to_string(repo_root().join("results/E14-minimal-counterproposal.md"))
+        .expect("E14's document");
+    let want = format!("Niles, d14: {refused} of {spellings} spellings refused at compile time");
+    assert!(
+        doc.contains(&want),
+        "E14's document must say, verbatim:\n  {want}"
+    );
+}
+
+/// **The pre-registered language rule, evaluated from the runs** (D-2; cycle 14, R2-05): if
+/// SQL+C+L refuses at check time every E14 class and every d14 spelling the Niles checker
+/// refuses, the question closes as (d), otherwise as (b). Niles's verdicts come from `nilesc`,
+/// SQL+C+L's from the `nilescheck-sql` binary (both built here, in this test's profile), each
+/// over its own copy of the same eighteen defects. The outcome is required in E14's document
+/// and in claim H-L1, so neither can say something the runs did not.
+#[test]
+fn the_language_rule_is_evaluated_from_the_runs() {
+    let root = repo_root();
+    let _ = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
+        .args(if cfg!(debug_assertions) {
+            [
+                "build",
+                "--quiet",
+                "-p",
+                "nilescheck-sql",
+                "--bin",
+                "nilescheck-sql",
+            ]
+            .as_slice()
+        } else {
+            [
+                "build",
+                "--quiet",
+                "--release",
+                "-p",
+                "nilescheck-sql",
+                "--bin",
+                "nilescheck-sql",
+            ]
+            .as_slice()
+        })
+        .current_dir(&root)
+        .status();
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join("target"));
+    let sqlc = target
+        .join(if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        })
+        .join("nilescheck-sql");
+    assert!(
+        sqlc.is_file(),
+        "BLOCKED-nilescheck-sql: no binary at {}",
+        sqlc.display()
+    );
+    let pre = root.join("crates/counterproposal/sql-checked/_preamble.sql");
+    let sql_refuses = |f: &std::path::Path| -> bool {
+        let o = Command::new(&sqlc)
+            .arg(&pre)
+            .arg(f)
+            .current_dir(&root)
+            .output()
+            .expect("run nilescheck-sql");
+        let out = String::from_utf8_lossy(&o.stdout);
+        assert!(
+            out.contains("error[") || out.contains("warning[") || out.contains("ok:"),
+            "BLOCKED-nilescheck-sql: no verdict on {}: {out}",
+            f.display()
+        );
+        out.contains(": error[")
+    };
+    // (name, Niles refuses, SQL+C+L refuses)
+    let mut rows = Vec::new();
+    for n in 1..=13 {
+        let find = |dir: &str, ext: &str| {
+            std::fs::read_dir(root.join(dir))
+                .unwrap()
+                .flatten()
+                .map(|e| e.path())
+                .find(|p| {
+                    let s = p.file_name().unwrap().to_string_lossy().to_string();
+                    s.starts_with(&format!("d{n}_")) && s.ends_with(ext)
+                })
+                .unwrap_or_else(|| panic!("no d{n} in {dir}"))
+        };
+        let nf = find("crates/counterproposal/niles", ".niles");
+        let sf = find("crates/counterproposal/sql-checked", ".sql");
+        rows.push((
+            format!("d{n}"),
+            verdict_of(&nf) == Verdict::Refused,
+            sql_refuses(&sf),
+        ));
+    }
+    for k in 1..=5 {
+        let pick = |dir: &str, ext: &str| {
+            std::fs::read_dir(root.join(dir))
+                .unwrap()
+                .flatten()
+                .map(|e| e.path())
+                .find(|p| {
+                    let s = p.file_name().unwrap().to_string_lossy().to_string();
+                    s.starts_with(&format!("d14_{k}_")) && s.ends_with(ext)
+                })
+                .unwrap_or_else(|| panic!("no d14_{k} in {dir}"))
+        };
+        let nf = pick("crates/counterproposal/d14/niles", ".niles");
+        let sf = pick("crates/counterproposal/d14/sql", ".sql");
+        rows.push((
+            format!("d14.{k}"),
+            verdict_of(&nf) == Verdict::Refused,
+            sql_refuses(&sf),
+        ));
+    }
+    let missed: Vec<&str> = rows
+        .iter()
+        .filter(|(_, niles, sql)| *niles && !*sql)
+        .map(|(n, _, _)| n.as_str())
+        .collect();
+    let outcome = if missed.is_empty() { "(d)" } else { "(b)" };
+    let doc = std::fs::read_to_string(root.join("results/E14-minimal-counterproposal.md"))
+        .expect("E14's document");
+    let want = format!("the rule selects {outcome}");
+    assert!(
+        doc.contains(&want),
+        "E14's document must say `{want}`; SQL+C+L misses {missed:?} of what Niles refuses. Rows: {rows:?}"
+    );
+    let status = std::fs::read_to_string(root.join("thesis/status.toml")).expect("status.toml");
+    let h = status
+        .split("[[claim]]")
+        .find(|c| c.contains("id = \"H-L1\""))
+        .expect("claim H-L1 exists");
+    assert!(
+        h.contains(&format!("selects {outcome}")),
+        "H-L1 must say `selects {outcome}`"
+    );
+}

@@ -74,3 +74,36 @@ for f in crates/counterproposal/sql-checked/d*.sql; do
 done
 echo
 echo "  $total defect classes: $caught caught at check time by the checker"
+
+echo
+echo "== part 5: SQL+C+L (crates/nilescheck-sql, R2-05) on the thirteen classes and d14's spellings =="
+refused=0; total=0
+for f in crates/counterproposal/sql-checked/d*.sql crates/counterproposal/d14/sql/d14_*.sql; do
+  n=$(basename "$f" .sql)
+  out=$(cargo run -q -p nilescheck-sql -- crates/counterproposal/sql-checked/_preamble.sql "$f" 2>&1)
+  codes=$(echo "$out" | grep -oE "(error|warning)\[[A-Z0-9]+\]" | sort -u | tr '\n' ' ')
+  total=$((total + 1))
+  if echo "$out" | grep -q ": error\["; then st="refused"; refused=$((refused + 1));
+  elif [ -n "$codes" ]; then st="warned"; else st="not caught"; fi
+  printf "  %-34s %-11s %s\n" "$n" "$st" "$codes"
+done
+echo
+echo "  $total programs: $refused refused at check time by SQL+C+L"
+
+echo
+echo "== part 6: d14's spellings in Niles and Rust =="
+for f in crates/counterproposal/d14/niles/*.niles; do
+  n=$(basename "$f" .niles)
+  out=$(cargo run -q -p nilesc -- check "$f" 2>&1)
+  codes=$(echo "$out" | grep -oE "^(error|warning)\[NL[0-9]+\]" | sort -u | tr '\n' ' ')
+  if echo "$out" | grep -q "^ok:"; then st="accepted"; else st="REJECTED"; fi
+  printf "  niles %-30s %-9s %s\n" "$n" "$st" "$codes"
+done
+rs_out=$(mktemp -d)
+for f in crates/counterproposal/d14/rust/*.rs; do
+  n=$(basename "$f" .rs)
+  if rustc --edition 2021 --crate-type bin -o "$rs_out/a" "$f" >/dev/null 2>&1; then r="accepted"; else r="REFUSED"; fi
+  if clippy-driver --edition 2021 --crate-type bin -D warnings -o "$rs_out/b" "$f" >/dev/null 2>&1; then c="accepted"; else c="REFUSED"; fi
+  printf "  rust  %-30s rustc %-9s clippy %s\n" "$n" "$r" "$c"
+done
+rm -rf "$rs_out"

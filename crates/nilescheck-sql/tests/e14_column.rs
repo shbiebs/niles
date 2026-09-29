@@ -43,15 +43,15 @@ fn verdicts() -> Vec<(String, Vec<String>)> {
 
 /// What this arm is expected to reach, and for the three it cannot, why.
 const EXPECTED: &[(&str, &[&str])] = &[
-    ("d1_unbalanced", &[]), // conservation needs the solver over the postings (R2-05)
+    ("d1_unbalanced", &[]), // conservation needs the solver over the postings (SQL+C+L, R2-05)
     ("d2_cross_currency_sum", &["NL0250"]),
     ("d3_wrong_scale", &["NL0240"]),
-    ("d4_mixed_currency_txn", &[]), // the solver again (R2-05); PostgreSQL's trigger catches it at COMMIT
+    ("d4_mixed_currency_txn", &[]), // the solver again (SQL+C+L); PostgreSQL's trigger catches it at COMMIT
     ("d5_stale_authorization", &["NL0311"]),
     ("d6_wall_clock_predicate", &["IR013"]),
     ("d7_stale_read_after_boundary", &["NL0310"]),
     ("d8_confidential_predicate", &["NL0260"]),
-    ("d9_unauthorized_overdraft", &[]), // an authority is a capability; SQL has no type to carry one
+    ("d9_unauthorized_overdraft", &[]), // a capability: the catalog checker has no rule for one (SQL+C+L does, R2-05)
     ("d10_ledger_without_conserve", &["NL0211"]),
     ("d11_update_ledger", &["NL0230"]),
     ("d12_infeasible_contract", &["NL0220"]),
@@ -61,7 +61,7 @@ const EXPECTED: &[(&str, &[&str])] = &[
 pub fn totals_line(v: &[(String, Vec<String>)]) -> String {
     let caught = v.iter().filter(|(_, c)| !c.is_empty()).count();
     format!(
-        "PostgreSQL + checker: {caught} of {} caught at check time, {} not caught (d1 and d4 need the conservation solver, R2-05; d9 needs a capability SQL cannot type).",
+        "PostgreSQL + checker: {caught} of {} caught at check time, {} not caught (d1 and d4 need the conservation solver, d9 a capability; SQL+C+L adds both, R2-05).",
         v.len(),
         v.len() - caught
     )

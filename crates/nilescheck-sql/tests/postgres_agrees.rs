@@ -128,3 +128,79 @@ fn postgresql_alone_accepts_every_checked_defect_at_definition_time() {
         refused.join("\n")
     );
 }
+
+/// **E14's PostgreSQL column for d14** (R2-05): each spelling of
+/// `crates/counterproposal/d14/sql/` is created and run on PostgreSQL 16 with the preamble,
+/// and the hold's state is read back. PostgreSQL refuses none at definition time, raises
+/// nothing at run time, and leaves the hold open — `never`, in E14's terms. The control
+/// resolves it. Inside `begin … rollback`, in a scratch schema.
+#[test]
+fn postgresql_runs_every_d14_spelling_and_leaves_the_hold_open() {
+    let mut c = client();
+    let cp = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../counterproposal");
+    let pre = std::fs::read_to_string(cp.join("sql-checked/_preamble.sql")).unwrap();
+    let mut files: Vec<_> = std::fs::read_dir(cp.join("d14/sql"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .collect();
+    files.sort();
+    let mut seen = Vec::new();
+    for f in &files {
+        let n = f.file_stem().unwrap().to_string_lossy().to_string();
+        let call = if n == "ok_resolved" {
+            "select f(1, true)"
+        } else {
+            "select f(1)"
+        };
+        c.simple("begin").unwrap();
+        let _ = c.simple("create schema if not exists nilescheck_d14");
+        let _ = c.simple("set local search_path = nilescheck_d14");
+        let created = c.simple(&format!("{pre}\n{}", std::fs::read_to_string(f).unwrap()));
+        let ran = created.as_ref().ok().map(|_| c.simple(call));
+        let state = c
+            .simple("select string_agg(state, ',' order by id) from holds")
+            .ok()
+            .and_then(|r| {
+                r.rows
+                    .first()
+                    .and_then(|row| row.first().cloned().flatten())
+            });
+        let _ = c.simple("rollback");
+        assert!(
+            created.is_ok(),
+            "{n}: PostgreSQL refused it at definition time: {created:?}"
+        );
+        let ran = ran.unwrap();
+        assert!(ran.is_ok(), "{n}: PostgreSQL raised at run time: {ran:?}");
+        seen.push((n, state.unwrap_or_default()));
+    }
+    let want: Vec<(String, String)> = [
+        ("d14_1_bare_call", "open"),
+        ("d14_2_discarded_binding", "open"),
+        ("d14_3_bound_read_dropped", "open"),
+        ("d14_4_explicit_ignore", "open"),
+        ("d14_5_forget", "open"),
+        ("ok_resolved", "posted"),
+    ]
+    .iter()
+    .map(|(a, b)| (a.to_string(), b.to_string()))
+    .collect();
+    assert_eq!(seen, want);
+    let doc = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../results/E14-minimal-counterproposal.md"),
+    )
+    .unwrap();
+    let open = seen
+        .iter()
+        .filter(|(n, s)| n.starts_with("d14_") && s == "open")
+        .count();
+    let line = format!(
+        "PostgreSQL, d14: 0 of {open} spellings refused at definition time or at run time; each runs and leaves the hold open."
+    );
+    assert!(
+        doc.contains(&line),
+        "E14's document must say, verbatim:\n  {line}"
+    );
+}

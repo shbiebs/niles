@@ -39,7 +39,13 @@ pub fn provenance(repo: &Path) -> Vec<(String, String)> {
         ("host".into(), sh("uname -srm")),
         ("cpus".into(), sh("nproc 2>/dev/null || sysctl -n hw.ncpu")),
         ("mem_mib".into(), sh("free -m 2>/dev/null | awk '/^Mem:/{print $2}' | grep . || echo $(( $(sysctl -n hw.memsize) / 1048576 ))")),
-        ("toolchain".into(), sh("cargo --version")),
+        // `cargo --version` inside the repository resolves the pinned toolchain, which does not
+        // install on the cloud container (its proxy refuses static.rust-lang.org), and printed
+        // nothing into R2-03's first 20 points. The project builds with `stable` there.
+        (
+            "toolchain".into(),
+            sh("RUSTUP_TOOLCHAIN=${RUSTUP_TOOLCHAIN:-stable} cargo --version"),
+        ),
         ("postgres".into(), sh(&format!("{}/postgres --version", crate::pgcluster::bin()))),
         ("date".into(), sh("date -u +%Y-%m-%dT%H:%M:%SZ")),
     ]

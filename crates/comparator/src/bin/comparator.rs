@@ -175,12 +175,6 @@ fn main() {
                 .iter()
                 .map(|a| (a.name().to_string(), a.describe()))
                 .collect();
-            let refs: Vec<&dyn Arm> = arms
-                .iter()
-                .filter(|a| !matches!(a.name(), "M+" | "H1M"))
-                .map(|a| a.as_ref())
-                .collect();
-            let table = comparator::arms::sql_table(&refs);
             let p99 = arg(&args, "--shape").as_deref() == Some("p99");
             let p99e = arg(&args, "--shape").as_deref() == Some("p99-engine");
             let (shape, stem, dir) = if p99e {
@@ -209,6 +203,15 @@ fn main() {
             // `--stem` renders another directory (e.g. Host C's) into its own files, so a
             // rendering of one host can never overwrite another's.
             let stem = arg(&args, "--stem").unwrap_or_else(|| stem.to_string());
+            // The query table has a column per arm this rendering measured.
+            let measured = comparator::render::arms_in(&dir);
+            let refs: Vec<&dyn Arm> = arms
+                .iter()
+                .filter(|a| !matches!(a.name(), "M+" | "H1M"))
+                .filter(|a| measured.is_empty() || measured.contains(a.name()))
+                .map(|a| a.as_ref())
+                .collect();
+            let table = comparator::arms::sql_table(&refs);
             let main = root.join(format!("results/{stem}.md"));
             let detail = root.join(format!("results/{stem}-detail.md"));
             comparator::render::render(&dir, &main, &detail, &lines, &table, shape)
@@ -283,6 +286,9 @@ fn main() {
             for (k, v) in comparator::store::provenance(&root) {
                 out += &format!("meta\t{k}\t{v}\n");
             }
+            // R2-03's probe file was written without this line; MANIFEST.csv states it for
+            // that file. Every later probe states it itself.
+            out += "meta\tcheckpoint_interval\t16 on N, P+ and M+; n/a on H1 and H1M (no per-key ledger checkpoint)\n";
             for arm in arms.iter_mut() {
                 for mutate in [false, true] {
                     for rep in 0..reps {

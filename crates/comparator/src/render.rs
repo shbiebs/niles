@@ -90,6 +90,17 @@ fn f(x: f64) -> String {
     }
 }
 
+/// A share as a percentage with enough digits that 0.1% is not printed as zero.
+fn pct(x: f64) -> String {
+    if !x.is_finite() {
+        "—".into()
+    } else if x == 0.0 {
+        "0".into()
+    } else {
+        format!("{:.3}%", x * 100.0)
+    }
+}
+
 fn size_label(n: u64) -> String {
     match n {
         1_000 => "10³".into(),
@@ -111,8 +122,12 @@ pub fn load(dir: &Path) -> BTreeMap<(String, u64, u64), Stored> {
             {
                 continue;
             }
+            // Only point files: the calibration table sits in the same directory, has meta
+            // lines of its own and no series.
             if let Ok(st) = Stored::read(&p) {
-                out.insert((st.series(), st.num("accounts"), st.num("seed")), st);
+                if !st.series().is_empty() {
+                    out.insert((st.series(), st.num("accounts"), st.num("seed")), st);
+                }
             }
         }
     }
@@ -139,6 +154,12 @@ fn series_of(st: &Stored, arm: &str, metric: &str) -> Series {
         .map(|(_, v)| *v)
         .collect();
     (measured, warm)
+}
+
+/// Every arm loaded in any point of `dir`, so a rendering's query table has a column for
+/// the arms it measured and no others.
+pub fn arms_in(dir: &Path) -> BTreeSet<String> {
+    load(dir).values().flat_map(arms_of).collect()
 }
 
 fn arms_of(st: &Stored) -> BTreeSet<String> {
@@ -276,7 +297,23 @@ pub fn render(
             .join("; ")
     );
     let _ = writeln!(s, "| host | {} — {} CPUs, {} MiB (the cloud container: every concurrency figure is on 2 cores) |", meta("host"), meta("cpus"), meta("mem_mib"));
-    let _ = writeln!(s, "| toolchain | {} |", meta("toolchain"));
+    // Every distinct value, so an empty one (see Deviations) is shown beside the rest.
+    let chains: BTreeSet<String> = points
+        .values()
+        .map(|p| {
+            let t = p.meta.get("toolchain").cloned().unwrap_or_default();
+            if t.is_empty() {
+                "(empty)".to_string()
+            } else {
+                format!("`{t}`")
+            }
+        })
+        .collect();
+    let _ = writeln!(
+        s,
+        "| toolchain | {} |",
+        chains.into_iter().collect::<Vec<_>>().join("; ")
+    );
     let _ = writeln!(s, "| PostgreSQL | {} |", meta("postgres"));
     let dates: BTreeSet<String> = points
         .values()
@@ -741,7 +778,12 @@ pub fn render(
     // Probe.
     let _ = writeln!(s, "## 7. The five anomalies (§5.7)\n");
     let probe = std::fs::read_to_string(dir.join("probe.tsv")).unwrap_or_default();
-    if probe.is_empty() {
+    if probe.is_empty() && !shape.flag.is_empty() {
+        let _ = writeln!(
+            s,
+            "*Not part of this shape: the probe runs once, with the main sweep (`results/E27-comparator.md` §7).*\n"
+        );
+    } else if probe.is_empty() {
         let _ = writeln!(s, "*Not run yet.*\n");
     } else {
         let _ = writeln!(s, "Driver and predicates: `crates/comparator/src/probe.rs`. 10³ accounts, budget 5 against 20 hot keys, 4 readers at the head, one appender, and in the second mode one mutator rewriting a historical leg (+10⁹ / −10⁹ in one transaction). Counts are reads (or resident slots, for lost delta) matching each predicate; deadlocks are 40P01 errors on any connection. M and P are a full materialised view with no partial state and no anchor on a read, so the five — anomalies of partial maintenance — have nothing to act on; the mutable arm with partial state is M+ (P+ without the append-only trigger); H1's is H1M (H1 without it). H1's reads carry no anchor: each is bracketed by ReadySet's applied position before and after it and is right if it matches the truth at any epoch in the bracket. Since R2-03 the mutating mode holds a read to the mutations that had landed when it ran, not to the final base (see Deviations).\n");
@@ -839,7 +881,7 @@ pub fn render(
             "## 7a. Answers from a replica: exactness and staleness (H1, T)\n"
         );
         let _ = writeln!(s, "H1 (ReadySet) and T (the REV fed by TigerBeetle's CDC) answer from state that trails the ledger. Each read is bracketed by the replica's applied position just before and just after it. An answer equal to the oracle at the head is fresh; one equal to it only at an earlier epoch in the bracket is **stale**, not a divergence; one equal to it at no epoch in the bracket is **inexact** — a divergence, which refuses the arm's comparisons at that point (§6). Per series, size and arm: the median over seeds of each seed's median over its measured runs, and the largest lag seen.\n");
-        let _ = writeln!(s, "| series | size | arm | inexactness rate | stale share | max stale lag (epochs) |\n|---|---|---|---|---|---|");
+        let _ = writeln!(s, "| series | size | arm | inexactness rate (% of reads) | stale share (% of reads) | max stale lag (epochs) |\n|---|---|---|---|---|---|");
         for se in &series {
             for n in &sizes {
                 for arm in REPLICA_ARMS {
@@ -880,8 +922,8 @@ pub fn render(
                         s,
                         "| {se} | {} | {arm} | {} | {} | {} |",
                         size_label(*n),
-                        f(med_over_seeds("inexactness_rate")),
-                        f(med_over_seeds("stale_read_share")),
+                        pct(med_over_seeds("inexactness_rate")),
+                        pct(med_over_seeds("stale_read_share")),
                         f(lag)
                     );
                 }
@@ -892,7 +934,7 @@ pub fn render(
 
     // H-E1.
     let _ = writeln!(s, "## 8. What this says about H-E1\n");
-    let _ = writeln!(s, "§7's engine rule needs N to beat **P+ and H3** by the joint gate on resident bytes per key ever read and on p99 read latency under eviction; T informs the write floor (commits/s against N and P+). The rows below are §2's size verdicts for those pairs.{}\n", if shape.flag.is_empty() { " Their p99 rows are the main sweep's, where a run held about 110 samples of a query; the targeted re-run the author chose is the one that resolves p99." } else { "" });
+    let _ = writeln!(s, "§7's engine rule needs N to beat **P+ and H3** by the joint gate on resident bytes per key ever read and on p99 read latency under eviction; T informs the write floor (commits/s against N and P+). The rows below are §2's size verdicts for those pairs.{}\n", if shape.flag.is_empty() { " Their p99 rows are the main sweep's, where a run held about 110 samples of a query; the targeted re-run the author chose, `results/E27-p99-engine.md` §8, is the one that resolves p99 (about 1,000 samples of each query per run)." } else { "" });
     let _ = writeln!(
         s,
         "| series | pair | metric | {} |\n|---|---|---|{}",
@@ -1004,7 +1046,7 @@ pub const P99_ENGINE: Shape = Shape {
     title: "E27-p99-engine — read latency tails under eviction, N against P+, H3 and T",
     flag: " --shape p99-engine",
     run_shape: "as E27-p99: 3 warm-up runs then 10 measured runs per (arm, size, seed), interleaved; a run = 2,000 point reads at 1 client (q1 and q2 half each, no writes), then 4 clients × 500 reads — on the multi-currency series at 10⁵, q1 only (the author's decision of 2026-09-28)",
-    preface: "**Why this file exists.** §7's engine rule compares N with P+ **and H3** on p99 read latency under eviction, and T's reads are measured beside them. The author chose on 2026-09-28 (R2-03) to run the targeted p99 shape of `results/E27-p99.md` again with the four engine-rule arms interleaved together. `results/E27-p99.md` (N against P+ only) is unchanged. Same universe, seeds, sizes, gate, floor and refusal rule as E27. T's answers are checked at its bracketed frontier (E27 §7a); an inexact one refuses its comparisons.",
+    preface: "**Why this file exists.** §7's engine rule compares N with P+ **and H3** on p99 read latency under eviction, and T's reads are measured beside them. The author chose on 2026-09-28 (R2-03) to run the targeted p99 shape of `results/E27-p99.md` again with the four engine-rule arms interleaved together. `results/E27-p99.md` (N against P+ only) keeps its R2-02 points unchanged; only its rendering follows the current renderer. Same universe, seeds, sizes, gate, floor and refusal rule as E27. T's answers are checked at its bracketed frontier (E27 §7a); an inexact one refuses its comparisons.",
 };
 
 /// The deviations E27 states in its header. Each is a fact about this build, recorded in the
@@ -1030,6 +1072,10 @@ pub const DEVIATIONS: &[&str] = &[
     "**H1's residency budget is in bytes** (the author's decision of 2026-09-28): per series and size, on seed 1's universe and on H1 alone, `readyset_allocator_allocated_bytes` after the load (a0) and after reading every key once (a1) set `--memory-limit = a0 + (a1 − a0) × budget / keys` — the same share of keys as the other partial arms. It is ReadySet's allocator figure, not PSS, because that is what its limit is enforced against.",
     "**H3's write is acknowledged only when its epoch has arrived through logical replication and been applied to the REV**, so H3's reads are exact at the head, like N's and P+'s, and its write latency includes the replication hop. Its upquery is `epoch <= e` on the ledger's index, with no checkpoints, as §R2-03 specifies; its q3–q6 are relayed to its PostgreSQL.",
     "**T's write is acknowledged at TigerBeetle's commit** (one replica, Direct I/O), not when the view has it: T is the write floor (§7). Its reads come from the REV fed by the change stream and are checked at the sidecar's bracketed frontier (§7a); a read as of an epoch TigerBeetle has committed but the stream has not yet delivered waits for it (up to 30 s) — before that repair, found in the sweep's first minutes and before any point was written, such a read was refused and counted as a divergence. Its upquery is TigerBeetle's account balance at the epoch's timestamp — an index lookup reporting one row — so its base rows per reconstruction are not comparable with a fold's. `--cache-grid=256MiB` rather than the 1 GiB default, set before any T measurement so the eight arms fit the 8 GB host; TigerBeetle allocates about 2.3 GiB at start regardless, which is in T's memory.",
+    "**H1 is absent at 10⁵ as well** (the author's decision of 2026-09-29): in the first 10⁵ point the container's memory cgroup killed ReadySet at run 7 of 13 (RSS 1.9 GB against a calibrated byte limit of about 350 MB; kernel log `task=readyset`), which refused every comparison at that point. That point is kept, unchanged, in `results/E27-comparator/failed/`; the six other arms were re-run for it. Earlier in the same aborted attempt (seed 7, a warm-up run) H1 returned one q6 extract that matched the oracle at no epoch in its bracket; no kept point contains it, and the note below on H1's replication offset bears on how to read it.",
+    "**On the multi-currency series at 10⁵ only N, P+, H2 and H3 run** (the author's decision of 2026-09-29): with six arms loaded, the memory cgroup killed N at run 3 of the first point (N grows to ~2.8 GB there, as R2-02 measured). P's and M's multi-currency 10⁵ figures are R2-02's four-arm points in `results/E27-comparator/r2-02-four-arms/` — the same host, universe and seeds, a different run and build — cited there and never pooled with these.",
+    "**ReadySet's replication offset runs ahead of what its readers see.** The probe's one H1 skipped delta (append + mutate mode, repetition 1, where every mutation was refused by the append-only trigger) is key (193, 0) read as −4,964,547 inside a bracket of exactly #296; recomputing the probe's oracle gives −4,991,801 at #295 and #296 and −4,964,547 at #294. The read was two epochs *staler* than the offset ReadySet reported before it, not missing a delta. The bracket (`h1.rs`) therefore bounds ReadySet's base tables, not its reader views, and an H1 answer classified as inexact may instead be stale beyond it; the main sweep recorded no inexact H1 answer, so no H1 cell depends on the difference.",
+    "**The first 20 points (10³ and 10⁴) record an empty `toolchain`**: the provenance probe ran `cargo --version` inside the worktree, which resolves the pinned toolchain that does not install here. Every binary was built with `cargo 1.95.0 (f2d3ce0bd 2026-03-21)` under `RUSTUP_TOOLCHAIN=stable`; the 10⁵ points and the p99-engine points record it, and `store::provenance` now asks for it explicitly.",
     "**T is absent at 10⁵** (the author's decision of 2026-09-28): the eight arms do not fit the 8 GB host together at 10⁵ — in a load-only check the first seven reached about 5.5 GB and the container's memory-cgroup limit killed TigerBeetle while it allocated its ~2.3 GiB (kernel log: `oom-kill: constraint=CONSTRAINT_MEMCG … task=tigerbeetle`). The other seven arms run interleaved at 10⁵; T's write floor is judged at 10³ and 10⁴; T's 10⁵ read tails are in `results/E27-p99-engine.md`, where N, P+, H3 and T fit together. Cells of T's pairs at 10⁵ show —.",
     "**Versions as installed** (`claude/cycle-14-r2-03-downloads.md`): the PostgreSQL server stayed at 16.13 (held); `postgresql-server-dev-16` and `libpq5` are 16.15, so pg_ivm 1.15 is built against 16.15 headers and loads into the 16.13 server (the module magic block checks the major version); RabbitMQ 3.12.1 from Ubuntu 24.04 left upstream community support on 29 Feb 2024 and is used only as T's change-stream transport.",
 ];

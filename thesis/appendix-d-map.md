@@ -3,7 +3,7 @@
 | Crate | Role | public items |
 |---|---|--:|
 | `bank-bench` | NilesBank generator, wall-clock harness, thesis drift tests | 114 |
-| `comparator` | E27: Nilestream against PostgreSQL, pg_ivm, ReadySet, a REV sidecar and TigerBeetle under eviction, across bank sizes; the five-anomalies probe | 90 |
+| `comparator` | E27: Nilestream against PostgreSQL, pg_ivm, ReadySet, a REV sidecar and TigerBeetle under eviction, across bank sizes; the five-anomalies probe | 91 |
 | `conservation-suite` | Reference oracle and the conservation property tests | 23 |
 | `experiments` | The E-series measurement harness | 0 |
 | `niles-interp` | The imperative-subset interpreter `nilesc run` drives, and the ledger it posts to | 16 |

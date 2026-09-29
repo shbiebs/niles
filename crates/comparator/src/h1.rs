@@ -347,7 +347,7 @@ impl Arm for H1Arm {
         format!(
             "ReadySet stable-260924 (1.31.0; BSL 1.1, non-production benchmark use) on 127.0.0.1:{} \
              in front of PostgreSQL 16 (own cluster on 127.0.0.1:{}, SCRAM-SHA-256 as role bench, \
-             {}); deep caches for q1, q4, q5, q6, q2 and q3 proxied to \
+             {}); deep caches for q1, q4, q5 and q6; q2 and q3 proxied to \
              PostgreSQL; {}; every answer checked against the oracle at the replica's bracketed \
              position",
             self.port,

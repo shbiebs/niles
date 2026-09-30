@@ -15,6 +15,7 @@ pub mod parser;
 pub mod plpgsql;
 pub mod stmt;
 pub mod stmt2;
+pub mod typing;
 
 /// Parse a script: every statement, comments set aside.
 pub fn parse(src: &str) -> Result<(Vec<ast::Stmt>, Vec<lex::Token>), parser::ParseError> {
@@ -90,5 +91,14 @@ pub fn check_all(stmts: &[ast::Stmt]) -> Vec<check::Diag> {
     d.extend(conserve::check(stmts));
     d.extend(capability::check(stmts));
     d.extend(effects::check(stmts));
+    // The typing rules re-derive NL0250 where `check2` already found it on columns: a
+    // typing report at the same place as an existing one of its code is not added twice.
+    let mut seen: std::collections::BTreeSet<(&str, usize, usize)> =
+        d.iter().map(|x| (x.code, x.span.start, x.span.end)).collect();
+    for x in typing::check(stmts) {
+        if seen.insert((x.code, x.span.start, x.span.end)) {
+            d.push(x);
+        }
+    }
     d
 }

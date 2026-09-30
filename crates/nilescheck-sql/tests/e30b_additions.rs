@@ -162,3 +162,92 @@ fn an_unreadable_annotation_item_is_a_warning_not_a_pass() {
     );
     assert!(c.contains(&"NSQ003"), "{c:?}");
 }
+
+// ---------------------------------------------------------------- 5.2 typing of bodies
+
+fn body(params: &str, decls: &str, stmts: &str) -> String {
+    format!(
+        "create function f({params}) returns void language plpgsql as $$\ndeclare\n    t bigint := 1;\n    e bigint := 1;\n{decls}\nbegin\n{stmts}\nend $$;\n"
+    )
+}
+
+#[test]
+fn minor_units_of_two_currencies_do_not_add() {
+    let prog = |n: &str| body(&format!("m usd, n {n}"), "    x bigint;", "    x := (m).minor + (n).minor;");
+    assert!(errors("r1", &prog("usd")).is_empty());
+    assert_eq!(errors("r1", &prog("eur")), ["NL0250"]);
+}
+
+#[test]
+fn a_currency_built_from_another_currencys_minor_units_is_nl0255() {
+    let prog = |src: &str| {
+        body(
+            &format!("a bigint, b bigint, m {src}"),
+            "",
+            "    insert into postings (txn, acct, cur, amt_eur, epoch, value_date) values\n        (t, a, 'eur', row(-(m).minor)::eur, e, current_date),\n        (t, b, 'eur', row((m).minor)::eur, e, current_date);",
+        )
+    };
+    assert!(errors("r1", &prog("eur")).is_empty());
+    assert_eq!(errors("r1", &prog("usd")), ["NL0255"]);
+}
+
+#[test]
+fn an_argument_of_the_wrong_currency_is_nl0255() {
+    let prog = |n: &str| {
+        format!(
+            "create function g(a bigint, m usd) returns void language plpgsql as $$ begin perform 1; end $$;\n{}",
+            body(&format!("a bigint, n {n}"), "", "    perform g(a, n);")
+        )
+    };
+    assert!(errors("r1", &prog("usd")).is_empty());
+    assert_eq!(errors("r1", &prog("eur")), ["NL0255"]);
+}
+
+#[test]
+fn a_ledger_row_labelled_with_another_currency_is_nl0255_in_r1() {
+    let prog = |label: &str| {
+        body(
+            "a bigint, b bigint, m usd",
+            "",
+            &format!("    insert into postings (txn, acct, cur, amt_usd, epoch, value_date) values\n        (t, a, '{label}', row(-(m).minor)::usd, e, current_date),\n        (t, b, '{label}', m, e, current_date);"),
+        )
+    };
+    assert!(errors("r1", &prog("usd")).is_empty());
+    assert_eq!(errors("r1", &prog("eur")), ["NL0255"]);
+}
+
+#[test]
+fn a_ledger_row_labelled_with_another_currency_is_nl0255_in_r2() {
+    let prog = |label: &str| {
+        body(
+            "a bigint, b bigint, m usd",
+            "",
+            &format!("    insert into postings (txn, acct, cur, amt, epoch, value_date) values\n        (t, a, '{label}', -(m).minor, e, current_date),\n        (t, b, '{label}', (m).minor, e, current_date);"),
+        )
+    };
+    assert!(errors("r2", &prog("usd")).is_empty(), "{:?}", errors("r2", &prog("usd")));
+    assert_eq!(errors("r2", &prog("eur")), ["NL0255"]);
+}
+
+#[test]
+fn a_declaration_or_a_return_of_the_wrong_currency_is_nl0332() {
+    let decl = |n: &str| body(&format!("n {n}"), "    x usd := n;", "    perform 1;");
+    assert!(errors("r1", &decl("usd")).is_empty());
+    assert_eq!(errors("r1", &decl("eur")), ["NL0332"]);
+    let ret = |n: &str| {
+        format!("create function r(n {n}) returns usd language plpgsql as $$ begin return n; end $$;\n")
+    };
+    assert!(errors("r1", &ret("usd")).is_empty());
+    assert_eq!(errors("r1", &ret("eur")), ["NL0332"]);
+}
+
+#[test]
+fn what_the_typing_cannot_see_it_leaves_alone() {
+    // A plain integer relabelled as usd: no currency to compare, so nothing is refused.
+    let prog = body(
+        "a bigint, b bigint, k bigint",
+        "",
+        "    insert into postings (txn, acct, cur, amt_usd, epoch, value_date) values\n        (t, a, 'usd', row(-k)::usd, e, current_date),\n        (t, b, 'usd', row(k)::usd, e, current_date);",
+    );
+    assert!(errors("r1", &prog).is_empty(), "{:?}", errors("r1", &prog));
+}

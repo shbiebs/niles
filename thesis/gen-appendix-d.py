@@ -43,7 +43,7 @@ ROLE = {
     "nilestream-server": "Daemon: sessions, PostgreSQL wire surface, conformance",
     "conservation-suite": "Reference oracle and the conservation property tests",
     "bank-bench": "NilesBank generator, wall-clock harness, thesis drift tests",
-    "comparator": "E27: Nilestream against PostgreSQL, pg_ivm, ReadySet, a REV sidecar and TigerBeetle under eviction, across bank sizes; the five-anomalies probe",
+    "comparator": "E27: Nilestream against PostgreSQL, pg_ivm, ReadySet, a REV sidecar and TigerBeetle under eviction, across bank sizes; the five-anomalies probe; E27b (`--study e27b`): view-state bytes per key read and the engine rule evaluated",
     "nilescheck-sql": "Hand-written PostgreSQL 16 SQL and PL/pgSQL parser; the catalog checker (E14 PostgreSQL + checker) and SQL+C+L: linearity, conservation through niles-lang's solver, capabilities (E14 columns); since cycle 15 (E30b′) effect annotations (NL0310), body typing (NL0250/NL0255/NL0332) and NSQ002 for dynamic SQL in a ledger writer",
     "rev-sidecar": "E27 arms H3 and T: a nilestream-core REV fed by PostgreSQL logical replication (pgoutput) or TigerBeetle CDC, served over the PostgreSQL wire",
     "syntax-study": "E30: the syntax study — one corpus in five surfaces, an oracle, the executors and the mutation classification (design docs/study/E30-syntax-design.md); and E30b′, the adversarial study of whether Niles needs its own grammar (docs/study/E30b-design.md)",

@@ -1320,7 +1320,18 @@ impl<'a> Lx<'a> {
             cur = id;
         }
         if let Some(h) = &s.having {
-            let p = self.predicate(cur, h, "having")?;
+            // **An aggregate call in `having` names the aggregate's output column.**
+            //
+            // `having sum(amt) < 0` lowered the call as a scalar over the aggregate's output,
+            // where it resolved to nothing and became an argument-less UDF: every group
+            // compared null and was dropped, and the query answered no rows with no
+            // diagnostic (cycle 14, R2-06, found writing E30's Q02). The call is now matched
+            // the way `order by` matches one — by kind and by argument against the aggregates
+            // the query computes — and rewritten to that column; an aggregate the query does
+            // not compute is refused.
+            let out_names = self.schema_of(cur).to_vec();
+            let h = self.having_aggregates(h, agg_input, &agg_columns, &out_names)?;
+            let p = self.predicate(cur, &h, "having")?;
             let id = self
                 .circuit
                 .add(Op::Filter { predicate: p }, vec![cur], c, "having");
@@ -2033,6 +2044,71 @@ fn first_pat_name(p: &Pat) -> Option<String> {
 /// `Aggregate` node cannot disagree — which they did: a global aggregate was an aggregate
 /// to the second and not to the first, so `select sum(v) from t` took the projection path
 /// and lowered `sum` as a user function.
+impl Lx<'_> {
+    /// `having`'s aggregate calls, rewritten to the output columns that hold them.
+    fn having_aggregates(
+        &mut self,
+        e: &Expr,
+        agg_input: NodeId,
+        agg_columns: &[((Agg, Scalar), ColIdx)],
+        out_names: &[String],
+    ) -> Option<Expr> {
+        if let Some(a) = aggregate_of(e) {
+            let arg = match e {
+                Expr::Call { args, .. } => args.first().map(|x| &x.value),
+                _ => None,
+            };
+            let lowered = arg.and_then(|x| self.scalar(agg_input, x));
+            let found = lowered.and_then(|v| {
+                agg_columns
+                    .iter()
+                    .find(|((ka, kv), _)| *ka == a && *kv == v)
+                    .map(|(_, i)| *i)
+            });
+            let Some(name) = found.and_then(|i| out_names.get(i as usize)) else {
+                self.d.push(
+                    Diagnostic::error(
+                        "NL0518",
+                        format!(
+                            "`having {}(…)` names an aggregate this query does not compute",
+                            a.as_str()
+                        ),
+                    )
+                    .primary(e.span(), "no output column holds this aggregate")
+                    .note("a `having` predicate filters the groups the query produced, so the aggregate it tests must be one the projection computes, over the same expression"),
+                );
+                return None;
+            };
+            return Some(Expr::Path(Path {
+                segments: vec![Name {
+                    text: name.clone(),
+                    span: e.span(),
+                }],
+                span: e.span(),
+            }));
+        }
+        Some(match e {
+            Expr::Binary { op, lhs, rhs, span } => Expr::Binary {
+                op: *op,
+                lhs: Box::new(self.having_aggregates(lhs, agg_input, agg_columns, out_names)?),
+                rhs: Box::new(self.having_aggregates(rhs, agg_input, agg_columns, out_names)?),
+                span: *span,
+            },
+            Expr::Unary { op, operand, span } => Expr::Unary {
+                op: *op,
+                operand: Box::new(self.having_aggregates(
+                    operand,
+                    agg_input,
+                    agg_columns,
+                    out_names,
+                )?),
+                span: *span,
+            },
+            other => other.clone(),
+        })
+    }
+}
+
 fn aggregate_of(e: &Expr) -> Option<Agg> {
     let Expr::Call { callee, .. } = e else {
         return None;

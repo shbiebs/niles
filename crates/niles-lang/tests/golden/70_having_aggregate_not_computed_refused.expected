@@ -1,0 +1,2 @@
+# 70_having_aggregate_not_computed_refused — `having` tests an aggregate the projection does not compute
+REFUSED NL0518

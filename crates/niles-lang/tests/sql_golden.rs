@@ -340,9 +340,12 @@ fn the_two_surfaces_denote_the_same_zset_wherever_both_are_written() {
     // cases stopped being compared. The list is printed and its length is bounded, so
     // adding a case that silently opts out of the comparison fails here.
     assert!(
-        skipped.len() <= 40,
+        skipped.len() <= 41,
         "{} cases are skipped by this comparison, which is more than the corpus leaves \
-         uncompared today (40: thirty-seven written in one surface, three refused in both).\n\n\
+         uncompared today (41: thirty-eight written in one surface, three refused in both). \
+         It went up by one in cycle 14 (R2-06) for `70_having_aggregate_not_computed_refused`, \
+         a refusal of the SQL surface's `having` that the pipeline's `having(|g| ..)` cannot \
+         spell, because it names output fields rather than aggregate calls.\n\n\
          The bound went *down* by one when the pipeline surface learned to sort descending. \
          `58_order_by_aggregate` used to be here, and the reason it was here was a gap in the \
          surface rather than in the corpus: `order_by` mapped every key to `(k, true)`, so \

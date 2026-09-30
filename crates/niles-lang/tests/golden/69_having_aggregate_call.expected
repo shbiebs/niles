@@ -1,0 +1,3 @@
+# 69_having_aggregate_call — an aggregate *call* in `having`, as SQL writes it (R2-06: it lowered to
+# an argument-less call and dropped every group)
+3 30 x1

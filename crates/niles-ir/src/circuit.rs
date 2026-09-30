@@ -455,7 +455,13 @@ impl Circuit {
                 }
             );
         }
-        for (name, id) in &self.outputs {
+        // Sorted by name. `outputs` is a `HashMap`, and iterating it directly printed the
+        // output lines in a different order on each run (cycle 15 audit: six runs of
+        // `nilesc explain examples/demo_bank.niles`, six different digests), which made an
+        // explain dump useless as a golden file or a diff.
+        let mut outputs: Vec<(&String, &NodeId)> = self.outputs.iter().collect();
+        outputs.sort();
+        for (name, id) in outputs {
             let _ = writeln!(s, "  output {name} = node {id}");
         }
         s
@@ -650,5 +656,29 @@ mod tests {
             e.contains("LedgerConsistent"),
             "the rung must be visible in explain:\n{e}"
         );
+    }
+
+    /// **`explain` lists a circuit's outputs by name, so two runs print the same bytes.**
+    ///
+    /// `outputs` is a `HashMap`, and `explain` iterated it, so the output lines came out in
+    /// a different order on every run. Thirteen outputs, not two: the chance that a random
+    /// order happens to be the sorted one is 1 in 13!, so this fails against the old loop.
+    #[test]
+    fn explain_lists_outputs_sorted_by_name() {
+        let (mut c, agg) = balance_circuit();
+        let names: Vec<String> = (0..12).map(|i| format!("view_{:02}", 11 - i)).collect();
+        for n in &names {
+            c.set_output(n.clone(), agg);
+        }
+        let e = c.explain();
+        let printed: Vec<&str> = e
+            .lines()
+            .filter_map(|l| l.trim_start().strip_prefix("output "))
+            .map(|l| l.split(' ').next().unwrap_or(""))
+            .collect();
+        let mut sorted = printed.clone();
+        sorted.sort_unstable();
+        assert_eq!(printed.len(), 13, "twelve views plus ledger_balance:\n{e}");
+        assert_eq!(printed, sorted, "outputs are not in name order:\n{e}");
     }
 }

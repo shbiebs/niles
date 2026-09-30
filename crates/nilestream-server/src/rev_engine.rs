@@ -1061,10 +1061,18 @@ impl RevEngine {
             // shape outside the fragment, and it is the oracle the fast path is tested
             // against.
             _ => {
-                let sources = match restricted {
+                let mut sources = match restricted {
                     Some(acct) => self.base_for_account(acct, anchor),
                     None => self.base_at(anchor),
                 };
+                // A statement naming `recorded_at` reads the system time as well (C15-05b).
+                // `account_predicate` never restricts a circuit that does.
+                let system = niles_ir::operator::system_time_relation("postings");
+                if circuit.nodes.iter().any(|n| {
+                    matches!(&n.op, niles_ir::operator::Op::Source { relation, .. } if *relation == system)
+                }) {
+                    sources.insert(system, self.postings_at(anchor, true));
+                }
                 self.served_rows.fetch_add(
                     sources.values().map(|z| z.len() as u64).sum::<u64>(),
                     std::sync::atomic::Ordering::Relaxed,
@@ -2248,6 +2256,16 @@ impl RevEngine {
     /// computes with, and a circuit that filtered on one would be filtering on an absence,
     /// which the three-valued rules already handle correctly.
     fn base_at(&self, anchor: u64) -> std::collections::BTreeMap<String, niles_ir::eval::ZSet> {
+        let mut m = std::collections::BTreeMap::new();
+        m.insert("postings".to_string(), self.postings_at(anchor, false));
+        m
+    }
+
+    /// The postings visible at `anchor`, each with the epoch that sealed it appended when
+    /// `recorded_at` is asked for — the system-time read `postings@recorded_at` (cycle 15,
+    /// C15-05b). The log already stores every row under that epoch; this is where a query
+    /// can see it.
+    fn postings_at(&self, anchor: u64, recorded_at: bool) -> niles_ir::eval::ZSet {
         use niles_ir::value::Value;
         let mut z: niles_ir::eval::ZSet = Default::default();
         let base = self.base();
@@ -2259,20 +2277,21 @@ impl RevEngine {
             }
             for r in &e.rows {
                 if let Row::Post(p) = r {
-                    let row = vec![
+                    let mut row = vec![
                         Value::Int(p.txn as i128),
                         Value::Int(p.acct as i128),
                         Value::Int(p.cur as i128),
                         Value::Int(p.amt),
                         Value::Null,
                     ];
+                    if recorded_at {
+                        row.push(Value::Int(e.id as i128));
+                    }
                     niles_ir::eval::add(&mut z, row, 1);
                 }
             }
         }
-        let mut m = std::collections::BTreeMap::new();
-        m.insert("postings".to_string(), z);
-        m
+        z
     }
 
     /// The base restricted to one account, through the anchor index.
@@ -2493,13 +2512,19 @@ fn account_predicate(circuit: &niles_ir::circuit::Circuit) -> Option<u64> {
             _ => None,
         }
     };
-    let mut sources = circuit
-        .nodes
-        .iter()
-        .filter(|n| matches!(&n.op, Op::Source { relation, .. } if relation == "postings"));
+    // Every read of postings counts, its system-time read included (C15-05b): the rule
+    // needs the one read, and it must be the plain one this restriction narrows.
+    let mut sources = circuit.nodes.iter().filter(|n| {
+        matches!(&n.op, Op::Source { relation, .. }
+            if relation == "postings"
+                || niles_ir::operator::system_time_of(relation) == Some("postings"))
+    });
     let (Some(src), None) = (sources.next(), sources.next()) else {
         return None;
     };
+    if !matches!(&src.op, Op::Source { relation, .. } if relation == "postings") {
+        return None;
+    }
     let mut cur = src.id;
     loop {
         let reads: usize = circuit

@@ -614,7 +614,18 @@ impl<'a> Lx<'a> {
                 // claim is marketing, and that includes how they fail.
                 let mut names = Vec::new();
                 if let Some(a) = args.first() {
-                    collect_order_keys(&a.value, true, &mut names);
+                    if let Err(at) = collect_order_keys(&a.value, true, &mut names) {
+                        self.d.push(
+                            Diagnostic::error(
+                                "NL0509",
+                                "an `order_by` key must be a column, a tuple of keys, or `asc(..)` / `desc(..)` around one",
+                            )
+                            .primary(at, "not an ordering key")
+                            .note("an expression here was skipped, so the view was ordered by the keys that remained; write a descending key as `desc(r.x)`")
+                            .note("to order by a computed value, `map` it into a column first"),
+                        );
+                        return None;
+                    }
                 }
                 if names.is_empty() {
                     self.d.push(
@@ -2005,26 +2016,45 @@ fn collect_field_names(e: &Expr, out: &mut Vec<String>) {
 /// A call to anything else contributes **no** key rather than a wrong one; an empty key list
 /// is refused with NL0509 by the caller, which is what makes `order_by(|r| descending(r.x))`
 /// — a plausible misspelling — a diagnostic instead of a silently ascending sort.
-fn collect_order_keys(e: &Expr, asc: bool, out: &mut Vec<(String, bool)>) {
+/// The ordering keys an `order_by` closure names, or the span of the first element that is
+/// not one: a column, a tuple of keys, or `asc(..)` / `desc(..)` around them.
+///
+/// **Anything else is refused, not skipped.** This walked the key and ignored what it did not
+/// recognise, so `.order_by(|r| (-r.sum, r.acct))` kept `r.acct` alone, lost the negation
+/// meant as a descending order, and `.limit(5)` returned the five lowest account ids — the
+/// wrong rows, with no diagnostic (cycle 14, R2-06, found writing E30's Q05).
+fn collect_order_keys(e: &Expr, asc: bool, out: &mut Vec<(String, bool)>) -> Result<(), Span> {
     match e {
-        Expr::Call { callee, args, .. } => {
+        Expr::Call { callee, args, span } => {
             let Expr::Path(p) = callee.as_ref() else {
-                return;
+                return Err(*span);
             };
             let dir = match p.last().text.as_str() {
                 "desc" => false,
                 "asc" => true,
-                _ => return,
+                _ => return Err(*span),
             };
             for a in args {
-                collect_order_keys(&a.value, dir, out);
+                collect_order_keys(&a.value, dir, out)?;
             }
+            Ok(())
         }
-        Expr::Field { name, .. } => out.push((name.text.clone(), asc)),
-        Expr::Path(p) => out.push((p.last().text.clone(), asc)),
-        Expr::Tuple { elems, .. } => elems.iter().for_each(|x| collect_order_keys(x, asc, out)),
+        Expr::Field { name, .. } => {
+            out.push((name.text.clone(), asc));
+            Ok(())
+        }
+        Expr::Path(p) => {
+            out.push((p.last().text.clone(), asc));
+            Ok(())
+        }
+        Expr::Tuple { elems, .. } => {
+            for x in elems {
+                collect_order_keys(x, asc, out)?;
+            }
+            Ok(())
+        }
         Expr::Closure { body, .. } => collect_order_keys(body, asc, out),
-        _ => {}
+        other => Err(other.span()),
     }
 }
 

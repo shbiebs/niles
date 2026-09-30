@@ -132,9 +132,9 @@ wire-protocol-session.md,byte-deterministic,cargo test -p nilestream-server --te
 wire-protocol-client.md,host-scoped,cargo test -p nilestream-server --test psql_conformance -- --ignored transcript
 e12_phase_compiled.csv,byte-deterministic,./target/release/nilestream sweep examples/demo_bank.niles ledger_balance > results/e12_phase_compiled.csv
 E23-scaling.md,byte-deterministic,cargo run --release -p bank-bench --bin bench -- --render
-E18-counts.csv,byte-deterministic,cargo run -q --release --manifest-path tools/memprobe/Cargo.toml
-E18-memory.csv,toolchain-scoped,cargo run -q --release --manifest-path tools/memprobe/Cargo.toml
-E18-memory.md,toolchain-scoped,cargo run -q --release --manifest-path tools/memprobe/Cargo.toml
+E18-counts.csv,byte-deterministic,cargo run -q --release --manifest-path tools/memprobe/Cargo.toml --bin memprobe
+E18-memory.csv,toolchain-scoped,cargo run -q --release --manifest-path tools/memprobe/Cargo.toml --bin memprobe
+E18-memory.md,toolchain-scoped,cargo run -q --release --manifest-path tools/memprobe/Cargo.toml --bin memprobe
 E23-scaling/E23-scaling.csv,machine-dependent,cargo run --release -p bank-bench --bin bench -- --run --e23 --publish
 E16-wallclock.md,machine-dependent,cargo run --release -p bank-bench --bin bench -- --run --publish
 E16-wallclock/oltp.csv,machine-dependent,cargo run --release -p bank-bench --bin bench -- --run --publish

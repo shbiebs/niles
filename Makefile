@@ -52,14 +52,18 @@ lint:
 preflight:
 	sh tools/preflight.sh
 
-# The gate every task must pass before it is done.
-gate: preflight fmt lint generated test measurements memory
+# The gate every task must pass before it is done. **It ends with `make reproduce`** (cycle 15,
+# DA-11). Until cycle 15 reproduce sat in a separate `gate-full`, kept out of `gate` because it
+# took 404 s on a two-core host (cycle 14, R2-01). The separation hid two faults for a whole
+# round: `make reproduce` exited 2 from `44133cc` onwards (a second memprobe binary made its
+# `cargo run` ambiguous), and R2-06 left results/E18-counts.csv stale, and every "gate exit 0"
+# of that round was true only of the part that ran. A byte-deterministic artefact had gone
+# stale in cycle 13 for the same reason. Reproduce ends in `git diff --exit-code`, so the gate
+# now passes only on a tree whose regenerated results are the committed ones.
+gate: preflight fmt lint generated test measurements memory reproduce
 
-# The gate plus `make reproduce`. Separate because reproduce took 404 s on a two-core host
-# (cycle 14, R2-01, measured 2026-09-28, warm build cache) against the five-minute bound the
-# round set for folding it into `gate`; required at the end of every round, since a byte-deterministic
-# artefact went stale in cycle 13 precisely because the gate did not regenerate it.
-gate-full: gate reproduce
+# Kept as a name, so older logs and scripts that say `make gate-full` still run the same thing.
+gate-full: gate
 
 # **The measurements that are also assertions.** `#[ignore]`d because they are shapes rather
 # than thresholds and because they cost seconds, not because they are optional: each one
@@ -201,7 +205,11 @@ reproduce:
 	# (`Instant`), reclassified machine-dependent in this cycle, and re-running it here
 	# would make the recipe overwrite a measurement on every invocation.
 	cargo run --release -p experiments -- e1 e2 e3 e4 e5 e6 e8 e9 e10 e26
-	cargo run -q --release --manifest-path tools/memprobe/Cargo.toml
+	# `--bin memprobe`: the package has three binaries since cycle 14 (memprobe, checkcost,
+	# e30cost), and without it cargo refuses to choose and this line exited 2 from `44133cc` on.
+	# Named rather than `default-run`, so the command says which program writes E18 and matches
+	# the manifest's producer strings for the other two binaries.
+	cargo run -q --release --manifest-path tools/memprobe/Cargo.toml --bin memprobe
 	cargo run -q --release --offline -p nilestream -- sweep examples/demo_bank.niles ledger_balance > results/e12_phase_compiled.csv
 	python3 thesis/include-results.py
 	git diff --exit-code -- results/ thesis/ docs/SPEC-LANGUAGE.md docs/keywords.md $(INCOMPARABLE_RESULTS)

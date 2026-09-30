@@ -267,7 +267,7 @@ fn the_well_typed_neighbour_of_each_mutant_is_accepted() {
             .filter(|c| {
                 [
                     "NL0204", "NL0205", "NL0216", "NL0252", "NL0253", "NL0255", "NL0256", "NL0300",
-                    "NL0310", "NL0311", "NL0312", "NL0322", "NL0330", "NL0331", "NL0332",
+                    "NL0257", "NL0310", "NL0311", "NL0312", "NL0322", "NL0330", "NL0331", "NL0332",
                 ]
                 .contains(&c.as_str())
             })

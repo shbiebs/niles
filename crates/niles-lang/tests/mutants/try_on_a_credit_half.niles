@@ -1,0 +1,12 @@
+// RULE: T-Try. `?` eliminates a `Result` or an `Option`; its operand must be one.
+// WHY IT MATTERS: `credit(..)` returns the leg itself and `debit(..)` returns
+// `Result<Leg>`, which is why every schema writes `debit(..)?` and `credit(..)`. The checker
+// never looked at `?`'s operand, so a sign-flip that turned `debit(from, amount)?` into
+// `credit(from, amount)?` type-checked and raised in the interpreter (E30 finding F12,
+// cycle 14). A well-typed program must not fail at run time on a shape the checker can see.
+// EXPECT: NL0257
+// STAGE: check
+fn f(from: Id<Account>, to: Id<Account>, amount: Money<usd>)
+    -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{ txn idem("f") { post(credit(from, amount)?, debit(to, amount)?) } }

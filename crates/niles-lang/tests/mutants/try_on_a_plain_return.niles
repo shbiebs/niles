@@ -1,0 +1,11 @@
+// RULE: T-Try, through a call. A declared return type that is money, a capability or a
+// scalar is certainly not a `Result`, so `?` on a call to it is refused.
+// WHY IT MATTERS: the same hole as `try_on_a_credit_half`, one indirection away: the
+// operand's type is written in the callee's signature, where the checker can read it.
+// EXPECT: NL0257
+// STAGE: check
+fn fee() -> Money<usd> ! { } { 1.50 usd }
+fn f(from: Id<Account>, to: Id<Account>)
+    -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{ txn idem("f") { post(debit(from, fee()?)?, credit(to, fee())) } }

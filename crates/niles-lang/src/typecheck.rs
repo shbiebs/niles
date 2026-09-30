@@ -201,6 +201,11 @@ pub struct FnSummary {
     /// is what makes that visible instead of it looking like a clean answer. A fresh symbol
     /// with no havoc record is exactly the fabrication this whole pass is against.
     pub havoc: bool,
+    /// The declared return type, described, when it names a value that is certainly neither
+    /// a `Result` nor an `Option`: a scalar, `Money` or `Auth`. `None` when there is no
+    /// annotation or the annotation is a type this checker cannot see through (a user type,
+    /// an alias). What `?` on a call to this function is checked against (NL0257).
+    plain_return: Option<String>,
 }
 
 pub fn check_program(prog: &Program, cat: &Catalog) -> (Report, Diagnostics) {
@@ -563,6 +568,7 @@ impl<'a> Cx<'a> {
                 param_money: Vec::new(),
                 params: param_kinds(f),
                 havoc: f.effects.is_none(),
+                plain_return: plain_return_of(f),
             };
         };
         let mut sc = Scope::default();
@@ -581,6 +587,60 @@ impl<'a> Cx<'a> {
             param_money,
             params: param_kinds(f),
             havoc: false,
+            plain_return: plain_return_of(f),
+        }
+    }
+
+    /// What `?`'s operand certainly is, described, when it is certainly not a `Result` or
+    /// an `Option`; `None` when it might be one. See the `Expr::Try` arm.
+    fn not_fallible(&self, operand: &Expr, shape: &Shape) -> Option<String> {
+        // Read off the syntax first, and trust the shape only where the syntax says it can
+        // be trusted. A call to a declared function is given `Money` whenever one of its
+        // *arguments* is money (the undecided-amount rule in `call`), so the shape of
+        // `transfer(a, b, 850.00 usd)`, which returns `Result<TxnId, _>`, is `Money<usd>`,
+        // and a variable bound to it inherits that. Refusing on a `Money` shape there
+        // refused GBS's `transfer(..)?` on the first run of this check. So a call is judged
+        // by what the callee declares, a variable only by the shapes that have no such
+        // approximation behind them, and money only where it is written as money.
+        match operand {
+            Expr::Int(..)
+            | Expr::Float(..)
+            | Expr::Bool(..)
+            | Expr::Str(..)
+            | Expr::Bytes(..)
+            | Expr::Unit(..)
+            | Expr::Money { .. }
+            | Expr::Epoch(..)
+            | Expr::Instant { .. }
+            | Expr::Duration { .. } => Some(match shape {
+                Shape::Opaque => "a literal".into(),
+                s => format!("a literal of type {}", s.describe()),
+            }),
+            Expr::Tuple { .. } => Some("a tuple".into()),
+            Expr::Array { .. } => Some("an array".into()),
+            Expr::StructLit { .. } => Some("a struct".into()),
+            Expr::Unary { .. } | Expr::Binary { .. } => match shape {
+                Shape::Money(..) | Shape::Auth(_) | Shape::Scalar(_) => Some(shape.describe()),
+                _ => None,
+            },
+            Expr::Path(_) => match shape {
+                Shape::Linear(LinearKind::Credit) => Some("a credit half".into()),
+                Shape::Auth(_) | Shape::Scalar(_) => Some(shape.describe()),
+                _ => None,
+            },
+            Expr::Call { callee, .. } => {
+                if matches!(shape, Shape::Linear(LinearKind::Credit)) {
+                    return Some("a credit half: `credit(..)` returns the leg itself".into());
+                }
+                let Expr::Path(p) = callee.as_ref() else {
+                    return None;
+                };
+                let s = self.summaries.get(p.last().text.as_str())?;
+                s.plain_return
+                    .as_ref()
+                    .map(|r| format!("a call to `{}`, declared to return {r}", p.last().text))
+            }
+            _ => None,
         }
     }
 
@@ -1495,7 +1555,33 @@ impl<'a> Cx<'a> {
             // forty-dollar hole — was downgraded to a warning. Atomicity is what makes the
             // stronger reading sound, which is a case of a runtime guarantee buying static
             // precision rather than the other way round.
-            Expr::Try { expr, .. } => self.expr(expr, sc),
+            //
+            // **What `?` is applied to is checked (NL0257).** Until cycle 15 it was not: the
+            // arm returned the operand's shape and never looked at it, so `credit(b, m)?`,
+            // `(10.00 usd)?` and `n?` over an `Int` all type-checked and the interpreter
+            // raised at run time (E30's finding F12, found by a sign-flip mutant turning
+            // `debit(..)?` into `credit(..)?`). `?` needs a `Result` or an `Option`. Refused
+            // here is every operand the checker *knows* is neither: a credit half (`credit`
+            // returns the bare leg; `debit` returns `Result<Leg>`, which is why the schemas
+            // write `debit(..)?` and `credit(..)`), money, a capability, a scalar, a tuple,
+            // an array or a struct literal, and a call to a declared function whose return
+            // type is written as one of those. An operand it cannot see into stays accepted:
+            // that is the run time's to catch, as before.
+            Expr::Try { expr, span } => {
+                let shape = self.expr(expr, sc);
+                if let Some(what) = self.not_fallible(expr, &shape) {
+                    self.push(
+                        Diagnostic::error(
+                            "NL0257",
+                            format!("`?` needs a `Result` or an `Option`, and this is {what}"),
+                        )
+                        .primary(*span, "`?` applied here")
+                        .secondary(expr.span(), what)
+                        .note("`debit(..)` returns `Result<Leg>` and takes `?`; `credit(..)` returns the leg itself and does not"),
+                    );
+                }
+                shape
+            }
             Expr::Cast { expr, .. } => self.expr(expr, sc),
             Expr::Field { base, .. } | Expr::Index { base, .. } => {
                 self.expr(base, sc);
@@ -2340,6 +2426,24 @@ fn scalar_annotation_of(t: &Ty) -> Option<ScalarKind> {
 /// here is the same one `adds_to` makes.
 fn scalar_initialises(want: ScalarKind, got: ScalarKind) -> bool {
     want == got || matches!((want, got), (ScalarKind::Epoch, ScalarKind::Int))
+}
+
+/// A function's declared return type, described, if it certainly is not a `Result` or an
+/// `Option` (see `FnSummary::plain_return`). Only the three families the checker already
+/// names by their built-in spelling; anything else might be an alias for `Result`, so it is
+/// left alone rather than guessed at.
+fn plain_return_of(f: &FnDecl) -> Option<String> {
+    let t = f.ret.as_ref()?;
+    if let Some(k) = scalar_annotation_of(t) {
+        return Some(format!("`{}`", k.name()));
+    }
+    if let Some(c) = money_currency_of(t) {
+        return Some(match c {
+            Some(c) => format!("`Money<{c}>`"),
+            None => "`Money`".into(),
+        });
+    }
+    auth_effect_of(t).map(|e| format!("`Auth<{e}>`"))
 }
 
 fn money_currency_of(t: &Ty) -> Option<Option<String>> {

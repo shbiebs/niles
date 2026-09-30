@@ -1,7 +1,19 @@
 # 52_cross_join
-# **Outside SQL-Core**, and this case is why. `cross join` parsed, lowered to the IR's
-# *keyed* `Inner` join, verified, and answered with the equi-join on whatever key the two
-# relations happened to carry: four rows where the query asks for twelve, with nothing to
-# say so. Every join operator in this IR joins on a key and there is no product operator,
-# so the honest answer is a refusal until there is one.
-REFUSED NL0516
+# **A product, since cycle 15** (C15-05b; decision 5, "admit the product"). This case used to
+# be the reason `cross join` was outside SQL-Core: it had lowered to the IR's *keyed* `Inner`
+# join and answered the equi-join (four rows for twelve), and was then refused as NL0516 on
+# the premise that the IR had no product operator. It had one: the comma from-list lowered
+# to a join with empty keys, which the evaluator runs as the product (E30 finding F10).
+# `cross join` now lowers to the same node: every `t` row with every `u` row, 4 x 3 = 12.
+1 10 100 1 1 x1
+1 10 100 2 2 x1
+1 10 100 4 4 x1
+1 10 null 1 1 x1
+1 10 null 2 2 x1
+1 10 null 4 4 x1
+2 20 200 1 1 x1
+2 20 200 2 2 x1
+2 20 200 4 4 x1
+3 30 null 1 1 x1
+3 30 null 2 2 x1
+3 30 null 4 4 x1

@@ -705,20 +705,26 @@ impl<'a> Lx<'a> {
             | StageKind::FullOuterJoin
             | StageKind::CrossJoin => {
                 let rhs = args.first().and_then(|a| self.expr(&a.value, c))?;
-                // **A cross join is not a keyed join and must not be lowered as one.** Every
-                // join operator in the IR joins on a key; `cross_join` was mapped to
-                // `Inner`, which silently answered a *cross join* with the *equi-join* on
-                // whatever key the two sides happened to carry — fewer rows than the query
-                // asked for, with nothing to indicate it. Refused until the IR has a product
-                // operator; §12 records it, and Appendix H lists it outside SQL-Core.
+                // **`cross_join` is a product** (cycle 15, C15-05b; decision 5): the join with
+                // empty keys the comma from-list already lowers to. It used to be mapped to
+                // `Inner` on whatever keys the sides carried (the equi-join, silently), and
+                // then refused as NL0516; see the SQL arm.
                 if kind == StageKind::CrossJoin {
-                    self.d.push(
-                        Diagnostic::error("NL0516", "`cross join` is outside the executed fragment")
-                            .primary(name.span, "no product operator exists in the IR")
-                            .note("every join this engine executes joins on a key; lowering a cross join to a keyed join answers a different query, which is worse than refusing")
-                            .note("write the product's meaning explicitly, or join on the key the query actually relates the relations by"),
+                    let mut names = self.schema_of(input).to_vec();
+                    names.extend(self.schema_of(rhs).iter().cloned());
+                    let id = self.circuit.add(
+                        Op::Join {
+                            kind: IrJoin::Inner,
+                            left_key: Vec::new(),
+                            right_key: Vec::new(),
+                            residual: None,
+                        },
+                        vec![input, rhs],
+                        c,
+                        "cross join",
                     );
-                    return None;
+                    self.schemas.insert(id, names);
+                    return Some(id);
                 }
                 let jk = match kind {
                     StageKind::LeftJoin => IrJoin::LeftOuter,
@@ -2063,16 +2069,30 @@ impl<'a> Lx<'a> {
             } => {
                 let l = self.table_ref(left, c)?;
                 let r = self.table_ref(right, c)?;
-                // See the pipeline arm: `CROSS JOIN` has no product operator to lower to,
-                // and lowering it to the keyed `Inner` join answers the equi-join instead.
+                // **`CROSS JOIN` is a product** (cycle 15, C15-05b; the author's decision 5 of
+                // 2026-09-30, "admit the product"). It was refused as NL0516 on the premise
+                // that the IR had no product operator, while the comma from-list lowered to a
+                // join with empty keys, which the evaluator runs as the product (E30 finding
+                // F10). So the IR had one all along, and the refusal made the two spellings of
+                // one query disagree. Both now lower the same way.
                 if *kind == JoinKind::Cross {
-                    self.d.push(
-                        Diagnostic::error("NL0516", "`cross join` is outside the executed fragment")
-                            .primary(*span, "no product operator exists in the IR")
-                            .note("every join this engine executes joins on a key; lowering a cross join to a keyed join answers a different query, which is worse than refusing")
-                            .note("write the product's meaning explicitly, or join on the key the query actually relates the relations by"),
+                    let mut names = self.schema_of(l).to_vec();
+                    names.extend(self.schema_of(r).iter().cloned());
+                    let id = self.circuit.add(
+                        Op::Join {
+                            kind: IrJoin::Inner,
+                            left_key: Vec::new(),
+                            right_key: Vec::new(),
+                            residual: None,
+                        },
+                        vec![l, r],
+                        c,
+                        "cross join",
                     );
-                    return None;
+                    self.schemas.insert(id, names);
+                    let (ls, rs) = (self.ref_sides(left, l), self.ref_sides(right, r));
+                    self.record_join(id, l, r, ls, rs, IrJoin::Inner, &[], &[]);
+                    return Some(id);
                 }
                 let jk = match kind {
                     JoinKind::Left => IrJoin::LeftOuter,

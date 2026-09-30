@@ -71,10 +71,10 @@ pub static MAPPING: &[Mapping] = &[
     Mapping { sql: "LEFT JOIN u ON c", niles: ".left_join(u)", status: Status::Lowered },                   // 18
     Mapping { sql: "RIGHT JOIN u ON c", niles: ".right_join(u)", status: Status::Equivalent },              // 50
     Mapping { sql: "FULL JOIN u ON c", niles: ".full_outer_join(u)", status: Status::Equivalent },          // 51
-    // **Refused, and the reason is worth the row.** Every join operator in the IR joins on
-    // a key and there is no product operator, so `cross join` lowered to the keyed inner
-    // join and answered a different query -- four rows where twelve were asked for.
-    Mapping { sql: "CROSS JOIN u", niles: "(none)", status: Status::Refused("NL0516") },                    // 52
+    // **A product, since cycle 15** (C15-05b, decision 5). It lowered to the keyed inner join
+    // (four rows where twelve were asked for), was then refused as NL0516, and now lowers to
+    // the empty-key join the comma from-list always used.
+    Mapping { sql: "CROSS JOIN u", niles: ".cross_join(u)", status: Status::Lowered },                      // 52
     Mapping { sql: "JOIN u USING (k)", niles: "(none)", status: Status::Refused("NL0001") },                // 56
     Mapping { sql: "COUNT(DISTINCT x)", niles: "(none)", status: Status::Refused("NL0002") },               // 57
     Mapping { sql: "CASE WHEN .. THEN .. ELSE .. END", niles: "(none)", status: Status::Refused("NL0508") },// 53

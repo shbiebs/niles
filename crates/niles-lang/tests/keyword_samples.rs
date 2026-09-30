@@ -113,12 +113,7 @@ const NOT_COMPILED: &[(&str, &str)] = &[
         "an outline: `step` stands for a step function declared elsewhere",
     ),
     // --- A deliberate refusal, which is not a gap. ---
-    (
-        "cross",
-        "`cross_join` is refused by design with NL0516: the IR has no product \
-               operator, and lowering a cross join to a keyed join would answer a \
-               different query",
-    ),
+    // (`cross` left this list in cycle 15: `a.cross_join(b)` lowers to the product, C15-05b.)
     (
         "like",
         "`like \"ac%\"` is refused with NL0521 (cycle 14, R2-06): the IR's values are \

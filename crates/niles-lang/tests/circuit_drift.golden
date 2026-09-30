@@ -1030,10 +1030,12 @@ circuit (3 nodes):
   output golden = node 2
 
 === crates/niles-lang/tests/golden/52_cross_join.sql
-codes: [NL0516]
-circuit (2 nodes):
+codes: []
+circuit (3 nodes):
   0 Source { relation: "t", is_base: true, confidential: [], anchor_key: [0] } in=[] key=Some([0]) arity=0 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // t
   1 Source { relation: "u", is_base: true, confidential: [], anchor_key: [0] } in=[] key=Some([0]) arity=0 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // u
+  2 Join { kind: Inner, left_key: [], right_key: [], residual: None } in=[0, 1] key=Some([]) arity=0 anchor=Inherited contract=ServeContract { consistency: Snapshot, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // cross join
+  output golden = node 2
 
 === crates/niles-lang/tests/golden/53_case_when.sql
 codes: [NL0508]

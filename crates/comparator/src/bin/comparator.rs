@@ -25,14 +25,28 @@ fn list<T: std::str::FromStr>(s: &str) -> Vec<T> {
     s.split(',').filter_map(|x| x.trim().parse().ok()).collect()
 }
 
-fn build_arms(names: &[String], multi: bool, scratch: &Path) -> Vec<Box<dyn Arm>> {
+/// E27b's two metered daemons (C15-02, E2): the shipped `main.rs` files built by
+/// `tools/memprobe` over its thread-local metering allocator.
+fn metered(root: &Path, name: &str) -> PathBuf {
+    root.join("tools/memprobe/target/release").join(name)
+}
+
+fn build_arms(names: &[String], multi: bool, scratch: &Path, e27b: bool) -> Vec<Box<dyn Arm>> {
     let root = repo_root();
-    let bin = root.join("target/release/nilestreamd");
+    let bin = if e27b {
+        metered(&root, "nilestreamd-metered")
+    } else {
+        root.join("target/release/nilestreamd")
+    };
     names
         .iter()
         .map(|n| -> Box<dyn Arm> {
             match n.as_str() {
-                "N" => Box::new(NArm::new(5450, scratch.join("n"), bin.clone(), multi, 16)),
+                "N" => {
+                    let mut a = NArm::new(5450, scratch.join("n"), bin.clone(), multi, 16);
+                    a.e27b = e27b;
+                    Box::new(a)
+                }
                 "P" => Box::new(PgArm::new(PgKind::P, 5451, &root)),
                 "P+" => Box::new(PgArm::new(PgKind::PPlus, 5452, &root)),
                 "M" => Box::new(PgArm::new(PgKind::M, 5453, &root)),
@@ -46,7 +60,13 @@ fn build_arms(names: &[String], multi: bool, scratch: &Path) -> Vec<Box<dyn Arm>
                     );
                     Box::new(a)
                 }
-                "H3" => Box::new(H3Arm::new(5461, 5462, scratch.join("h3"), &root)),
+                "H3" => {
+                    let mut a = H3Arm::new(5461, 5462, scratch.join("h3"), &root);
+                    if e27b {
+                        a.binary = metered(&root, "rev-sidecar-metered");
+                    }
+                    Box::new(a)
+                }
                 "T" => Box::new(TArm::new(scratch.join("t"), &root)),
                 "H1M" => {
                     let mut a = H1Arm::new(5459, 5460, scratch.join("h1m"), &root);
@@ -64,10 +84,20 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let cmd = args.get(1).map(String::as_str).unwrap_or("");
     let root = repo_root();
-    let dir = PathBuf::from(
-        arg(&args, "--dir")
-            .unwrap_or_else(|| root.join("results/E27-comparator").display().to_string()),
-    );
+    // `--study e27b` (cycle 15, C15-02): the same harness, with N as changed by E27b's E1–E4
+    // and measured by the metered builds, into E27b's own directories and files. Without it
+    // every command is E27's, byte for byte.
+    let e27b = match arg(&args, "--study").as_deref() {
+        None | Some("e27") => false,
+        Some("e27b") => true,
+        Some(other) => panic!("--study e27|e27b, not {other}"),
+    };
+    let study = if e27b { "E27b" } else { "E27" };
+    let dir = PathBuf::from(arg(&args, "--dir").unwrap_or_else(|| {
+        root.join(format!("results/{study}-comparator"))
+            .display()
+            .to_string()
+    }));
     match cmd {
         "run" => {
             let series = arg(&args, "--series").unwrap_or_else(|| "single".into());
@@ -94,7 +124,7 @@ fn main() {
                 Config::declared(multi)
             };
             let dir = if p99e && arg(&args, "--dir").is_none() {
-                root.join("results/E27-p99-engine")
+                root.join(format!("results/{study}-p99-engine"))
             } else if p99 && arg(&args, "--dir").is_none() {
                 root.join("results/E27-p99")
             } else {
@@ -121,12 +151,16 @@ fn main() {
             let skip = args.iter().any(|a| a == "--skip-existing");
             let scratch =
                 PathBuf::from(arg(&args, "--scratch").unwrap_or_else(|| "/var/tmp/e27".into()));
-            let bin = root.join("target/release/nilestreamd");
+            let bin = if e27b {
+                metered(&root, "nilestreamd-metered")
+            } else {
+                root.join("target/release/nilestreamd")
+            };
             if names.iter().any(|n| n == "N") && !bin.exists() {
-                eprintln!("comparator: {} is missing; run `cargo build --release -p nilestream-server --bin nilestreamd` first", bin.display());
+                eprintln!("comparator: {} is missing; run `cargo build --release -p nilestream-server --bin nilestreamd` (or, for --study e27b, `cargo build --release --manifest-path tools/memprobe/Cargo.toml --bins`) first", bin.display());
                 std::process::exit(2);
             }
-            let mut arms = build_arms(&names, multi, &scratch);
+            let mut arms = build_arms(&names, multi, &scratch, e27b);
             for &size in &sizes {
                 for &seed in &seeds {
                     let path = dir.join(format!("{series}-{size}-{seed}.tsv"));
@@ -140,12 +174,19 @@ fn main() {
                         for a in arms.iter() {
                             p.not_run.entry(a.name().into()).or_default().push((
                                 "q2".into(),
-                                "the author's decision of 2026-09-28: on the multi-currency series at 10⁵ and above, Nilestream answers every anchored read by folding the whole ledger, so 1,000 q2 reads per run cost hours per point (a 10⁴ point took 21 minutes); q2's p50 verdict is in E27".into(),
+                                if e27b {
+                                    "E27b design §6: q1 only on the multi-currency series at 10⁵, as in E27 (the author's decision of 2026-09-28); q2's p50 verdict is in E27b-comparator".into()
+                                } else {
+                                    "the author's decision of 2026-09-28: on the multi-currency series at 10⁵ and above, Nilestream answers every anchored read by folding the whole ledger, so 1,000 q2 reads per run cost hours per point (a 10⁴ point took 21 minutes); q2's p50 verdict is in E27".into()
+                                },
                             ));
                         }
                     }
                     let mut prov = comparator::store::provenance(&root);
                     prov.push(("checkpoint_interval".into(), cfg.checkpoint.to_string()));
+                    if e27b {
+                        prov.push(("study".into(), "E27b".into()));
+                    }
                     comparator::store::write(&path, &series, &p, &prov).expect("write point");
                     eprintln!(
                         "wrote {} in {:.0}s{}",
@@ -181,6 +222,7 @@ fn main() {
                 &["N", "P+", "P", "M", "H1", "H2", "H3", "T", "M+", "H1M"].map(String::from),
                 false,
                 Path::new("/var/tmp/e27"),
+                e27b,
             );
             let lines: Vec<(String, String)> = arms
                 .iter()
@@ -188,7 +230,19 @@ fn main() {
                 .collect();
             let p99 = arg(&args, "--shape").as_deref() == Some("p99");
             let p99e = arg(&args, "--shape").as_deref() == Some("p99-engine");
-            let (shape, stem, dir) = if p99e {
+            let (shape, stem, dir) = if e27b && p99e {
+                (
+                    &comparator::render::P99_ENGINE_B,
+                    "E27b-p99-engine",
+                    if arg(&args, "--dir").is_some() {
+                        dir.clone()
+                    } else {
+                        root.join("results/E27b-p99-engine")
+                    },
+                )
+            } else if e27b {
+                (&comparator::render::MAIN_B, "E27b-comparator", dir.clone())
+            } else if p99e {
                 (
                     &comparator::render::P99_ENGINE,
                     "E27-p99-engine",
@@ -225,8 +279,19 @@ fn main() {
             let table = comparator::arms::sql_table(&refs);
             let main = root.join(format!("results/{stem}.md"));
             let detail = root.join(format!("results/{stem}-detail.md"));
-            comparator::render::render(&dir, &main, &detail, &lines, &table, shape)
-                .expect("render");
+            // E27b's main file evaluates the engine rule, whose p99 clause is judged in the
+            // targeted re-run's points (design §4.2, §6).
+            let p99_dir = e27b.then(|| root.join("results/E27b-p99-engine"));
+            comparator::render::render(
+                &dir,
+                &main,
+                &detail,
+                &lines,
+                &table,
+                shape,
+                p99_dir.as_deref(),
+            )
+            .expect("render");
             eprintln!("wrote {} and {}", main.display(), detail.display());
         }
         "calibrate-h1" => {
@@ -288,7 +353,7 @@ fn main() {
                 .split(',')
                 .map(String::from)
                 .collect();
-            let mut arms = build_arms(&names, false, &scratch);
+            let mut arms = build_arms(&names, false, &scratch, false);
             let cfg = comparator::probe::ProbeConfig::default();
             let reps: usize = arg(&args, "--reps")
                 .map(|r| r.parse().expect("--reps"))

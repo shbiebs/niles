@@ -161,6 +161,12 @@ pub trait Arm: Sync {
     fn epochs_between(&self, _lo: u64, _hi: u64) -> (u64, u64) {
         (0, 0)
     }
+    /// **E27b's memory metric**: the bytes of the derived state this arm holds so that it can
+    /// answer reads — not its base (`docs/study/E27b-design.md` §4.1). `None` where the arm
+    /// cannot report it, which the rendering shows as absent, never as zero.
+    fn view_state_bytes(&self, _c: &mut Client) -> Option<u64> {
+        None
+    }
     fn stop(&mut self);
 }
 
@@ -271,6 +277,10 @@ pub struct NArm {
     pub binary: PathBuf,
     pub multi_currency: bool,
     pub checkpoint: usize,
+    /// **E27b's N** (C15-02): the served relation carries `value_date`, inserts send each
+    /// transaction's value day, q3 and q4 are asked, and the binary is the metered build.
+    /// Off, the arm is E27's exactly, so E27's rendering and its reproduction do not move.
+    pub e27b: bool,
     child: Option<Child>,
     /// Oracle epoch index i is N's epoch `f_start + i`; established by probing during the
     /// load (it is -1 on the unseeded daemon, whose first sealed epoch is #0).
@@ -291,6 +301,7 @@ impl NArm {
             binary,
             multi_currency,
             checkpoint,
+            e27b: false,
             child: None,
             f_start: 0,
         }
@@ -300,13 +311,16 @@ impl NArm {
         format!(
             "schema bank {{\n    currency usd {{ scale: 2 }}\n{}    ledger postings {{\n        \
              txn: TxnId, acct: Id<Account>, cur: Currency, amt: Money,\n        \
-             idem: IdemKey window 1_000_000.epochs,\n        conserve per (txn, cur);\n        \
+             idem: IdemKey window 1_000_000.epochs,{}\n        conserve per (txn, cur);\n        \
              retain forever;\n    }}\n    index ix_postings on postings (acct) anchor;\n}}\n",
             if self.multi_currency {
                 "    currency eur { scale: 2 }\n"
             } else {
                 ""
-            }
+            },
+            // E27b E3: the value date, the sixth column of the served relation, as in the
+            // daemon's default schema.
+            if self.e27b { " value_date: Int," } else { "" }
         )
     }
 
@@ -335,6 +349,15 @@ impl Arm for NArm {
         "N"
     }
     fn describe(&self) -> String {
+        if self.e27b {
+            return format!(
+                "Nilestream daemon, metered build (`nilestreamd-metered`: the shipped `main.rs` \
+                 compiled by `tools/memprobe` over a thread-local metering allocator, release) on \
+                 127.0.0.1:{}, --durable (SyncPolicy::Always), --mode demand, LRU, --checkpoint \
+                 {}, budget 5% of keys; served relation (txn, acct, cur, amt, idem, value_date)",
+                self.port, self.checkpoint
+            );
+        }
         format!(
             "Nilestream daemon (`nilestreamd`, release build) on 127.0.0.1:{}, --durable \
              (SyncPolicy::Always), --mode demand, LRU, --checkpoint {}, budget 5% of keys",
@@ -346,7 +369,7 @@ impl Arm for NArm {
     }
     fn supports(&self, q: &Query) -> Result<(), NotRun> {
         match q {
-            Query::Statement(..) | Query::Desk(_) => Err(N_NOT_RUN),
+            Query::Statement(..) | Query::Desk(_) if !self.e27b => Err(N_NOT_RUN),
             _ => Ok(()),
         }
     }
@@ -368,11 +391,27 @@ impl Arm for NArm {
                 "select acct, sum(amt) from postings where cur = {c} group by acct order by sum(amt) desc limit 10"
             ),
             Query::Extract => "select acct, cur, sum(amt) from postings group by acct, cur".into(),
+            // E27b (design §5, with its two listed deviations): `between` does not lower on
+            // N's SQL surface, so the smallest spelling that does; and the desk is not
+            // stored, so it is `desk_of`'s own definition, P's and M's spelling.
+            Query::Statement((a, c), d0, d1) if self.e27b => format!(
+                "select count(amt), sum(amt) from postings where acct = {a} and cur = {c} and value_date >= {d0} and value_date <= {d1}"
+            ),
+            Query::Desk(d) if self.e27b => format!(
+                "select cur, sum(amt) from postings where acct % 16 = {d} group by cur"
+            ),
             Query::Statement(..) | Query::Desk(_) => String::new(),
         }
     }
     fn write_sql(&self, _idx: u64, t: &Txn) -> Vec<String> {
         let [a, b] = t.legs;
+        if self.e27b {
+            let d = t.value_day;
+            return vec![format!(
+                "insert into postings values ({}, {}, {}, {}, {d}), ({}, {}, {}, {}, {d})",
+                t.id, a.acct, a.cur, a.amt, t.id, b.acct, b.cur, b.amt
+            )];
+        }
         vec![format!(
             "insert into postings values ({}, {}, {}, {}), ({}, {}, {}, {})",
             t.id, a.acct, a.cur, a.amt, t.id, b.acct, b.cur, b.amt
@@ -447,7 +486,14 @@ impl Arm for NArm {
                 current = t.batch;
             }
             for l in t.legs {
-                batch.push(format!("({}, {}, {}, {})", t.id, l.acct, l.cur, l.amt));
+                batch.push(if self.e27b {
+                    format!(
+                        "({}, {}, {}, {}, {})",
+                        t.id, l.acct, l.cur, l.amt, t.value_day
+                    )
+                } else {
+                    format!("({}, {}, {}, {})", t.id, l.acct, l.cur, l.amt)
+                });
             }
         }
         flush(&mut c, &mut batch)?;
@@ -490,10 +536,21 @@ impl Arm for NArm {
             "view_answers",
             "fallbacks",
             "view_metadata_keys",
+            // E27b: NULL on the unmetered build, and then simply absent here.
+            "view_state_bytes",
+            "checkpoint_bytes",
         ]
         .iter()
         .filter_map(|n| rows.by_name(n).map(|v| (n.to_string(), v)))
         .collect()
+    }
+    /// The view's derived state plus the ledger's per-key checkpoint state, both counted by
+    /// the metered build; `None` on the shipped one, which reports them as NULL.
+    fn view_state_bytes(&self, c: &mut Client) -> Option<u64> {
+        let rows = c.simple("select nilestream_stats").ok()?;
+        let v = rows.by_name("view_state_bytes")?;
+        let k = rows.by_name("checkpoint_bytes")?;
+        Some((v + k) as u64)
     }
     fn at_head(&self, c: &mut Client, head: u64) -> Result<bool, String> {
         self.frontier_is(c, self.epoch(head))
@@ -748,8 +805,41 @@ impl Arm for PgArm {
                     out.push(("resident".into(), v));
                 }
             }
+            // E27b: the one relation of P+'s derived state E27's figures did not list.
+            if let Ok(rows) = c.simple("select pg_total_relation_size('arm.rev_meta')") {
+                if let Some(v) = rows.nth(0) {
+                    out.push(("bytes arm.rev_meta".into(), v));
+                }
+            }
+        } else if let Ok(rows) = c.simple("select count(*) from arm.balances") {
+            // A full view holds every key: its resident count, for bytes per resident key.
+            if let Some(v) = rows.nth(0) {
+                out.push(("resident".into(), v));
+            }
         }
         out
+    }
+    /// E27b §4.1: P+'s derived state is its four mechanism relations; P's and M's is the
+    /// materialised view. `pg_total_relation_size`: heap, indexes, TOAST, free-space and
+    /// visibility maps, so dead tuples and free space are counted — that arm's real cost.
+    fn view_state_bytes(&self, c: &mut Client) -> Option<u64> {
+        let rels: &[&str] = if self.mechanism() {
+            &[
+                "arm.rev",
+                "arm.rev_meta",
+                "arm.key_counts",
+                "arm.checkpoints",
+            ]
+        } else {
+            &["arm.balances"]
+        };
+        let sum = rels
+            .iter()
+            .map(|r| format!("pg_total_relation_size('{r}')"))
+            .collect::<Vec<_>>()
+            .join(" + ");
+        let rows = c.simple(&format!("select {sum}")).ok()?;
+        rows.nth(0).map(|v| v as u64)
     }
     fn at_head(&self, c: &mut Client, head: u64) -> Result<bool, String> {
         let rows = c

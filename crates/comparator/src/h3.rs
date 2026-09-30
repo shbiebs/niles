@@ -203,6 +203,7 @@ impl Arm for H3Arm {
                 "evictions",
                 "view_metadata_keys",
                 "view_slots",
+                "view_state_bytes",
             ] {
                 if let Some(v) = rows.by_name(n) {
                     out.push((n.to_string(), v));
@@ -210,6 +211,12 @@ impl Arm for H3Arm {
             }
         }
         out
+    }
+    /// E27b §4.1: the sidecar's REV, counted by the metered build (`rev-sidecar-metered`); H3
+    /// has no checkpoints. `None` on the plain sidecar, which reports NULL.
+    fn view_state_bytes(&self, c: &mut Client) -> Option<u64> {
+        let rows = c.simple("select rev_stats").ok()?;
+        rows.by_name("view_state_bytes").map(|v| v as u64)
     }
     fn at_head(&self, c: &mut Client, head: u64) -> Result<bool, String> {
         let rows = c

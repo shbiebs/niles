@@ -530,6 +530,22 @@ pub struct PointResult {
 }
 
 fn add_memory(arm: &dyn Arm, loaded: u64, keys_read: usize, out: &mut RunOut) {
+    // E27b §4.1: the derived state's bytes, after the run and outside its timed region, and
+    // per distinct key read so far. Judged across seeds on the last measured run, as the PSS
+    // figure is. Absent (not zero) on an arm that cannot report it.
+    if let Some(b) = arm
+        .connect()
+        .ok()
+        .and_then(|mut c| arm.view_state_bytes(&mut c))
+    {
+        out.values.insert("view_state_bytes".into(), b as f64);
+        if keys_read > 0 {
+            out.values.insert(
+                "view_state_bytes_per_key_read".into(),
+                b as f64 / keys_read as f64,
+            );
+        }
+    }
     if let Some(p) = arm.pss() {
         out.values
             .insert("pss_mib".into(), p as f64 / (1024.0 * 1024.0));

@@ -235,4 +235,5 @@ reproduce:
 	@echo "   than Linux, which is Completion at 112 bytes there against 96 here. For the wire"
 	@echo "   transcript it is results/wire-protocol-session.md itself, which is compared: only"
 	@echo "   the psql version banner moved out. The per-op allocation budgets in"
-	@echo "   tools/memprobe/src/alloc.rs are what A10-19 was about and they are unchanged.)"
+	@echo "   tools/memprobe/src/alloc.rs are what A10-19 was about; since then one was tightened"
+	@echo "   (served_point_conjunct 17 -> 13, cycle 15 C15-02) and none loosened.)"

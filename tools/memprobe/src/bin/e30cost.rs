@@ -80,13 +80,18 @@ fn main() {
             syntax_study::oracle::TASKS
                 .iter()
                 .filter(|t| tasks::in_scope(s, t))
-                .filter_map(|t| std::fs::read_to_string(corpus.join(tasks::program_file(t, s))).ok())
+                .filter_map(|t| {
+                    std::fs::read_to_string(corpus.join(tasks::program_file(t, s))).ok()
+                })
                 .map(|p| format!("{schema}\n{p}"))
                 .collect()
         })
         .collect();
 
-    assert!(alloc::installed(), "e30cost: the counting allocator is not installed");
+    assert!(
+        alloc::installed(),
+        "e30cost: the counting allocator is not installed"
+    );
     let peaks: Vec<(usize, f64)> = surfaces
         .iter()
         .zip(&files)
@@ -127,20 +132,47 @@ fn main() {
     let head = |k: &str, v: String| format!("# {k}: {v}\n");
     out += &head(
         "commit",
-        cmd("git", &["-C", root.to_str().unwrap(), "rev-parse", "--short=12", "HEAD"]),
+        cmd(
+            "git",
+            &[
+                "-C",
+                root.to_str().unwrap(),
+                "rev-parse",
+                "--short=12",
+                "HEAD",
+            ],
+        ),
     );
     let dirty = !cmd(
         "git",
-        &["-C", root.to_str().unwrap(), "status", "--porcelain", "--", "crates", "Cargo.toml", "Cargo.lock"],
+        &[
+            "-C",
+            root.to_str().unwrap(),
+            "status",
+            "--porcelain",
+            "--",
+            "crates",
+            "Cargo.toml",
+            "Cargo.lock",
+        ],
     )
     .is_empty();
-    out += &head("worktree", if dirty { "MODIFIED".into() } else { "clean".into() });
+    out += &head(
+        "worktree",
+        if dirty {
+            "MODIFIED".into()
+        } else {
+            "clean".into()
+        },
+    );
     out += &head(
         "host",
         format!(
             "{} — {} CPUs",
             cmd("uname", &["-srm"]),
-            std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0)
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(0)
         ),
     );
     out += &head("toolchain", env!("MEMPROBE_RUSTC").to_string());

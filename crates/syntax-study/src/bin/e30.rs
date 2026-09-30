@@ -20,6 +20,10 @@ fn work() -> PathBuf {
         .unwrap_or_else(|| std::env::temp_dir().join("e30-work"))
 }
 
+fn results() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../results/E30-syntax")
+}
+
 pub fn program_path(task: &str, surface: &str) -> PathBuf {
     corpus().join(tasks::program_file(task, surface))
 }
@@ -78,6 +82,98 @@ fn main() {
                     println!("{t}\t{s}\t{}", describe(&o, &want));
                 }
             }
+        }
+        Some("keywords") => {
+            let mut pg = syntax_study::pg::connect().unwrap_or_else(|e| panic!("{e:?}"));
+            let prqlc = syntax_study::ext::prqlc().expect("prqlc");
+            let dir = corpus().join("keywords");
+            std::fs::create_dir_all(&dir).expect("mkdir");
+            for (name, text) in syntax_study::keywords::generate(&mut pg, &prqlc).expect("keywords")
+            {
+                std::fs::write(dir.join(name), text).expect("write");
+            }
+            eprintln!("wrote {}", dir.display());
+        }
+        Some("sites") => {
+            // The mutants each program has, without running any: for reviewing the patterns.
+            let only_task = args.get(1).filter(|t| t.as_str() != "-").cloned();
+            let only_surface = args.get(2).cloned();
+            for t in oracle::TASKS {
+                if only_task.as_deref().is_some_and(|x| x != *t) {
+                    continue;
+                }
+                for (s, _) in tasks::SURFACES {
+                    if only_surface.as_deref().is_some_and(|x| x != *s) || !tasks::in_scope(s, t) {
+                        continue;
+                    }
+                    let Ok(src) = std::fs::read_to_string(program_path(t, s)) else {
+                        continue;
+                    };
+                    for m in syntax_study::mutate::mutants(&src, s) {
+                        println!("{t}\t{s}\t{}#{}\tline {}\t{}", m.op, m.site, m.line, m.what);
+                    }
+                }
+            }
+        }
+        Some("mutate") => {
+            // Every mutant of every expressible program, checked, executed and classified
+            // (design §6): static, runtime, silent, equivalent, or unexecuted (A1).
+            let only_task = args.get(1).filter(|t| t.as_str() != "-").cloned();
+            let only_surface = args.get(2).cloned();
+            let mut ctx = Ctx::new(d.clone(), work());
+            let mut rows =
+                vec!["task\tsurface\top\tsite\tline\tmutation\tclass\tdetail".to_string()];
+            for t in oracle::TASKS {
+                if only_task.as_deref().is_some_and(|x| x != *t) {
+                    continue;
+                }
+                let want = oracle::expected(t, &d);
+                for (s, _) in tasks::SURFACES {
+                    if only_surface.as_deref().is_some_and(|x| x != *s) || !tasks::in_scope(s, t) {
+                        continue;
+                    }
+                    let Ok(src) = std::fs::read_to_string(program_path(t, s)) else {
+                        continue;
+                    };
+                    let base = verdict(&mut ctx, t, s, &src, &want);
+                    let base_answer = match &base {
+                        Outcome::Answer(a) if want.diff(a).is_none() => Some(a.clone()),
+                        Outcome::Unexecuted(_) => None,
+                        other => panic!(
+                            "{t} {s}: the unmutated program is not correct: {}",
+                            describe(other, &want)
+                        ),
+                    };
+                    for m in syntax_study::mutate::mutants(&src, s) {
+                        let (class, detail) = syntax_study::run::classify(
+                            &mut ctx,
+                            t,
+                            s,
+                            &m.text,
+                            base_answer.as_ref(),
+                            &want,
+                        );
+                        eprintln!("{t} {s} {}#{} {class}", m.op, m.site);
+                        rows.push(format!(
+                            "{t}\t{s}\t{}\t{}\t{}\t{}\t{class}\t{}",
+                            m.op,
+                            m.site,
+                            m.line,
+                            m.what.replace(['\t', '\n'], " "),
+                            detail.replace(['\t', '\n'], " ")
+                        ));
+                    }
+                }
+            }
+            let dir = results();
+            std::fs::create_dir_all(&dir).expect("mkdir");
+            let name = if only_task.is_some() || only_surface.is_some() {
+                "mutants-partial.tsv"
+            } else {
+                "mutants.tsv"
+            };
+            std::fs::write(dir.join(name), rows.join("\n") + "\n").expect("write");
+            eprintln!("wrote {}", dir.join(name).display());
         }
         Some("circuit") => {
             // A debugging aid: the lowered circuit of a Niles program, operator by operator.

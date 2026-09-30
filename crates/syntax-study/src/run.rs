@@ -273,3 +273,36 @@ pub fn verdict(ctx: &mut Ctx, task: &str, surface: &str, program: &str, like: &A
         Ok(None) => execute(ctx, task, surface, program, like),
     }
 }
+
+/// A mutant's class (design §6), in the design's order: refused by the checker (`static`),
+/// raised when run (`runtime`), ran with a different answer from the unmutated program's
+/// (`silent`), ran with the same answer (`equivalent`) — or, accepted when its program has no
+/// executor (`base = None`) or it has none itself, `unexecuted` (A1). With the evidence.
+pub fn classify(
+    ctx: &mut Ctx,
+    task: &str,
+    surface: &str,
+    mutant: &str,
+    base: Option<&Answer>,
+    like: &Answer,
+) -> (&'static str, String) {
+    match check(ctx, surface, mutant) {
+        Err(e) => panic!("{task} {surface}: the checker could not run: {e}"),
+        Ok(Some(codes)) => ("static", codes.join(" ")),
+        Ok(None) => {
+            let Some(base) = base else {
+                return ("unexecuted", "its program has no executor".into());
+            };
+            match execute(ctx, task, surface, mutant, like) {
+                Outcome::Static(c) => ("static", c.join(" ")),
+                Outcome::Runtime(e) => ("runtime", e),
+                Outcome::Unexecuted(e) => ("unexecuted", e),
+                Outcome::Answer(a) => match base.diff(&a) {
+                    None => ("equivalent", String::new()),
+                    Some(d) => ("silent", d),
+                },
+                Outcome::Blocked(e) => panic!("{task} {surface}: blocked: {e}"),
+            }
+        }
+    }
+}

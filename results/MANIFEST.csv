@@ -66,6 +66,14 @@
 #   C=0 E19-scaling/durable.csv E19-scaling/mixed.csv E19-scaling/fold.csv
 #   C=0 E23-scaling/E23-scaling.csv E21-wire-cost.md E13-durability.md e7_write_path.csv
 #
+#   E30's rows (cycle 14, R2-06) ran no engine, so they have no checkpoint interval to state:
+#   Niles programs are evaluated by niles_ir::eval over the lowered circuit and niles-interp,
+#   SQL and PRQL on PostgreSQL, DL by Souffle, and the two cost files time checkers, not a
+#   daemon — E14-checkcost.md's "n/a (no engine runs)", said here once for all six.
+#
+#   C=n/a E30-syntax/programs.tsv E30-syntax/schemas.tsv E30-syntax/mutants.tsv
+#   C=n/a E30-syntax/load.tsv E30-syntax/cost-external.tsv E30-syntax/cost-inprocess.tsv
+#
 #   E23's two series are additionally *insensitive* to C, and that is measured rather than
 #   assumed: `serve_path` in its own CSV reads `fold` and `report-from-view`, and the path a
 #   checkpoint bounds is `IndexFold`. The marker that attributed the caveat to §9.14.5 is

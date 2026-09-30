@@ -3,6 +3,8 @@
 
 pub mod answer;
 pub mod data;
+pub mod e30b;
+pub mod e30b_report;
 pub mod ext;
 pub mod keywords;
 pub mod kinds;

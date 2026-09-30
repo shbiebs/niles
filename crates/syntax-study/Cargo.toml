@@ -20,3 +20,8 @@ nilestream-ledger = { path = "../nilestream-ledger" }
 [[bin]]
 name = "e30"
 path = "src/bin/e30.rs"
+
+# E30b′ (cycle 15, C15-05; design `docs/study/E30b-design.md`).
+[[bin]]
+name = "e30b"
+path = "src/bin/e30b.rs"

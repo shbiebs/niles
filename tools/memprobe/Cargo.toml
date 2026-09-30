@@ -44,6 +44,11 @@ path = "src/bin/checkcost.rs"
 name = "e30cost"
 path = "src/bin/e30cost.rs"
 
+# E30b′'s in-process check cost (cycle 15, C15-05): here for the counting allocator.
+[[bin]]
+name = "e30bcost"
+path = "src/bin/e30bcost.rs"
+
 [lib]
 name = "memprobe"
 path = "src/lib.rs"

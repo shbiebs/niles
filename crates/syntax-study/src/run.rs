@@ -91,22 +91,9 @@ fn niles_args(v: &[Arg]) -> Option<Vec<niles::Arg>> {
 /// Check a program with its surface's checker: `Some(codes)` when refused.
 pub fn check(ctx: &Ctx, surface: &str, program: &str) -> Result<Option<Vec<String>>, String> {
     match surface {
-        "SQL" => {
-            let src = format!("{}\n{program}", pg::SCHEMA_SQL);
-            match nilescheck_sql::parse(&src) {
-                Err(e) => Ok(Some(vec![format!("parse: {}", e.msg)])),
-                Ok((stmts, _)) => {
-                    let mut e: Vec<String> = nilescheck_sql::check_all(&stmts)
-                        .into_iter()
-                        .filter(|d| d.error)
-                        .map(|d| d.code.to_string())
-                        .collect();
-                    e.sort();
-                    e.dedup();
-                    Ok((!e.is_empty()).then_some(e))
-                }
-            }
-        }
+        "SQL" => Ok(check_sql(pg::SCHEMA_SQL, program)),
+        // E30b′'s representation R2 (cycle 15, design §3): the same checker, R2's schema.
+        "SQL2" => Ok(check_sql(crate::e30b::SCHEMA_R2, program)),
         "NL" | "RS" => {
             let v = niles::check(program);
             Ok(v.refused().then_some(v.errors))
@@ -133,6 +120,24 @@ pub fn check(ctx: &Ctx, surface: &str, program: &str) -> Result<Option<Vec<Strin
     }
 }
 
+/// SQL+C+L over `schema` followed by the program: `Some(codes)` when it refuses.
+pub fn check_sql(schema: &str, program: &str) -> Option<Vec<String>> {
+    let src = format!("{schema}\n{program}");
+    match nilescheck_sql::parse(&src) {
+        Err(e) => Some(vec![format!("parse: {}", e.msg)]),
+        Ok((stmts, _)) => {
+            let mut e: Vec<String> = nilescheck_sql::check_all(&stmts)
+                .into_iter()
+                .filter(|d| d.error)
+                .map(|d| d.code.to_string())
+                .collect();
+            e.sort();
+            e.dedup();
+            (!e.is_empty()).then_some(e)
+        }
+    }
+}
+
 fn first_line(s: &str) -> String {
     s.lines()
         .find(|l| !l.trim().is_empty())
@@ -147,7 +152,7 @@ fn first_line(s: &str) -> String {
 pub fn execute(ctx: &mut Ctx, task: &str, surface: &str, program: &str, like: &Answer) -> Outcome {
     let kinds = kinds::of(task);
     match surface {
-        "SQL" | "PRQL" => {
+        "SQL" | "SQL2" | "PRQL" => {
             let (schema, data, text) = if surface == "PRQL" {
                 let Some(bin) = ctx.prqlc.clone() else {
                     return Outcome::Blocked("prqlc is not installed".into());
@@ -156,6 +161,12 @@ pub fn execute(ctx: &mut Ctx, task: &str, surface: &str, program: &str, like: &A
                     Ok(sql) => (pg::SCHEMA_PLAIN, ctx.data_plain.clone(), sql),
                     Err(e) => return Outcome::Static(vec![first_line(&e)]),
                 }
+            } else if surface == "SQL2" {
+                (
+                    crate::e30b::SCHEMA_R2,
+                    ctx.data_plain.clone(),
+                    program.to_string(),
+                )
             } else {
                 (pg::SCHEMA_SQL, ctx.data_typed.clone(), program.to_string())
             };
@@ -174,7 +185,14 @@ pub fn execute(ctx: &mut Ctx, task: &str, surface: &str, program: &str, like: &A
                             vec![
                                 ("exec", format!("select task({})", a.join(", "))),
                                 ("exec", "set constraints all immediate".into()),
-                                ("read", tasks::sql_effect(task).into()),
+                                (
+                                    "read",
+                                    if surface == "SQL2" {
+                                        crate::e30b::sql_effect_r2(task).into()
+                                    } else {
+                                        tasks::sql_effect(task).into()
+                                    },
+                                ),
                             ],
                         )
                     }

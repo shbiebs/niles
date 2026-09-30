@@ -45,7 +45,12 @@ fn front(
 
 /// `nilesc check`: parse, resolve, typecheck, lower.
 pub fn check(program: &str) -> Verdict {
-    let src = format!("{SCHEMA}\n{program}");
+    check_with(SCHEMA, program)
+}
+
+/// The same, after another schema (E30b′'s schema variants, design §4.2).
+pub fn check_with(schema: &str, program: &str) -> Verdict {
+    let src = format!("{schema}\n{program}");
     let (prog, cat, mut d) = front(&src);
     let (_, l) = lower::lower_program(&prog, &cat);
     d.extend(l);
@@ -278,8 +283,19 @@ pub enum RunErr {
 /// Run function `f` of a program on the interpreter and return the legs it seals, as
 /// (acct, cur, amt). Opening balances are the dataset's.
 pub fn run_fn(program: &str, f: &str, args: &[Arg], d: &Dataset) -> Result<Answer, RunErr> {
+    run_fn_with(SCHEMA, program, f, args, d)
+}
+
+/// The same, after another schema (E30b′'s schema variants, design §4.2).
+pub fn run_fn_with(
+    schema: &str,
+    program: &str,
+    f: &str,
+    args: &[Arg],
+    d: &Dataset,
+) -> Result<Answer, RunErr> {
     use niles_interp::{Interp, Value as V};
-    let src = format!("{SCHEMA}\n{program}");
+    let src = format!("{schema}\n{program}");
     let (prog, cat, diags) = front(&src);
     if diags.has_errors() {
         return Err(RunErr::Failed("the program does not check".into()));

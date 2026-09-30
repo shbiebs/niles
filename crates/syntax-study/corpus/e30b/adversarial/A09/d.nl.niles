@@ -1,0 +1,8 @@
+// A09 defective: declared usd; the body posts a balanced pair in eur.
+fn task(a: Id<Account>, b: Id<Account>, x: Money<eur>) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("a09") {
+        post(debit(a, x)?, credit(b, x))
+    }
+}

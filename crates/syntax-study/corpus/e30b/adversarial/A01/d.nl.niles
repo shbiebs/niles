@@ -1,0 +1,7 @@
+// A01 defective: a hold is placed and never resolved. Niles has no way to declare a hold
+// type that is not linear, so the omission itself cannot be written; the defect it lets
+// through can.
+fn task(a: Id<Account>, m: Money<usd>) -> Result<(), TxnError> ! { append, hold<usd> } {
+    let h = hold(a, m, expires: 7.days)?;
+    Ok(())
+}

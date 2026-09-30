@@ -1,0 +1,44 @@
+// E30b′ a02: E30's Niles schema with `postings` declared a table rather than a ledger (design §4.2).
+// E30's schema in Niles: the study's four relations and three currencies. Every NL and RS
+// program is checked as this file followed by the program.
+schema study {
+    currency usd { scale: 2 }
+    currency eur { scale: 2 }
+    currency jpy { scale: 0 }
+
+    table parties {
+        id: Id<Party> primary key,
+        parent: Id<Party>,
+    }
+
+    table accounts {
+        id: Id<Account> primary key,
+        owner: Id<Party>,
+        desk: Int,
+    }
+
+    table postings {
+        txn: TxnId,
+        acct: Id<Account>,
+        cur: Currency,
+        amt: Money,
+        value_date: Date,
+        idem: IdemKey window 1_000_000.epochs,
+        retain forever;
+        bitemporal;
+    }
+
+    base holds {
+        id: HoldId,
+        acct: Id<Account>,
+        cur: Currency,
+        amount: Money,
+        open: Bool,
+        retain forever;
+    }
+
+    index ix_postings on postings (acct) anchor;
+    index ix_holds on holds (acct, cur) anchor;
+    index ix_accounts on accounts (id) anchor;
+    index ix_parties on parties (id) anchor;
+}

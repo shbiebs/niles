@@ -1,0 +1,9 @@
+// A12 correct: a usd transfer. The defective twin (a usd amount labelled eur) has no
+// spelling: a posting's currency is its Money's, not a separate label.
+fn task(a: Id<Account>, b: Id<Account>, m: Money<usd>) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("a12") {
+        post(debit(a, m)?, credit(b, m))
+    }
+}

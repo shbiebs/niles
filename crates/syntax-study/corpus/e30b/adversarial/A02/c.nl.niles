@@ -1,0 +1,8 @@
+// A02 correct: the balanced transfer, same schema.
+fn task(a: Id<Account>, b: Id<Account>, m: Money<usd>) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("a02") {
+        post(debit(a, m)?, credit(b, m))
+    }
+}

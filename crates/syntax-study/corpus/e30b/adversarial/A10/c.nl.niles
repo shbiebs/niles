@@ -1,0 +1,15 @@
+// A10 correct: the view is served `snapshot`.
+view bal = postings
+    .where(|p| p.cur == "usd")
+    .group_by(|p| p.acct)
+    .sum(|p| p.amt)
+    serve { consistency: snapshot, materialize: auto };
+
+fn task(a: Id<Account>, b: Id<Account>, m: Money<usd>) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd>, read@snapshot }
+{
+    let have: Money<usd> = bal.get(a)?;
+    txn idem("a10") {
+        post(debit(a, m)?, credit(b, m))
+    }
+}

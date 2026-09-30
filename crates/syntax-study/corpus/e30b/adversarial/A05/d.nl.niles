@@ -1,0 +1,10 @@
+// A05 defective: a helper posts one half; the task's transaction calls it for the debit only.
+fn pay_out(a: Id<Account>, m: Money<usd>) -> Result<(), TxnError> ! { append, debit<usd> } {
+    post(debit(a, m)?)
+}
+
+fn task(a: Id<Account>, b: Id<Account>, m: Money<usd>) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("a05") { pay_out(a, m) }
+}

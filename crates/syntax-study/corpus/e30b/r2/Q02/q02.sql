@@ -1,0 +1,5 @@
+select acct, sum(amt)
+from postings
+where cur = 'usd'
+group by acct
+having sum(amt) < 0

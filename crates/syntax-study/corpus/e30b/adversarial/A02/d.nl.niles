@@ -1,0 +1,9 @@
+// A02 defective: a transfer one minor unit short, under a schema whose `postings` is a
+// table rather than a ledger (schema a02).
+fn task(a: Id<Account>, b: Id<Account>, m: Money<usd>) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("a02") {
+        post(debit(a, m)?, credit(b, m - 0.01 usd))
+    }
+}

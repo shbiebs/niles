@@ -1,0 +1,12 @@
+// A05 correct: the helper posts both halves.
+fn pay(a: Id<Account>, b: Id<Account>, m: Money<usd>) -> Result<(), TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    post(debit(a, m)?, credit(b, m))
+}
+
+fn task(a: Id<Account>, b: Id<Account>, m: Money<usd>) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("a05") { pay(a, b, m) }
+}

@@ -1,0 +1,8 @@
+// A09 correct: declared eur.
+fn task(a: Id<Account>, b: Id<Account>, x: Money<eur>) -> Result<TxnId, TxnError>
+    ! { append, debit<eur>, credit<eur> }
+{
+    txn idem("a09") {
+        post(debit(a, x)?, credit(b, x))
+    }
+}

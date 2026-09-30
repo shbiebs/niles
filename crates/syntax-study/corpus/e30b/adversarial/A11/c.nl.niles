@@ -1,0 +1,10 @@
+// A11 correct: an eur transfer from an eur parameter. The defective twin (eur legs from a
+// usd amount) has no spelling: a Money value's minor units cannot be taken out of it and
+// re-labelled.
+fn task(a: Id<Account>, b: Id<Account>, x: Money<eur>) -> Result<TxnId, TxnError>
+    ! { append, debit<eur>, credit<eur> }
+{
+    txn idem("a11") {
+        post(debit(a, x)?, credit(b, x))
+    }
+}

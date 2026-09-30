@@ -1,0 +1,15 @@
+case	class	sql_schema	niles_schema	d_sql_args	c_sql_args	d_niles_args	c_niles_args	niles_defective	niles_correct
+A01	schema-level omission	a01	e30	3, row(5000)::usd	3, row(5000)::usd	acct:3 usd:5000	acct:3 usd:5000	d.nl.niles	c.nl.niles
+A02	schema-level omission	a02	a02	3, 4, row(12345)::usd	3, 4, row(12345)::usd	acct:3 acct:4 usd:12345	acct:3 acct:4 usd:12345	d.nl.niles	c.nl.niles
+A03	dynamic execute	r1	e30	3, 4, row(12345)::usd	3, 4, row(12345)::usd	acct:3 acct:4 usd:12345	acct:3 acct:4 usd:12345	n/a: Niles has no dynamic SQL	n/a: Niles has no dynamic SQL
+A04	dynamic execute	r1	e30	3, 4, row(12345)::usd	3, 4, row(12345)::usd	acct:3 acct:4 usd:12345	acct:3 acct:4 usd:12345	n/a: Niles has no dynamic SQL	n/a: Niles has no dynamic SQL
+A05	functions calling functions	r1	e30	3, 4, row(12345)::usd	3, 4, row(12345)::usd	acct:3 acct:4 usd:12345	acct:3 acct:4 usd:12345	d.nl.niles	c.nl.niles
+A06	functions calling functions	r1	e30	3, 4, row(9000)::eur	3, 4, row(9000)::eur	acct:3 acct:4 eur:9000	acct:3 acct:4 eur:9000	d.nl.niles	c.nl.niles
+A07	triggers	r1	e30	3, 4, row(12345)::usd	3, 4, row(12345)::usd	acct:3 acct:4 usd:12345	acct:3 acct:4 usd:12345	n/a: Niles has no triggers	n/a: Niles has no triggers
+A08	triggers	r1	e30	3, 4, row(12345)::usd	3, 4, row(12345)::usd	acct:3 acct:4 usd:12345	acct:3 acct:4 usd:12345	n/a: Niles has no triggers	n/a: Niles has no triggers
+A09	declared-effect mismatch	r1	e30	3, 4, row(9000)::eur	3, 4, row(9000)::eur	acct:3 acct:4 eur:9000	acct:3 acct:4 eur:9000	d.nl.niles	c.nl.niles
+A10	declared-effect mismatch	r1	e30	3, 4, row(100)::usd	3, 4, row(100)::usd	acct:3 acct:4 usd:100	acct:3 acct:4 usd:100	d.nl.niles	c.nl.niles
+A11	currency swap, typed position	r1	e30	3, 4, row(9000)::usd	3, 4, row(9000)::eur	acct:3 acct:4 usd:9000	acct:3 acct:4 eur:9000	n/a: a Money value's minor units cannot be taken out and re-labelled	c.nl.niles
+A12	currency swap, untyped position	r1	e30	3, 4, row(12345)::usd	3, 4, row(12345)::usd	acct:3 acct:4 usd:12345	acct:3 acct:4 usd:12345	n/a: a posting's currency is its Money's; there is no separate label	c.nl.niles
+A13	back-valued correction	r1	e30	1	1	int:1	int:1	n/a: no Niles form sets a posting's value date (E30 F9)	n/a: no Niles form sets a posting's value date (E30 F9)
+A14	back-valued correction	r1	e30	1, 3, row(1000)::usd	1, 3, row(1000)::usd	acct:1 acct:3 usd:1000	acct:1 acct:3 usd:1000	n/a: no Niles form sets a posting's value date (E30 F9)	n/a: no Niles form sets a posting's value date (E30 F9)

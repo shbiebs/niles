@@ -1,0 +1,14 @@
+// A06 correct: `task` is declared eur.
+fn inner_pair(a: Id<Account>, b: Id<Account>, x: Money<eur>) -> Result<(), TxnError> {
+    post(debit(a, x)?, credit(b, x))
+}
+
+fn middle(a: Id<Account>, b: Id<Account>, x: Money<eur>) -> Result<(), TxnError> {
+    inner_pair(a, b, x)
+}
+
+fn task(a: Id<Account>, b: Id<Account>, x: Money<eur>) -> Result<TxnId, TxnError>
+    ! { append, debit<eur>, credit<eur> }
+{
+    txn idem("a06") { middle(a, b, x) }
+}

@@ -76,8 +76,13 @@ impl<'a> Cx<'a> {
             Expr::Un(op, x, _) if op == "+" => self.minor(x),
             Expr::Field(x, f, _) if f == "minor" => match x.as_ref() {
                 Expr::Col(n, _) if n.0.len() == 1 => self.symbol(n.last()),
+                Expr::Row(v, _) if v.len() == 1 => match &v[0] {
+                    Expr::Col(n, _) if n.0.len() == 1 => self.symbol(n.last()),
+                    _ => self.fresh(),
+                },
                 _ => self.fresh(),
             },
+            Expr::Row(v, _) if v.len() == 1 => self.minor(&v[0]),
             Expr::Col(n, _) if n.0.len() == 1 => self.symbol(&format!("int {}", n.last())),
             Expr::Bin(a, op, b, _) if op == "+" || op == "-" => {
                 let (x, y) = (self.minor(a), self.minor(b));

@@ -251,3 +251,19 @@ fn what_the_typing_cannot_see_it_leaves_alone() {
     );
     assert!(errors("r1", &prog).is_empty(), "{:?}", errors("r1", &prog));
 }
+
+// ---------------------------------------------------------------- the adapter's reading of `(m).minor`
+
+#[test]
+fn a_parenthesised_minor_is_its_parameter_so_the_legs_cancel() {
+    // `(m).minor` parses as the field of a one-element row. conserve.rs read that as a fresh
+    // amount, so `row(-(m).minor)::usd` never cancelled `m`, contrary to its own
+    // documentation, and a leg one minor unit off was undecided instead of refused.
+    let prog = |credit: &str| {
+        format!(
+            "create function pay(a bigint, b bigint, m usd) returns void language plpgsql as $$\n{HEAD}    insert into postings (txn, acct, cur, amt_usd, epoch, value_date) values\n        (t, a, 'usd', row(-(m).minor)::usd, e, current_date),\n        (t, b, 'usd', {credit}, e, current_date);\nend $$;\n"
+        )
+    };
+    assert!(errors("r1", &prog("m")).is_empty());
+    assert_eq!(errors("r1", &prog("row((m).minor + 1)::usd")), ["NL0300"]);
+}

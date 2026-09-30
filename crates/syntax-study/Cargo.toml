@@ -1,0 +1,21 @@
+[package]
+name = "syntax-study"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+# E30 — the syntax study (cycle 14, R2-06; design `docs/study/E30-syntax-design.md`). Five
+# surfaces over one corpus and one dataset, each program checked, executed and compared with an
+# oracle that shares no code with any surface. No dependency outside this repository; PRQL and
+# Soufflé are external binaries found at run time (`/opt/arms`, or `PRQLC` / `SOUFFLE`).
+[dependencies]
+bank-bench = { path = "../bank-bench" }
+niles-lang = { path = "../niles-lang" }
+niles-ir = { path = "../niles-ir" }
+niles-interp = { path = "../niles-interp" }
+nilescheck-sql = { path = "../nilescheck-sql" }
+
+[[bin]]
+name = "e30"
+path = "src/bin/e30.rs"

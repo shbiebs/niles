@@ -1,0 +1,7 @@
+id	acct	cur	amount	open
+1	6	usd	3088	true
+2	9	eur	2036	true
+3	12	usd	7978	true
+4	13	eur	1182	false
+5	9	usd	6706	false
+6	10	eur	2178	false

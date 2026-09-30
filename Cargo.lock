@@ -145,3 +145,14 @@ dependencies = [
  "nilestream-core",
  "nilestream-server",
 ]
+
+[[package]]
+name = "syntax-study"
+version = "0.1.0"
+dependencies = [
+ "bank-bench",
+ "niles-interp",
+ "niles-ir",
+ "niles-lang",
+ "nilescheck-sql",
+]

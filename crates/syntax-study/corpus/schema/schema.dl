@@ -1,0 +1,15 @@
+// E30's schema in Soufflé Datalog: the four relations as input facts (parties split in two), with plain columns — a
+// currency as a symbol, an amount as a number of minor units, a value date as a day count
+// since 1970-01-01. Every DL program is run as this file followed by the program, which
+// declares `answer` and outputs it.
+.decl parties(id: number)
+.input parties
+// A party's parent, where it has one: Datalog has no null, and a sentinel parent would be one.
+.decl parent(child: number, parent: number)
+.input parent
+.decl accounts(id: number, owner: number, desk: number)
+.input accounts
+.decl postings(txn: number, acct: number, cur: symbol, amt: number, epoch: number, value_date: number)
+.input postings
+.decl holds(id: number, acct: number, cur: symbol, amount: number, open: number)
+.input holds

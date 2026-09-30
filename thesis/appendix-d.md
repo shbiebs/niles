@@ -37,6 +37,7 @@ component is for is not derivable from its source.
 | `nilestream-server` | Daemon: sessions, PostgreSQL wire surface, conformance | 87 |
 | `proto-engine` | The research prototype the counted-work experiments run on | 24 |
 | `rev-sidecar` | E27 arms H3 and T: a nilestream-core REV fed by PostgreSQL logical replication (pgoutput) or TigerBeetle CDC, served over the PostgreSQL wire | 12 |
+| `syntax-study` | E30: the syntax study — one corpus in five surfaces, an oracle, the executors and the mutation classification (design docs/study/E30-syntax-design.md) | 52 |
 
 <!-- END:appendix-d-map -->
 

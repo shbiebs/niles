@@ -46,6 +46,7 @@ ROLE = {
     "comparator": "E27: Nilestream against PostgreSQL, pg_ivm, ReadySet, a REV sidecar and TigerBeetle under eviction, across bank sizes; the five-anomalies probe",
     "nilescheck-sql": "Hand-written PostgreSQL 16 SQL and PL/pgSQL parser; the catalog checker (E14 PostgreSQL + checker) and SQL+C+L: linearity, conservation through niles-lang's solver, capabilities (E14 columns)",
     "rev-sidecar": "E27 arms H3 and T: a nilestream-core REV fed by PostgreSQL logical replication (pgoutput) or TigerBeetle CDC, served over the PostgreSQL wire",
+    "syntax-study": "E30: the syntax study — one corpus in five surfaces, an oracle, the executors and the mutation classification (design docs/study/E30-syntax-design.md)",
     "experiments": "The E-series measurement harness",
     "proto-engine": "The research prototype the counted-work experiments run on",
     "counterproposal": "The differential defect corpus against PostgreSQL",

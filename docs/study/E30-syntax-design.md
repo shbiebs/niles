@@ -216,3 +216,24 @@ before any number exists.
   constraint trigger that raises when a `(txn, cur)` group does not sum to zero — and each SQL
   transaction runs inside `begin`, then `set constraints all immediate` so the deferred check
   fires, then `rollback`.
+
+## 10. Amendment A2 — each surface's schema, and B03 in Niles (2026-09-30, with the harness, before any program)
+
+* **Each surface queries the relations in its own natural form** (`crates/syntax-study/corpus/schema/`).
+  SQL+C+L gets R2-05's typed schema — money as a composite type per currency, the ledger,
+  linear and capability domains by comment, a real conservation trigger. PRQL gets the same
+  four relations with plain columns (currency as text, amount as bigint minor units), because
+  typed money is SQL+C+L's discipline, not the relational model's, and PRQL is a query
+  language over whatever relations it is given. Datalog gets the same plain columns as input
+  facts, with a party's parent as its own relation `parent(child, parent)`: Datalog has no
+  null, and a sentinel parent would be one. Niles gets its schema in Niles. A consequence,
+  stated before any mutant runs: a swapped currency in PRQL or DL has no type to violate, so
+  it can only be caught at run time or not at all — which is those surfaces' property, and
+  what M1 is there to measure.
+* **B03 in NL/RS is unexecuted by construction.** Its correction is back-valued, and
+  `niles-interp`'s legs (`ledger.rs`, `Leg`) carry an epoch but no value date, so the
+  correction the program posts cannot be read back at the value date it was posted for. B03's
+  NL/RS program is checked, and its accepted mutants are *unexecuted* (A1's fifth class).
+* **Dates** are ISO dates in SQL and PRQL, `Date` (days since 1970-01-01) in Niles, and day
+  counts since 1970-01-01 in DL; the dataset's day 0 is 2026-01-01. Answers render every date
+  as ISO text before comparison.

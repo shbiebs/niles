@@ -12,7 +12,7 @@ The tool lives outside the workspace. `GlobalAlloc` cannot be implemented withou
 
 | Scenario | Unit | Ops | Allocations | per op | Bytes | per op | Live | Peak |
 |---|---|--:|--:|--:|--:|--:|--:|--:|
-| `ledger_seeded` | posting | 40000 | 150345 | 3.8 | 21582367 | 540 | 8872589 | 9856518 |
+| `ledger_seeded` | posting | 40000 | 150369 | 3.8 | 22401931 | 560 | 9282205 | 10266134 |
 | `zset_base_at` | row | 40000 | 46665 | 1.2 | 9583856 | 240 | 9583856 | 9583856 |
 | `served_group_by_cur` | query | 3 | 39 | 13.0 | 5454 | 1818 | 0 | 1664 |
 | `served_group_by_acct` | query | 3 | 37806 | 12602.0 | 11387166 | 3795722 | 0 | 2841312 |
@@ -21,7 +21,7 @@ The tool lives outside the workspace. `GlobalAlloc` cannot be implemented withou
 | `served_point` | query | 200 | 2000 | 10.0 | 184400 | 922 | 0 | 842 |
 | `wire_reply_10k` | reply | 5 | 5 | 1.0 | 348160 | 69632 | 0 | 69632 |
 | `wire_reply_100k` | reply | 5 | 5 | 1.0 | 348160 | 69632 | 0 | 69632 |
-| `served_point_conjunct` | query | 200 | 3000 | 15.0 | 427600 | 2138 | 0 | 1792 |
+| `served_point_conjunct` | query | 200 | 2000 | 10.0 | 184400 | 922 | 0 | 842 |
 | `served_having_on_key` | query | 200 | 4200 | 21.0 | 635600 | 3178 | 0 | 1856 |
 | `rev_read_hit` | read | 1000 | 0 | 0.0 | 0 | 0 | 0 | 0 |
 | `append_in_memory` | transaction | 500 | 3500 | 7.0 | 266000 | 532 | 76000 | 76232 |
@@ -37,7 +37,7 @@ Allocations per operation, asserted exactly — an allocation count is not a tol
 
 | Scenario | Budget (allocations/op) | Measured | Headroom |
 |---|--:|--:|--:|
-| `ledger_seeded` | 4.2 | 3.8 | 11% |
+| `ledger_seeded` | 4.2 | 3.8 | 10% |
 | `zset_base_at` | 1.4 | 1.2 | 17% |
 | `served_group_by_cur` | 15.0 | 13.0 | 13% |
 | `served_group_by_acct` | 14000.0 | 12602.0 | 10% |
@@ -46,7 +46,7 @@ Allocations per operation, asserted exactly — an allocation count is not a tol
 | `served_point` | 13.0 | 10.0 | 23% |
 | `wire_reply_10k` | 1.2 | 1.0 | 17% |
 | `wire_reply_100k` | 1.2 | 1.0 | 17% |
-| `served_point_conjunct` | 17.0 | 15.0 | 12% |
+| `served_point_conjunct` | 13.0 | 10.0 | 23% |
 | `served_having_on_key` | 24.0 | 21.0 | 12% |
 | `rev_read_hit` | 1.2 | 0.0 | 100% |
 | `append_in_memory` | 7.7 | 7.0 | 9% |

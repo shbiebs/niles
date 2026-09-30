@@ -711,6 +711,15 @@ account 7's balance for a query that selects no rows. A scan may be restricted w
 conjunct is necessary; a view may only answer when it is sufficient. Those are different
 questions and the code now asks both — `account_restriction` and `sole_account_filter`.
 
+**Since cycle 15 (C15-02, E27b's E1) the conjunct above is 10, `served_point`'s figure, and
+its budget is `served_point`'s 13.** A `cur = c` conjunct is not an "other condition" of a view
+keyed by `(acct, cur)`: it names the key's second half. `sole_key_filter` now accepts
+`acct = k` alone or with `cur = c`, and the view answers either. The case above stays correct
+because existence is checked per key (`Ledger::key_exists_at`), so a currency the account never
+posted in still selects no rows (`acct = 3 and cur = 1` in `tests/multi_currency_view.rs`;
+`cur = 99` in `rev_engine.rs`'s `a_restricted_scan_and_the_full_one_answer_the_same_question`).
+Any other conjunct still sends the read to the restricted scan.
+
 **`explain` says which class**, from `rev_engine::serve_path` — the function `query` itself
 branches on, so the two cannot become different descriptions of the same engine:
 

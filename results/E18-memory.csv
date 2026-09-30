@@ -1,7 +1,7 @@
 # provenance: cargo run -q --release --manifest-path tools/memprobe/Cargo.toml --bin memprobe
 # configuration: byte totals are host- and toolchain-shaped; measured on linux x86_64 / rustc 1.95.0 (59807616e 2026-04-14)
 scenario,unit,operations,allocations,bytes,live_delta,peak_delta,allocations_per_op,bytes_per_op
-ledger_seeded,posting,40000,150345,21582367,8872589,9856518,3.8,539.6
+ledger_seeded,posting,40000,150369,22401931,9282205,10266134,3.8,560.0
 zset_base_at,row,40000,46665,9583856,9583856,9583856,1.2,239.6
 served_group_by_cur,query,3,39,5454,0,1664,13.0,1818.0
 served_group_by_acct,query,3,37806,11387166,0,2841312,12602.0,3795722.0
@@ -10,7 +10,7 @@ served_sum_negative,query,3,36,5568,0,1728,12.0,1856.0
 served_point,query,200,2000,184400,0,842,10.0,922.0
 wire_reply_10k,reply,5,5,348160,0,69632,1.0,69632.0
 wire_reply_100k,reply,5,5,348160,0,69632,1.0,69632.0
-served_point_conjunct,query,200,3000,427600,0,1792,15.0,2138.0
+served_point_conjunct,query,200,2000,184400,0,842,10.0,922.0
 served_having_on_key,query,200,4200,635600,0,1856,21.0,3178.0
 rev_read_hit,read,1000,0,0,0,0,0.0,0.0
 append_in_memory,transaction,500,3500,266000,76000,76232,7.0,532.0

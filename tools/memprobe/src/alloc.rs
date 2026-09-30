@@ -340,6 +340,16 @@ pub fn budget(scenario: &str) -> Option<f64> {
         // moved. Consistent with the currency lookups the lowering now runs for each money
         // aggregate while compiling the balance view (each origin trace collects the
         // filters it passes); not traced to a line.
+        //
+        // **+24 in C15-02 (E27b), bisected by commit** (memprobe in a worktree at each):
+        // `4e62ea3` (E1, the multi-currency view) 150,345 -> 150,358, with live bytes
+        // 8,872,589 -> 9,282,205; `44bb0cd` (E3, value dates) 150,358 -> 150,369, with 256
+        // more bytes and no live change; `2623dfa` (E2) no change. E1's +409,616 live bytes
+        // are the ledger's new `key_first` map, and they match it exactly: 10,000 keys in
+        // 16,384 buckets of a 16-byte key and an 8-byte epoch, plus 16,400 control bytes. Its
+        // +13 allocations are that map's growth. E3's +11 are per process and consistent with
+        // the seeded engine compiling one more column; they are not traced to a line. Per-op
+        // stays 3.8.
         "ledger_seeded" => 4.2,
         // **The three served analytical statements, after the fold replaced the copy.**
         //
@@ -399,11 +409,13 @@ pub fn budget(scenario: &str) -> Option<f64> {
         // account, and 76,696 allocations to find one group out of ten thousand is not a
         // cost the shape of the question justifies. The budget is `served_point`'s plus room
         // for the extra conjunct, because that is all either one now is.
-        // Three more than `served_point` because it is *not* a plain balance read: the
-        // extra conjunct means the maintained view cannot answer it (the view is keyed by
-        // account and currency and knows nothing about a query's other conditions), so the
-        // account-restricted scan folds instead. Fifteen allocations, against thirty-two.
-        "served_point_conjunct" => 17.0,
+        // **Now a plain balance read, and held to `served_point`'s budget.** Until C15-02 the
+        // conjunct `cur = 0` kept the maintained view from answering, so the
+        // account-restricted scan folded instead: 15 allocations, against 32 before that.
+        // E27b's E1 (`4e62ea3`, bisected) made a read that names its currency a key of the
+        // `(acct, cur)` view: 15 -> 10, exactly `served_point`'s. The budget moves from 17.0
+        // to `served_point`'s 13.0, so a regression to the fold (15) fails the gate.
+        "served_point_conjunct" => 13.0,
         // The `having` copy costs a rewritten predicate — two boxes for a comparison, the
         // vector holding it, and the filter above the aggregate still being evaluated over
         // the one group that survives. Nine allocations for a query, against seventy-six

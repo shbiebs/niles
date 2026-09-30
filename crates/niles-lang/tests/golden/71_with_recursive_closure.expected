@@ -1,0 +1,17 @@
+# 71_with_recursive_closure
+# **The transitive closure case 36 could not write** (C15-05b; decision 4). `with recursive`
+# lowers to the guarded fixpoint: the base is the edges, the step joins the accumulator's `b`
+# to an edge's `src` and keeps the outer `a` with the inner `dst`, and the SQL surface can
+# say both because a join names its key and a qualified column names its side. The graph has
+# a cycle (5 -> 6 -> 5), so the closure holds (5,5) and (6,6), and a fixpoint that kept
+# multiplicities would never stop: ten pairs, each once.
+1 2 x1
+1 3 x1
+1 4 x1
+2 3 x1
+2 4 x1
+3 4 x1
+5 5 x1
+5 6 x1
+6 5 x1
+6 6 x1

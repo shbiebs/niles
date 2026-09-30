@@ -945,6 +945,15 @@ impl<'a> Lx<'a> {
             contract,
             name,
         );
+        // **A source's arity is its width** (cycle 15, C15-05b). `Circuit::add` derives every
+        // other node's arity from its inputs and cannot know a relation's, so every source
+        // was built with arity 0 and every node above one inherited it. The verifier reads
+        // arity as width: its confidentiality pass concatenated a join's two sides without
+        // the left side's width, so a sealed column of the right side was checked at the
+        // wrong index (a filter on it passed, and a filter on the left side's column of the
+        // same index was refused), and IR019 reported every correlated subquery over a
+        // source as out of bounds.
+        self.circuit.nodes[id as usize].arity = cols.len() as u16;
         self.schemas.insert(id, cols);
         self.sources.insert(name.to_string(), id);
         Some(id)
@@ -1723,7 +1732,196 @@ impl<'a> Lx<'a> {
     /// `order by`, then `limit`. The pipeline surface writes that order out explicitly,
     /// which is the argument for it; the SQL surface writes SQL's order and is rearranged
     /// here.
+    /// A `select`, with its `with` list (C15-05b; the author's decision 4).
+    ///
+    /// Each entry is lowered in order and its name bound, for the rest of the statement, to
+    /// the node it lowered to. A binding shadows a relation of the same name and is undone
+    /// when the statement ends, so a CTE is visible exactly where SQL says it is.
     fn select(&mut self, s: &SelectStmt, c: ServeContract) -> Option<NodeId> {
+        if s.ctes.is_empty() {
+            return self.select_body(s, c);
+        }
+        let mut shadowed: Vec<(String, Option<NodeId>)> = Vec::new();
+        let mut ok = true;
+        for cte in &s.ctes {
+            let node = if cte.recursive && mentions(&cte.body, &cte.name.text) > 0 {
+                self.recursive_cte(cte, c)
+            } else {
+                self.select(&cte.body, c)
+                    .and_then(|n| self.cte_columns(cte, n, c))
+            };
+            let Some(node) = node else {
+                ok = false;
+                break;
+            };
+            let prev = self.sources.insert(cte.name.text.clone(), node);
+            shadowed.push((cte.name.text.clone(), prev));
+        }
+        let out = if ok { self.select_body(s, c) } else { None };
+        for (name, prev) in shadowed.into_iter().rev() {
+            match prev {
+                Some(p) => self.sources.insert(name, p),
+                None => self.sources.remove(&name),
+            };
+        }
+        out
+    }
+
+    /// A CTE's column list, applied to the node its body lowered to: a projection that
+    /// renames, and nothing when no list is written.
+    fn cte_columns(&mut self, cte: &Cte, node: NodeId, c: ServeContract) -> Option<NodeId> {
+        if cte.columns.is_empty() {
+            return Some(node);
+        }
+        let have = self.schema_of(node).len();
+        if cte.columns.len() != have {
+            self.d.push(
+                Diagnostic::error(
+                    "NL0523",
+                    format!(
+                        "`{}` names {} column(s) and its body produces {have}",
+                        cte.name.text,
+                        cte.columns.len()
+                    ),
+                )
+                .primary(cte.span, "the column list and the body disagree")
+                .note("a CTE's column list renames the body's columns one for one; it cannot add or drop one"),
+            );
+            return None;
+        }
+        let id = self.circuit.add(
+            Op::Map {
+                exprs: (0..have as ColIdx).map(Scalar::Column).collect(),
+            },
+            vec![node],
+            c,
+            "cte columns",
+        );
+        self.schemas
+            .insert(id, cte.columns.iter().map(|n| n.text.clone()).collect());
+        Some(id)
+    }
+
+    /// **`with recursive`, lowered to the guarded fixpoint** (C15-05b; decision 4).
+    ///
+    /// The body is `base union step`. The base is lowered once; the step is lowered with the
+    /// CTE's name bound to a `Delay` over the base, which is the accumulator, exactly as the
+    /// pipeline's `.fixpoint(|acc| ..)` binds its parameter. The fixpoint node unions the
+    /// step's output into the accumulator until nothing new arrives.
+    ///
+    /// **What it means, stated so an engine can be held to it.** The IR's fixpoint is the
+    /// least *set* `R` with `R = base ∪ step(R)`, reached by iteration from the base. For the
+    /// steps SQL admits in a recursive term — the CTE read once, not inside a subquery, not
+    /// on the nullable side of an outer join, with no aggregate, no `limit`, no `order by`
+    /// and no further set operation — `step` is monotone, and that set is the answer
+    /// PostgreSQL gives for `union`. Those same restrictions are refused here (NL0525)
+    /// rather than given another meaning. `union all` is refused (NL0524): its answer is a
+    /// bag with the multiplicities of the working-table iteration, and the fixpoint keeps a
+    /// set, so it would answer a different query under the same text.
+    ///
+    /// **The guard.** SQL writes no measure. The round bound (1,000) is the only guard, and
+    /// the measure slot carries `null` to say so rather than a constant that would read as a
+    /// termination argument. A recursion that has not converged by then is refused at run
+    /// time (`NonTerminating`), which stops the epoch instead of stalling it.
+    fn recursive_cte(&mut self, cte: &Cte, c: ServeContract) -> Option<NodeId> {
+        let name = cte.name.text.as_str();
+        let body = &cte.body;
+        let refuse = |this: &mut Self, code: &'static str, msg: String, at: Span, note: &str| {
+            this.d.push(
+                Diagnostic::error(code, msg)
+                    .primary(at, "in this recursive CTE")
+                    .note(note.to_string()),
+            );
+            None
+        };
+        let Some((op, step)) = &body.set_op else {
+            return refuse(
+                self,
+                "NL0525",
+                format!("`{name}` reads itself, and a recursive CTE is a base `union` a step"),
+                cte.span,
+                "write the rows the recursion starts from, then `union`, then the query that reads the CTE",
+            );
+        };
+        if *op == SetOp::UnionAll {
+            return refuse(
+                self,
+                "NL0524",
+                format!("`{name}` recurses through `union all`"),
+                cte.span,
+                "the guarded fixpoint computes a set; `union all` asks for a bag, and on a cycle it never stops growing. Write `union`",
+            );
+        }
+        if *op != SetOp::Union {
+            return refuse(
+                self,
+                "NL0525",
+                format!("`{name}` recurses through a set operation other than `union`"),
+                cte.span,
+                "`except` and `intersect` are not monotone, so iterating them has no least fixpoint to reach",
+            );
+        }
+        let mut base = body.clone();
+        base.set_op = None;
+        if mentions(&base, name) > 0 {
+            return refuse(
+                self,
+                "NL0525",
+                format!("the base of `{name}` reads `{name}`"),
+                base.span,
+                "the rows before `union` are where the recursion starts; they cannot depend on it",
+            );
+        }
+        if let Some(why) = step_restriction(step, name) {
+            return refuse(
+                self,
+                "NL0525",
+                format!("the step of `{name}` {why}"),
+                step.span,
+                "these are the recursive terms whose iteration is monotone, which is what gives the fixpoint the answer SQL defines",
+            );
+        }
+        let base_node = self.select(&base, c)?;
+        let base_node = self.cte_columns(cte, base_node, c)?;
+        let delay = self
+            .circuit
+            .add(Op::Delay, vec![base_node], c, "accumulator");
+        self.schemas
+            .insert(delay, self.schema_of(base_node).to_vec());
+        let prev = self.sources.insert(name.to_string(), delay);
+        let produced = self.select(step, c);
+        match prev {
+            Some(p) => self.sources.insert(name.to_string(), p),
+            None => self.sources.remove(name),
+        };
+        let produced = produced?;
+        let (want, got) = (
+            self.schema_of(base_node).len(),
+            self.schema_of(produced).len(),
+        );
+        if want != got {
+            self.d.push(
+                Diagnostic::error("NL0514", "a fixpoint's step must produce the same shape it consumes")
+                    .primary(step.span, format!("this produces {got} column(s)"))
+                    .secondary(base.span, format!("the base has {want}"))
+                    .note("the accumulator and the step's output are unioned each round; two shapes cannot be unioned"),
+            );
+            return None;
+        }
+        let id = self.circuit.add(
+            Op::Fixpoint {
+                measure: Scalar::LitNull,
+                max_rounds: 1_000,
+            },
+            vec![base_node, produced],
+            c,
+            "with recursive",
+        );
+        self.schemas.insert(id, self.schema_of(base_node).to_vec());
+        Some(id)
+    }
+
+    fn select_body(&mut self, s: &SelectStmt, c: ServeContract) -> Option<NodeId> {
         let Some(first) = s.from.first() else {
             self.d.push(
                 Diagnostic::error("NL0511", "this `select` has no `from`")
@@ -2475,26 +2673,25 @@ impl<'a> Lx<'a> {
                 // concatenated schema is what it is resolved against.
                 let mut names = self.schema_of(l).to_vec();
                 names.extend(self.schema_of(r).iter().cloned());
-                let lk = self.output_key(l).unwrap_or_default();
-                let rk = match self.output_key(r) {
-                    Some(k) => k,
-                    None => {
-                        self.d.push(
-                            Diagnostic::error("NL0503", "the right side of this join has no key")
-                                .primary(t.span(), "nothing says which columns to join on")
-                                .note("the left side's key is not a default: two relations agreeing on a column *position* is not the same as agreeing on a column"),
-                        );
-                        return None;
-                    }
+                let Some(o) = on else {
+                    // No `on`: the two sides' keys, which is the pipeline's `.join(u)`.
+                    return self.key_join(l, r, left, right, jk, names, t.span(), *span, c);
                 };
-                if !self.join_keys_agree(&lk, &rk, *span, "join") {
-                    return None;
-                }
+                // **The join's keys come from its `on` clause** (cycle 15, C15-05b, found
+                // lowering `with recursive`). They came from the two sides' *anchor* keys,
+                // with `on` added as a residual, so a join whose condition was not the anchor
+                // was the anchor-join filtered by the condition: `t join u on t.v = u.w`
+                // answered no rows where two match, `r join edges e on r.b = e.src` was
+                // refused as NL0519 because `r` has no anchor, and nothing said so. SQL's
+                // `on` is the whole of the match. Its `column = column` conjuncts across the
+                // two sides become the keys the IR probes on, and whatever else it says
+                // stays the residual, evaluated as part of the match — which is what an
+                // outer join's padding depends on.
                 let id = self.circuit.add(
                     Op::Join {
                         kind: jk,
-                        left_key: lk.clone(),
-                        right_key: rk.clone(),
+                        left_key: Vec::new(),
+                        right_key: Vec::new(),
                         residual: None,
                     },
                     vec![l, r],
@@ -2503,19 +2700,112 @@ impl<'a> Lx<'a> {
                 );
                 self.schemas.insert(id, names);
                 let (ls, rs) = (self.ref_sides(left, l), self.ref_sides(right, r));
-                self.record_join(id, l, r, ls, rs, jk, &lk, &rk);
-                if let Some(o) = on {
-                    // Resolved after the node exists, because `scalar` resolves column
-                    // names against a node's schema and the joined schema is this node's.
-                    let residual = self.predicate(id, o, "join on")?;
-                    if let Op::Join { residual: slot, .. } = &mut self.circuit.nodes[id as usize].op
-                    {
-                        *slot = Some(residual);
+                self.record_join(id, l, r, ls.clone(), rs.clone(), jk, &[], &[]);
+                // Resolved after the node exists, because `scalar` resolves column names
+                // against a node's schema and the joined schema is this node's.
+                let condition = self.predicate(id, o, "join on")?;
+                let width_l = self.schema_of(l).len() as ColIdx;
+                let (mut lk, mut rk, mut rest) = (Vec::new(), Vec::new(), Vec::new());
+                for conj in scalar_conjuncts(condition) {
+                    match &conj {
+                        Scalar::Binary {
+                            op: ScalarOp::Eq,
+                            lhs,
+                            rhs,
+                        } => match (&**lhs, &**rhs) {
+                            (Scalar::Column(a), Scalar::Column(b))
+                                if *a < width_l && *b >= width_l =>
+                            {
+                                lk.push(*a);
+                                rk.push(*b - width_l);
+                            }
+                            (Scalar::Column(a), Scalar::Column(b))
+                                if *b < width_l && *a >= width_l =>
+                            {
+                                lk.push(*b);
+                                rk.push(*a - width_l);
+                            }
+                            _ => rest.push(conj),
+                        },
+                        _ => rest.push(conj),
                     }
                 }
+                let residual = rest.into_iter().reduce(|a, b| Scalar::Binary {
+                    op: ScalarOp::And,
+                    lhs: Box::new(a),
+                    rhs: Box::new(b),
+                });
+                let node = &mut self.circuit.nodes[id as usize];
+                node.op = Op::Join {
+                    kind: jk,
+                    left_key: lk.clone(),
+                    right_key: rk.clone(),
+                    residual,
+                };
+                node.key = Some(lk.clone());
+                self.record_join(id, l, r, ls, rs, jk, &lk, &rk);
                 Some(id)
             }
         }
+    }
+
+    /// A join with no `on`, keyed on the two sides' keys.
+    #[allow(clippy::too_many_arguments)]
+    fn key_join(
+        &mut self,
+        l: NodeId,
+        r: NodeId,
+        left: &TableRef,
+        right: &TableRef,
+        jk: IrJoin,
+        names: Vec<String>,
+        at: Span,
+        span: Span,
+        c: ServeContract,
+    ) -> Option<NodeId> {
+        let lk = self.output_key(l).unwrap_or_default();
+        let Some(rk) = self.output_key(r) else {
+            self.d.push(
+                Diagnostic::error("NL0503", "the right side of this join has no key")
+                    .primary(at, "nothing says which columns to join on")
+                    .note("the left side's key is not a default: two relations agreeing on a column *position* is not the same as agreeing on a column"),
+            );
+            return None;
+        };
+        if !self.join_keys_agree(&lk, &rk, span, "join") {
+            return None;
+        }
+        let id = self.circuit.add(
+            Op::Join {
+                kind: jk,
+                left_key: lk.clone(),
+                right_key: rk.clone(),
+                residual: None,
+            },
+            vec![l, r],
+            c,
+            "join",
+        );
+        self.schemas.insert(id, names);
+        let (ls, rs) = (self.ref_sides(left, l), self.ref_sides(right, r));
+        self.record_join(id, l, r, ls, rs, jk, &lk, &rk);
+        Some(id)
+    }
+}
+
+/// The conjuncts of an `and`-chain, in order.
+fn scalar_conjuncts(s: Scalar) -> Vec<Scalar> {
+    match s {
+        Scalar::Binary {
+            op: ScalarOp::And,
+            lhs,
+            rhs,
+        } => {
+            let mut v = scalar_conjuncts(*lhs);
+            v.extend(scalar_conjuncts(*rhs));
+            v
+        }
+        other => vec![other],
     }
 }
 
@@ -2890,6 +3180,147 @@ impl Lx<'_> {
             },
             other => other.clone(),
         })
+    }
+}
+
+/// How many times a query reads `name` as a relation: in its from-lists, its subqueries,
+/// its set operations and its own `with` bodies. A `with` entry of the same name shadows it
+/// for what follows.
+fn mentions(s: &SelectStmt, name: &str) -> usize {
+    let mut n = 0;
+    let mut shadowed = false;
+    for cte in &s.ctes {
+        n += mentions(&cte.body, name);
+        if cte.name.text == name {
+            shadowed = true;
+        }
+    }
+    if shadowed {
+        return n;
+    }
+    fn table(t: &TableRef, name: &str, n: &mut usize) {
+        match t {
+            TableRef::Named { name: r, .. } => {
+                if r.text == name {
+                    *n += 1;
+                }
+            }
+            TableRef::Join {
+                left, right, on, ..
+            } => {
+                table(left, name, n);
+                table(right, name, n);
+                if let Some(o) = on {
+                    *n += mentions_in_expr(o, name);
+                }
+            }
+            TableRef::Sub { query, .. } => *n += mentions(query, name),
+        }
+    }
+    for t in &s.from {
+        table(t, name, &mut n);
+    }
+    for (e, _) in &s.projections {
+        n += mentions_in_expr(e, name);
+    }
+    for e in s
+        .filter
+        .iter()
+        .chain(s.having.iter())
+        .chain(s.group_by.iter())
+    {
+        n += mentions_in_expr(e, name);
+    }
+    if let Some((_, next)) = &s.set_op {
+        n += mentions(next, name);
+    }
+    n
+}
+
+/// The reads of `name` inside the subqueries of an expression.
+fn mentions_in_expr(e: &Expr, name: &str) -> usize {
+    match e {
+        Expr::Exists { query, .. } => mentions(query, name),
+        Expr::Select(q) => mentions(q, name),
+        _ => {
+            let (mut kids, mut blocks) = (Vec::new(), Vec::new());
+            crate::typecheck::each_child(e, &mut kids, &mut blocks);
+            kids.iter().map(|k| mentions_in_expr(k, name)).sum()
+        }
+    }
+}
+
+/// Why a recursive CTE's step is outside the recursive terms SQL admits, or `None`. These
+/// are PostgreSQL's restrictions on a recursive term, and they are what make the step
+/// monotone in the CTE, which is what the least-fixpoint answer rests on.
+fn step_restriction(step: &SelectStmt, name: &str) -> Option<&'static str> {
+    if step.set_op.is_some() {
+        return Some("is itself a set operation; write one step");
+    }
+    if !step.group_by.is_empty()
+        || step.having.is_some()
+        || step
+            .projections
+            .iter()
+            .any(|(e, _)| aggregate_of(e).is_some())
+    {
+        return Some("aggregates, and an aggregate over the recursion is not monotone");
+    }
+    if step.limit.is_some() || step.offset.is_some() || !step.order_by.is_empty() {
+        return Some("orders or limits its rows, which has no meaning inside a recursion");
+    }
+    // The reads of the CTE: exactly one, in the from-list proper, and not on the side of an
+    // outer join that is padded with nulls.
+    fn direct(t: &TableRef, name: &str, nullable: bool, hits: &mut Vec<bool>, other: &mut usize) {
+        match t {
+            TableRef::Named { name: r, .. } => {
+                if r.text == name {
+                    hits.push(nullable);
+                }
+            }
+            TableRef::Join {
+                left,
+                right,
+                kind,
+                on,
+                ..
+            } => {
+                let (ln, rn) = match kind {
+                    JoinKind::Left => (false, true),
+                    JoinKind::Right => (true, false),
+                    JoinKind::Full => (true, true),
+                    JoinKind::Inner | JoinKind::Cross => (false, false),
+                };
+                direct(left, name, nullable || ln, hits, other);
+                direct(right, name, nullable || rn, hits, other);
+                if let Some(o) = on {
+                    *other += mentions_in_expr(o, name);
+                }
+            }
+            TableRef::Sub { query, .. } => *other += mentions(query, name),
+        }
+    }
+    let (mut hits, mut other) = (Vec::new(), 0usize);
+    for t in &step.from {
+        direct(t, name, false, &mut hits, &mut other);
+    }
+    for (e, _) in &step.projections {
+        other += mentions_in_expr(e, name);
+    }
+    if let Some(f) = &step.filter {
+        other += mentions_in_expr(f, name);
+    }
+    for cte in &step.ctes {
+        other += mentions(&cte.body, name);
+    }
+    if other > 0 {
+        return Some("reads the CTE inside a subquery");
+    }
+    match hits.as_slice() {
+        [] => Some("does not read the CTE, so there is nothing to recurse on"),
+        [false] => None,
+        [true] => Some("reads the CTE on the null-padded side of an outer join"),
+        _ => Some("reads the CTE more than once"),
     }
 }
 

@@ -358,6 +358,11 @@ struct Cx<'a> {
     /// the same body is walked several times and reporting each pass would multiply every
     /// error by the number of rounds.
     emit: bool,
+    /// The `with` entries in scope, innermost last, each with the relations its body reads
+    /// (through earlier entries). The confidentiality rule looks relations up by name, and a
+    /// CTE's name is not a relation's: without this, `with x as (select * from p) select *
+    /// from x where owner = 1` filtered on a sealed column with no NL0260 (C15-05b).
+    ctes: Vec<(String, Vec<String>)>,
 }
 
 /// Per-scope state: the currency row being accumulated, the effects incurred, and the
@@ -543,6 +548,7 @@ impl<'a> Cx<'a> {
             next_symbol: 0,
             summaries,
             emit: false,
+            ctes: Vec::new(),
         }
     }
 
@@ -1667,6 +1673,51 @@ impl<'a> Cx<'a> {
     }
 
     fn select(&mut self, s: &SelectStmt, sc: &mut Scope) {
+        // The `with` list first: each body is checked like any other query (its reads are
+        // effects, its predicates are subject to the confidentiality rule), and its name then
+        // stands for the relations it reads, for the rest of the statement.
+        let depth = self.ctes.len();
+        for cte in &s.ctes {
+            if cte.recursive {
+                // A recursive body reads itself; the name is in scope for its own body, and
+                // stands for what the body's other sources are.
+                let mut own = Vec::new();
+                self.relations_of(&cte.body, &cte.name.text, &mut own);
+                self.ctes.push((cte.name.text.clone(), own));
+            }
+            let body = cte.body.clone();
+            self.select(&body, sc);
+            if !cte.recursive {
+                let mut own = Vec::new();
+                self.relations_of(&cte.body, "", &mut own);
+                self.ctes.push((cte.name.text.clone(), own));
+            }
+        }
+        self.select_body(s, sc);
+        self.ctes.truncate(depth);
+    }
+
+    /// The relations a query reads, with every `with` name in scope replaced by what it
+    /// stands for. `skip` is a recursive entry's own name, which stands for nothing new.
+    fn relations_of(&self, s: &SelectStmt, skip: &str, out: &mut Vec<String>) {
+        let mut names = Vec::new();
+        let mut arm = Some(s);
+        while let Some(a) = arm {
+            collect_relation_names(&a.from, &mut |n| names.push(n.to_string()));
+            arm = a.set_op.as_ref().map(|(_, next)| &**next);
+        }
+        for n in names {
+            if n == skip {
+                continue;
+            }
+            match self.ctes.iter().rev().find(|(c, _)| *c == n) {
+                Some((_, under)) => out.extend(under.iter().cloned()),
+                None => out.push(n),
+            }
+        }
+    }
+
+    fn select_body(&mut self, s: &SelectStmt, sc: &mut Scope) {
         self.check_confidential_in_select(s);
         for t in &s.from {
             self.table_ref(t, sc);
@@ -2234,11 +2285,20 @@ impl<'a> Cx<'a> {
     /// it — is refused.
     fn check_confidential_in_select(&mut self, s: &SelectStmt) {
         let mut confidential: Vec<(String, String, Span)> = Vec::new();
-        collect_relation_names(&s.from, &mut |n| {
-            if let Some(rel) = self.cat.relations.get(n) {
-                confidential.extend(confidential_columns(rel));
+        let mut names = Vec::new();
+        collect_relation_names(&s.from, &mut |n| names.push(n.to_string()));
+        for n in names {
+            // A `with` name stands for the relations its body reads.
+            let under: Vec<String> = match self.ctes.iter().rev().find(|(c, _)| *c == n) {
+                Some((_, under)) => under.clone(),
+                None => vec![n],
+            };
+            for r in under {
+                if let Some(rel) = self.cat.relations.get(&r) {
+                    confidential.extend(confidential_columns(rel));
+                }
             }
-        });
+        }
         if confidential.is_empty() {
             return;
         }
@@ -2523,7 +2583,7 @@ fn calls_in_expr(e: &Expr, out: &mut Vec<String>) {
 /// Written once so that the call-graph walk cannot fall behind the AST: a new `Expr`
 /// variant that carries a body and is not added here would make a call inside it invisible
 /// to the recursion check, and an unnoticed cycle is exactly what `havoc` exists to catch.
-fn each_child<'e>(e: &'e Expr, exprs: &mut Vec<&'e Expr>, blocks: &mut Vec<&'e Block>) {
+pub(crate) fn each_child<'e>(e: &'e Expr, exprs: &mut Vec<&'e Expr>, blocks: &mut Vec<&'e Block>) {
     match e {
         Expr::Call { callee, args, .. } => {
             exprs.push(callee);
@@ -2712,6 +2772,9 @@ fn collect_sources_in_select(
             }
             TableRef::Sub { query, .. } => collect_sources_in_select(query, cat, out),
         }
+    }
+    for cte in &s.ctes {
+        collect_sources_in_select(&cte.body, cat, out);
     }
     for t in &s.from {
         table_ref(t, cat, out);

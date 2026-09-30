@@ -1,0 +1,8 @@
+# 75_join_on_non_anchor_column
+# **`on` is the whole of the match** (cycle 15, C15-05b; found lowering `with recursive`).
+# A SQL join was keyed on the two sides' *anchors* with `on` as a residual, so this query —
+# `edges` is anchored on `src`, not `dst` — was the join `src = k` filtered by `dst = k`,
+# and answered no rows. Its keys now come from `on`: each edge meets the `t` row its `dst`
+# names. Edge 3 -> 4 has no `t` row, and neither edge of the 5 <-> 6 cycle has one.
+1 2 2 20 200 x1
+2 3 3 30 null x1

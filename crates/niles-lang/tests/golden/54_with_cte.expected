@@ -1,6 +1,10 @@
 # 54_with_cte
-# **Outside SQL-Core.** A non-recursive `with` is refused at lowering; `with recursive` has
-# a Niles spelling (`.fixpoint(..) guard measure(..)`, cases 31 and 36) and the plain form
-# does not. This is the shape of gap worth recording precisely: the harder construct is
-# supported and the easier one is not.
-REFUSED NL0500
+# **Lowered since cycle 15** (C15-05b; the author's decision 4). This case recorded a
+# refusal: the `with` list was parsed and discarded, so `from x` reached the lowering as a
+# relation nobody had declared and was refused as NL0500 — the harder construct
+# (`with recursive`) had a Niles spelling and the easier one had none. The entry is now
+# lowered and its name bound for the rest of the statement: the rows of `t`.
+1 10 100 x1
+1 10 null x1
+2 20 200 x1
+3 30 null x1

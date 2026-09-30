@@ -850,6 +850,26 @@ pub struct SelectStmt {
     /// served engine could ask for an anchor other than the frontier — which is the read the
     /// thesis's second item is about.
     pub as_of: Option<(u64, Span)>,
+    /// The `with` list in front of the statement (cycle 15, C15-05b; the author's decision 4).
+    /// It used to be parsed and thrown away, so `with x as (..) select .. from x` reached the
+    /// lowering as a read of a relation called `x` and was refused as NL0500. The list is
+    /// now kept and lowered: a plain entry is inlined, a `recursive` one becomes the IR's
+    /// guarded fixpoint.
+    pub ctes: Vec<Cte>,
+    pub span: Span,
+}
+
+/// One entry of a `with` list: `name [(col, ..)] as (select ..)`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Cte {
+    pub name: Name,
+    /// The column list, when one is written. Empty means "the body's own column names".
+    pub columns: Vec<Name>,
+    /// Whether the `with` that introduced this entry said `recursive`. SQL puts the keyword
+    /// on the list, not the entry, so every entry of a `with recursive` list carries it; an
+    /// entry that does not read itself is lowered as a plain one either way.
+    pub recursive: bool,
+    pub body: SelectStmt,
     pub span: Span,
 }
 

@@ -399,7 +399,7 @@ pub static KEYWORDS: &[Keyword] = &[
     kw!("order", Order, ColName, RequiresAs, Sql, "2026", "Introduces ordering; the pipeline spelling is `order_by`. Clause-position only.", "order_by(|r| asc(r.id))"),
     kw!("outer", Outer, TypeFuncName, RequiresAs, Sql, "2026", "Marks a join as outer.", "a.full_outer_join(b, |x, y| x.k == y.k)"),
     kw!("primary", Primary, Unreserved, Bare, Sql, "2026", "Introduces the primary key.", "table t { id: i64 primary key }"),
-    kw!("recursive", Recursive, Unreserved, Bare, Sql, "2026", "Marks a CTE as recursive. Niles requires a `guard measure(..)` on the recursion regardless.", "sql { with recursive r as (select 1) select * from r }"),
+    kw!("recursive", Recursive, Unreserved, Bare, Sql, "2026", "Marks a CTE as recursive: `base union step`, lowered to the fixpoint. SQL writes no measure, so the round bound is its only guard.", "sql { with recursive r(k) as (select k from t union select k from r) select * from r }"),
     kw!("references", References, Unreserved, Bare, Sql, "2026", "Target of a foreign key.", "foreign key (acct) references accounts (id)"),
     kw!("revoke", Revoke, Unreserved, Bare, Sql, "2026", "Withdraw a capability. Recorded as a ledger event, never a silent edit.", "revoke debit<usd> on postings from teller;"),
     kw!("right", Right, TypeFuncName, RequiresAs, Sql, "2026", "Right outer join.", "a.right_join(b, |x, y| x.k == y.k)"),
@@ -416,7 +416,7 @@ pub static KEYWORDS: &[Keyword] = &[
     kw!("view", View, Unreserved, Bare, Sql, "2026", "A derived relation with a serve contract. The REV of the theory.", "view v = postings.group_by(|p| p.acct) serve { consistency: snapshot };"),
     kw!("when", When, Reserved, RequiresAs, Sql, "2026", "Guard of a `case` arm, or of a `match` arm.", "case when p then a else b end"),
     kw!("where", Where, Reserved, RequiresAs, Sql, "2026", "Filter stage, and Rust's bound clause. The positions are disjoint.", "postings.where(|p| p.amt > 0.00 usd)"),
-    kw!("with", With, Reserved, RequiresAs, Sql, "2026", "Common table expression in the SQL surface.", "sql { with t as (select 1) select * from t }"),
+    kw!("with", With, Reserved, RequiresAs, Sql, "2026", "Common table expression in the SQL surface; each entry is inlined where it is named.", "sql { with x as (select k from t) select * from x }"),
 
     // ================= Rust-derived =================
     kw!("Self", SelfType, Reserved, RequiresAs, Rust, "2026", "The implementing type.", "fn zero() -> Self { Self { amt: 0.00 usd } }"),

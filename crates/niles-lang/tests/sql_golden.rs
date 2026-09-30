@@ -341,9 +341,16 @@ fn the_two_surfaces_denote_the_same_zset_wherever_both_are_written() {
     // cases stopped being compared. The list is printed and its length is bounded, so
     // adding a case that silently opts out of the comparison fails here.
     assert!(
-        skipped.len() <= 41,
+        skipped.len() <= 44,
         "{} cases are skipped by this comparison, which is more than the corpus leaves \
-         uncompared today (41: thirty-eight written in one surface, three refused in both). \
+         uncompared today (44: thirty-nine written in one surface, five refused in both; the \
+         breakdown this message gave before cycle 15, thirty-eight and three, was stale). \
+         It went up by three in cycle 15 (C15-05b): `75_join_on_non_anchor_column` has no \
+         pipeline spelling, since `.join(u)` is keyed on the anchors by design; four `with` \
+         cases have none either \
+         (`71_with_recursive_closure`, which is the closure case 36 cannot write, and the \
+         refusals 72-74), and `54_with_cte` and `55_with_cte_filtered`, which used to record a \
+         refusal, now lower and are written in both surfaces and compared.\n\n\
          It went up by one in cycle 14 (R2-06) for `70_having_aggregate_not_computed_refused`, \
          a refusal of the SQL surface's `having` that the pipeline's `having(|g| ..)` cannot \
          spell, because it names output fields rather than aggregate calls.\n\n\

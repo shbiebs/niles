@@ -1,0 +1,6 @@
+# 72_with_recursive_union_all_refused
+# `union all` in a recursive CTE asks for a bag, with the multiplicities PostgreSQL's
+# working-table iteration produces; the IR's fixpoint keeps a set. Answering it would answer
+# a different query under the same text, and on this graph's cycle the bag never stops
+# growing. Refused, with `union` named as the form that lowers.
+REFUSED NL0524

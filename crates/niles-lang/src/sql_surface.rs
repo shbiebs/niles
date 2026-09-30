@@ -67,7 +67,9 @@ pub static MAPPING: &[Mapping] = &[
     Mapping { sql: "count / min / max / avg", niles: ".count(..) / .min(..) / .max(..) / .avg(..)", status: Status::Equivalent }, // 09, 10, 11, 40
     Mapping { sql: "SELECT sum(v) FROM t", niles: "(no pipeline spelling)", status: Status::Lowered },      // 26
     Mapping { sql: "GROUP BY k HAVING h", niles: ".group_by(|r| r.k).having(|g| h)", status: Status::Lowered },  // 12
-    Mapping { sql: "JOIN u ON c", niles: ".join(u)", status: Status::Lowered },                             // 17
+    // Keyed by `on`'s cross-side equalities since cycle 15 (C15-05b); it was keyed on the two
+    // anchors with `on` as a residual, and case 75 answered no rows.
+    Mapping { sql: "JOIN u ON c", niles: ".join(u)", status: Status::Lowered },                             // 17, 75
     Mapping { sql: "LEFT JOIN u ON c", niles: ".left_join(u)", status: Status::Lowered },                   // 18
     Mapping { sql: "RIGHT JOIN u ON c", niles: ".right_join(u)", status: Status::Equivalent },              // 50
     Mapping { sql: "FULL JOIN u ON c", niles: ".full_outer_join(u)", status: Status::Equivalent },          // 51
@@ -78,7 +80,12 @@ pub static MAPPING: &[Mapping] = &[
     Mapping { sql: "JOIN u USING (k)", niles: "(none)", status: Status::Refused("NL0001") },                // 56
     Mapping { sql: "COUNT(DISTINCT x)", niles: "(none)", status: Status::Refused("NL0002") },               // 57
     Mapping { sql: "CASE WHEN .. THEN .. ELSE .. END", niles: "(none)", status: Status::Refused("NL0508") },// 53
-    Mapping { sql: "WITH x AS (..) SELECT .. (non-recursive)", niles: "(none)", status: Status::Refused("NL0500") }, // 54, 55
+    // **`with`, since cycle 15** (C15-05b, decision 4). The list was parsed and discarded, so
+    // `from x` was a read of an undeclared relation (NL0500). A plain entry is now inlined —
+    // the pipeline has no `with`, and the two surfaces are compared on its body — and a
+    // recursive one lowers to the guarded fixpoint, which is the closure case 36 cannot write.
+    Mapping { sql: "WITH x AS (..) SELECT .. (non-recursive)", niles: "(the body, inlined)", status: Status::Equivalent }, // 54, 55
+    Mapping { sql: "WITH x (a, b) AS (..) — a column list of another arity", niles: "(none)", status: Status::Refused("NL0523") }, // 74
     Mapping { sql: "FROM t, u", niles: "(no pipeline spelling)", status: Status::Lowered },                 // 19
     Mapping { sql: "UNION", niles: ".union(u)", status: Status::Lowered },                                  // 14
     Mapping { sql: "UNION ALL", niles: ".union_all(u)", status: Status::Lowered },                          // 13
@@ -96,7 +103,9 @@ pub static MAPPING: &[Mapping] = &[
     Mapping { sql: "a scalar subquery in the projection list", niles: "(none)", status: Status::Refused("NL0508") }, // 38
     Mapping { sql: "a set operation between different arities", niles: "(none)", status: Status::Refused("NL0512") }, // 27
     Mapping { sql: "SELECT with no FROM", niles: "(none)", status: Status::Refused("NL0511") },             // 35
-    Mapping { sql: "WITH RECURSIVE", niles: ".fixpoint(|acc| ..) guard measure(m)", status: Status::Specified },  // 31, 36
+    Mapping { sql: "WITH RECURSIVE x AS (base UNION step)", niles: ".fixpoint(|acc| ..) guard measure(m)", status: Status::Lowered },  // 71
+    Mapping { sql: "WITH RECURSIVE x AS (base UNION ALL step)", niles: "(none: the fixpoint keeps a set)", status: Status::Refused("NL0524") }, // 72
+    Mapping { sql: "WITH RECURSIVE, a step outside SQL's recursive terms", niles: "(none)", status: Status::Refused("NL0525") }, // 73
     Mapping { sql: "CREATE MATERIALIZED VIEW", niles: "view .. serve { materialize: full }", status: Status::Lowered }, // 01
     Mapping { sql: "AS OF SYSTEM TIME", niles: ".as_of(#e)", status: Status::Lowered }, // 41
     Mapping { sql: "FOR SYSTEM_TIME", niles: ".recorded_at / .valid_at / bitemporal", status: Status::Specified },

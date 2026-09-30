@@ -2608,16 +2608,37 @@ impl<'a> Parser<'a> {
     }
 
     fn select_inner_body(&mut self, start: Span) -> SelectStmt {
-        // `with t as (..) select ..` — the CTE is parsed and, at lowering, inlined.
+        // `with [recursive] t [(c, ..)] as (..), .. select ..` — kept, and lowered: a plain
+        // entry is inlined, a recursive one becomes the guarded fixpoint (C15-05b). Until
+        // cycle 15 the list was parsed and discarded here, and a column list did not parse.
+        let mut ctes = Vec::new();
         if self.eat_kw(Kw::With) {
-            self.eat_kw(Kw::Recursive);
+            let recursive = self.eat_kw(Kw::Recursive);
             loop {
-                let _name = self.ident("a CTE name");
+                let cte_start = self.cur_span();
+                let name = self.ident("a CTE name");
+                let mut columns = Vec::new();
+                if self.eat(&Tok::LParen) {
+                    loop {
+                        columns.push(self.ident("a CTE column name"));
+                        if !self.eat(&Tok::Comma) {
+                            break;
+                        }
+                    }
+                    self.expect(Tok::RParen, "to close a CTE's column list");
+                }
                 self.expect_kw(Kw::As, "in a CTE");
                 self.expect(Tok::LParen, "to open a CTE body");
                 let inner_start = self.cur_span();
-                let _ = self.select_inner(inner_start);
+                let body = self.select_inner(inner_start);
                 self.expect(Tok::RParen, "to close a CTE body");
+                ctes.push(Cte {
+                    name,
+                    columns,
+                    recursive,
+                    body,
+                    span: cte_start.to(self.cur_span()),
+                });
                 if !self.eat(&Tok::Comma) {
                     break;
                 }
@@ -2777,6 +2798,7 @@ impl<'a> Parser<'a> {
             offset,
             set_op,
             as_of,
+            ctes,
             span: start.to(self.cur_span()),
         }
     }

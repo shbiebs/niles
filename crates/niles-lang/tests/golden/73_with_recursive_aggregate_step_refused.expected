@@ -1,0 +1,5 @@
+# 73_with_recursive_aggregate_step_refused
+# An aggregate over the recursion is not monotone, so iterating it reaches no least
+# fixpoint — PostgreSQL refuses the same query ("aggregate functions are not allowed in a
+# recursive query's recursive term"). Refused here rather than given a meaning.
+REFUSED NL0525

@@ -1,0 +1,4 @@
+# 74_with_cte_column_list_arity
+# A column list renames the body's columns one for one. `t` has three and the list names
+# two; a lowering that dropped or padded a column would serve a schema nobody wrote.
+REFUSED NL0523

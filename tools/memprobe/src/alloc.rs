@@ -229,6 +229,17 @@ pub fn budget(scenario: &str) -> Option<f64> {
         // this drift survived the gate on L-1's own commit; `make reproduce` caught it two
         // cards later. A byte-deterministic artefact whose regeneration is not in the gate
         // is guarded only by whoever remembers to run it.
+        //
+        // **+13 in cycle 14 (R2-06), and it is qualifier-aware resolution.** `5c48b99`
+        // ("Niles fix 5/5: a qualifier names a side of a join") made the lowering build the
+        // sides, same-column and parameter maps for every view it compiles, and the seeded
+        // engine compiles its balance view once: 150,309 -> 150,322 over 40,000 postings.
+        // Bisected, not assumed (cycle 15, C15-01): `01c4cae` reads 150,309 and `5c48b99`
+        // reads 150,322, and at 80,000 postings (ROUNDS = 4, a scratch run, not committed)
+        // the same two commits read 290,312 and 290,325, so the 13 is per process and not per
+        // posting. The per-op figure stays 3.8. The same hole let it through a second time:
+        // the gate still did not run reproduce, and `make reproduce` itself had exited 2 since
+        // `44133cc`. From cycle 15 the gate runs it (DA-11).
         "ledger_seeded" => 4.2,
         // **The three served analytical statements, after the fold replaced the copy.**
         //

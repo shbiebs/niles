@@ -136,6 +136,47 @@ impl<'a> Cx<'a> {
             })
             .collect();
         let txn_at = i.columns.iter().position(|c| c == "txn");
+        // **Representation R2** (E30b′ design §3): one plain amount column beside a currency
+        // text, named by the ledger's comment. A leg's currency is the row's currency value
+        // when it is a declared currency's name as a string literal, and otherwise unknown
+        // (its amount is then undecided); its amount is the amount expression, read as minor
+        // units exactly as R1's composites are.
+        let r2 = self.types.ledger_cols.get(&table).and_then(|(cc, ac)| {
+            Some((
+                i.columns.iter().position(|c| c == cc)?,
+                i.columns.iter().position(|c| c == ac)?,
+            ))
+        });
+        if let (Some((cur_at, amt_at)), Some(QueryBody::Values(values))) =
+            (r2, i.source.as_ref().map(|q| &q.body))
+        {
+            for r in values {
+                let rendered = txn_at.and_then(|k| r.get(k)).map(render);
+                let (key, opaque) = match rendered {
+                    Some(Some(k)) => (k, false),
+                    Some(None) => (format!("(txn at byte {})", i.span.start), true),
+                    None => ("(no txn column)".to_string(), false),
+                };
+                self.first.entry(key.clone()).or_insert(span);
+                let Some(amt) = r.get(amt_at) else { continue };
+                if matches!(amt, Expr::Lit(Literal::Null, _)) {
+                    continue;
+                }
+                let known = match r.get(cur_at) {
+                    Some(Expr::Lit(Literal::Str(c), _)) if self.types.currencies.contains_key(c) => {
+                        Some(c.clone())
+                    }
+                    _ => None,
+                };
+                let a = self.minor(amt);
+                let (cur, a) = match known {
+                    Some(c) => (c, if opaque { a.add(&self.fresh()) } else { a }),
+                    None => ("(a currency this reading cannot name)".to_string(), self.fresh()),
+                };
+                map.entry(key).or_default().movement(Cur::Known(cur), a, nspan(span));
+            }
+            return;
+        }
         match i.source.as_ref().map(|q| &q.body) {
             Some(QueryBody::Values(values)) => {
                 for r in values {
@@ -166,10 +207,16 @@ impl<'a> Cx<'a> {
                 // `insert … select`: whatever it inserts, the checker cannot see the amounts.
                 let key = format!("(insert … select at byte {})", i.span.start);
                 self.first.entry(key.clone()).or_insert(span);
-                let fresh: Vec<(String, Amount)> = cols
+                let mut fresh: Vec<(String, Amount)> = cols
                     .iter()
                     .map(|(_, c)| (c.clone(), self.fresh()))
                     .collect();
+                if r2.is_some() {
+                    fresh.push((
+                        "(a currency this reading cannot name)".to_string(),
+                        self.fresh(),
+                    ));
+                }
                 let row = map.entry(key).or_default();
                 for (cur, a) in fresh {
                     row.movement(Cur::Known(cur), a, nspan(span));

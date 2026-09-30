@@ -32,6 +32,34 @@ pub struct Types {
     /// view → (query, materialized).
     pub views: BTreeMap<String, (Query, bool)>,
     pub functions: BTreeMap<String, String>,
+    /// A ledger whose comment names its currency and amount columns (`ledger cur=cur
+    /// amount=amt`): E30b′'s representation R2, one plain amount column beside a currency
+    /// text. Absent for R1's typed columns, where the column's type is the currency.
+    pub ledger_cols: BTreeMap<String, (String, String)>,
+    /// (table, column) → the column's declared type (last name part), for every column.
+    pub column_types: BTreeMap<(String, String), String>,
+    /// table → its columns in declaration order, for an `insert` with no column list.
+    pub table_columns: BTreeMap<String, Vec<String>>,
+}
+
+/// Whether a table comment declares a ledger: `ledger`, or `ledger` followed by the columns
+/// representation R2 names (`ledger cur=cur amount=amt`, cycle 15, E30b′ design §3).
+pub fn is_ledger_comment(text: &str) -> bool {
+    text == "ledger" || text.starts_with("ledger ")
+}
+
+/// The `(currency column, amount column)` a ledger comment names, if it names both.
+pub fn ledger_columns(text: &str) -> Option<(String, String)> {
+    let mut cur = None;
+    let mut amt = None;
+    for w in text.split_whitespace().skip(1) {
+        if let Some(v) = w.strip_prefix("cur=") {
+            cur = Some(v.to_string());
+        } else if let Some(v) = w.strip_prefix("amount=") {
+            amt = Some(v.to_string());
+        }
+    }
+    Some((cur?, amt?))
 }
 
 fn last(n: &Name) -> String {
@@ -70,8 +98,11 @@ impl Types {
                             }
                         }
                     }
-                    "table" if text == "ledger" => {
+                    "table" if is_ledger_comment(text) => {
                         t.ledgers.insert(last(target));
+                        if let Some(cols) = ledger_columns(text) {
+                            t.ledger_cols.insert(last(target), cols);
+                        }
                     }
                     "column" => {
                         let p = &target.0;
@@ -99,7 +130,15 @@ impl Types {
         }
         for s in stmts {
             if let Stmt::CreateTable(ct) = s {
+                t.table_columns.insert(
+                    last(&ct.name),
+                    ct.columns.iter().map(|c| c.name.clone()).collect(),
+                );
                 for c in &ct.columns {
+                    t.column_types.insert(
+                        (last(&ct.name), c.name.clone()),
+                        c.ty.name.last().to_string(),
+                    );
                     if t.currencies.contains_key(c.ty.name.last()) {
                         t.columns.insert(
                             (last(&ct.name), c.name.clone()),

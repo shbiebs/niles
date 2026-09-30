@@ -139,7 +139,7 @@ impl Catalog {
                 } => {
                     let text = text.clone().unwrap_or_default();
                     match kind.as_str() {
-                        "table" if text == "ledger" => {
+                        "table" if crate::check2::is_ledger_comment(text.as_str()) => {
                             c.ledgers.insert(base(target));
                         }
                         "column" if !text.is_empty() => {

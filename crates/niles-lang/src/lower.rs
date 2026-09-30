@@ -492,12 +492,12 @@ impl<'a> Lx<'a> {
                     _ => IrJoin::Inner,
                 };
                 let residual = args.get(1).and_then(|a| self.scalar(input, &a.value));
-                let lk = self.circuit.node(input).key.clone().unwrap_or_default();
+                let lk = self.output_key(input).unwrap_or_default();
                 // The right key defaulting to the left key joined two relations on
                 // whatever column positions the left happened to use. Position agreement
                 // is not key agreement, and the resulting join was silently wrong rather
                 // than empty.
-                let rk = match self.circuit.node(rhs).key.clone() {
+                let rk = match self.output_key(rhs) {
                     Some(k) => k,
                     None => {
                         self.d.push(
@@ -571,8 +571,8 @@ impl<'a> Lx<'a> {
                 // dedicated operator keeps the operator set closed, which matters because
                 // every theorem quantifies over that set.
                 let rhs = args.first().and_then(|a| self.expr(&a.value, c))?;
-                let lk = self.circuit.node(input).key.clone().unwrap_or_default();
-                let rk = match self.circuit.node(rhs).key.clone() {
+                let lk = self.output_key(input).unwrap_or_default();
+                let rk = match self.output_key(rhs) {
                     Some(k) => k,
                     None => {
                         self.d.push(
@@ -1582,13 +1582,8 @@ impl<'a> Lx<'a> {
                 // the intersection — which is `INTERSECT ALL`, a form this fragment does
                 // not claim.
                 SetOp::Intersect => {
-                    let lk = self.circuit.node(cur).key.clone().unwrap_or_default();
-                    let rk = self
-                        .circuit
-                        .node(rhs)
-                        .key
-                        .clone()
-                        .unwrap_or_else(|| lk.clone());
+                    let lk = self.output_key(cur).unwrap_or_default();
+                    let rk = self.output_key(rhs).unwrap_or_else(|| lk.clone());
                     if !self.join_keys_agree(&lk, &rk, s.span, "`intersect`") {
                         return None;
                     }
@@ -1795,8 +1790,8 @@ impl<'a> Lx<'a> {
                 // concatenated schema is what it is resolved against.
                 let mut names = self.schema_of(l).to_vec();
                 names.extend(self.schema_of(r).iter().cloned());
-                let lk = self.circuit.node(l).key.clone().unwrap_or_default();
-                let rk = match self.circuit.node(r).key.clone() {
+                let lk = self.output_key(l).unwrap_or_default();
+                let rk = match self.output_key(r) {
                     Some(k) => k,
                     None => {
                         self.d.push(
@@ -2086,6 +2081,41 @@ fn first_pat_name(p: &Pat) -> Option<String> {
 /// `Aggregate` node cannot disagree — which they did: a global aggregate was an aggregate
 /// to the second and not to the first, so `select sum(v) from t` took the projection path
 /// and lowered `sum` as a user function.
+impl Lx<'_> {
+    /// **The columns of a node's *output* its key names**, for a join to match on.
+    ///
+    /// A node's `key` is in its *input's* terms where the upquery path needs it so: an
+    /// `Aggregate` derives `group_key`, the input columns it groups by, and asks its input at
+    /// that key (`upquery_path.rs`). Its output puts those columns first, at `0..k`. A join
+    /// took the input-terms key as if it indexed the aggregate's output, so
+    /// `accounts.left_join(postings.group_by(|p| p.acct).count(..))` matched account ids
+    /// against the *count* column — ten rows where two were right, accepted (cycle 14, R2-06,
+    /// found writing E30's Q04). Through the operators that keep their input's columns, the
+    /// aggregate below still decides.
+    fn output_key(&self, id: NodeId) -> Option<Vec<ColIdx>> {
+        let mut cur = id;
+        loop {
+            let n = self.circuit.node(cur);
+            match &n.op {
+                Op::Aggregate { group_key, .. } => {
+                    return Some((0..group_key.len() as ColIdx).collect());
+                }
+                Op::Filter { .. }
+                | Op::AsOf { .. }
+                | Op::ValidAt { .. }
+                | Op::Distinct
+                | Op::Negate
+                | Op::OrderBy { .. }
+                | Op::Limit { .. } => match n.inputs.first() {
+                    Some(i) => cur = *i,
+                    None => return n.key.clone(),
+                },
+                _ => return n.key.clone(),
+            }
+        }
+    }
+}
+
 impl Lx<'_> {
     /// **A keyed join whose two keys differ in length is refused.** Every join the IR executes
     /// matches a row's left key against a row's right key, so keys of different arity never

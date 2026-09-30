@@ -60,3 +60,58 @@ fn keys_of_the_same_length_are_accepted() {
         assert!(c.is_empty(), "{view}: {c:?}");
     }
 }
+
+/// **A join to an aggregate matches on the aggregate's output key** (cycle 14, R2-06).
+///
+/// E30's Q04 wrote `accounts.left_join(postings.group_by(|p| p.acct).count(|p| p.txn))`. The
+/// aggregate's derived key is its *input* grouping column (postings' `acct`, column 1), and the
+/// join used it as if it indexed the aggregate's output — where column 1 is the count — so
+/// account ids were matched against counts. Evaluated here on three accounts, two of which post.
+#[test]
+fn a_join_to_a_grouped_count_matches_on_the_grouping_column() {
+    use niles_ir::eval;
+    use niles_ir::operator::Op;
+    let src = format!(
+        "{}\nview v = accounts\n    .left_join(postings.group_by(|p| p.acct).count(|p| p.txn))\n    .where(|r| r.count is null)\n    .map(|r| r.id);\n",
+        schema("acct")
+    );
+    let (prog, _) = parser::parse_program(&src);
+    let (cat, _) = resolve::resolve_program(&prog, 0);
+    let (l, d) = lower::lower_program(&prog, &cat);
+    assert!(!d.has_errors());
+    let join = l
+        .circuit
+        .nodes
+        .iter()
+        .find_map(|n| match &n.op {
+            Op::Join {
+                left_key,
+                right_key,
+                ..
+            } => Some((left_key.clone(), right_key.clone())),
+            _ => None,
+        })
+        .expect("a join");
+    assert_eq!(
+        join,
+        (vec![0], vec![0]),
+        "the count's key is its first output column"
+    );
+    // accounts(id, desk); postings(txn, acct, cur, amt, idem): accounts 1 and 3 post.
+    let mut sources = std::collections::BTreeMap::new();
+    sources.insert(
+        "accounts".to_string(),
+        eval::zset(&[(&[1, 10], 1), (&[2, 20], 1), (&[3, 30], 1)]),
+    );
+    sources.insert(
+        "postings".to_string(),
+        eval::zset(&[(&[1, 1, 0, -5, 1], 1), (&[1, 3, 0, 5, 1], 1)]),
+    );
+    let (z, _) = eval::try_run(&l.circuit, "v", &sources).expect("evaluates");
+    let rows: Vec<String> = z.iter().map(|(r, w)| format!("{:?} x{w}", r)).collect();
+    assert_eq!(
+        rows,
+        vec!["[Int(2)] x1".to_string()],
+        "only account 2 has no posting"
+    );
+}

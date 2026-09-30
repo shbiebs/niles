@@ -188,3 +188,31 @@ constructs, mutants by class and the static-rejection rate, check cost; the rule
 class and overall, with this document's commit cited. `results/E30-syntax/` holds the per-program
 and per-mutant rows. The syntax rule in §6.25, B.1 and J.1 is restated from the result in R2-11
 or round 3, never before.
+
+## 9. Amendment A1 — the executors, as found (2026-09-30, before any program was written)
+
+Reading the executors this design names, before writing a program, found three facts the design
+did not state. They change how a result is obtained, not what is measured, and are fixed here
+before any number exists.
+
+* **`niles_ir::eval` passes `AsOf` and `ValidAt` through** (`crates/niles-ir/src/eval.rs`): the
+  reference evaluator answers a pinned read at the head. The engine does not — the server reads
+  the pin from the lowered circuit and scans the ledger at it
+  (`crates/nilestream-server/src/session.rs`, `pinned_anchor`, refusing two different pins). For
+  NL and RS the harness does the same: it reads every `AsOf { epoch: Some(e) }` in the circuit,
+  refuses conflicting pins as the server does, and restricts each source to rows with epoch ≤ e
+  before evaluating. **`ValidAt` has no executor anywhere in the repository**; the harness
+  restricts each source to rows with value date ≤ the instant, which is the IR's documented
+  meaning (`operator.rs`: "select a prefix of history"), and every answer that depends on it is
+  marked *harness-evaluated valid time* in the results.
+* **`niles-interp` refuses `hold`, `resolve`, `fx` and `authorize`** (`NotInSubset`). T03, T04,
+  T05 and T09 in NL/RS are therefore checked but cannot be executed by any Niles executor: their
+  semantic equality with the oracle is **not established**, and each of their mutants the checker
+  accepts is classified **unexecuted** — a fifth class, reported, and excluded from the
+  static-rejection rate's denominator like an equivalent mutant (it is neither known to be caught
+  nor known to be missed).
+* **The E14 preamble's conservation trigger is a stub** (it returns without checking), because
+  E14 measured checkers, not run time. The study's SQL schema has a real one — a deferred
+  constraint trigger that raises when a `(txn, cur)` group does not sum to zero — and each SQL
+  transaction runs inside `begin`, then `set constraints all immediate` so the deferred check
+  fires, then `rollback`.

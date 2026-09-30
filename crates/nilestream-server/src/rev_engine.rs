@@ -1868,7 +1868,7 @@ impl RevEngine {
     ///   would skip;
     /// * the chain from the base must be filters only — a `Map` changes what is aggregated,
     ///   and a view maintained over unmapped rows would answer a different query;
-    ///   `account_predicate` has already established that every filter is `acct = k`;
+    ///   the plan's sole-account filter has established that the restriction is `acct = k`;
     /// * the aggregate must be exactly `sum(amt)`, which is what the installed view holds;
     /// * the base must hold exactly one currency. The view is keyed `(account, currency)`
     ///   and this query names no currency, so with two the server would have to pick one —
@@ -2455,35 +2455,73 @@ pub fn serve_path_of(
     ServePath::Fold
 }
 
+/// **The account a scan may be restricted to**, or `None` for the whole base.
+///
+/// Restricting the scan is sound only if every postings row the circuit reads passes a
+/// filter `acct = k` before anything else sees it. This used to look for *any* filter of
+/// that shape, anywhere, at column 1 of *its own input* (cycle 15, C15-05b, found serving
+/// `with recursive`). Both halves were wrong on the wire:
+///
+/// * a filter on one side of a self-join restricted both sides, because the two reads of
+///   `postings` share one source node: `select p.acct, q.acct from postings p join postings
+///   q on p.txn = q.txn where p.acct = 0` answered only the pairs `(0, 0)`, and a recursion
+///   seeded with `acct = 0` never reached another account;
+/// * column 1 is `acct` only at the source: `select * from (select acct, p.txn as t from
+///   postings p) as s where t = 1` restricted the scan to *account* 1 and lost account 0's
+///   row of transaction 1.
+///
+/// So the rule is now structural. There is one postings source, it is read along a single
+/// chain — each node on it the only reader of the one below — of operators that keep the
+/// source's columns where they were (`Filter`, `AsOf`, `ValidAt`), and one filter on that
+/// chain is exactly `acct = k`. Every postings row then meets that filter before it meets
+/// anything else, which is the whole of the soundness argument.
 fn account_predicate(circuit: &niles_ir::circuit::Circuit) -> Option<u64> {
     use niles_ir::operator::{Op, Scalar, ScalarOp};
     const ACCT: u16 = ACCT_COL;
-    let mut found: Option<u64> = None;
-    for n in &circuit.nodes {
-        let Op::Filter { predicate } = &n.op else {
-            continue;
-        };
+    let acct_eq = |p: &Scalar| -> Option<u64> {
         let Scalar::Binary {
             op: ScalarOp::Eq,
             lhs,
             rhs,
-        } = predicate
+        } = p
         else {
-            // A filter this does not understand may keep rows a restricted scan would have
-            // dropped, so the restriction is abandoned rather than narrowed.
             return None;
         };
-        let acct = match (&**lhs, &**rhs) {
+        match (&**lhs, &**rhs) {
             (Scalar::Column(ACCT), Scalar::LitInt(k))
-            | (Scalar::LitInt(k), Scalar::Column(ACCT)) => u64::try_from(*k).ok()?,
-            _ => return None,
-        };
-        match found {
-            Some(prev) if prev != acct => return None,
-            _ => found = Some(acct),
+            | (Scalar::LitInt(k), Scalar::Column(ACCT)) => u64::try_from(*k).ok(),
+            _ => None,
         }
+    };
+    let mut sources = circuit
+        .nodes
+        .iter()
+        .filter(|n| matches!(&n.op, Op::Source { relation, .. } if relation == "postings"));
+    let (Some(src), None) = (sources.next(), sources.next()) else {
+        return None;
+    };
+    let mut cur = src.id;
+    loop {
+        let reads: usize = circuit
+            .nodes
+            .iter()
+            .map(|n| n.inputs.iter().filter(|i| **i == cur).count())
+            .sum();
+        if reads != 1 {
+            return None;
+        }
+        let next = circuit.nodes.iter().find(|n| n.inputs.contains(&cur))?;
+        match &next.op {
+            Op::Filter { predicate } => {
+                if let Some(k) = acct_eq(predicate) {
+                    return Some(k);
+                }
+            }
+            Op::AsOf { .. } | Op::ValidAt { .. } => {}
+            _ => return None,
+        }
+        cur = next.id;
     }
-    found
 }
 
 /// **Install the balance view the wire path reads from.**
@@ -2975,6 +3013,15 @@ mod tests {
             // Contradictory conjuncts: no row survives, and a scan restricted to one of the
             // two accounts would be answering a different query.
             "select acct, sum(amt) from postings where acct = 7 and acct = 9 group by acct",
+            // **Must not be restricted** (cycle 15, C15-05b): the filter is on one of two
+            // reads of `postings`, which share a source node. Answered only `(7, 7)`.
+            "select p.acct, q.acct from postings p join postings q on p.txn = q.txn where p.acct = 7",
+            // **Must not be restricted**: column 1 of the filter's input is `txn`, not
+            // `acct`. Restricted the scan to account 7 and lost every other posting of
+            // transaction 7.
+            "select * from (select acct, p.txn as t from postings p) as s where t = 7",
+            // A recursion seeded with one account reaches others through the ledger.
+            "with recursive reach(acct) as (select acct from postings where acct = 7 union select q.acct from reach r join postings p on r.acct = p.acct join postings q on p.txn = q.txn) select acct from reach",
         ] {
             let lowered = compile(sql);
             let served = e

@@ -4840,9 +4840,24 @@ mod concurrent_differential {
         let advancer = {
             let (base, rt, stop) = (base.clone(), rt.clone(), stop.clone());
             std::thread::spawn(move || {
+                // **Only when the frontier has moved** (cycle 15, C15-02, finding F-02-2).
+                // This loop took the runtime's lock on every pass, even with nothing to
+                // apply, and a `yield_now` between passes did not stop it re-taking the lock
+                // before a parked reader woke. In one `make gate` run on the 2-core host the
+                // test ran 13 minutes and was killed: the advancer had used 752 s of CPU,
+                // the writer 2.8 s, and the two unfinished readers were asleep (per-thread
+                // CPU and state from `/proc`; the lock is inferred, not traced). Alone, and in
+                // five runs of the whole suite, it takes under half a second. The advancer
+                // still applies every epoch the writer seals, as soon as it is sealed.
+                let mut applied = None;
                 while !stop.load(Ordering::Relaxed) {
                     let f = base.frontier();
+                    if applied == Some(f) {
+                        std::thread::sleep(std::time::Duration::from_micros(50));
+                        continue;
+                    }
                     rt.lock().expect("not poisoned").advance(&*base, f);
+                    applied = Some(f);
                     std::thread::yield_now();
                 }
             })

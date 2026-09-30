@@ -310,6 +310,13 @@ pub enum EvalError {
         op: &'static str,
         why: crate::value::Mismatch,
     },
+    /// **A system-time read with no system time to read** (cycle 15, C15-05b). The circuit
+    /// reads `R@recorded_at` and the caller supplied no such source. Answering from an
+    /// empty relation would be a wrong answer that looks like an empty one.
+    MissingSystemTime { relation: String },
+    /// **A window over a collection that is not a bag** (cycle 15, C15-05b): a row with a
+    /// negative weight has no position in a partition's order.
+    Window { why: &'static str },
 }
 
 impl From<crate::arith::ArithError> for EvalError {
@@ -335,6 +342,11 @@ impl std::fmt::Display for EvalError {
                     write!(f, "`{op}` between {a} and {b}")
                 }
             },
+            EvalError::MissingSystemTime { relation } => write!(
+                f,
+                "the circuit reads `{relation}`, and no system-time rows were supplied for it"
+            ),
+            EvalError::Window { why } => write!(f, "a window function: {why}"),
         }
     }
 }
@@ -371,6 +383,7 @@ pub fn implements(op: &Op) -> bool {
         | Op::Delay
         | Op::OrderBy { .. }
         | Op::Limit { .. }
+        | Op::Window { .. }
         | Op::Index { .. }
         | Op::AsOf { .. }
         | Op::ValidAt { .. }
@@ -536,7 +549,14 @@ impl<'a> Eval<'a> {
                     self.work += z.len() as u64;
                     Cow::Borrowed(z)
                 }
-                None => Cow::Owned(ZSet::new()),
+                None => {
+                    if crate::operator::system_time_of(relation).is_some() {
+                        self.note_error(EvalError::MissingSystemTime {
+                            relation: relation.clone(),
+                        });
+                    }
+                    Cow::Owned(ZSet::new())
+                }
             },
             // **Filtered by reference, and a kept row cloned once.** Consuming the input
             // would copy every row of a borrowed source in order to discard most of them,
@@ -697,6 +717,14 @@ impl<'a> Eval<'a> {
             // what `order by` decides is how a *result set* is presented, which is a
             // question one level below this one.
             Op::OrderBy { .. } => self.node(n.inputs[0]),
+            Op::Window {
+                partition,
+                order,
+                func,
+            } => {
+                let inp = self.node(n.inputs[0]);
+                Cow::Owned(self.window(partition, order, func, &inp))
+            }
 
             // **`limit`, and the choice it forces.** "The first n rows" of an unordered
             // collection is not a denotation, and in SQL a `LIMIT` without an `ORDER BY`
@@ -966,6 +994,114 @@ impl<'a> Eval<'a> {
                 row_out.push(v);
             }
             add(&mut out, row_out, 1);
+        }
+        out
+    }
+
+    /// **A window function, by its definition.** Each partition's rows are put in order
+    /// (the `OrderBy` order: the keys, then the row), expanded by weight — a row of weight
+    /// `w` is `w` identical rows — and split into peer groups, rows equal on the ordering
+    /// keys. Every row of a peer group sees the same frame: the partition's rows up to the
+    /// end of its group, or the whole partition when there is no ordering.
+    fn window(
+        &mut self,
+        partition: &[ColIdx],
+        order: &[(ColIdx, bool)],
+        func: &crate::operator::WindowFn,
+        inp: &ZSet,
+    ) -> ZSet {
+        use crate::operator::WindowFn;
+        let mut parts: BTreeMap<Row, Vec<(&Row, i128)>> = BTreeMap::new();
+        for (r, w) in inp {
+            self.work += 1;
+            if *w < 0 {
+                self.note_error(EvalError::Window {
+                    why: "a row with a negative weight has no place in a partition's order",
+                });
+                return ZSet::new();
+            }
+            if *w == 0 {
+                continue;
+            }
+            let k: Row = partition
+                .iter()
+                .map(|c| *r.get(*c as usize).unwrap_or(&Value::Null))
+                .collect();
+            parts.entry(k).or_default().push((r, *w));
+        }
+        let peers = |a: &Row, b: &Row| {
+            order.iter().all(|(c, _)| {
+                a.get(*c as usize).copied().unwrap_or(Value::Null)
+                    == b.get(*c as usize).copied().unwrap_or(Value::Null)
+            })
+        };
+        let mut out = ZSet::new();
+        for (_, mut rows) in parts {
+            rows.sort_by(|a, b| order_rows(a.0, b.0, order));
+            // Peer groups, as index ranges into `rows`. With no ordering the whole partition
+            // is one group: every row is every other row's peer.
+            let groups: Vec<(usize, usize)> = if order.is_empty() {
+                vec![(0, rows.len())]
+            } else {
+                let mut g = Vec::new();
+                let mut start = 0;
+                for i in 1..=rows.len() {
+                    if i == rows.len() || !peers(rows[start].0, rows[i].0) {
+                        g.push((start, i));
+                        start = i;
+                    }
+                }
+                g
+            };
+            let mut before: i128 = 0; // rows (with multiplicity) before the current group
+            let mut frame: Vec<(Value, i128)> = Vec::new();
+            for (g, (lo, hi)) in groups.iter().enumerate() {
+                self.work += (hi - lo) as u64;
+                let in_group: i128 = rows[*lo..*hi].iter().map(|(_, w)| *w).sum();
+                match func {
+                    WindowFn::RowNumber => {
+                        let mut n = before;
+                        for (r, w) in &rows[*lo..*hi] {
+                            for _ in 0..*w {
+                                n += 1;
+                                let mut row = (*r).clone();
+                                row.push(Value::Int(n));
+                                add(&mut out, row, 1);
+                            }
+                        }
+                    }
+                    WindowFn::Rank | WindowFn::DenseRank => {
+                        let v = if matches!(func, WindowFn::Rank) {
+                            before + 1
+                        } else {
+                            g as i128 + 1
+                        };
+                        for (r, w) in &rows[*lo..*hi] {
+                            let mut row = (*r).clone();
+                            row.push(Value::Int(v));
+                            add(&mut out, row, *w);
+                        }
+                    }
+                    WindowFn::Running(a, e) => {
+                        for (r, w) in &rows[*lo..*hi] {
+                            frame.push((self.scalar(e, r), *w));
+                        }
+                        let v = match try_fold(*a, &frame) {
+                            Ok(v) => v,
+                            Err(err) => {
+                                self.note_error(err);
+                                Value::Null
+                            }
+                        };
+                        for (r, w) in &rows[*lo..*hi] {
+                            let mut row = (*r).clone();
+                            row.push(v);
+                            add(&mut out, row, *w);
+                        }
+                    }
+                }
+                before += in_group;
+            }
         }
         out
     }
@@ -1624,5 +1760,219 @@ mod tests {
             try_fold(Agg::Max, &[(Value::text("x"), 1), (Value::text("y"), 1)]),
             Ok(Value::text("y"))
         );
+    }
+}
+
+/// **Window functions, by their definition** (cycle 15, C15-05b; the author's decision 4).
+#[cfg(test)]
+mod window {
+    use super::*;
+    use crate::circuit::internal_contract;
+    use crate::operator::WindowFn;
+
+    /// `rows(part, ord, v)` over one source, with `func` appended.
+    fn run(
+        rows: &[(&[i128], i128)],
+        order: Vec<(ColIdx, bool)>,
+        func: WindowFn,
+    ) -> Result<Vec<String>, EvalError> {
+        let z = eval(rows, order, func)?;
+        let mut out: Vec<String> = z
+            .iter()
+            .map(|(r, w)| {
+                let cells: Vec<String> = r.iter().map(|v| v.to_string()).collect();
+                format!("{} x{w}", cells.join(" "))
+            })
+            .collect();
+        out.sort();
+        Ok(out)
+    }
+
+    fn eval(
+        rows: &[(&[i128], i128)],
+        order: Vec<(ColIdx, bool)>,
+        func: WindowFn,
+    ) -> Result<ZSet, EvalError> {
+        let mut c = Circuit::new();
+        let s = c.add(
+            Op::Source {
+                relation: "r".into(),
+                is_base: true,
+                anchor_key: vec![],
+                confidential: Vec::new(),
+            },
+            vec![],
+            internal_contract(),
+            "r",
+        );
+        let w = c.add(
+            Op::Window {
+                partition: vec![0],
+                order,
+                func,
+            },
+            vec![s],
+            internal_contract(),
+            "window",
+        );
+        c.outputs.insert("v".into(), w);
+        let mut src = BTreeMap::new();
+        src.insert("r".to_string(), zset(rows));
+        Ok(try_run(&c, "v", &src)?.0)
+    }
+
+    // Partition 1: ord 10 (twice, as one row of weight 2), 20, 20 (a second row, a tie on
+    // `ord` with a different `v`), 30. Partition 2: one row.
+    const ROWS: &[(&[i128], i128)] = &[
+        (&[1, 10, 5], 2),
+        (&[1, 20, 7], 1),
+        (&[1, 20, 8], 1),
+        (&[1, 30, 1], 1),
+        (&[2, 10, 100], 1),
+    ];
+
+    #[test]
+    fn a_running_sum_includes_the_current_rows_peers() {
+        // 10: 5+5 = 10; 20: 10+7+8 = 25 for both tied rows; 30: 26.
+        assert_eq!(
+            run(
+                ROWS,
+                vec![(1, true)],
+                WindowFn::Running(Agg::Sum, Scalar::Column(2))
+            )
+            .unwrap(),
+            [
+                "1 10 5 10 x2",
+                "1 20 7 25 x1",
+                "1 20 8 25 x1",
+                "1 30 1 26 x1",
+                "2 10 100 100 x1"
+            ]
+        );
+    }
+
+    #[test]
+    fn without_an_order_the_frame_is_the_whole_partition() {
+        assert_eq!(
+            run(
+                ROWS,
+                vec![],
+                WindowFn::Running(Agg::Count, Scalar::Column(2))
+            )
+            .unwrap(),
+            [
+                "1 10 5 5 x2",
+                "1 20 7 5 x1",
+                "1 20 8 5 x1",
+                "1 30 1 5 x1",
+                "2 10 100 1 x1"
+            ]
+        );
+    }
+
+    #[test]
+    fn rank_skips_after_a_tie_and_dense_rank_does_not() {
+        assert_eq!(
+            run(ROWS, vec![(1, true)], WindowFn::Rank).unwrap(),
+            [
+                "1 10 5 1 x2",
+                "1 20 7 3 x1",
+                "1 20 8 3 x1",
+                "1 30 1 5 x1",
+                "2 10 100 1 x1"
+            ]
+        );
+        assert_eq!(
+            run(ROWS, vec![(1, true)], WindowFn::DenseRank).unwrap(),
+            [
+                "1 10 5 1 x2",
+                "1 20 7 2 x1",
+                "1 20 8 2 x1",
+                "1 30 1 3 x1",
+                "2 10 100 1 x1"
+            ]
+        );
+        // Descending: 30 first.
+        assert_eq!(
+            run(ROWS, vec![(1, false)], WindowFn::Rank).unwrap(),
+            [
+                "1 10 5 4 x2",
+                "1 20 7 2 x1",
+                "1 20 8 2 x1",
+                "1 30 1 1 x1",
+                "2 10 100 1 x1"
+            ]
+        );
+    }
+
+    #[test]
+    fn row_number_numbers_each_copy_of_a_repeated_row() {
+        assert_eq!(
+            run(ROWS, vec![(1, true)], WindowFn::RowNumber).unwrap(),
+            [
+                "1 10 5 1 x1",
+                "1 10 5 2 x1",
+                "1 20 7 3 x1",
+                "1 20 8 4 x1",
+                "1 30 1 5 x1",
+                "2 10 100 1 x1"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_negative_weight_is_refused() {
+        match run(&[(&[1, 10, 5], -1)], vec![(1, true)], WindowFn::Rank) {
+            Err(EvalError::Window { .. }) => {}
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_running_sum_of_money_keeps_its_currency_and_refuses_two() {
+        let money = |currency: u32| Scalar::InCurrency {
+            amount: Box::new(Scalar::Column(2)),
+            currency: Box::new(Scalar::LitInt(currency as i128)),
+        };
+        let one = eval(ROWS, vec![(1, true)], WindowFn::Running(Agg::Sum, money(0))).unwrap();
+        let last = |r: &Row| r.last().copied();
+        assert!(
+            one.keys().any(|r| last(r)
+                == Some(Value::Money {
+                    minor: 26,
+                    currency: 0
+                })),
+            "the running sum is money in currency 0: {one:?}"
+        );
+        // Two currencies in one partition: the currency is column 1 here, 10/20/30.
+        let two = Scalar::InCurrency {
+            amount: Box::new(Scalar::Column(2)),
+            currency: Box::new(Scalar::Column(1)),
+        };
+        match run(ROWS, vec![(1, true)], WindowFn::Running(Agg::Sum, two)) {
+            Err(EvalError::Mismatch { .. }) => {}
+            other => panic!("expected a currency mismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_system_time_read_with_nothing_supplied_is_refused() {
+        let mut c = Circuit::new();
+        let s = c.add(
+            Op::Source {
+                relation: crate::operator::system_time_relation("postings"),
+                is_base: true,
+                anchor_key: vec![],
+                confidential: Vec::new(),
+            },
+            vec![],
+            internal_contract(),
+            "postings",
+        );
+        c.outputs.insert("v".into(), s);
+        match try_run(&c, "v", &BTreeMap::new()) {
+            Err(EvalError::MissingSystemTime { .. }) => {}
+            other => panic!("expected a refusal, got {:?}", other.map(|(z, _)| z.len())),
+        }
     }
 }

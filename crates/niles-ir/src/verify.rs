@@ -534,6 +534,40 @@ fn confidential_pass(
                 }
                 both
             }
+            // A window reads its partition and ordering keys and, for a running aggregate,
+            // its argument: each is a computation over the column (C15-05b). The appended
+            // column is a value the engine computed, so it is not sealed — the rule has
+            // already refused the computation if its input was.
+            Op::Window {
+                partition,
+                order,
+                func,
+            } => {
+                let mut cols = input_sealed(&sealed, 0);
+                for k in partition.iter().chain(order.iter().map(|(k, _)| k)) {
+                    if cols.get(*k as usize).copied().unwrap_or(false) {
+                        violate(
+                            "IR022",
+                            format!(
+                                "column {k} is declared `@confidential` and is a window's \
+                                 partition or ordering key"
+                            ),
+                        );
+                    }
+                }
+                if let crate::operator::WindowFn::Running(_, e) = func {
+                    if reads_sealed(e, &cols) {
+                        violate(
+                            "IR022",
+                            "a window function's argument reads a `@confidential` column".into(),
+                        );
+                    }
+                }
+                let width = n.arity.max(1) as usize - 1;
+                cols.resize(width.max(cols.len()), false);
+                cols.push(false);
+                cols
+            }
             // A union's column is sealed if either side's is: the two sides' rows share
             // the output's columns. Passing input 0 through, as this did, unsealed a
             // column that only the second side carried sealed.
@@ -1201,5 +1235,73 @@ mod confidentiality_through_unions {
         );
         c.outputs.insert("v".into(), fx);
         assert_eq!(codes(&c), vec!["IR022"]);
+    }
+}
+
+/// A window reads its keys and its argument (cycle 15, C15-05b).
+#[cfg(test)]
+mod confidentiality_in_windows {
+    use crate::circuit::Circuit;
+    use crate::operator::{Agg, Op, Scalar, WindowFn};
+    use crate::{Consistency, Materialize, Retention, ServeContract};
+
+    fn contract() -> ServeContract {
+        ServeContract {
+            consistency: Consistency::Snapshot,
+            materialize: Materialize::Auto,
+            retain: Retention::Forever,
+            lineage: crate::Lineage::Key,
+        }
+    }
+
+    fn codes(partition: Vec<u16>, order: Vec<(u16, bool)>, func: WindowFn) -> Vec<&'static str> {
+        let mut c = Circuit::new();
+        let p = c.add(
+            Op::Source {
+                relation: "p".into(),
+                is_base: true,
+                anchor_key: vec![],
+                confidential: vec![1],
+            },
+            vec![],
+            contract(),
+            "p",
+        );
+        c.nodes[p as usize].arity = 3;
+        let w = c.add(
+            Op::Window {
+                partition: partition.into_iter().map(|x| x as _).collect(),
+                order: order.into_iter().map(|(x, a)| (x as _, a)).collect(),
+                func,
+            },
+            vec![p],
+            contract(),
+            "window",
+        );
+        c.outputs.insert("v".into(), w);
+        super::confidential_use(&c)
+            .into_iter()
+            .map(|v| v.code)
+            .collect()
+    }
+
+    #[test]
+    fn a_window_may_not_partition_order_or_aggregate_a_sealed_column() {
+        assert_eq!(codes(vec![1], vec![], WindowFn::RowNumber), ["IR022"]);
+        assert_eq!(codes(vec![0], vec![(1, true)], WindowFn::Rank), ["IR022"]);
+        assert_eq!(
+            codes(
+                vec![0],
+                vec![(2, true)],
+                WindowFn::Running(Agg::Sum, Scalar::Column(1))
+            ),
+            ["IR022"]
+        );
+        assert!(codes(
+            vec![0],
+            vec![(2, true)],
+            WindowFn::Running(Agg::Sum, Scalar::Column(2))
+        )
+        .is_empty());
     }
 }

@@ -274,6 +274,8 @@ impl Circuit {
             },
             // An apply is the outer row, plus one column if a scalar subquery widened it.
             Op::Apply { kind, .. } => inputs.first().map(width).unwrap_or(0) + kind.widens() as u16,
+            // The input's columns and the one the window function appends.
+            Op::Window { .. } => inputs.first().map(width).unwrap_or(0) + 1,
             _ => inputs.first().map(width).unwrap_or(0),
         };
         let lineage = contract.lineage;

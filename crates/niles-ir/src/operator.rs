@@ -49,6 +49,53 @@ pub enum Agg {
     Avg,
 }
 
+/// **The system-time column** (cycle 15, C15-05b; decision 4's "the epoch as a readable
+/// column"): `recorded_at`, the epoch that recorded a row, which the keyword registry has
+/// named since stage 0 and no query could read.
+///
+/// A relation's rows carry no epoch as a Z-set, so the read that needs one is a different
+/// source: `R@recorded_at`, whose rows are `R`'s with the recording epoch appended. An
+/// engine supplies it from the log it already keeps (every row is stored under the epoch
+/// that sealed it); the reference evaluator refuses a circuit that reads it when it was not
+/// supplied, rather than answering from nothing.
+pub const RECORDED_AT: &str = "recorded_at";
+
+/// The source name of `relation`'s system-time read.
+pub fn system_time_relation(relation: &str) -> String {
+    format!("{relation}@{RECORDED_AT}")
+}
+
+/// The relation a system-time source reads, or `None` for an ordinary source.
+pub fn system_time_of(source: &str) -> Option<&str> {
+    source.strip_suffix("@recorded_at")
+}
+
+/// What a [`Op::Window`] computes for each row.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WindowFn {
+    /// 1, 2, 3, … in order within the partition; peers are numbered in the rows' own order,
+    /// which is the evaluator's total order, not an arbitrary one.
+    RowNumber,
+    /// 1 + the number of rows before the current row's peer group.
+    Rank,
+    /// 1 + the number of peer groups before the current row's.
+    DenseRank,
+    /// An aggregate over the frame, folded as [`Op::Aggregate`] folds it: money stays in
+    /// its currency and two currencies are refused.
+    Running(Agg, Scalar),
+}
+
+impl WindowFn {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            WindowFn::RowNumber => "row_number",
+            WindowFn::Rank => "rank",
+            WindowFn::DenseRank => "dense_rank",
+            WindowFn::Running(a, _) => a.as_str(),
+        }
+    }
+}
+
 impl Agg {
     /// Whether the aggregate is maintainable in O(1) per delta in both directions.
     pub fn is_additive(self) -> bool {
@@ -292,6 +339,23 @@ pub enum Op {
         count: u64,
         offset: u64,
     },
+    /// **A window function** (cycle 15, C15-05b; the author's decision 4): every input row,
+    /// with one column appended — `func` computed over the rows of its partition.
+    ///
+    /// The frame is SQL's default and the only one the IR has: with an `order`, the rows
+    /// from the partition's first up to the current row *and its peers* (rows equal on the
+    /// ordering key; `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`); without one, the
+    /// whole partition. Rows are ordered as `OrderBy` orders them. A row of weight `w` is
+    /// `w` identical rows — peers of each other — so a running sum counts it `w` times and
+    /// `row_number` numbers each copy.
+    ///
+    /// **Not incremental**, for the same reason as `OrderBy`: a new row changes the value
+    /// appended to every later row of its partition.
+    Window {
+        partition: Vec<ColIdx>,
+        order: Vec<(ColIdx, bool)>,
+        func: WindowFn,
+    },
     /// Pin a read to a system-time epoch — the system axis of bitemporality.
     AsOf {
         epoch: Option<u64>,
@@ -386,6 +450,7 @@ impl Op {
             Op::Index { .. } => "index",
             Op::OrderBy { .. } => "order_by",
             Op::Limit { .. } => "limit",
+            Op::Window { .. } => "window",
             Op::AsOf { .. } => "as_of",
             Op::ValidAt { .. } => "valid_at",
             Op::Apply { .. } => "apply",
@@ -415,7 +480,7 @@ impl Op {
     /// before promising a demand-materialized view at a strict rung.
     pub fn is_incremental(&self) -> bool {
         match self {
-            Op::OrderBy { .. } | Op::Limit { .. } => false,
+            Op::OrderBy { .. } | Op::Limit { .. } | Op::Window { .. } => false,
             // A dependent join has no delta rule: one new outer row re-scans the inner
             // relation. Unnesting is therefore not a speed optimisation but the step that
             // makes a correlated query maintainable at all, and the verifier says so.
@@ -513,6 +578,11 @@ impl Op {
             // Reorders rows; the multiset, and therefore every total over it, is
             // unchanged. Transparent, and for a reason rather than by default.
             Op::OrderBy { .. } => true,
+            // Every row passes with every column it had, and one column is appended. The
+            // amounts that entered leave unchanged; the appended value (a running sum, a
+            // rank) is a statistic beside them, not a restatement of them, and a reader
+            // who totals the appended column is totalling something else.
+            Op::Window { .. } => true,
 
             // The leaf itself, the DBSP core, the index, and the two temporal pins. A
             // source *is* the conserved relation; `Delay`, `Integrate` and `Differentiate`
@@ -579,7 +649,10 @@ impl Op {
             | Op::Distinct
             | Op::Negate
             | Op::OrderBy { .. }
-            | Op::Limit { .. } => input_keys.first().cloned().flatten(),
+            | Op::Limit { .. }
+            // Appends a column after the input's, so the input's key columns are where
+            // they were.
+            | Op::Window { .. } => input_keys.first().cloned().flatten(),
             Op::Union => match (input_keys.first(), input_keys.get(1)) {
                 (Some(Some(a)), Some(Some(b))) if a == b => Some(a.clone()),
                 _ => None,
@@ -631,6 +704,15 @@ impl fmt::Display for Op {
                 write!(f, "apply({}, corr={correlation:?})", kind.name())
             }
             Op::Limit { count, offset } => write!(f, "limit({count}, offset={offset})"),
+            Op::Window {
+                partition,
+                order,
+                func,
+            } => write!(
+                f,
+                "window({}, partition={partition:?}, order={order:?})",
+                func.as_str()
+            ),
             other => write!(f, "{}", other.name()),
         }
     }
@@ -660,13 +742,18 @@ mod tests {
                 count: 10,
                 offset: 0,
             },
+            Op::Window {
+                partition: vec![0],
+                order: vec![(1, true)],
+                func: WindowFn::Rank,
+            },
         ];
         let non: Vec<&str> = ops
             .iter()
             .filter(|o| !o.is_incremental())
             .map(|o| o.name())
             .collect();
-        assert_eq!(non, vec!["order_by", "limit"]);
+        assert_eq!(non, vec!["order_by", "limit", "window"]);
     }
 
     #[test]

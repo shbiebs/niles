@@ -1,0 +1,9 @@
+fn task(a: Id<Account>, b: Id<Account>, m: Money<usd>) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("t01") {
+        let d = debit(a, m)?;
+        let c = credit(b, m);
+        post(d, c)
+    }
+}

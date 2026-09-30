@@ -1,0 +1,9 @@
+schema study {
+    index ix_postings_statement on postings (acct, cur) anchor;
+}
+
+view answer = postings
+    .where(|p| p.value_date >= v@2026-02-01)
+    .group_by(|p| (p.acct, p.cur))
+    .sum(|p| p.amt)
+    serve { consistency: bounded(1.epochs, 1.s), materialize: demand, retain: evictable };

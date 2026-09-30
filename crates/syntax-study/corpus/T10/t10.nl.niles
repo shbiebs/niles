@@ -1,0 +1,6 @@
+fn task(reversed: TxnId) -> Result<TxnId, TxnError> ! { append, debit, credit, read@ledger_consistent } {
+    let legs = postings.where(|p| p.txn == reversed);
+    txn idem("t10") {
+        post(legs.map(|p| if p.amt < 0 { credit(p.acct, -p.amt) } else { debit(p.acct, p.amt)? }))
+    }
+}

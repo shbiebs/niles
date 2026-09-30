@@ -1,0 +1,7 @@
+fn task(a: Id<Account>, b: Id<Account>, u: Money<usd>, x: Money<eur>) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd>, debit<eur>, credit<eur> }
+{
+    txn idem("t03") {
+        post(debit(a, u)?, credit(b, u), debit(b, x)?, credit(a, x))
+    }
+}

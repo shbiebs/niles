@@ -280,7 +280,7 @@ pub enum RunErr {
 pub fn run_fn(program: &str, f: &str, args: &[Arg], d: &Dataset) -> Result<Answer, RunErr> {
     use niles_interp::{Interp, Value as V};
     let src = format!("{SCHEMA}\n{program}");
-    let (prog, _cat, diags) = front(&src);
+    let (prog, cat, diags) = front(&src);
     if diags.has_errors() {
         return Err(RunErr::Failed("the program does not check".into()));
     }
@@ -318,7 +318,24 @@ pub fn run_fn(program: &str, f: &str, args: &[Arg], d: &Dataset) -> Result<Answe
         Err(niles_interp::Error::NotInSubset { form, .. }) => {
             return Err(RunErr::NotInSubset(form.to_string()))
         }
-        Err(e) => return Err(RunErr::Failed(e.message())),
+        Err(e) => {
+            // The interpreter has no relational tier: a view or relation read inside a
+            // function reaches it as an unbound name. That is the executor's limit, not the
+            // program's error, so it is kept apart from a failure (design deviation D1).
+            let m = e.message();
+            let unbound = m
+                .strip_prefix('`')
+                .and_then(|r| r.split_once("` is not bound here"))
+                .map(|(n, _)| n.to_string());
+            if let Some(n) = unbound {
+                if cat.relations.contains_key(&n) || cat.views.contains_key(&n) {
+                    return Err(RunErr::NotInSubset(format!(
+                        "a read of `{n}` (the interpreter has no relational tier)"
+                    )));
+                }
+            }
+            return Err(RunErr::Failed(m));
+        }
     }
     let mut rows = Vec::new();
     for set in &it.ledger.sealed {

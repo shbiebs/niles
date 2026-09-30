@@ -1,0 +1,16 @@
+fn task(
+    borrower: Id<Account>,
+    l1: Id<Account>, m1: Money<usd>,
+    l2: Id<Account>, m2: Money<usd>,
+    l3: Id<Account>, m3: Money<usd>,
+) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("t06") {
+        let to_borrower = credit(borrower, m1 + m2 + m3);
+        let a = debit(l1, m1)?;
+        let b = debit(l2, m2)?;
+        let c = debit(l3, m3)?;
+        post(to_borrower, a, b, c)
+    }
+}

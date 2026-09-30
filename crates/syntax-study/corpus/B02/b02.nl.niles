@@ -1,0 +1,4 @@
+view answer = postings
+    .valid_at(v@2026-01-21)
+    .group_by(|p| (p.acct, p.cur))
+    .sum(|p| p.amt);

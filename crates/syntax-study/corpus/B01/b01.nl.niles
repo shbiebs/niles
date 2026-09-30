@@ -1,0 +1,4 @@
+view answer = postings
+    .as_of(#5)
+    .group_by(|p| (p.acct, p.cur))
+    .sum(|p| p.amt);

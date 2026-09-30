@@ -1,0 +1,4 @@
+view answer = postings
+    .group_by(|p| p.cur)
+    .sum(|p| p.amt)
+    serve { consistency: snapshot, materialize: full };

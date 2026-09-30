@@ -1,0 +1,5 @@
+fn task(a: Id<Account>, m: Money<usd>, auth: Auth<authorize<usd>>) -> Result<(), TxnError>
+    ! { authorize<usd> }
+{
+    authorize(a, m)
+}

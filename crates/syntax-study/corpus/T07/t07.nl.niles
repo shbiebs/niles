@@ -1,0 +1,9 @@
+fn task(receivable: Id<Account>, income: Id<Account>, x: Money<usd>) -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    txn idem("t07") {
+        let r = credit(receivable, x);
+        let i = debit(income, x)?;
+        post(r, i)
+    }
+}

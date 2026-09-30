@@ -1,0 +1,4 @@
+view answer = postings
+    .as_of(#5)
+    .where(|p| p.acct == 3 && p.value_date >= v@2026-01-11 && p.value_date <= v@2026-01-31)
+    .map(|p| (p.txn, p.value_date, p.cur, p.amt));

@@ -20,10 +20,8 @@ fn work() -> PathBuf {
         .unwrap_or_else(|| std::env::temp_dir().join("e30-work"))
 }
 
-pub fn program_path(task: &str, ext: &str) -> PathBuf {
-    corpus()
-        .join(task)
-        .join(format!("{}.{ext}", task.to_lowercase()))
+pub fn program_path(task: &str, surface: &str) -> PathBuf {
+    corpus().join(tasks::program_file(task, surface))
 }
 
 fn describe(o: &Outcome, want: &Answer) -> String {
@@ -60,11 +58,11 @@ fn main() {
                     continue;
                 }
                 let want = oracle::expected(t, &d);
-                for (s, ext) in tasks::SURFACES {
+                for (s, _) in tasks::SURFACES {
                     if only_surface.as_deref().is_some_and(|x| x != *s) || !tasks::in_scope(s, t) {
                         continue;
                     }
-                    let p = program_path(t, ext);
+                    let p = program_path(t, s);
                     let Ok(src) = std::fs::read_to_string(&p) else {
                         let reason = std::fs::read_to_string(format!("{}.none", p.display()));
                         match reason {

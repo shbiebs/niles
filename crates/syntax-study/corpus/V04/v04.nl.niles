@@ -1,0 +1,4 @@
+view answer = postings
+    .group_by(|p| p.acct)
+    .count(|p| p.txn)
+    serve { consistency: snapshot, materialize: full, retain: pinned };

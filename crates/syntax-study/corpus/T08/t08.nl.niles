@@ -1,0 +1,19 @@
+view loan_balance = postings
+    .where(|p| p.cur == "usd")
+    .group_by(|p| p.acct)
+    .sum(|p| p.amt)
+    serve { consistency: snapshot, materialize: auto };
+
+fn task(loan: Id<Account>, payer: Id<Account>, unapplied: Id<Account>, payment: Money<usd>)
+    -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd>, read@snapshot }
+{
+    let owed: Money<usd> = loan_balance.get(loan)?;
+    txn idem("t08") {
+        if payment > owed {
+            post(debit(payer, payment)?, credit(loan, owed), credit(unapplied, payment - owed))
+        } else {
+            post(debit(payer, payment)?, credit(loan, payment))
+        }
+    }
+}

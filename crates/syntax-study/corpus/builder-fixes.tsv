@@ -15,3 +15,7 @@ Q08	RS	(no pipeline form attempted beyond the self-join of F7)	not expressible
 Q09	NL	REFUSED (with recursive)	not expressible
 Q09	RS	REFUSED NL0507 (fixpoint)	not expressible
 Q10	RS	REFUSED NL0509: a map to a tuple loses field names	rewritten as two grouped sums unioned and summed again
+T08	NL	REFUSED NL0310: a balance read from an untyped view has an unknown currency, so its credit is `credit<?c>`	the view filtered to usd, a serve contract at the declared rung, and the read annotated `Money<usd>`
+T10	NL	REFUSED NL0310: the declared read rung and currencies did not match what reversing arbitrary legs needs	the effect row names `debit`, `credit` in any currency and `read@ledger_consistent`
+V03	NL	REFUSED NL0004: an `index` item outside a `schema` block does not parse	the anchor index declared in a second `schema study { … }` block, on (acct, cur), which is what the view is keyed by (NL0223 named it)
+B03	NL	REFUSED NL0001 (a `valid` clause on `txn` does not exist)	not expressible: no form sets a posting's value date

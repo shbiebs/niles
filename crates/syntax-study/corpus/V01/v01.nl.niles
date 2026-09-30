@@ -1,0 +1,4 @@
+view answer = postings
+    .group_by(|p| (p.acct, p.cur))
+    .sum(|p| p.amt)
+    serve { consistency: read_your_writes, materialize: auto, retain: evictable };

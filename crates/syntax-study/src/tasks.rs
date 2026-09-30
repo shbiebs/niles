@@ -139,3 +139,20 @@ pub fn sql_effect(task: &str) -> &'static str {
          from postings where txn > 100"
     }
 }
+
+/// The file a surface's program for a task lives in. NL and RS share one file for every
+/// non-query task (design §2): Niles has one spelling for a transaction, a contract and a
+/// temporal read.
+pub fn program_file(task: &str, surface: &str) -> String {
+    let ext = SURFACES
+        .iter()
+        .find(|(s, _)| *s == surface)
+        .map(|(_, e)| *e)
+        .unwrap_or("?");
+    let ext = if surface == "RS" && class(task) != Class::Q {
+        "nl.niles"
+    } else {
+        ext
+    };
+    format!("{}/{}.{ext}", task, task.to_lowercase())
+}

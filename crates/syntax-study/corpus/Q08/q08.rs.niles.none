@@ -1,1 +1,1 @@
-No window or rank stage in the pipeline, and a counting self-join hits the alias defect of finding F7.
+No window or rank stage in the pipeline. The SQL-92 form needs every account compared with every other account of its desk: `cross_join` is refused (NL0516, "no product operator exists in the IR"), and a keyed join of the balance view with itself matches on its key, (acct, desk), so each account meets only itself. The SQL surface's comma from-list lowers to a join with empty keys, which the evaluator runs as a product (finding F10); the pipeline has no spelling for it.

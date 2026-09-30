@@ -19,3 +19,10 @@ T08	NL	REFUSED NL0310: a balance read from an untyped view has an unknown curren
 T10	NL	REFUSED NL0310: the declared read rung and currencies did not match what reversing arbitrary legs needs	the effect row names `debit`, `credit` in any currency and `read@ledger_consistent`
 V03	NL	REFUSED NL0004: an `index` item outside a `schema` block does not parse	the anchor index declared in a second `schema study { … }` block, on (acct, cur), which is what the view is keyed by (NL0223 named it)
 B03	NL	REFUSED NL0001 (a `valid` clause on `txn` does not exist)	not expressible: no form sets a posting's value date
+Q02	NL	after Niles fix 1/5: `having sum(amt) < 0.00 usd` names its aggregate's output column (NL0518)	the program restored to the SQL spelling first written, `having sum(amt) < 0.00 usd`: CORRECT
+Q04	RS	after Niles fix 4/5: a join to a grouped count matches on the count's output key	the program restored to the left join first written, `.left_join(postings.group_by(|p| p.acct).count(|p| p.txn)).where(|r| r.count is null)`: CORRECT
+Q05	RS	after Niles fix 3/5: `desc(..)` is an `order_by` key, and a key the lowering cannot read is refused (NL0509)	written as `.order_by(|r| (desc(r.sum), r.acct)).limit(5)`: CORRECT; no longer recorded not expressible
+Q07	NL	after Niles fix 5/5: the self-join's aliases resolve	still not expressible: the task orders by epoch, which is not a column (F8); the reason no longer cites F7
+Q07	RS	after Niles fix 5/5: a join closure's parameters resolve to their sides	still not expressible, for the same reason as NL
+Q08	NL	after Niles fix 5/5: qualifiers resolve in `where`, `group by` and the projection	written in SQL-92 form, rank as the count of same-desk accounts that are richer or the account itself, over a comma product of a balance view with itself: CORRECT
+Q08	RS	after Niles fix 5/5	still not expressible: `cross_join` is refused (NL0516) and a keyed self-join matches on (acct, desk); the SQL surface's comma product has no pipeline spelling (F10)

@@ -1,3 +1,4 @@
 view answer = accounts
-    .map(|a| a.id)
-    .except(postings.map(|p| p.acct));
+    .left_join(postings.group_by(|p| p.acct).count(|p| p.txn))
+    .where(|r| r.count is null)
+    .map(|r| r.id);

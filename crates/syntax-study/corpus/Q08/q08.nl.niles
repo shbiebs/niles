@@ -1,0 +1,12 @@
+view balance = sql {
+    select p.acct, a.desk, sum(p.amt) as bal
+    from postings p join accounts a on a.id = p.acct
+    where p.cur = "usd"
+    group by p.acct, a.desk
+};
+view answer = sql {
+    select b.acct, b.desk, count(r.acct) as rank
+    from balance b, balance r
+    where r.desk = b.desk and (r.bal > b.bal or r.acct = b.acct)
+    group by b.acct, b.desk
+};

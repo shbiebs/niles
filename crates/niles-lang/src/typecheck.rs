@@ -2393,6 +2393,18 @@ fn collect_fields(e: &Expr, out: &mut Vec<(String, Span)>) {
         Expr::Call { args, .. } | Expr::Stage { args, .. } => {
             args.iter().for_each(|a| collect_fields(&a.value, out))
         }
+        // A window reads its function's arguments and its partition and ordering keys
+        // (C15-05b): each is a computation over the column.
+        Expr::Window {
+            call,
+            partition,
+            order,
+            ..
+        } => {
+            collect_fields(call, out);
+            partition.iter().for_each(|x| collect_fields(x, out));
+            order.iter().for_each(|(x, _)| collect_fields(x, out));
+        }
         _ => {}
     }
 }
@@ -2624,6 +2636,16 @@ pub(crate) fn each_child<'e>(e: &'e Expr, exprs: &mut Vec<&'e Expr>, blocks: &mu
             exprs.push(rhs);
         }
         Expr::Unary { operand, .. } => exprs.push(operand),
+        Expr::Window {
+            call,
+            partition,
+            order,
+            ..
+        } => {
+            exprs.push(call);
+            exprs.extend(partition.iter());
+            exprs.extend(order.iter().map(|(e, _)| e));
+        }
         Expr::Block(b) => blocks.push(b),
         Expr::If {
             cond, then, els, ..

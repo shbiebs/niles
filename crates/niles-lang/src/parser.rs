@@ -2012,6 +2012,10 @@ impl<'a> Parser<'a> {
                         args,
                         span,
                     };
+                    // `f(..) over (..)`: a window, on the SQL surface only (C15-05b).
+                    if self.sql_depth > 0 && self.at(&Tok::Kw(Kw::Over)) {
+                        e = self.window_clause(e);
+                    }
                 }
                 Tok::LBracket => {
                     self.bump();
@@ -2799,6 +2803,52 @@ impl<'a> Parser<'a> {
             set_op,
             as_of,
             ctes,
+            span: start.to(self.cur_span()),
+        }
+    }
+
+    /// `over ( [partition by e, ..] [order by e [asc|desc], ..] )` after a call.
+    fn window_clause(&mut self, call: Expr) -> Expr {
+        let start = call.span();
+        self.bump();
+        self.expect(Tok::LParen, "to open a window");
+        let mut partition = Vec::new();
+        if self.eat_kw(Kw::Partition) {
+            self.expect_kw(Kw::By, "after `partition`");
+            loop {
+                partition.push(self.expr());
+                if !self.eat(&Tok::Comma) {
+                    break;
+                }
+            }
+        }
+        let mut order = Vec::new();
+        if self.eat_kw(Kw::Order) {
+            self.expect_kw(Kw::By, "after `order`");
+            loop {
+                let e = self.expr();
+                let asc = if self.eat_kw(Kw::Desc) {
+                    false
+                } else {
+                    self.eat_kw(Kw::Asc);
+                    true
+                };
+                order.push((e, asc));
+                if !self.eat(&Tok::Comma) {
+                    break;
+                }
+            }
+        }
+        // A frame clause (`rows between ..`) is not in the fragment: the default frame is the
+        // only one the IR has, so anything here is refused by the parser rather than ignored.
+        self.expect(
+            Tok::RParen,
+            "to close a window (a frame clause is not supported)",
+        );
+        Expr::Window {
+            call: Box::new(call),
+            partition,
+            order,
             span: start.to(self.cur_span()),
         }
     }

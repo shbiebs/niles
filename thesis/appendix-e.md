@@ -132,7 +132,7 @@ And, one stage up:
 |---|---|---|---|
 | **Stage 1 runs** | `bootstrap/parser.niles` under `niles-interp` | Stage 0 executes a ~1,050-line Niles program that builds and walks a recursive tree | Nothing about type-checking |
 | **Stage 1 equivalence** | Niles parser vs. Rust parser over a 48-case corpus | The two agree on **every node of every tree** | Spans are excluded by design — token offsets are the lexer's gate |
-| **Stage 2 self-application** | Niles front end over its own two source files | It parses 2,068 lines of Niles, including itself, identically to the reference (127,165 bytes of tree) | Still not "recompiles itself": no code is generated |
+| **Stage 2 self-application** | Niles front end over its own two source files | It parses 2,069 lines of Niles, including itself, identically to the reference (127,196 bytes of tree) | Still not "recompiles itself": no code is generated |
 | **Stage 3 fixpoint** | Repeated runs, and repeated self-application | Byte-identical output run to run | As above |
 | **Negative controls** | A missing brace; a token that cannot begin an expression; `a - b - c`; `a = b = c` | Both parsers recover to the *same* tree, and associate the way B.10.1 says | The Niles parser has no diagnostic channel; see below |
 
@@ -163,7 +163,7 @@ Finding 2 is the one to carry forward as a claim. The argument for stage-1 equiv
 
 **One gap, declared rather than closed.** `bootstrap/parser.niles` has no *diagnostic* channel. Where the reference parser builds an error node, the Niles parser builds the same error node and the trees agree; where the reference parser reports a message and builds an ordinary node — a reserved word used as an identifier is the case that arises — the Niles parser is silent. A test pins both halves, so the gap stays known rather than becoming a surprise. Diagnostics in Niles are part of the same work as the type-checker, and neither is written.
 
-**What the gates do not establish, stated plainly.** They do not establish that Niles can express a compiler. They establish that it can express a lexer and a parser, that both agree with an independent implementation — the parser node for node, over a corpus and over 2,068 lines of real source including its own — and that both are deterministic. The distance from here to E.1's stage 2 — "stage 1 recompiling the same sources" — is a type-checker and a lowering pass, neither of which is written. The bootstrap has gone from *no input* to *two front-end stages, verified against the reference implementation*. That is two rungs, and calling it a ladder would be exactly the overclaim this appendix's E.0 exists to prevent.
+**What the gates do not establish, stated plainly.** They do not establish that Niles can express a compiler. They establish that it can express a lexer and a parser, that both agree with an independent implementation — the parser node for node, over a corpus and over 2,069 lines of real source including its own — and that both are deterministic. The distance from here to E.1's stage 2 — "stage 1 recompiling the same sources" — is a type-checker and a lowering pass, neither of which is written. The bootstrap has gone from *no input* to *two front-end stages, verified against the reference implementation*. That is two rungs, and calling it a ladder would be exactly the overclaim this appendix's E.0 exists to prevent.
 
 ## E.20 Thesis Consistency: What Is in Niles and Why the Boundary Holds
 

@@ -41,6 +41,7 @@ pub fn lower_program(prog: &Program, cat: &Catalog) -> (Lowered, Diagnostics) {
         same: HashMap::new(),
         params: Vec::new(),
         pins: Vec::new(),
+        system_time: false,
     };
     for item in &prog.items {
         lx.item(item);
@@ -79,6 +80,9 @@ struct Lx<'a> {
     /// Currencies pinned by a conjunct of the `and`-chain being lowered: `(node, column,
     /// code)` for each `cur = "eur"` beside the amounts it governs (cycle 15, C15-05b).
     pins: Vec<(NodeId, ColIdx, i128)>,
+    /// Whether the statement being lowered names `recorded_at`, so that its from-list reads
+    /// each base's system-time source rather than the base (cycle 15, C15-05b).
+    system_time: bool,
 }
 
 /// Where a column comes from: see [`Lx::origin`].
@@ -89,6 +93,8 @@ struct Origin {
     agg: Option<Agg>,
     /// The filter nodes on the way down, nearest first.
     filters: Vec<NodeId>,
+    /// Whether the source is a system-time read, and the column its `recorded_at`.
+    system_time: bool,
 }
 
 impl<'a> Lx<'a> {
@@ -577,12 +583,28 @@ impl<'a> Lx<'a> {
             match &n.op {
                 Op::Source { relation, .. } => {
                     let column = self.schema_of(id).get(c as usize)?.clone();
+                    // A system-time read is its relation, plus one column: the relation's
+                    // own columns are traced to the relation, and `recorded_at` says so.
+                    let base = niles_ir::operator::system_time_of(relation);
+                    let system_time = base.is_some()
+                        && c as usize + 1 == self.schema_of(id).len()
+                        && column == niles_ir::operator::RECORDED_AT;
                     return Some(Origin {
-                        relation: relation.clone(),
+                        relation: base.unwrap_or(relation).to_string(),
                         column,
                         agg,
                         filters,
+                        system_time,
                     });
+                }
+                // The appended column is a value the window computed, not a column of
+                // anything below it.
+                Op::Window { .. } => {
+                    let n_in = self.schema_of(*n.inputs.first()?).len() as ColIdx;
+                    if c >= n_in {
+                        return None;
+                    }
+                    id = *n.inputs.first()?;
                 }
                 Op::Filter { .. } => {
                     filters.push(id);
@@ -680,9 +702,19 @@ impl<'a> Lx<'a> {
             .find(|c| matches!(&c.ty, Ty::Path { path, .. } if path.last().text == "Currency"))?
             .name
             .clone();
+        // Where the from-list reads the relation more than once, only the amount's own side
+        // says its currency. Taking the first match tagged `q.amt` in `postings p join
+        // postings q` with `p.cur`, or with a pin on `p.cur` (found in C15-05b), which would
+        // compare an eur amount as usd.
+        let side = self
+            .sides
+            .get(&self.frame(input))
+            .and_then(|ss| ss.iter().find(|(_, s0, n)| *s0 <= col && col < s0 + n))
+            .map(|(_, s0, n)| (*s0, *n));
+        let on_side = |j: ColIdx| side.is_none_or(|(s0, n)| s0 <= j && j < s0 + n);
         // A conjunct of the predicate being lowered that pins this relation's currency.
         for (node, k, code) in self.pins.iter().rev() {
-            if *node == input {
+            if *node == input && on_side(*k) {
                 if let Some(q) = self.origin(input, *k) {
                     if q.relation == o.relation && q.column == cur_col {
                         return Some(Scalar::LitInt(*code));
@@ -691,10 +723,30 @@ impl<'a> Lx<'a> {
             }
         }
         // The row's own currency column, where it is still a column of `input`.
+        let mut candidates = Vec::new();
         for j in 0..self.schema_of(input).len() as ColIdx {
             if let Some(q) = self.origin(input, j) {
                 if q.relation == o.relation && q.column == cur_col && q.agg.is_none() {
-                    return Some(Scalar::Column(j));
+                    candidates.push(j);
+                }
+            }
+        }
+        match side {
+            Some((s0, n)) => {
+                if let Some(j) = candidates.iter().find(|j| s0 <= **j && **j < s0 + n) {
+                    return Some(Scalar::Column(*j));
+                }
+                if candidates.len() > 1 {
+                    // Several, none on the amount's side: no way to say which is its own.
+                    return None;
+                }
+                if let Some(j) = candidates.first() {
+                    return Some(Scalar::Column(*j));
+                }
+            }
+            None => {
+                if let Some(j) = candidates.first() {
+                    return Some(Scalar::Column(*j));
                 }
             }
         }
@@ -956,6 +1008,173 @@ impl<'a> Lx<'a> {
         self.circuit.nodes[id as usize].arity = cols.len() as u16;
         self.schemas.insert(id, cols);
         self.sources.insert(name.to_string(), id);
+        Some(id)
+    }
+
+    /// **A base's system-time read** (cycle 15, C15-05b; decision 4): the relation's rows
+    /// with `recorded_at`, the epoch that recorded each, appended. Memoised like `source`,
+    /// under the system-time source's own name, so a statement that reads both the base and
+    /// its system time has two sources — two reads — rather than one read with two shapes.
+    fn system_source(&mut self, name: &str, c: ServeContract) -> Option<NodeId> {
+        let key = niles_ir::operator::system_time_relation(name);
+        if let Some(id) = self.sources.get(&key) {
+            return Some(*id);
+        }
+        let base = self.source(name, c)?;
+        let Op::Source {
+            is_base,
+            anchor_key,
+            confidential,
+            ..
+        } = self.circuit.node(base).op.clone()
+        else {
+            return None;
+        };
+        let contract = self.circuit.node(base).contract.peek().to_owned();
+        let mut cols = self.schema_of(base).to_vec();
+        cols.push(niles_ir::operator::RECORDED_AT.to_string());
+        let id = self.circuit.add(
+            Op::Source {
+                relation: key.clone(),
+                is_base,
+                anchor_key,
+                confidential,
+            },
+            vec![],
+            contract,
+            &key,
+        );
+        self.circuit.nodes[id as usize].arity = cols.len() as u16;
+        self.schemas.insert(id, cols);
+        self.sources.insert(key, id);
+        Some(id)
+    }
+
+    /// Whether column `col` of `node` is declared `Money` (with or without a currency).
+    fn is_money_column(&self, node: NodeId, col: ColIdx) -> bool {
+        self.origin(node, col)
+            .and_then(|o| self.origin_column(&o).map(|i| i.money_currency.is_some()))
+            .unwrap_or(false)
+    }
+
+    /// Whether column `col` of `node` is a system-time column, which `select *` leaves out.
+    fn is_system_column(&self, node: NodeId, col: ColIdx) -> bool {
+        self.origin(node, col).is_some_and(|o| o.system_time)
+    }
+
+    /// **A window function**, appended to `input` (cycle 15, C15-05b; decision 4).
+    ///
+    /// The partition and ordering keys are columns, resolved as `group by` resolves its keys;
+    /// the function is `row_number`, `rank` or `dense_rank` with no argument, or `sum`,
+    /// `count`, `min`, `max` or `avg` of one expression, lowered as an aggregate's argument
+    /// is — so an amount carries its currency and a running sum across two is refused.
+    fn window(
+        &mut self,
+        input: NodeId,
+        call: &Expr,
+        partition: &[Expr],
+        order: &[(Expr, bool)],
+        name: String,
+        c: ServeContract,
+    ) -> Option<NodeId> {
+        let refuse = |this: &mut Self, why: String, note: &str| {
+            this.d.push(
+                Diagnostic::error("NL0527", why)
+                    .primary(call.span(), "this window function")
+                    .note(note.to_string()),
+            );
+            None
+        };
+        let Expr::Call { callee, args, .. } = call else {
+            return refuse(
+                self,
+                "`over` follows a function call".to_string(),
+                "a window applies a function to a partition's rows",
+            );
+        };
+        let Expr::Path(fname) = &**callee else {
+            return refuse(
+                self,
+                "a window's function is named, not computed".to_string(),
+                "write `rank()`, `row_number()`, `dense_rank()`, or an aggregate",
+            );
+        };
+        let fname = fname.last().text.as_str();
+        use niles_ir::operator::WindowFn;
+        let func = match (fname, args.len()) {
+            ("row_number", 0) => WindowFn::RowNumber,
+            ("rank", 0) => WindowFn::Rank,
+            ("dense_rank", 0) => WindowFn::DenseRank,
+            ("sum" | "count" | "min" | "max" | "avg", 1) => {
+                let a = aggregate_of(call).expect("an aggregate name");
+                let Some(v) = self.scalar(input, &args[0].value) else {
+                    return refuse(
+                        self,
+                        format!("the argument of `{fname}(..) over` has no lowering"),
+                        "the argument is lowered as an aggregate's is; there is no safe default",
+                    );
+                };
+                // An amount carries its currency into the running aggregate (decision 8), so
+                // a partition that holds two currencies is refused rather than summed.
+                let v = match v {
+                    Scalar::Column(k) if self.is_money_column(input, k) => {
+                        match self.currency_of_amount(input, k) {
+                            Some(cur) => Scalar::InCurrency {
+                                amount: Box::new(Scalar::Column(k)),
+                                currency: Box::new(cur),
+                            },
+                            None => {
+                                self.d.push(
+                                    Diagnostic::error(
+                                        "NL0522",
+                                        format!("the currency of `{fname}(..) over`'s amount cannot be found"),
+                                    )
+                                    .primary(args[0].value.span(), "an amount with no currency column, pin or `Money<c>` type")
+                                    .note("a running total of amounts whose currency is unknown could add two currencies"),
+                                );
+                                return None;
+                            }
+                        }
+                    }
+                    other => other,
+                };
+                WindowFn::Running(a, v)
+            }
+            _ => {
+                return refuse(
+                    self,
+                    format!("`{fname}` with {} argument(s) is not a window function", args.len()),
+                    "the window functions are `row_number()`, `rank()`, `dense_rank()`, and `sum`, `count`, `min`, `max` or `avg` of one expression",
+                )
+            }
+        };
+        let partition = self.resolve_columns(input, partition, "partition by")?;
+        let keys: Vec<Expr> = order.iter().map(|(e, _)| e.clone()).collect();
+        let resolved = self.resolve_columns(input, &keys, "order by")?;
+        if resolved.len() != order.len() {
+            return refuse(
+                self,
+                "each window `order by` key is one column".to_string(),
+                "an ordering key that names several columns has no single position in the order",
+            );
+        }
+        let order: Vec<(ColIdx, bool)> = resolved
+            .into_iter()
+            .zip(order.iter().map(|(_, asc)| *asc))
+            .collect();
+        let id = self.circuit.add(
+            Op::Window {
+                partition,
+                order,
+                func,
+            },
+            vec![input],
+            c,
+            "window",
+        );
+        let mut names = self.schema_of(input).to_vec();
+        names.push(name);
+        self.schemas.insert(id, names);
         Some(id)
     }
 
@@ -1738,6 +1957,17 @@ impl<'a> Lx<'a> {
     /// the node it lowered to. A binding shadows a relation of the same name and is undone
     /// when the statement ends, so a CTE is visible exactly where SQL says it is.
     fn select(&mut self, s: &SelectStmt, c: ServeContract) -> Option<NodeId> {
+        // Each statement decides for its own from-list whether it reads system time; a
+        // subquery or a `with` body decides for its own, and the outer statement's choice is
+        // restored after it.
+        let saved = self.system_time;
+        self.system_time = names_system_time(s);
+        let out = self.select_with(s, c);
+        self.system_time = saved;
+        out
+    }
+
+    fn select_with(&mut self, s: &SelectStmt, c: ServeContract) -> Option<NodeId> {
         if s.ctes.is_empty() {
             return self.select_body(s, c);
         }
@@ -1757,7 +1987,14 @@ impl<'a> Lx<'a> {
             let prev = self.sources.insert(cte.name.text.clone(), node);
             shadowed.push((cte.name.text.clone(), prev));
         }
-        let out = if ok { self.select_body(s, c) } else { None };
+        let out = if ok {
+            // The entries were lowered as statements of their own; this one reads system
+            // time if it says so itself.
+            self.system_time = names_system_time(s);
+            self.select_body(s, c)
+        } else {
+            None
+        };
         for (name, prev) in shadowed.into_iter().rev() {
             match prev {
                 Some(p) => self.sources.insert(name, p),
@@ -1922,6 +2159,35 @@ impl<'a> Lx<'a> {
     }
 
     fn select_body(&mut self, s: &SelectStmt, c: ServeContract) -> Option<NodeId> {
+        // Where a window may stand (C15-05b): a projection item of a query that does not
+        // aggregate. Checked before anything is lowered, so the refusal names the window
+        // rather than whichever clause failed to lower around it.
+        let windows_elsewhere = s
+            .filter
+            .iter()
+            .chain(s.having.iter())
+            .chain(s.group_by.iter())
+            .chain(s.order_by.iter().map(|(e, _)| e))
+            .find(|e| contains_window(e));
+        if let Some(e) = windows_elsewhere {
+            self.d.push(
+                Diagnostic::error("NL0526", "a window function is a projection item")
+                    .primary(e.span(), "a window here")
+                    .note("SQL computes windows after `where`, `group by` and `having`, so none of them can read one; project it and filter an outer query"),
+            );
+            return None;
+        }
+        if s.projections.iter().any(|(e, _)| contains_window(e))
+            && (!s.group_by.is_empty()
+                || s.projections.iter().any(|(e, _)| aggregate_of(e).is_some()))
+        {
+            self.d.push(
+                Diagnostic::error("NL0526", "a window function over an aggregating query")
+                    .primary(s.span, "this query groups, and projects a window")
+                    .note("the fragment computes a window over rows, not over groups: aggregate in a subquery and apply the window to its result"),
+            );
+            return None;
+        }
         let Some(first) = s.from.first() else {
             self.d.push(
                 Diagnostic::error("NL0511", "this `select` has no `from`")
@@ -2220,6 +2486,50 @@ impl<'a> Lx<'a> {
             self.schemas.insert(id, self.schema_of(cur).to_vec());
             cur = id;
         }
+        // **Window functions** (cycle 15, C15-05b; decision 4), after `where` and before
+        // `order by`, which is where SQL evaluates them: each appends one column, so an
+        // `order by` can name a window's alias and the projection reads it by position.
+        let mut window_cols: HashMap<usize, ColIdx> = HashMap::new();
+        if s.projections.iter().any(|(e, _)| contains_window(e)) {
+            for (i, (e, alias)) in s.projections.iter().enumerate() {
+                let Expr::Window {
+                    call,
+                    partition,
+                    order,
+                    ..
+                } = e
+                else {
+                    if contains_window(e) {
+                        self.d.push(
+                            Diagnostic::error("NL0526", "a window function inside an expression")
+                                .primary(e.span(), "the window is one operand here")
+                                .note("project the window on its own, and compute over it in an outer query"),
+                        );
+                        return None;
+                    }
+                    continue;
+                };
+                // The appended column's name is what an `order by` resolves: the alias, or
+                // the function's name, unless the input has a column of that name already.
+                let wanted = match alias {
+                    Some(a) => a.text.clone(),
+                    None => match &**call {
+                        Expr::Call { callee, .. } => match &**callee {
+                            Expr::Path(p) => p.last().text.clone(),
+                            _ => format!("window{i}"),
+                        },
+                        _ => format!("window{i}"),
+                    },
+                };
+                let name = if self.schema_of(cur).contains(&wanted) {
+                    format!("__window{i}")
+                } else {
+                    wanted
+                };
+                cur = self.window(cur, call, partition, order, name, c)?;
+                window_cols.insert(i, self.schema_of(cur).len() as ColIdx - 1);
+            }
+        }
         // `order by` is placed *before* the projection so that it can name a column the
         // query does not select — which SQL permits, and which a strict output-schema-only
         // reading would refuse. A Z-set is unordered, so `OrderBy` is a materialization
@@ -2335,6 +2645,14 @@ impl<'a> Lx<'a> {
             let mut exprs = Vec::with_capacity(s.projections.len());
             let mut names = Vec::with_capacity(s.projections.len());
             for (i, (e, alias)) in s.projections.iter().enumerate() {
+                if let Some(k) = window_cols.get(&i) {
+                    names.push(match alias {
+                        Some(a) => a.text.clone(),
+                        None => self.schema_of(cur)[*k as usize].clone(),
+                    });
+                    exprs.push(Scalar::Column(*k));
+                    continue;
+                }
                 let Some(v) = self.scalar(cur, e) else {
                     self.d.push(
                         Diagnostic::error(
@@ -2357,6 +2675,30 @@ impl<'a> Lx<'a> {
                 .add(Op::Map { exprs }, vec![cur], c, "projection");
             self.schemas.insert(id, names);
             cur = id;
+        } else if self.system_time {
+            // `select *` is the relations' declared columns. A system-time read carries
+            // `recorded_at` besides them, as SQL:2011's system-period columns may be hidden,
+            // so the star leaves it out; naming it projects it.
+            let width = self.schema_of(cur).len() as ColIdx;
+            let keep: Vec<ColIdx> = (0..width)
+                .filter(|i| !self.is_system_column(cur, *i))
+                .collect();
+            if keep.len() < width as usize {
+                let names = keep
+                    .iter()
+                    .map(|i| self.schema_of(cur)[*i as usize].clone())
+                    .collect();
+                let id = self.circuit.add(
+                    Op::Map {
+                        exprs: keep.into_iter().map(Scalar::Column).collect(),
+                    },
+                    vec![cur],
+                    c,
+                    "projection",
+                );
+                self.schemas.insert(id, names);
+                cur = id;
+            }
         }
         // `SELECT DISTINCT` — read for the first time. `SelectStmt::distinct` was parsed and
         // never consulted, so the keyword was accepted and ignored, and a query asking for
@@ -2620,7 +2962,24 @@ impl<'a> Lx<'a> {
 
     fn table_ref(&mut self, t: &TableRef, c: ServeContract) -> Option<NodeId> {
         match t {
-            TableRef::Named { name, .. } => self.source(&name.text, c),
+            TableRef::Named { name, .. } => {
+                // A statement that names `recorded_at` reads each base's system time (C15-05b).
+                // A `with` entry of the same name is not the base: it shadows it.
+                let rel = self.cat.relations.get(&name.text);
+                let a_cte = self.sources.get(&name.text).is_some_and(|id| {
+                    !matches!(&self.circuit.node(*id).op, Op::Source { relation, .. } if *relation == name.text)
+                });
+                if self.system_time
+                    && !a_cte
+                    && rel.is_some_and(|r| {
+                        r.is_base() && r.column(niles_ir::operator::RECORDED_AT).is_none()
+                    })
+                {
+                    self.system_source(&name.text, c)
+                } else {
+                    self.source(&name.text, c)
+                }
+            }
             TableRef::Sub { query, .. } => self.select(query, c),
             TableRef::Join {
                 left,
@@ -3031,6 +3390,50 @@ fn collect_order_keys(e: &Expr, asc: bool, out: &mut Vec<(String, bool)>) -> Res
 }
 
 /// Whether a projection list is `*` — the identity, which emits no `Map`.
+/// Whether an expression holds a window function anywhere.
+fn contains_window(e: &Expr) -> bool {
+    if matches!(e, Expr::Window { .. }) {
+        return true;
+    }
+    let (mut kids, mut blocks) = (Vec::new(), Vec::new());
+    crate::typecheck::each_child(e, &mut kids, &mut blocks);
+    kids.into_iter().any(contains_window)
+}
+
+/// Whether a statement's own clauses name `recorded_at` (cycle 15, C15-05b): its projection,
+/// predicates, keys, windows and join conditions — not its subqueries or `with` bodies, which
+/// are statements of their own.
+fn names_system_time(s: &SelectStmt) -> bool {
+    fn in_expr(e: &Expr) -> bool {
+        match e {
+            Expr::Path(p) if p.last().text == niles_ir::operator::RECORDED_AT => true,
+            Expr::Field { name, .. } if name.text == niles_ir::operator::RECORDED_AT => true,
+            Expr::Select(_) | Expr::Exists { .. } => false,
+            _ => {
+                let (mut kids, mut blocks) = (Vec::new(), Vec::new());
+                crate::typecheck::each_child(e, &mut kids, &mut blocks);
+                kids.into_iter().any(in_expr)
+            }
+        }
+    }
+    fn in_table(t: &TableRef) -> bool {
+        match t {
+            TableRef::Join {
+                left, right, on, ..
+            } => in_table(left) || in_table(right) || on.as_ref().is_some_and(in_expr),
+            _ => false,
+        }
+    }
+    s.projections.iter().any(|(e, _)| in_expr(e))
+        || s.from.iter().any(in_table)
+        || s.filter
+            .iter()
+            .chain(s.having.iter())
+            .chain(s.group_by.iter())
+            .chain(s.order_by.iter().map(|(e, _)| e))
+            .any(in_expr)
+}
+
 fn is_star(projections: &[(Expr, Option<Name>)]) -> bool {
     projections.is_empty()
         || projections

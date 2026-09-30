@@ -587,6 +587,7 @@ pub fn expr(e: &Expr) -> String {
         Sql { .. } => unsupported("sql"),
         Exists { .. } => unsupported("exists"),
         Select(_) => unsupported("select"),
+        Window { .. } => unsupported("window"),
     }
 }
 

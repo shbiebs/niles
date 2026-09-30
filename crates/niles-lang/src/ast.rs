@@ -793,6 +793,14 @@ pub enum Expr {
     },
     /// A SQL `select` as written, before it is rewritten into a pipeline.
     Select(Box<SelectStmt>),
+    /// `f(..) over (partition by .. order by ..)` — a window function on the SQL surface
+    /// (cycle 15, C15-05b; the author's decision 4). `call` is the function as written.
+    Window {
+        call: Box<Expr>,
+        partition: Vec<Expr>,
+        order: Vec<(Expr, bool)>,
+        span: Span,
+    },
 
     /// A parse error. Its span covers the tokens that were skipped.
     Error(Span),
@@ -1149,7 +1157,7 @@ impl Expr {
             | Reproduce { span, .. }
             | Impact { span, .. }
             | Sql { span, .. } => *span,
-            Exists { span, .. } => *span,
+            Exists { span, .. } | Window { span, .. } => *span,
             Path(p) => p.span,
             Block(b) => b.span,
             Select(s) => s.span,

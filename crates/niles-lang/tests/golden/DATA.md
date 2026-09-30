@@ -33,3 +33,14 @@ did not clamp weights would never converge:
 | 3 | 4 |
 | 5 | 6 |
 | 6 | 5 |
+
+`t@recorded_at` — `t`'s system time (cycle 15, C15-05b): each row of `t` with the epoch that
+recorded it. A statement that names `recorded_at` reads this instead of `t`; `select *` over
+it still returns `t`'s three declared columns.
+
+| k | v | n | recorded_at |
+|---|---|---|---|
+| 1 | 10 | 100 | 1 |
+| 1 | 10 | null | 2 |
+| 2 | 20 | 200 | 2 |
+| 3 | 30 | null | 3 |

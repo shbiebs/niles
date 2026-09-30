@@ -1,0 +1,9 @@
+# 81_recorded_at_filter
+# **The epoch as a readable column** (cycle 15, C15-05b; decision 4): `recorded_at`, the
+# system-time column the keyword registry has named since stage 0. Naming it makes the
+# statement read `t`'s system time (`DATA.md`); `select *` still means `t`'s declared
+# columns, as SQL:2011's system-period columns may be hidden. The row recorded at epoch 3
+# is filtered out.
+1 10 100 x1
+1 10 null x1
+2 20 200 x1

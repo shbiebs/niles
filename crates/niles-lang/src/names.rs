@@ -538,7 +538,7 @@ impl Walk {
             }
 
             // The SQL surface: a different binder discipline, stated in the header.
-            Expr::Sql { .. } | Expr::Exists { .. } | Expr::Select(_) => {}
+            Expr::Sql { .. } | Expr::Exists { .. } | Expr::Select(_) | Expr::Window { .. } => {}
         }
     }
 

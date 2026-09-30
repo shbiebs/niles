@@ -202,3 +202,23 @@ fn a_declared_money_currency_is_its_currency() {
 fn an_amount_whose_currency_cannot_be_found_is_nl0522() {
     assert!(codes("view v = loose.where(|r| r.amt > 1.00 usd);").contains(&"NL0522".to_string()));
 }
+
+#[test]
+fn in_a_self_join_an_amount_takes_its_own_sides_currency() {
+    // A pin on `q`'s own currency governs `q.amt`: transaction 1's legs are usd, and the
+    // positive one is account 8's, met by both of `p`'s legs.
+    let view = "view v = sql { select q.acct from postings p join postings q on p.txn = q.txn where q.cur = \"usd\" and q.amt > 1.00 usd };";
+    assert_eq!(run(view).unwrap(), ["8 x2"]);
+    // A pin on `p`'s currency does not. Account 7 has a usd leg (txn 1) and an eur leg
+    // (txn 2); `q` is its eur leg, so `q.amt > 1.00 usd` compares eur 3.00 with a usd
+    // literal and is refused. The lookup this replaces took the most recent pin on *any*
+    // `postings.cur` — here `p.cur = "usd"` — and answered `7`.
+    let view = "view v = sql { select q.acct from postings p join postings q on p.acct = q.acct where q.cur = \"eur\" and p.cur = \"usd\" and q.amt > 1.00 usd };";
+    match run(view) {
+        Err(EvalError::Mismatch {
+            why: Mismatch::Currencies(_, _),
+            ..
+        }) => {}
+        other => panic!("expected a currency mismatch, got {other:?}"),
+    }
+}

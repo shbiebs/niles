@@ -1,0 +1,4 @@
+# 80_window_over_group_refused
+# A window over an aggregating query's groups is outside the fragment: the IR's window is
+# over rows. Aggregate in a subquery and apply the window to its result.
+REFUSED NL0526

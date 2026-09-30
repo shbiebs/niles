@@ -1,0 +1,8 @@
+# 83_window_by_recorded_at
+# E30's Q07 shape: a running sum per partition in the order the facts were recorded. The two
+# `k = 1` rows tie on every declared column but were recorded at epochs 1 and 2, so the
+# running sum separates them: 10, then 20.
+1 10 10 x1
+1 10 20 x1
+2 20 20 x1
+3 30 30 x1

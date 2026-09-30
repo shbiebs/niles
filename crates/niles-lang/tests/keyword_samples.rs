@@ -186,11 +186,8 @@ const NOT_COMPILED: &[(&str, &str)] = &[
         "between",
         "MISMATCH: `between (a, b)` over `Money` literals has no lowering",
     ),
-    (
-        "recorded_at",
-        "MISMATCH: `#4200` is an epoch literal and `recorded_at` is a system \
-                     column the surface does not project",
-    ),
+    // (`recorded_at` left this list in cycle 15: the SQL surface reads the system-time
+    // column, C15-05b; the sample is now the SQL spelling.)
     (
         "lineage",
         "MISMATCH: `serve { lineage: full }` is not a serve-contract key the \

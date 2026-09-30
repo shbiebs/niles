@@ -196,12 +196,12 @@ fragment MUST be published rather than implied, and narrowing it is a public act
 <!-- BEGIN:sql-surface -->
 *Status, generated from `sql_surface::MAPPING` by `cargo run -q -p niles-lang --bin gen-sql-surface`. Do not edit between the markers.*
 
-The stated fragment has **47 forms**. Of those, **11** are
+The stated fragment has **50 forms**. Of those, **11** are
 *equivalent* — the SQL and pipeline spellings denote the same Z-set on the golden
 corpus's dataset, which is a stronger claim than the structural circuit equality
 this line used to rest on: two circuits can differ and denote the same thing, and
-agree while both are wrong. **17** are *lowered* with a golden case fixing
-what they denote but written in one surface only. **11** are *refused*, each
+agree while both are wrong. **19** are *lowered* with a golden case fixing
+what they denote but written in one surface only. **12** are *refused*, each
 with the diagnostic code that refuses it — that is what narrowing the fragment looks
 like from inside the compiler. **2** are lowered with nothing checking what
 they compute, and say so. **1** are specified and not built.

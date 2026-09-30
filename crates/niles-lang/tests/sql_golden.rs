@@ -103,6 +103,31 @@ fn sources() -> BTreeMap<String, ZSet> {
             (&[6, 5], 1),
         ]),
     );
+    // **`t`'s system time** (cycle 15, C15-05b): each row of `t` with the epoch that
+    // recorded it appended, which is what a statement naming `recorded_at` reads. The two
+    // `k = 1` rows were recorded at different epochs, so an order by `recorded_at` separates
+    // what an order by `k` or `v` ties.
+    let mut system = eval::ZSet::new();
+    for (row, epoch) in [
+        (vec![1, 10, 100], 1),
+        (vec![1, 10, i128::MIN], 2),
+        (vec![2, 20, 200], 2),
+        (vec![3, 30, i128::MIN], 3),
+    ] {
+        let mut r: Vec<niles_ir::value::Value> = row
+            .into_iter()
+            .map(|x| {
+                if x == i128::MIN {
+                    niles_ir::value::Value::Null
+                } else {
+                    niles_ir::value::Value::Int(x)
+                }
+            })
+            .collect();
+        r.push(niles_ir::value::Value::Int(epoch));
+        eval::add(&mut system, r, 1);
+    }
+    m.insert(niles_ir::operator::system_time_relation("t"), system);
     m
 }
 
@@ -341,11 +366,13 @@ fn the_two_surfaces_denote_the_same_zset_wherever_both_are_written() {
     // cases stopped being compared. The list is printed and its length is bounded, so
     // adding a case that silently opts out of the comparison fails here.
     assert!(
-        skipped.len() <= 44,
+        skipped.len() <= 52,
         "{} cases are skipped by this comparison, which is more than the corpus leaves \
-         uncompared today (44: thirty-nine written in one surface, five refused in both; the \
+         uncompared today (52: forty-seven written in one surface, five refused in both; the \
          breakdown this message gave before cycle 15, thirty-eight and three, was stale). \
-         It went up by three in cycle 15 (C15-05b): `75_join_on_non_anchor_column` has no \
+         It went up by eleven in cycle 15 (C15-05b). Eight are the window and `recorded_at` \
+         cases (76-83), which are SQL only because the pipeline surface does not grow (the \
+         author's decision R2-b). Of the other three: `75_join_on_non_anchor_column` has no \
          pipeline spelling, since `.join(u)` is keyed on the anchors by design; four `with` \
          cases have none either \
          (`71_with_recursive_closure`, which is the closure case 36 cannot write, and the \

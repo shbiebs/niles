@@ -7,7 +7,7 @@
 
 This is the normative per-keyword reference of thesis Appendix B.19. It is **generated** from the compiler's keyword registry, not maintained alongside it: a keyword cannot exist in the lexer without an entry here, and an entry here cannot describe a keyword the lexer does not have.
 
-**174 keywords**: 95 unreserved, 59 reserved (including reserved-for-future), 20 in the remaining two classes.
+**176 keywords**: 97 unreserved, 59 reserved (including reserved-for-future), 20 in the remaining two classes.
 
 ## How to read the tables
 
@@ -29,7 +29,7 @@ Two orthogonal axes, following PostgreSQL's `kwlist.h`, which carries both becau
 
 **Reservation policy.** A new keyword is `unreserved` unless a written justification records why the grammar cannot be written without reserving it. Reserved-word count is a function of parser technology, not of vocabulary size: Niles uses hand-written recursive descent with unbounded lookahead, which keeps words like `epoch`, `ledger`, `serve` and `budget` available as column names in a bank's existing schema. Every novel keyword in this reference is unreserved, and a test enforces it.
 
-## SQL-derived keywords (71)
+## SQL-derived keywords (73)
 
 Taken from SQL, with SQL's meaning wherever the meaning survives. Where it does not — `update` and `delete` are legal against a `table` and meaningless against a `ledger` — the difference is stated in the entry.
 
@@ -87,6 +87,8 @@ Taken from SQL, with SQL's meaning wherever the meaning survives. Where it does 
 | `or` | reserved | requires `as` | 2026 | Short-circuiting boolean disjunction. | `where(\|r\| r.a or r.b)` |
 | `order` | non-reserved (cannot be function or type name) | requires `as` | 2026 | Introduces ordering; the pipeline spelling is `order_by`. Clause-position only. | `order_by(\|r\| asc(r.id))` |
 | `outer` | reserved (can be function or type name) | requires `as` | 2026 | Marks a join as outer. | `a.full_outer_join(b, \|x, y\| x.k == y.k)` |
+| `over` | unreserved | requires `as` | 2026 | Makes a call a window function: `rank()`, `row_number()`, `dense_rank()` or a running aggregate over a partition, in its order. | `sql { select k, rank() over (order by v) as r from t }` |
+| `partition` | unreserved | bare | 2026 | Splits a window's rows into partitions, each ordered and numbered on its own. | `sql { select k, sum(v) over (partition by k order by v) as running from t }` |
 | `primary` | unreserved | bare | 2026 | Introduces the primary key. | `table t { id: i64 primary key }` |
 | `recursive` | unreserved | bare | 2026 | Marks a CTE as recursive: `base union step`, lowered to the fixpoint. SQL writes no measure, so the round bound is its only guard. | `sql { with recursive r(k) as (select k from t union select k from r) select * from r }` |
 | `references` | unreserved | bare | 2026 | Target of a foreign key. | `foreign key (acct) references accounts (id)` |
@@ -196,7 +198,7 @@ These name concepts neither SQL nor Rust has: an immutable epoch-ordered base, a
 | `posting` | unreserved | bare | 2026 | One signed movement; the linear unit a ledger row is built from. | `let p: Posting = debit(a, 10.00 usd)?;` |
 | `rate` | unreserved | bare | 2026 | The declared conversion of an `fx` form, recorded with the legs. | `fx { .., rate: r }` |
 | `read_your_writes` | unreserved | bare | 2026 | Consistency rung 2: a session observes its own committed writes. | `serve { consistency: read_your_writes }` |
-| `recorded_at` | unreserved | bare | 2026 | The system-time axis: when the fact was recorded. Never rewritten. | `where(\|r\| r.recorded_at <= #4200)` |
+| `recorded_at` | unreserved | bare | 2026 | The system-time axis: when the fact was recorded. Never rewritten. On the SQL surface, a base's or ledger's column holding the epoch that recorded the row; not one of `*`'s columns. | `sql { select k, recorded_at from t where recorded_at <= 4200 }` |
 | `reproduce` | unreserved | bare | 2026 | Re-derive an answer from the base and compare, as an audit act. | `reproduce balances.get(k) at #4200;` |
 | `resolve` | unreserved | bare | 2026 | Consume a hold exactly once, by post, void or expire. | `resolve h post 18.50 usd` |
 | `retain` | unreserved | bare | 2026 | Retention of derived state; the base is always retained. | `serve { retain: pinned }` |
@@ -241,9 +243,9 @@ Self actor all and as async await break by case const continue crate cross disti
 
 ## Words that are *not* reserved, and why that matters
 
-95 words carry meaning in their own clause and are ordinary identifiers everywhere else. A bank migrating a schema whose columns are called `epoch`, `ledger`, `posted`, `serve`, `budget` or `scale` does not have to rename them.
+97 words carry meaning in their own clause and are ordinary identifiers everywhere else. A bank migrating a schema whose columns are called `epoch`, `ledger`, `posted`, `serve`, `budget` or `scale` does not have to rename them.
 
 ```
-absent add alter anchor any as_of asc authorize auto backfill base begin bitemporal bounded budget capability check column commit committed confidential conserve consistency create currency declassify default delete demand desc drop e2ee emit epoch evictable expire expires explain foreign forever freshness fx grant guard hold idem impact index insert into key ledger ledger_consistent leg lineage materialize measure monotonic of per pinned post posting primary rate read_your_writes recorded_at recursive references reproduce resolve retain revoke rollback scale schema serializable serve set signal snapshot spilled sql table tiered txn udf unique update upto valid_at value_date view void window
+absent add alter anchor any as_of asc authorize auto backfill base begin bitemporal bounded budget capability check column commit committed confidential conserve consistency create currency declassify default delete demand desc drop e2ee emit epoch evictable expire expires explain foreign forever freshness fx grant guard hold idem impact index insert into key ledger ledger_consistent leg lineage materialize measure monotonic of over partition per pinned post posting primary rate read_your_writes recorded_at recursive references reproduce resolve retain revoke rollback scale schema serializable serve set signal snapshot spilled sql table tiered txn udf unique update upto valid_at value_date view void window
 ```
 

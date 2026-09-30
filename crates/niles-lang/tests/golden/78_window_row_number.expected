@@ -1,0 +1,8 @@
+# 78_window_row_number
+# One partition per `k`. The two `k = 1` rows tie on `v`, and `row_number` still numbers them
+# 1 and 2 — in the evaluator's total order over rows (the null `n` first), which is the
+# order `order by` falls back to and is written down there.
+1 1 x1
+1 2 x1
+2 1 x1
+3 1 x1

@@ -1207,6 +1207,64 @@ circuit (3 nodes):
   2 Join { kind: Inner, left_key: [1], right_key: [0], residual: None } in=[0, 1] key=Some([1]) arity=5 anchor=Inherited contract=ServeContract { consistency: Snapshot, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // join
   output golden = node 2
 
+=== crates/niles-lang/tests/golden/76_window_running_sum.sql
+codes: []
+circuit (3 nodes):
+  0 Source { relation: "t", is_base: true, confidential: [], anchor_key: [0] } in=[] key=Some([0]) arity=3 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // t
+  1 Window { partition: [], order: [(0, true)], func: Running(Sum, Column(1)) } in=[0] key=Some([0]) arity=4 anchor=Inherited contract=ServeContract { consistency: Snapshot, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // window
+  2 Map { exprs: [Column(0), Column(1), Column(3)] } in=[1] key=None arity=3 anchor=Inherited contract=ServeContract { consistency: Snapshot, materialize: Auto, retain: Evictable, lineage: Off } conserving=false lineage=Off // projection
+  output golden = node 2
+
+=== crates/niles-lang/tests/golden/77_window_rank.sql
+codes: []
+circuit (3 nodes):
+  0 Source { relation: "t", is_base: true, confidential: [], anchor_key: [0] } in=[] key=Some([0]) arity=3 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // t
+  1 Window { partition: [], order: [(1, false)], func: Rank } in=[0] key=Some([0]) arity=4 anchor=Inherited contract=ServeContract { consistency: Snapshot, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // window
+  2 Map { exprs: [Column(0), Column(1), Column(3)] } in=[1] key=None arity=3 anchor=Inherited contract=ServeContract { consistency: Snapshot, materialize: Auto, retain: Evictable, lineage: Off } conserving=false lineage=Off // projection
+  output golden = node 2
+
+=== crates/niles-lang/tests/golden/78_window_row_number.sql
+codes: []
+circuit (3 nodes):
+  0 Source { relation: "t", is_base: true, confidential: [], anchor_key: [0] } in=[] key=Some([0]) arity=3 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // t
+  1 Window { partition: [0], order: [(1, true)], func: RowNumber } in=[0] key=Some([0]) arity=4 anchor=Inherited contract=ServeContract { consistency: Snapshot, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // window
+  2 Map { exprs: [Column(0), Column(3)] } in=[1] key=None arity=2 anchor=Inherited contract=ServeContract { consistency: Snapshot, materialize: Auto, retain: Evictable, lineage: Off } conserving=false lineage=Off // projection
+  output golden = node 2
+
+=== crates/niles-lang/tests/golden/79_window_in_where_refused.sql
+codes: [NL0526]
+circuit (0 nodes):
+
+=== crates/niles-lang/tests/golden/80_window_over_group_refused.sql
+codes: [NL0526]
+circuit (0 nodes):
+
+=== crates/niles-lang/tests/golden/81_recorded_at_filter.sql
+codes: []
+circuit (4 nodes):
+  0 Source { relation: "t", is_base: true, confidential: [], anchor_key: [0] } in=[] key=Some([0]) arity=3 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // t
+  1 Source { relation: "t@recorded_at", is_base: true, confidential: [], anchor_key: [0] } in=[] key=Some([0]) arity=4 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // t@recorded_at
+  2 Filter { predicate: Binary { op: Le, lhs: Column(3), rhs: LitInt(2) } } in=[1] key=Some([0]) arity=4 anchor=Inherited contract=ServeContract { consistency: Snapshot, materialize: Auto, retain: Evictable, lineage: Off } conserving=false lineage=Off // where
+  3 Map { exprs: [Column(0), Column(1), Column(2)] } in=[2] key=None arity=3 anchor=Inherited contract=ServeContract { consistency: Snapshot, materialize: Auto, retain: Evictable, lineage: Off } conserving=false lineage=Off // projection
+  output golden = node 3
+
+=== crates/niles-lang/tests/golden/82_recorded_at_projected.sql
+codes: []
+circuit (3 nodes):
+  0 Source { relation: "t", is_base: true, confidential: [], anchor_key: [0] } in=[] key=Some([0]) arity=3 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // t
+  1 Source { relation: "t@recorded_at", is_base: true, confidential: [], anchor_key: [0] } in=[] key=Some([0]) arity=4 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // t@recorded_at
+  2 Map { exprs: [Column(0), Column(3)] } in=[1] key=None arity=2 anchor=Inherited contract=ServeContract { consistency: Snapshot, materialize: Auto, retain: Evictable, lineage: Off } conserving=false lineage=Off // projection
+  output golden = node 2
+
+=== crates/niles-lang/tests/golden/83_window_by_recorded_at.sql
+codes: []
+circuit (4 nodes):
+  0 Source { relation: "t", is_base: true, confidential: [], anchor_key: [0] } in=[] key=Some([0]) arity=3 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // t
+  1 Source { relation: "t@recorded_at", is_base: true, confidential: [], anchor_key: [0] } in=[] key=Some([0]) arity=4 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // t@recorded_at
+  2 Window { partition: [0], order: [(3, true)], func: Running(Sum, Column(1)) } in=[1] key=Some([0]) arity=5 anchor=Inherited contract=ServeContract { consistency: Snapshot, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // window
+  3 Map { exprs: [Column(0), Column(1), Column(4)] } in=[2] key=None arity=3 anchor=Inherited contract=ServeContract { consistency: Snapshot, materialize: Auto, retain: Evictable, lineage: Off } conserving=false lineage=Off // projection
+  output golden = node 3
+
 === daemon: balance view, materialize auto
 codes: []
 circuit (2 nodes):

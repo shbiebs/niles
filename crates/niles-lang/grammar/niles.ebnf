@@ -34,8 +34,8 @@
        This is what lets `p.where(..)`, `p.order`, `p.select` and `p.check` all work.
 
    COUNTING. Two figures, because "how big is a grammar" has no single answer and an
-   uncounted one is folklore. This file defines 205 named rules; expanded to one
-   production per alternative (the BNF-normal reading), that is 496 productions. Both
+   uncounted one is folklore. This file defines 206 named rules; expanded to one
+   production per alternative (the BNF-normal reading), that is 497 productions. Both
    numbers are computed by `tests/grammar_drift.rs` from this file and asserted, so
    neither can drift from what is written here. Comparable published figures for SQL are
    not available: PostgreSQL's `gram.y` is 21,016 lines, but no authoritative production
@@ -518,16 +518,20 @@ sql_expr           ::= "sql" "{" select_stmt "}" ;
 
 select_stmt        ::= [ with_clause ] select_core { set_op select_core } ;
 with_clause        ::= "with" [ "recursive" ] cte { "," cte } ;
-cte                ::= <ident> "as" "(" select_stmt ")" ;
+cte                ::= <ident> [ "(" <ident> { "," <ident> } ")" ] "as" "(" select_stmt ")" ;
 select_core        ::= "select" [ "distinct" ] projection_list
                        [ from_clause ] [ where_clause ] [ group_clause ] [ having_clause ]
                        [ order_clause ] [ limit_clause ] [ offset_clause ] ;
 set_op             ::= "union" [ "all" ] | "except" | "intersect" ;
 
 projection_list    ::= projection { "," projection } ;
-projection         ::= "*" | expr [ [ "as" ] <ident> ] ;
+projection         ::= "*" | expr [ window ] [ [ "as" ] <ident> ] ;
                        (* the bare-label form is legal only where the following word's
                           registry `label` field is `bare`; `as` is required otherwise *)
+window             ::= "over" "(" [ "partition" "by" expr { "," expr } ] [ order_clause ] ")" ;
+                       (* after a call only; the frame is SQL's default and the only one:
+                          the partition up to the current row and its peers, or the whole
+                          partition when there is no order *)
 
 from_clause        ::= "from" table_ref { "," table_ref } ;
 table_ref          ::= table_primary { join_clause } ;

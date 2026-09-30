@@ -1,0 +1,4 @@
+# 79_window_in_where_refused
+# SQL computes windows after `where`, so `where` cannot read one. Refused by name rather
+# than as a predicate that failed to lower.
+REFUSED NL0526

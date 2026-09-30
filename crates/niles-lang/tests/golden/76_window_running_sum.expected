@@ -1,0 +1,7 @@
+# 76_window_running_sum
+# **A window, since cycle 15** (C15-05b; the author's decision 4). `over (order by k)` with
+# SQL's default frame: the rows up to the current one *and its peers*. The two `k = 1` rows
+# are peers, so both see 20 — and the projection `(k, v)` makes them one row of weight 2.
+1 10 20 x2
+2 20 40 x1
+3 30 70 x1

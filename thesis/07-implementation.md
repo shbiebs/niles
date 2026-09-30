@@ -48,8 +48,8 @@ Every row marked **built** is compiled and tested by `cargo test --workspace`, w
 
 | Component | Status |
 |---|---|
-| **Keyword registry** (`niles-lang::keywords`) | **Built** — 174 keywords on four axes; the single source of truth from which the lexer, the reserved list and Appendix B.19 are all generated |
-| **Normative grammar** (`grammar/niles.ebnf`) | **Built** — 205 rules, 496 productions, with a drift test checking it against the registry and the compiler in both directions |
+| **Keyword registry** (`niles-lang::keywords`) | **Built** — 176 keywords on four axes; the single source of truth from which the lexer, the reserved list and Appendix B.19 are all generated |
+| **Normative grammar** (`grammar/niles.ebnf`) | **Built** — 206 rules, 497 productions, with a drift test checking it against the registry and the compiler in both directions |
 | **Generated keyword reference** (`docs/keywords.md`) | **Built** — regenerated from the registry, with a blessing test that fails if the two disagree |
 | **Lexer** | **Built** — two-layer, lossless, covering money with per-currency scale, both temporal axes, epochs and durations |
 | **Parser** | **Built** — hand-written recursive descent with Pratt expressions; resilient, and total on arbitrary input |

@@ -224,8 +224,9 @@ fn the_reserved_set_stays_small() {
     );
 
     // The figures the thesis quotes. Computed here, never typed into the prose by hand.
+    // 176 since cycle 15: `over` and `partition` (C15-05b, window functions).
     assert_eq!(
-        total, 174,
+        total, 176,
         "keyword count changed; regenerate docs/keywords.md and update B.3"
     );
     assert_eq!(reserved, 59, "reserved count changed; update Appendix B.16");
@@ -234,7 +235,7 @@ fn the_reserved_set_stays_small() {
         .filter(|k| k.category == Category::Unreserved)
         .count();
     assert_eq!(
-        unreserved, 95,
+        unreserved, 97,
         "unreserved count changed; update Appendix B.16"
     );
 }

@@ -106,6 +106,11 @@ pub static MAPPING: &[Mapping] = &[
     Mapping { sql: "WITH RECURSIVE x AS (base UNION step)", niles: ".fixpoint(|acc| ..) guard measure(m)", status: Status::Lowered },  // 71
     Mapping { sql: "WITH RECURSIVE x AS (base UNION ALL step)", niles: "(none: the fixpoint keeps a set)", status: Status::Refused("NL0524") }, // 72
     Mapping { sql: "WITH RECURSIVE, a step outside SQL's recursive terms", niles: "(none)", status: Status::Refused("NL0525") }, // 73
+    // **Windows and the system-time column, since cycle 15** (C15-05b, decision 4), on the SQL
+    // surface only: the pipeline surface does not grow (decision R2-b).
+    Mapping { sql: "f(..) OVER (PARTITION BY .. ORDER BY ..)", niles: "(none: SQL surface only)", status: Status::Lowered }, // 76, 77, 78, 83
+    Mapping { sql: "a window outside the projection, or over an aggregating query", niles: "(none)", status: Status::Refused("NL0526") }, // 79, 80
+    Mapping { sql: "the system-time column recorded_at", niles: "(none: SQL surface only)", status: Status::Lowered }, // 81, 82, 83
     Mapping { sql: "CREATE MATERIALIZED VIEW", niles: "view .. serve { materialize: full }", status: Status::Lowered }, // 01
     Mapping { sql: "AS OF SYSTEM TIME", niles: ".as_of(#e)", status: Status::Lowered }, // 41
     Mapping { sql: "FOR SYSTEM_TIME", niles: ".recorded_at / .valid_at / bitemporal", status: Status::Specified },

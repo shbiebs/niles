@@ -257,6 +257,12 @@ pub fn budget(scenario: &str) -> Option<f64> {
         // with the new statement-level scans (each walk of a call collects its children into
         // a vector) and the +64 live bytes with `Op` growing by the window variant, over the
         // nodes the installed view keeps; neither is traced to a line.
+        //
+        // **+16 with the author's decision R2-d** (`bbd09f5`, the only code commit after
+        // `a3781dc`): 150,329 -> 150,345, per process, per-op 3.8, and no other scenario
+        // moved. Consistent with the currency lookups the lowering now runs for each money
+        // aggregate while compiling the balance view (each origin trace collects the
+        // filters it passes); not traced to a line.
         "ledger_seeded" => 4.2,
         // **The three served analytical statements, after the fold replaced the copy.**
         //

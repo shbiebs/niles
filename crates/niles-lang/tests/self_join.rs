@@ -134,3 +134,30 @@ fn a_name_on_both_sides_is_refused_unless_the_key_makes_it_one_value() {
         assert!(c.is_empty(), "{view}: {c:?}");
     }
 }
+
+/// `group by` and an aggregating projection read the qualifier too: `q.cur` in a product of
+/// `postings` with itself is column 7, the right side's `cur`, and the bare `cur` is refused.
+#[test]
+fn group_by_reads_the_qualifier() {
+    let src = format!(
+        "{SCHEMA}\nview v = sql {{ select q.cur, count(p.amt) from postings p, postings q where q.txn < p.txn group by q.cur }};\n"
+    );
+    let (prog, _) = parser::parse_program(&src);
+    let (cat, _) = resolve::resolve_program(&prog, 0);
+    let (l, d) = lower::lower_program(&prog, &cat);
+    assert!(!d.has_errors(), "{:?}", d.items);
+    let key = l
+        .circuit
+        .nodes
+        .iter()
+        .find_map(|n| match &n.op {
+            Op::Aggregate { group_key, .. } => Some(group_key.clone()),
+            _ => None,
+        })
+        .expect("an aggregate");
+    assert_eq!(key, vec![7]);
+    let c = codes(
+        "view v = sql { select cur, count(amt) from postings p, postings q where q.txn < p.txn group by cur };",
+    );
+    assert!(c.contains(&"NL0520"), "{c:?}");
+}

@@ -182,6 +182,14 @@ impl<'a> Lx<'a> {
     ) -> Option<Vec<ColIdx>> {
         let mut out = Vec::new();
         for e in exprs {
+            // A column reference keeps its qualifier: `group by q.acct` in a self-join is the
+            // right side's `acct`, which the name alone cannot say.
+            if is_column_reference(e) {
+                if let Some(i) = self.try_column(input, e)? {
+                    out.push(i);
+                    continue;
+                }
+            }
             let mut names = Vec::new();
             collect_field_names(e, &mut names);
             if names.is_empty() {
@@ -369,6 +377,17 @@ impl<'a> Lx<'a> {
             return None;
         }
         self.col_index(input, &name)
+    }
+
+    /// [`Lx::column_ref`] for a caller with its own "names no column" diagnostic: `None` when
+    /// the reference was refused (and said why), `Some(None)` when it names no column.
+    fn try_column(&mut self, input: NodeId, e: &Expr) -> Option<Option<ColIdx>> {
+        let before = self.d.error_count();
+        match self.column_ref(input, e) {
+            Some(i) => Some(Some(i)),
+            None if self.d.error_count() > before => None,
+            None => Some(None),
+        }
     }
 
     /// Record a join's sides and key equalities. The sides are passed in, not read off the
@@ -1520,11 +1539,7 @@ impl<'a> Lx<'a> {
                         return None;
                     }
                 };
-                if let Some(d) = self.ambiguity(cur, &one, e.span()) {
-                    self.d.push(d);
-                    return None;
-                }
-                let Some(i) = self.col_index(cur, &one) else {
+                let Some(i) = self.try_column(cur, e)? else {
                     self.d.push(
                         Diagnostic::error("NL0517", format!("`{one}` names no column"))
                             .primary(e.span(), "not a column of this query's input")

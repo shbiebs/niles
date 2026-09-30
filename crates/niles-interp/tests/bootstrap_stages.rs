@@ -437,13 +437,15 @@ fn the_relational_tier_is_still_refused_and_the_bootstrap_does_not_touch_it() {
     // by currency with its residual named (`niles-interp`'s own
     // `a_txn_that_does_not_conserve_is_refused_with_the_currency_and_the_residual`). What
     // matters *here* is the second half, which is untouched: the bootstrap does not use the
-    // relational tier, and `hold` and `resolve` remain uninterpretable.
+    // relational tier, and `authorize` and `declassify` remain uninterpretable. (`hold` and `resolve` were
+    // on this list until cycle 15, when E30b′ gave them the dynamic semantics Appendix B
+    // writes, design §6.2; the bootstrap does not reach them, which the run below checks.)
     for (src, form) in [
         (
-            "fn f() -> i64 { let h = hold(acct(1), 20.00 usd, expires: 7.days)?; 0 }",
-            "hold",
+            "fn f() -> i64 { let x = authorize(acct(1), 20.00 usd); 0 }",
+            "authorize",
         ),
-        ("fn f() -> i64 { let x = resolve h void; 0 }", "resolve"),
+        ("fn f() -> i64 { let x = declassify(1); 0 }", "declassify"),
     ] {
         let (prog, _) = parser::parse_program(src);
         let mut it = Interp::new();

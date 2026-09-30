@@ -169,6 +169,31 @@ pub struct Ledger {
     pub next_epoch: u64,
     /// The transaction being built, if a `txn` block is open.
     pub open: Option<Open>,
+    /// Holds, in the order they were placed (cycle 15, E30b′ design §6.2). A hold is a
+    /// ledger fact, not a posting: placing one moves no money, and resolving one records how
+    /// it ended.
+    pub holds: Vec<HoldRow>,
+}
+
+/// One hold and how it ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HoldRow {
+    pub id: u64,
+    pub account: String,
+    pub minor: i128,
+    pub currency: String,
+    pub scale: u32,
+    /// `None` while open; otherwise `void`, `expire`, or `post` with the amount captured.
+    pub resolution: Option<Resolution>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Resolution {
+    Void,
+    Expire,
+    /// Captured, in the hold's minor units. Appendix B names no counter-party for a capture,
+    /// so nothing is posted (the author's decision of 2026-09-30, "as written").
+    Post(i128),
 }
 
 /// The transaction currently being built.

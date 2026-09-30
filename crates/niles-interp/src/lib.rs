@@ -835,6 +835,13 @@ impl Interp {
 
             Expr::Try { expr, span } => self.try_op(env, expr, *span),
 
+            Expr::Hold { args, span } => self.hold(env, args, *span),
+            Expr::Resolve {
+                hold,
+                outcome,
+                span,
+            } => self.resolve(env, hold, outcome, *span),
+
             // --- control ---
             Expr::Block(b) => self.block(env, b),
 
@@ -1148,6 +1155,21 @@ impl Interp {
                 .checked_neg()
                 .map(Value::Int)
                 .ok_or_else(|| Error::Overflow { op: "-", at: span }.into()),
+            (
+                UnOp::Neg,
+                Value::Money {
+                    minor,
+                    scale,
+                    currency,
+                },
+            ) => minor
+                .checked_neg()
+                .map(|m| Value::Money {
+                    minor: m,
+                    scale: *scale,
+                    currency: currency.clone(),
+                })
+                .ok_or_else(|| Error::Overflow { op: "-", at: span }.into()),
             (UnOp::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
             // References are a no-op here: the subset has no aliasing, because values are
             // cloned. §6.6's memory model is a compile-time claim, and an interpreter that
@@ -1160,6 +1182,151 @@ impl Interp {
             }
             .into()),
         }
+    }
+
+    /// `hold(acct, amount, …)` (cycle 15, E30b′ design §6.2): appends an open hold and
+    /// returns `Ok(Hold { id })`, a `Result` because the schemas write `hold(..)?`.
+    ///
+    /// Named arguments (`expires: 7.days`, an authority) are **not evaluated**: they have no
+    /// effect here, and a duration literal is outside this interpreter's subset, so
+    /// evaluating `7.days` would refuse every hold. (The design said "evaluated"; this is its
+    /// deviation, recorded in E30b′'s results.)
+    #[inline(never)]
+    fn hold(&mut self, env: &mut Env, args: &[niles_lang::ast::Arg], span: Span) -> Eval<Value> {
+        let positional: Vec<&Expr> = args
+            .iter()
+            .filter(|a| a.name.is_none())
+            .map(|a| &a.value)
+            .collect();
+        let [acct, amount, ..] = positional[..] else {
+            return Err(Error::TypeMismatch {
+                want: "hold(account, amount, …)".into(),
+                got: format!("{} positional argument(s)", positional.len()),
+                at: span,
+            }
+            .into());
+        };
+        let account = match self.expr(env, acct)? {
+            Value::Str(s) => (*s).clone(),
+            other => other.render(),
+        };
+        let Value::Money {
+            minor,
+            scale,
+            currency,
+        } = self.expr(env, amount)?
+        else {
+            return Err(Error::TypeMismatch {
+                want: "money".into(),
+                got: "another value".into(),
+                at: span,
+            }
+            .into());
+        };
+        let id = self.ledger.holds.len() as u64 + 1;
+        self.ledger.holds.push(ledger::HoldRow {
+            id,
+            account,
+            minor,
+            currency: currency.to_ascii_uppercase(),
+            scale,
+            resolution: None,
+        });
+        let mut fields = BTreeMap::new();
+        fields.insert("id".to_string(), Value::Int(id as i128));
+        Ok(Value::Variant {
+            path: "Ok".into(),
+            payload: Rc::new(vec![Value::Record {
+                name: "Hold".into(),
+                fields: Rc::new(fields),
+            }]),
+        })
+    }
+
+    /// `resolve h void | expire | post amt`: closes the hold. A capture records its amount
+    /// and **posts nothing**, because Appendix B names no counter-party (the author's
+    /// decision of 2026-09-30). Resolving a hold twice, or one that does not exist, raises:
+    /// the checker refuses the first statically (NL0320/NL0321), and this is its run-time
+    /// counterpart. Returns `Ok(())`.
+    #[inline(never)]
+    fn resolve(
+        &mut self,
+        env: &mut Env,
+        hold: &Expr,
+        outcome: &niles_lang::ast::ResolveOutcome,
+        span: Span,
+    ) -> Eval<Value> {
+        use niles_lang::ast::ResolveOutcome as R;
+        let h = self.expr(env, hold)?;
+        let id = match &h {
+            Value::Record { name, fields } if name == "Hold" => match fields.get("id") {
+                Some(Value::Int(i)) => *i as u64,
+                _ => 0,
+            },
+            _ => 0,
+        };
+        let Some(k) = self.ledger.holds.iter().position(|r| r.id == id) else {
+            return Err(Error::TypeMismatch {
+                want: "a hold".into(),
+                got: h.type_name().into(),
+                at: span,
+            }
+            .into());
+        };
+        if self.ledger.holds[k].resolution.is_some() {
+            return Err(Error::TypeMismatch {
+                want: "an open hold".into(),
+                got: format!("hold {id}, already resolved"),
+                at: span,
+            }
+            .into());
+        }
+        let res = match outcome {
+            R::Void(_) => ledger::Resolution::Void,
+            R::Expire(_) => ledger::Resolution::Expire,
+            R::Post(amt) => {
+                let v = self.expr(env, amt)?;
+                let row = &self.ledger.holds[k];
+                let Value::Money {
+                    minor,
+                    scale,
+                    currency,
+                } = v
+                else {
+                    return Err(Error::TypeMismatch {
+                        want: "money".into(),
+                        got: v.type_name().into(),
+                        at: span,
+                    }
+                    .into());
+                };
+                same_money(&row.currency, row.scale, &currency, scale, span)?;
+                if minor < 0 || minor > row.minor {
+                    return Err(Error::TypeMismatch {
+                        want: format!(
+                            "a capture between 0 and the hold's {} minor units",
+                            row.minor
+                        ),
+                        got: format!("{minor}"),
+                        at: span,
+                    }
+                    .into());
+                }
+                ledger::Resolution::Post(minor)
+            }
+            R::Error(sp) => {
+                return Err(Error::NotInSubset {
+                    form: "a resolve outcome that did not parse",
+                    at: *sp,
+                }
+                .into())
+            }
+        };
+        self.ledger.holds[k].resolution = Some(res);
+        Ok(Value::Variant {
+            path: "Ok".into(),
+            payload: Rc::new(vec![Value::Unit]),
+        })
     }
 
     #[inline(never)]
@@ -1854,12 +2021,47 @@ fn arith(op: BinOp, a: &Value, b: &Value, at: Span) -> Result<Value, Error> {
 
         (Add, Value::Str(x), Value::Str(y)) => Ok(Value::Str(Rc::new(format!("{x}{y}")))),
 
-        // Money arithmetic is *not* provided. Adding two `Money` values requires the
-        // currency check that the type system performs; doing it here would create a
-        // second, unchecked path to the same operation, which is the seam §6.9 refuses.
+        // **Money arithmetic, re-checked** (cycle 15, E30b′ design §6.1). It was refused
+        // here, so that there would be no second, unchecked path to an operation the type
+        // system checks (§6.9), and every well-typed program that wrote `m - fee` could not
+        // run. It is provided now *with* the check: the currency (compared as the kernel
+        // compares, upper-cased) and the scale must agree, or it raises, and overflow raises
+        // as integer arithmetic does. The path is therefore not unchecked; it checks twice.
+        (
+            Add | Sub,
+            Value::Money {
+                minor: x,
+                scale: sx,
+                currency: cx,
+            },
+            Value::Money {
+                minor: y,
+                scale: sy,
+                currency: cy,
+            },
+        ) => {
+            same_money(cx, *sx, cy, *sy, at)?;
+            let r = if op == Add {
+                x.checked_add(*y)
+            } else {
+                x.checked_sub(*y)
+            };
+            match r {
+                Some(minor) => Ok(Value::Money {
+                    minor,
+                    scale: *sx,
+                    currency: cx.clone(),
+                }),
+                None => Err(Error::Overflow {
+                    op: if op == Add { "+" } else { "-" },
+                    at,
+                }),
+            }
+        }
         (Add | Sub, Value::Money { .. }, _) | (Add | Sub, _, Value::Money { .. }) => {
-            Err(Error::NotInSubset {
-                form: "money arithmetic (checked tier only)",
+            Err(Error::TypeMismatch {
+                want: "two money values".into(),
+                got: format!("{} and {}", a.type_name(), b.type_name()),
                 at,
             })
         }
@@ -1870,6 +2072,21 @@ fn arith(op: BinOp, a: &Value, b: &Value, at: Span) -> Result<Value, Error> {
             let ord = match (a, b) {
                 (Value::Int(x), Value::Int(y)) => x.cmp(y),
                 (Value::Str(x), Value::Str(y)) => x.cmp(y),
+                (
+                    Value::Money {
+                        minor: x,
+                        scale: sx,
+                        currency: cx,
+                    },
+                    Value::Money {
+                        minor: y,
+                        scale: sy,
+                        currency: cy,
+                    },
+                ) => {
+                    same_money(cx, *sx, cy, *sy, at)?;
+                    x.cmp(y)
+                }
                 _ => {
                     return Err(Error::TypeMismatch {
                         want: "two comparable values of the same type".into(),
@@ -1894,6 +2111,19 @@ fn arith(op: BinOp, a: &Value, b: &Value, at: Span) -> Result<Value, Error> {
             got: format!("{} and {}", a.type_name(), b.type_name()),
             at,
         }),
+    }
+}
+
+/// Two money values may meet in an operator only in one currency and one scale.
+fn same_money(cx: &str, sx: u32, cy: &str, sy: u32, at: Span) -> Result<(), Error> {
+    if cx.eq_ignore_ascii_case(cy) && sx == sy {
+        Ok(())
+    } else {
+        Err(Error::TypeMismatch {
+            want: format!("money in {} at scale {sx}", cx.to_ascii_uppercase()),
+            got: format!("money in {} at scale {sy}", cy.to_ascii_uppercase()),
+            at,
+        })
     }
 }
 
@@ -2365,12 +2595,13 @@ mod tests {
     /// checked — so evaluating `txn` did not quietly open the others.
     #[test]
     fn the_rest_of_the_relational_tier_is_refused_by_name_and_never_approximated() {
+        // `hold` and `resolve` left this list in cycle 15 (E30b′ design §6.2); see
+        // `holds_are_placed_and_resolved_as_appendix_b_writes_them`.
         for (src, want) in [
             (
-                "fn main() -> i64 { let h = hold(acct(1), 20.00 usd, expires: 7.days)?; 0 }",
-                "hold",
+                "fn main() -> i64 { let x = authorize(acct(1), 20.00 usd); 0 }",
+                "authorize",
             ),
-            ("fn main() -> i64 { let x = resolve h void; 0 }", "resolve"),
             (
                 "fn main() -> i64 { let x = 1.5; 0 }",
                 "floating-point literal",
@@ -2386,19 +2617,97 @@ mod tests {
         }
     }
 
+    /// **Money arithmetic runs, and re-checks what the type system proved** (cycle 15,
+    /// E30b′ design §6.1). It was refused outright, so every well-typed program that wrote
+    /// `m - fee` was unexecutable (E30's T02 and T06).
     #[test]
-    fn money_arithmetic_is_refused_because_the_check_lives_in_the_type_system() {
-        let src = "fn main() -> i64 { let a = 10.00 usd; let b = 5.00 eur; a + b }";
-        let (prog, _) = parser::parse_program(src);
-        let mut it = Interp::new();
-        it.load(&prog);
-        assert!(matches!(
-            it.call("main", vec![]),
-            Err(Error::NotInSubset {
-                form: "money arithmetic (checked tier only)",
-                ..
+    fn money_arithmetic_runs_within_one_currency_and_raises_across_two() {
+        let run = |body: &str| {
+            let src = format!("fn main() -> i64 {{ {body} }}");
+            let (prog, _) = parser::parse_program(&src);
+            let mut it = Interp::new();
+            it.load(&prog);
+            it.call("main", vec![])
+        };
+        assert_eq!(
+            run("let a = 10.00 usd; let b = 2.50 usd; a - b"),
+            Ok(Value::Money {
+                minor: 750,
+                scale: 2,
+                currency: "usd".into()
             })
+        );
+        assert_eq!(
+            run("let a = 10.00 usd; -a"),
+            Ok(Value::Money {
+                minor: -1000,
+                scale: 2,
+                currency: "usd".into()
+            })
+        );
+        assert_eq!(
+            run("let a = 1.00 usd; let b = 2.00 usd; a < b"),
+            Ok(Value::Bool(true))
+        );
+        assert!(matches!(
+            run("let a = 10.00 usd; let b = 5.00 eur; a + b"),
+            Err(Error::TypeMismatch { .. })
         ));
+        assert!(matches!(
+            run("let a = 10.00 usd; let b = 5.00 eur; a < b"),
+            Err(Error::TypeMismatch { .. })
+        ));
+        assert!(matches!(
+            run("let a = 10.00 usd; a + 1"),
+            Err(Error::TypeMismatch { .. })
+        ));
+    }
+
+    /// **`hold` and `resolve`, as Appendix B writes them** (cycle 15, E30b′ design §6.2; the
+    /// author's decision of 2026-09-30): a hold is placed and closed; a capture records its
+    /// amount and posts nothing, because the specification names no counter-party.
+    #[test]
+    fn holds_are_placed_and_resolved_as_appendix_b_writes_them() {
+        let run = |body: &str| {
+            let src = format!("fn main() -> Result<(), E> {{ {body} }}");
+            let (prog, _) = parser::parse_program(&src);
+            let mut it = Interp::new();
+            it.load(&prog);
+            let r = it.call("main", vec![]);
+            (r, it.ledger)
+        };
+        let (r, l) = run("let h = hold(acct(1), 50.00 usd, expires: 7.days)?; resolve h void");
+        assert!(r.is_ok(), "{r:?}");
+        assert_eq!(l.holds.len(), 1);
+        assert_eq!(l.holds[0].resolution, Some(ledger::Resolution::Void));
+        assert_eq!(l.holds[0].minor, 5000);
+
+        let (r, l) = run("let h = hold(acct(1), 50.00 usd)?; resolve h post 30.00 usd");
+        assert!(r.is_ok(), "{r:?}");
+        assert_eq!(l.holds[0].resolution, Some(ledger::Resolution::Post(3000)));
+        assert!(
+            l.sealed.is_empty(),
+            "a capture posts nothing: {:?}",
+            l.sealed
+        );
+
+        for (body, why) in [
+            (
+                "let h = hold(acct(1), 50.00 usd)?; resolve h void; resolve h void",
+                "a hold resolved twice",
+            ),
+            (
+                "let h = hold(acct(1), 50.00 usd)?; resolve h post 60.00 usd",
+                "a capture larger than the hold",
+            ),
+            (
+                "let h = hold(acct(1), 50.00 usd)?; resolve h post 10.00 eur",
+                "a capture in another currency",
+            ),
+        ] {
+            let (r, _) = run(body);
+            assert!(r.is_err(), "{why} must raise, got {r:?}");
+        }
     }
 
     #[test]

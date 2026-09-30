@@ -1106,7 +1106,28 @@ impl<'a> Lx<'a> {
             Expr::Closure { body, .. } => self.scalar(input, body)?,
             Expr::Int(v, _) => Scalar::LitInt(*v),
             Expr::Bool(v, _) => Scalar::LitBool(*v),
-            Expr::Str(s, _) => Scalar::LitText(s.clone()),
+            // **A string reaches the circuit only as a currency's name.** The IR's values are
+            // integers, and the one scalar evaluator — the reference evaluator's and the
+            // server's scan fold alike — read every `LitText` as `0`: `where cur = "eur"`
+            // compared the currency column with 0, which is `usd`'s code, and answered the
+            // `usd` rows under an `eur` filter (E30, found by the first mutation trial). A
+            // declared currency's name lowers to its catalog code, the integer the column
+            // holds; any other string has no value in the circuit and is refused.
+            Expr::Str(s, span) => match self.cat.currencies.get(s.as_str()) {
+                Some(c) => Scalar::LitInt(c.code as i128),
+                None => {
+                    self.d.push(
+                        Diagnostic::error(
+                            "NL0521",
+                            format!("the string \"{s}\" has no value in the circuit"),
+                        )
+                        .primary(*span, "not the name of a declared currency")
+                        .note("the IR's values are integers, and a string is lowered only as a currency's name, to that currency's code")
+                        .note("this used to evaluate as 0 — the first declared currency's code — so a comparison with it answered as if that currency had been written"),
+                    );
+                    return None;
+                }
+            },
             Expr::Money {
                 minor, currency, ..
             } => {

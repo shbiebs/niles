@@ -120,6 +120,12 @@ const NOT_COMPILED: &[(&str, &str)] = &[
                different query",
     ),
     (
+        "like",
+        "`like \"ac%\"` is refused with NL0521 (cycle 14, R2-06): the IR's values are \
+               integers, and a text pattern evaluated as 0, so `like` answered an equality \
+               with the first currency's code; a string lowers only as a currency's name",
+    ),
+    (
         "Self",
         "an outline: `Self { amt: 0.00 usd }` needs the type whose impl block it is in",
     ),
@@ -325,11 +331,11 @@ fn every_keyword_sample_is_syntax_the_compiler_has() {
 #[test]
 fn the_exemption_list_stays_small_and_reasoned() {
     assert!(
-        NOT_COMPILED.len() <= 31,
+        NOT_COMPILED.len() <= 32,
         "{} samples are exempt from compilation, which is more than the registry has decisions \
-         for today (31: fifteen outlines whose `..` or free names stand for something declared \
+         for today (32: fifteen outlines whose `..` or free names stand for something declared \
          elsewhere, fifteen MISMATCHes where the registry documents a construct the compiler \
-         does not have, and one deliberate refusal). \
+         does not have, and two deliberate refusals). \
          Adding a word here is a decision that belongs in the work-order report, not a way \
          to make this test pass.",
         NOT_COMPILED.len()

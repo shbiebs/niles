@@ -60,6 +60,19 @@ mod session;
 mod tls;
 
 use rev_engine::RevEngine;
+
+/// **E27b's metered build of this same file** (C15-02, E2).
+///
+/// `tools/memprobe` compiles this `main.rs` a second time as `nilestreamd-metered`, with
+/// `cfg(nilestream_metered)` set by its build script, so the daemon E27b measures is this
+/// source and nothing else, running over an allocator that can count the bytes a view holds
+/// (`select nilestream_stats`, columns `view_state_bytes` and `checkpoint_bytes`). The
+/// allocator is not here, because a `GlobalAlloc` has no safe implementation and §9.10's
+/// no-`unsafe` claim is about this crate; the shipped `nilestreamd` has neither it nor the
+/// meter, and reports both columns as NULL.
+#[cfg(nilestream_metered)]
+#[global_allocator]
+static METERED: memprobe::alloc::Metered = memprobe::alloc::Metered;
 use session::Serving;
 use std::net::TcpListener;
 use std::sync::Arc;
@@ -83,6 +96,18 @@ fn flag<T: std::str::FromStr>(name: &str, raw: &str) -> T {
 }
 
 fn main() {
+    #[cfg(nilestream_metered)]
+    {
+        if !memprobe::alloc::metered_installed()
+            || !nilestream_core::meter::install(memprobe::alloc::held)
+        {
+            eprintln!(
+                "nilestreamd-metered: the metering allocator is not in place; refusing to start"
+            );
+            std::process::exit(2);
+        }
+        eprintln!("  metered build: view_state_bytes and checkpoint_bytes are counted");
+    }
     let args: Vec<String> = std::env::args().collect();
     let mut port = 5433u16;
     let mut schema_path: Option<String> = None;

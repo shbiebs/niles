@@ -992,6 +992,56 @@ impl Rev {
         self.meta.len()
     }
 
+    /// **The bytes of this view's derived state**, or `None` when this process has no meter
+    /// (E27b, C15-02, E2; [`crate::meter`] says how the count is taken).
+    ///
+    /// What counts as derived state is everything that grows with the keys read: every slot
+    /// (resident values *and* the `Pending`/`Bottom`/`Hole` markers, which `slots_len` says
+    /// the budget does not bound), the per-key policy metadata, the pinned set, and the
+    /// in-flight table. What does not: the view's plan, its counters and its caps, which are
+    /// the same size for a view that has read nothing as for one that has read everything.
+    ///
+    /// A flight's completion record is shared through an `Arc` that a clone would only
+    /// re-count, not re-allocate, so the image allocates one fresh record per flight, at the
+    /// record's own size. That is exact on Linux, where `Mutex` and `Condvar` are futexes;
+    /// on macOS it omits the lazily boxed pthread objects of a flight somebody joined.
+    pub fn state_bytes(&self) -> Option<u64> {
+        crate::meter::held_bytes(|| self.state_image())
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn state_image(
+        &self,
+    ) -> (
+        BTreeMap<Key, Slot<Value>>,
+        BTreeMap<Key, Meta>,
+        BTreeSet<Key>,
+        BTreeMap<Key, (Epoch, u64, Arc<Completion>, Option<Slot<Value>>)>,
+    ) {
+        type FlightImage = (Epoch, u64, Arc<Completion>, Option<Slot<Value>>);
+        let flights: BTreeMap<Key, FlightImage> = self
+            .in_flight
+            .iter()
+            .map(|(k, f)| {
+                (
+                    k.clone(),
+                    (
+                        f.anchor,
+                        f.generation,
+                        Arc::new(Completion::default()),
+                        f.prior.clone(),
+                    ),
+                )
+            })
+            .collect();
+        (
+            self.slots.clone(),
+            self.meta.clone(),
+            self.pinned.clone(),
+            flights,
+        )
+    }
+
     /// Read a key at the given anchor.
     ///
     /// The four cases are the absence lattice: a `Present` entry whose certification interval

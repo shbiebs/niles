@@ -168,9 +168,17 @@ fn stats(shared: &Shared) -> Vec<Backend> {
         ("view_metadata_keys", view.metadata_len() as i128),
         ("view_slots", view.slots_len() as i128),
     ];
+    // E27b's memory metric (C15-02, E2): the bytes the view's derived state holds, counted
+    // the way `nilestreamd` counts its own — the same runtime, the same clone, the same
+    // meter. NULL without one (the plain `rev-sidecar`); H3 has no checkpoints.
+    let state_bytes = view.state_bytes();
+    let mut fields: Vec<Field> = cols.iter().map(|(n, _)| Field::int8(n)).collect();
+    fields.push(Field::int8("view_state_bytes"));
+    let mut row: Vec<Option<String>> = cols.iter().map(|(_, v)| Some(v.to_string())).collect();
+    row.push(state_bytes.map(|b| b.to_string()));
     vec![
-        Backend::RowDescription(cols.iter().map(|(n, _)| Field::int8(n)).collect()),
-        Backend::DataRow(cols.iter().map(|(_, v)| Some(v.to_string())).collect()),
+        Backend::RowDescription(fields),
+        Backend::DataRow(row),
         Backend::CommandComplete("SELECT 1".into()),
     ]
 }

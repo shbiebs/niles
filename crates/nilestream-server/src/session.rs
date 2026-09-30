@@ -1063,6 +1063,13 @@ impl Session {
                     Field::int8("gap_finish_samples"),
                     Field::int8("flights_behind_at_begin"),
                     Field::int8("flights_that_fell_behind"),
+                    // **E27b's memory metric, on the wire (C15-02, E2).** The bytes the
+                    // balance view's derived state holds and the bytes of the ledger's
+                    // per-key checkpoint state, counted by cloning under a meter. NULL on a
+                    // build without one — the shipped daemon — because a figure this build
+                    // cannot take is not a zero.
+                    Field::int8("view_state_bytes"),
+                    Field::int8("checkpoint_bytes"),
                 ]),
                 Backend::DataRow(vec![
                     Some(s.reads.to_string()),
@@ -1100,6 +1107,8 @@ impl Session {
                     Some(s.gap_finish_samples.to_string()),
                     Some(s.flights_behind_at_begin.to_string()),
                     Some(s.flights_that_fell_behind.to_string()),
+                    s.view_state_bytes.map(|b| b.to_string()),
+                    s.checkpoint_bytes.map(|b| b.to_string()),
                 ]),
                 Backend::CommandComplete("SELECT 1".into()),
             ];
@@ -3043,6 +3052,9 @@ schema bank {
             "gap_finish_samples",
             "flights_behind_at_begin",
             "flights_that_fell_behind",
+            // E27b's memory metric (C15-02, E2), read by the comparator by name.
+            "view_state_bytes",
+            "checkpoint_bytes",
         ] {
             assert!(
                 names.iter().any(|n| n == wanted),

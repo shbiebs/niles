@@ -29,6 +29,9 @@ nilescheck-sql = { path = "../../crates/nilescheck-sql" }
 nilestream-core = { path = "../../crates/nilestream-core" }
 nilestream-server = { path = "../../crates/nilestream-server" }
 syntax-study = { path = "../../crates/syntax-study" }
+# For the two metered daemons below (E27b, C15-02): the shipped `main.rs` files use them.
+nilestream-ledger = { path = "../../crates/nilestream-ledger" }
+rev-sidecar = { path = "../../crates/rev-sidecar" }
 
 [[bin]]
 name = "memprobe"
@@ -48,6 +51,22 @@ path = "src/bin/e30cost.rs"
 [[bin]]
 name = "e30bcost"
 path = "src/bin/e30bcost.rs"
+
+# **E27b's metered daemons (cycle 15, C15-02, E2).** The shipped `main.rs` of `nilestreamd`
+# and of `rev-sidecar`, compiled here a second time with `cfg(nilestream_metered)` (set by
+# `build.rs`), which installs `alloc::Metered` as their allocator and `alloc::held` as
+# `nilestream_core::meter`'s meter. The same source, so what E27b measures is the daemon;
+# built here, so the workspace keeps §9.10's no-`unsafe` claim. `test = false`: their unit
+# tests are the workspace's and run there, against their own manifest directory.
+[[bin]]
+name = "nilestreamd-metered"
+path = "../../crates/nilestream-server/src/main.rs"
+test = false
+
+[[bin]]
+name = "rev-sidecar-metered"
+path = "../../crates/rev-sidecar/src/main.rs"
+test = false
 
 [lib]
 name = "memprobe"

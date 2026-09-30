@@ -50,6 +50,10 @@ pub struct Cluster
 pub fn maintenance_stride(c: Consistency) -> u64
 pub fn is_highly_available(c: Consistency) -> bool
 pub fn permits_reading(outer: Consistency, inner: Consistency) -> bool
+pub type Meter
+pub fn install(m: Meter) -> bool
+pub fn installed() -> bool
+pub fn held_bytes<T: Any>(mut make: impl FnMut() -> T) -> Option<u64>
 pub type Key
 pub type Value
 pub struct Anchored

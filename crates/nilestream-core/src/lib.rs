@@ -23,6 +23,7 @@ pub mod anchor_index;
 pub mod distributed;
 pub mod eviction;
 pub mod ladder;
+pub mod meter;
 pub mod rev;
 pub mod upquery;
 

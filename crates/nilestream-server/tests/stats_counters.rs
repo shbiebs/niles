@@ -89,6 +89,11 @@ enum Kind {
     /// Zero before *and* after the events that would move a counter of this name, for the
     /// stated reason. A structural zero, written down where it can fail.
     StaysZero(&'static str),
+    /// A byte count this build **cannot take**: NULL here, before and after every event,
+    /// because the workspace has no metering allocator (§9.10). Its movement is asserted
+    /// where one is installed — `tools/memprobe/tests/view_state_bytes.rs` (E27b, C15-02).
+    /// A zero here would be the claim that the view holds nothing.
+    Metered(&'static str),
 }
 
 use Kind::*;
@@ -274,7 +279,25 @@ const TABLE: &[(&str, Kind)] = &[
              the hold has to be re-made, not this assertion relaxed",
         ),
     ),
+    (
+        "view_state_bytes",
+        Metered("the balance view's slots, metadata, pinned set and flights, in bytes held"),
+    ),
+    (
+        "checkpoint_bytes",
+        Metered("the ledger's per-key checkpoint state, in bytes held"),
+    ),
 ];
+
+/// Whether a column came back SQL NULL.
+fn is_null(s: &mut Session, e: &RevEngine, name: &str) -> bool {
+    stats_over_the_wire(s, e)
+        .into_iter()
+        .find(|(n, _)| n == name)
+        .unwrap_or_else(|| panic!("`{name}` is not on the wire"))
+        .1
+        .is_none()
+}
 
 fn fresh() -> RevEngine {
     // Small and deliberately partial: a budget below the key count is what makes a read miss
@@ -383,6 +406,11 @@ fn the_zero_event_control_is_zero_for_every_counter_of_events() {
                 // configured cap; reading it is the assertion.
                 let _ = value(&mut s, &e, name);
             }
+            Metered(_) => assert!(
+                is_null(&mut s, &e, name),
+                "`{name}` is not NULL in a build without a meter: it is reporting a figure \
+                 this build cannot take"
+            ),
         }
     }
 }
@@ -395,6 +423,13 @@ fn every_driven_counter_moves_and_every_stays_zero_counter_does_not() {
     drive_everything(&mut s, &e);
 
     for (name, kind) in TABLE {
+        if let Metered(what) = kind {
+            assert!(
+                is_null(&mut s, &e, name),
+                "`{name}` ({what}) is not NULL after the events, in a build without a meter"
+            );
+            continue;
+        }
         let v = value(&mut s, &e, name);
         match kind {
             Driven(event) => assert!(
@@ -410,7 +445,7 @@ fn every_driven_counter_moves_and_every_stays_zero_counter_does_not() {
                  claim that rests on it has to be re-made. Do not relax this assertion to make \
                  the suite green."
             ),
-            Level(_) => {}
+            Level(_) | Metered(_) => {}
         }
     }
 }

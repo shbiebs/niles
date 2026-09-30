@@ -282,6 +282,15 @@ pub struct ReadStats {
     /// (cycle 8) neither had a surface.
     pub view_metadata_keys: u64,
     pub idem_window_keys: u64,
+    /// **E27b's memory metric, in its two parts** (C15-02, E2): the balance view's derived
+    /// state (`Rev::state_bytes`) and the ledger's per-key checkpoint state
+    /// (`Ledger::checkpoint_state_image`), in bytes held, counted by cloning under a meter.
+    ///
+    /// `None` when the process has no meter — the shipped `nilestreamd` — and reported as
+    /// SQL NULL on the wire: a figure this build cannot take is not a zero. The first part is
+    /// zero before any read; the second is maintained on write, and is not.
+    pub view_state_bytes: Option<u64>,
+    pub checkpoint_bytes: Option<u64>,
     /// **The absence lattice's fourth state, made askable.**
     ///
     /// `pending_joins` counts keyed reads that found a reconstruction already in flight at
@@ -1420,7 +1429,15 @@ impl crate::session::Serving for RevEngine {
         // table — the alternative is holding both locks across the read, which is the
         // deadlock — and it is stated here because a reader who assumes atomicity would
         // read a one-epoch skew as a counter that does not reconcile.
-        let idem_keys = self.base().idem_window_keys() as u64;
+        let (idem_keys, checkpoint_bytes) = {
+            let b = self.base();
+            (
+                b.idem_window_keys() as u64,
+                // E27b's per-key checkpoint state, counted while B is held shared — a clone
+                // of the ledger's four per-key maps, taken before V as the order requires.
+                nilestream_core::meter::held_bytes(|| b.checkpoint_state_image()),
+            )
+        };
         crate::rev_engine::stats_order_hook::pause();
         let guard = self
             .runtime
@@ -1445,6 +1462,8 @@ impl crate::session::Serving for RevEngine {
                     view_answers,
                     fallbacks,
                     view_metadata_keys: v.metadata_len() as u64,
+                    view_state_bytes: v.state_bytes(),
+                    checkpoint_bytes,
                     idem_window_keys: idem_keys,
                     pending_joins: s.pending_joins,
                     uninstalled_folds: s.uninstalled_folds,
@@ -1486,6 +1505,10 @@ impl crate::session::Serving for RevEngine {
                 view_answers,
                 fallbacks,
                 idem_window_keys: idem_keys,
+                // No runtime, no partial state: zero when the process can count, and absent
+                // when it cannot, because absent and zero are different claims.
+                view_state_bytes: nilestream_core::meter::installed().then_some(0),
+                checkpoint_bytes,
                 ..Default::default()
             },
         }
@@ -6157,6 +6180,9 @@ mod fallback_rate_tests {
             // would report zero for a run that had them the whole time.
             merge_max_epochs: after.merge_max_epochs,
             merge_max_rows: after.merge_max_rows,
+            // Levels too, and absent in a build without a meter.
+            view_state_bytes: after.view_state_bytes,
+            checkpoint_bytes: after.checkpoint_bytes,
             merges_refused_epochs: after.merges_refused_epochs - before.merges_refused_epochs,
             merges_refused_rows: after.merges_refused_rows - before.merges_refused_rows,
             merges_refused_unavailable: after.merges_refused_unavailable

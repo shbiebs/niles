@@ -69,6 +69,83 @@ unsafe impl GlobalAlloc for Counting {
     }
 }
 
+/// **The system allocator, metered per thread — for a server, not for E18** (E27b, C15-02).
+///
+/// `Counting` keeps process-wide totals with four atomic read-modify-writes per allocation.
+/// That is right for E18, whose regions are single-threaded, and wrong for a daemon serving
+/// four clients: every allocation on every connection thread would contend for the same
+/// cache lines, and the p99 that E27b compares would carry the instrument's cost.
+///
+/// This one does nothing but a thread-local flag test unless the *calling thread* has armed
+/// it, and when armed it adds to a thread-local total. No atomics, no shared line, and no
+/// other thread's allocations in a figure. [`held`] is the only thing that arms it; it is
+/// installed as `nilestream_core::meter`'s meter by `nilestreamd-metered` and
+/// `rev-sidecar-metered`, which are the shipped `main.rs` files built here with this as their
+/// `#[global_allocator]`.
+pub struct Metered;
+
+std::thread_local! {
+    static ARMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static HELD: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
+}
+
+/// Add `delta` to this thread's total if this thread is armed. `try_with` because an
+/// allocation can happen while a thread's locals are being torn down; these two have no
+/// destructor, so it never fails in practice, and if it did the figure would not be asked for.
+fn note(delta: isize) {
+    let _ = ARMED.try_with(|a| {
+        if a.get() {
+            let _ = HELD.try_with(|h| h.set(h.get() + delta));
+        }
+    });
+}
+
+unsafe impl GlobalAlloc for Metered {
+    unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+        let p = System.alloc(l);
+        if !p.is_null() {
+            note(l.size() as isize);
+        }
+        p
+    }
+    unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+        note(-(l.size() as isize));
+        System.dealloc(p, l)
+    }
+    unsafe fn realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 {
+        let q = System.realloc(p, l, n);
+        if !q.is_null() {
+            note(n as isize - l.size() as isize);
+        }
+        q
+    }
+}
+
+/// **The meter**: build the image on this thread, read the bytes it holds live, drop it.
+///
+/// Requested bytes, net of those freed while building — so a temporary the clone made and
+/// released is not counted, and what the image still holds is. The image is dropped after
+/// the counter is read and outside the armed region.
+pub fn held(make: &mut dyn FnMut() -> Box<dyn std::any::Any>) -> u64 {
+    HELD.with(|h| h.set(0));
+    ARMED.with(|a| a.set(true));
+    let image = make();
+    let held = HELD.with(|h| h.get());
+    ARMED.with(|a| a.set(false));
+    drop(image);
+    held.max(0) as u64
+}
+
+/// Whether [`Metered`] is this program's allocator: a 4 KiB allocation inside [`held`]
+/// moves the figure only if it is. A binary that installs the meter without the allocator
+/// would report every view as holding nothing, so the metered binaries refuse to start
+/// when this is false.
+pub fn metered_installed() -> bool {
+    // `black_box`, or the optimiser removes an allocation nobody observes and the probe
+    // reads zero under the right allocator — which is what it did the first time it ran.
+    held(&mut || Box::new(std::hint::black_box(Vec::<u8>::with_capacity(4096)))) >= 4096
+}
+
 /// Whether the counting allocator is the one this program is using.
 ///
 /// Probed rather than assumed: without `--features count-alloc` the binary installs nothing,

@@ -16,6 +16,13 @@ use rev_sidecar::stream::{self, Shared};
 use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 
+/// **E27b's metered build of this same file** (C15-02, E2): `tools/memprobe` compiles it
+/// again as `rev-sidecar-metered`, with this allocator, so H3's `view_state_bytes` is counted
+/// exactly as N's is. See `crates/nilestream-server/src/main.rs`.
+#[cfg(nilestream_metered)]
+#[global_allocator]
+static METERED: memprobe::alloc::Metered = memprobe::alloc::Metered;
+
 /// The view's name: the one Nilestream's daemon installs, from the same text.
 const VIEW: &str = "__balance";
 
@@ -56,6 +63,12 @@ fn install(budget: u64) -> Runtime {
 }
 
 fn main() {
+    #[cfg(nilestream_metered)]
+    if !memprobe::alloc::metered_installed()
+        || !nilestream_core::meter::install(memprobe::alloc::held)
+    {
+        fail("the metering allocator is not in place; refusing to start");
+    }
     let args: Vec<String> = std::env::args().collect();
     let listen = arg(&args, "--listen").unwrap_or_else(|| fail("--listen host:port"));
     // `--ledger driver:HOST:PORT` is arm T (TigerBeetle behind tools/arms/tigerbeetle's

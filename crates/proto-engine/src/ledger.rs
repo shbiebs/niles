@@ -619,6 +619,35 @@ impl Ledger {
     /// accounts almost no key reaches 64. Without this accessor that coincidence has to be
     /// explained by argument; with it, the experiment reports the coverage beside the cost
     /// and the explanation is a column.
+    /// **A copy of the per-key state the read path keeps beside the base**, for counting its
+    /// bytes (E27b, C15-02, E2; `nilestream_core::meter` takes the count).
+    ///
+    /// The checkpoints themselves; the two per-key counters that exist only to place them
+    /// (`running`, `posting_seen` — PostgreSQL's P+ arm keeps the same thing as
+    /// `arm.key_counts`, and its figure includes it); and `key_first`, the per-key first
+    /// epoch a currency-named read consults. The last is closer to an index over the base
+    /// than to derived state, and is counted anyway: the choice that makes Nilestream's
+    /// figure larger is the one that cannot flatter it.
+    ///
+    /// Not counted: the postings, the epoch records and the anchor index, which are the
+    /// base — the thing E27's memory clause wrongly compared.
+    #[allow(clippy::type_complexity)]
+    pub fn checkpoint_state_image(
+        &self,
+    ) -> (
+        HashMap<(Acct, Cur), Vec<(Epoch, Minor)>>,
+        HashMap<(Acct, Cur), usize>,
+        HashMap<(Acct, Cur), Minor>,
+        HashMap<(Acct, Cur), Epoch>,
+    ) {
+        (
+            self.checkpoints.clone(),
+            self.posting_seen.clone(),
+            self.running.clone(),
+            self.key_first.clone(),
+        )
+    }
+
     pub fn checkpoint_coverage(&self) -> (usize, usize) {
         (
             self.checkpoints.values().filter(|v| !v.is_empty()).count(),

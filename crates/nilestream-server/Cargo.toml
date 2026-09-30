@@ -15,3 +15,8 @@ proto-engine = { path = "../proto-engine" }
 [[bin]]
 name = "nilestreamd"
 path = "src/main.rs"
+
+# `tools/memprobe` builds this crate's `main.rs` a second time with `cfg(nilestream_metered)`
+# (E27b, C15-02): declared here so the ordinary build knows the name and says nothing.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(nilestream_metered)'] }

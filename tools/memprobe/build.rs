@@ -24,4 +24,9 @@ fn main() {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_else(|| "rustc version not recorded".into());
     println!("cargo:rustc-env=MEMPROBE_RUSTC={version}");
+    // E27b (C15-02): `nilestreamd-metered` and `rev-sidecar-metered` are the shipped
+    // `main.rs` files compiled in this package, where this cfg turns on their metering
+    // allocator and meter. Set for every target here; only those two files read it.
+    println!("cargo:rustc-check-cfg=cfg(nilestream_metered)");
+    println!("cargo:rustc-cfg=nilestream_metered");
 }

@@ -3,6 +3,24 @@
 version = 4
 
 [[package]]
+name = "bank-bench"
+version = "0.1.0"
+dependencies = [
+ "conservation-suite",
+ "niles-ir",
+ "nilestream-ledger",
+ "nilestream-server",
+ "proto-engine",
+]
+
+[[package]]
+name = "conservation-suite"
+version = "0.1.0"
+dependencies = [
+ "nilestream-ledger",
+]
+
+[[package]]
 name = "memprobe"
 version = "0.1.0"
 dependencies = [
@@ -12,6 +30,15 @@ dependencies = [
  "nilestream-core",
  "nilestream-server",
  "proto-engine",
+ "syntax-study",
+]
+
+[[package]]
+name = "niles-interp"
+version = "0.1.0"
+dependencies = [
+ "niles-ir",
+ "niles-lang",
 ]
 
 [[package]]
@@ -61,4 +88,15 @@ version = "0.1.0"
 dependencies = [
  "nilestream-core",
  "nilestream-ledger",
+]
+
+[[package]]
+name = "syntax-study"
+version = "0.1.0"
+dependencies = [
+ "bank-bench",
+ "niles-interp",
+ "niles-ir",
+ "niles-lang",
+ "nilescheck-sql",
 ]

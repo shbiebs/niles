@@ -291,6 +291,24 @@ pub fn run_fn(program: &str, f: &str, args: &[Arg], d: &Dataset) -> Result<Answe
             .map(|x| x.1)
             .unwrap_or(2)
     };
+    // **The call boundary.** A caller hands `task` its arguments through a typed boundary —
+    // the server decodes a call's arguments by the declared parameter types, as PostgreSQL
+    // resolves `select task(…)` against the function's signature — and the interpreter's
+    // `call` does not check them. So a parameter whose declared currency differs from the
+    // argument's is refused here, as the call PostgreSQL refuses ("function … does not
+    // exist") is refused there: a run-time failure on both surfaces.
+    if let Some(decl) = find_fn(&prog.items, f) {
+        for (n, (p, a)) in decl.params.iter().zip(args).enumerate() {
+            if let (Some(declared), Arg::Money(_, c)) = (money_currency(&p.ty), a) {
+                if !declared.eq_ignore_ascii_case(c) {
+                    return Err(RunErr::Failed(format!(
+                        "argument {} is Money<{c}> and `{f}` declares Money<{declared}>: no typed caller can make this call",
+                        n + 1
+                    )));
+                }
+            }
+        }
+    }
     let mut it = Interp::new();
     it.load(&prog);
     let mut open: BTreeMap<(i64, &str), i64> = BTreeMap::new();
@@ -348,4 +366,73 @@ pub fn run_fn(program: &str, f: &str, args: &[Arg], d: &Dataset) -> Result<Answe
         }
     }
     Ok(Answer::set(rows))
+}
+
+fn find_fn<'a>(items: &'a [niles_lang::ast::Item], f: &str) -> Option<&'a niles_lang::ast::FnDecl> {
+    use niles_lang::ast::Item;
+    items.iter().find_map(|i| match i {
+        Item::Fn(d) if d.name.text == f => Some(d),
+        Item::Mod { items, .. } => find_fn(items, f),
+        _ => None,
+    })
+}
+
+/// `Money<c>` → `c`.
+fn money_currency(t: &niles_lang::ast::Ty) -> Option<String> {
+    match t {
+        niles_lang::ast::Ty::Path { path, args, .. } if path.last().text == "Money" => {
+            match args.first() {
+                Some(niles_lang::ast::Ty::Path { path, .. }) => Some(path.last().text.clone()),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The rows the Niles executor is handed, rendered canonically (design §4's load check):
+/// the relations exactly as [`sources`] builds them for every evaluation, decoded back
+/// through the catalog. A posting's epoch is system time here, not a column (A1), so the
+/// postings carry no epoch.
+pub fn loaded_rows(d: &Dataset) -> BTreeMap<String, Vec<String>> {
+    let (_, cat, _) = front(SCHEMA);
+    let src = sources(&cat, d, &[], None, None).expect("sources");
+    let name_of: BTreeMap<i128, String> = cat
+        .currencies
+        .iter()
+        .map(|(n, c)| (c.code as i128, n.clone()))
+        .collect();
+    let mut out = BTreeMap::new();
+    for (rel, z) in src {
+        let cols: Vec<String> = cat.relations[&rel]
+            .columns
+            .iter()
+            .map(|c| c.name.clone())
+            .collect();
+        let want: &[&str] = match rel.as_str() {
+            "parties" => &["id", "parent"],
+            "accounts" => &["id", "owner", "desk"],
+            "postings" => &["txn", "acct", "cur", "amt", "value_date"],
+            "holds" => &["id", "acct", "cur", "amount", "open"],
+            _ => continue,
+        };
+        let mut rows = Vec::new();
+        for (row, w) in &z {
+            let cell = |c: &str| -> String {
+                let i = cols.iter().position(|x| x == c).expect("column");
+                match (c, &row[i]) {
+                    (_, Value::Null) => "null".into(),
+                    ("cur", Value::Int(k)) => name_of.get(k).cloned().unwrap_or_default(),
+                    ("value_date", Value::Int(k)) => crate::kinds::iso(*k as i64),
+                    (_, Value::Int(k)) => k.to_string(),
+                }
+            };
+            let line = want.iter().map(|c| cell(c)).collect::<Vec<_>>().join("|");
+            for _ in 0..*w {
+                rows.push(line.clone());
+            }
+        }
+        out.insert(rel, rows);
+    }
+    out
 }

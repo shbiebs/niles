@@ -28,6 +28,7 @@ niles-lang = { path = "../../crates/niles-lang" }
 nilescheck-sql = { path = "../../crates/nilescheck-sql" }
 nilestream-core = { path = "../../crates/nilestream-core" }
 nilestream-server = { path = "../../crates/nilestream-server" }
+syntax-study = { path = "../../crates/syntax-study" }
 
 [[bin]]
 name = "memprobe"
@@ -37,6 +38,11 @@ path = "src/main.rs"
 [[bin]]
 name = "checkcost"
 path = "src/bin/checkcost.rs"
+
+# E30's in-process check cost (cycle 14, R2-06): here for the counting allocator.
+[[bin]]
+name = "e30cost"
+path = "src/bin/e30cost.rs"
 
 [lib]
 name = "memprobe"

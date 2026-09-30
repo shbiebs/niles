@@ -15,6 +15,7 @@ niles-lang = { path = "../niles-lang" }
 niles-ir = { path = "../niles-ir" }
 niles-interp = { path = "../niles-interp" }
 nilescheck-sql = { path = "../nilescheck-sql" }
+nilestream-ledger = { path = "../nilestream-ledger" }
 
 [[bin]]
 name = "e30"

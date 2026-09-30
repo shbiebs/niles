@@ -155,4 +155,5 @@ dependencies = [
  "niles-ir",
  "niles-lang",
  "nilescheck-sql",
+ "nilestream-ledger",
 ]

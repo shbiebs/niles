@@ -3545,8 +3545,13 @@ schema s {
                 "explain select acct, sum(amt) from postings where acct = 7 group by acct",
                 "view",
             ),
+            // A named currency is a key of the view since C15-02 (E27b's E1).
             (
                 "explain select acct, sum(amt) from postings where acct = 7 and cur = 0 group by acct",
+                "view",
+            ),
+            (
+                "explain select acct, sum(amt) from postings where acct = 7 and amt > 0 group by acct",
                 "index-fold",
             ),
             (

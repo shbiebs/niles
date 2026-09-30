@@ -127,6 +127,11 @@ pub struct Ledger {
     checkpoints: HashMap<(Acct, Cur), Vec<(Epoch, Minor)>>,
     posting_seen: HashMap<(Acct, Cur), usize>,
     running: HashMap<(Acct, Cur), Minor>,
+    /// The epoch of the first posting on each `(account, currency)` key: whether a key exists
+    /// at an anchor, in one lookup, for a read that names its currency (cycle 15, C15-02). An
+    /// account can post in one currency and not another, so the account's own history does
+    /// not say.
+    key_first: HashMap<(Acct, Cur), Epoch>,
     /// Instrumentation: base rows touched by reconstruction since last reset.
     ///
     /// **An atomic, and that is the point.** This counter was the only thing reconstruction
@@ -431,6 +436,7 @@ impl Ledger {
             match r {
                 Row::Post(p) => {
                     self.by_account.entry(p.acct).or_default().push(rr);
+                    self.key_first.entry((p.acct, p.cur)).or_insert(id);
                     // `None` means checkpointing is off, not "guard a division": making
                     // the interval's non-zero-ness a type fact says which.
                     if let Some(interval) = std::num::NonZeroUsize::new(self.checkpoint_interval) {
@@ -646,6 +652,13 @@ impl Ledger {
             }
         }
         out
+    }
+
+    /// Whether the `(account, currency)` key has a posting at or before `anchor`.
+    pub fn key_exists_at(&self, acct: Acct, cur: Cur, anchor: Epoch) -> bool {
+        self.key_first
+            .get(&(acct, cur))
+            .is_some_and(|first| *first <= anchor)
     }
 
     pub fn key_update_count(&self, acct: Acct, anchor: Epoch) -> usize {

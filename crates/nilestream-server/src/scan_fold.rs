@@ -197,6 +197,58 @@ impl FoldPlan<'_> {
     ///
     /// `None` therefore means "not a plain balance read", and the fold answers instead —
     /// correctly, and more slowly, which is the right way round.
+    /// **One `(account, currency)` key, if that is exactly what the filters say** (cycle 15,
+    /// C15-02): `acct = a`, and at most one `cur = c` beside it, and nothing else. The
+    /// currency is `None` when the read names none.
+    ///
+    /// [`Self::sole_account_filter`] treats any condition beside the account as "not a plain
+    /// balance read", which is right for it — `where acct = 7 and cur = 99` answered from
+    /// the view returned account 7's balance once — and meant that a read naming its
+    /// currency never reached the view at all: E27's `multi` series asks every keyed read
+    /// with `cur = k`. A named currency is a key, not a condition, as long as the caller
+    /// asks the key, not the account, whether it exists.
+    pub fn sole_key_filter(&self, acct_col: ColIdx, cur_col: ColIdx) -> Option<(u64, Option<u64>)> {
+        use niles_ir::operator::ScalarOp;
+        if !self.filters_only() {
+            return None;
+        }
+        let (mut acct, mut cur): (Option<u64>, Option<u64>) = (None, None);
+        let mut other = false;
+        for step in &self.steps {
+            let Step::Filter(p) = step else { continue };
+            conjuncts(p, &mut |leaf| {
+                let hit = match leaf {
+                    Scalar::Binary {
+                        op: ScalarOp::Eq,
+                        lhs,
+                        rhs,
+                    } => match (&**lhs, &**rhs) {
+                        (Scalar::Column(c), Scalar::LitInt(k))
+                        | (Scalar::LitInt(k), Scalar::Column(c)) => {
+                            u64::try_from(*k).ok().map(|k| (*c, k))
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                let slot = match hit {
+                    Some((c, k)) if c == acct_col => Some((&mut acct, k)),
+                    Some((c, k)) if c == cur_col => Some((&mut cur, k)),
+                    _ => None,
+                };
+                match slot {
+                    Some((v, k)) if v.is_none_or(|prev| prev == k) => *v = Some(k),
+                    // A second value for one column, or any other condition.
+                    _ => other = true,
+                }
+            });
+        }
+        if other {
+            return None;
+        }
+        acct.map(|a| (a, cur))
+    }
+
     pub fn sole_account_filter(&self, acct_col: ColIdx) -> Option<u64> {
         use niles_ir::operator::ScalarOp;
         if !self.filters_only() {

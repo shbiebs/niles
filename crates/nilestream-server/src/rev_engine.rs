@@ -983,14 +983,14 @@ impl RevEngine {
         }
         let sole = planned
             .as_ref()
-            .and_then(|p| p.sole_account_filter(ACCT_COL));
-        if let (true, Some(p), Some(acct), ServePath::View) = (
+            .and_then(|p| p.sole_key_filter(ACCT_COL, CUR_COL));
+        if let (true, Some(p), Some((acct, named)), ServePath::View) = (
             try_view,
             planned.as_ref(),
             sole,
             serve_path_of(planned.as_ref(), circuit, output),
         ) {
-            match self.answer_from_view(p, circuit, output, acct, anchor) {
+            match self.answer_from_view(p, circuit, output, acct, named, anchor) {
                 ViewAnswer::Rows(rows) => return QueryStep::Done(Ok(rows)),
                 // The fold below answers it.
                 ViewAnswer::NotApplicable => {}
@@ -1902,6 +1902,7 @@ impl RevEngine {
         circuit: &niles_ir::circuit::Circuit,
         output: &str,
         acct: u64,
+        named: Option<u64>,
         anchor: u64,
     ) -> ViewAnswer {
         /// Column positions in `postings`: `txn, acct, cur, amt, idem`.
@@ -1922,11 +1923,28 @@ impl RevEngine {
             [ACCT, CUR] => true,
             _ => return ViewAnswer::NotApplicable,
         };
-        if self.currency_count() != 1 {
-            return ViewAnswer::NotApplicable;
-        }
-        let Some(cur) = self.sole_currency() else {
-            return ViewAnswer::NotApplicable;
+        // **Which `(acct, cur)` key the read is, over a base of any number of currencies**
+        // (cycle 15, C15-02, E27b's E1). This refused whenever the base held more than one
+        // currency, including for a read whose predicate names the currency, which the
+        // `(account, currency)`-keyed view answers exactly — so on E27's `multi` series every
+        // keyed read folded the base and nothing was ever resident. A read that names its
+        // currency (`cur = k`) is the key `(acct, k)`, however many currencies the base
+        // holds. A read that names none is a key only while there is one currency to mean;
+        // over several it sums an account across currencies, which the fold path refuses
+        // (`cross_currency_fold`), with its reason.
+        let named = named.and_then(|c| u32::try_from(c).ok());
+        let several = self.currency_count() != 1;
+        let cur = match named {
+            Some(c) => c,
+            None => {
+                if several {
+                    return ViewAnswer::NotApplicable;
+                }
+                let Some(c) = self.sole_currency() else {
+                    return ViewAnswer::NotApplicable;
+                };
+                c
+            }
         };
 
         // **The base, and then the view — in that order, because `append` takes them in that
@@ -2148,7 +2166,17 @@ impl RevEngine {
         // lose: a keyed read answers with a number for a key nothing has ever touched, and a
         // group that does not exist must produce no row at all — which is what the fold and
         // the reference evaluator both do, and what this must agree with.
-        if base.key_update_count(acct, anchor.min(base.head())) == 0 {
+        // Over several currencies an account can exist in one and not in another, so the
+        // key's own history is asked; over one, the account's is the key's.
+        // A named currency is asked of the key as well: `cur = 99` over a usd base is a key
+        // with no postings, and answering it from the account's history returned account
+        // 7's balance once.
+        let exists = if several || named.is_some() {
+            base.key_exists_at(acct, cur, anchor.min(base.head()))
+        } else {
+            base.key_update_count(acct, anchor.min(base.head())) > 0
+        };
+        if !exists {
             return ViewAnswer::Rows(crate::session::Rows {
                 columns,
                 rows: crate::session::RowSource::Evaluated {
@@ -2355,6 +2383,9 @@ impl RevEngine {
 /// `txn, acct, cur, amt, idem`.
 pub const ACCT_COL: u16 = 1;
 
+/// The column `postings.cur` occupies in the source schema.
+pub const CUR_COL: u16 = 2;
+
 /// **How the engine would answer a statement.**
 ///
 /// Four classes, ordered from cheapest to most expensive, and the difference between the
@@ -2480,7 +2511,7 @@ pub fn serve_path_of(
     let Some(p) = plan else {
         return ServePath::Materialise;
     };
-    let sole = p.sole_account_filter(ACCT_COL);
+    let sole = p.sole_key_filter(ACCT_COL, CUR);
     if sole.is_some()
         && circuit.outputs.get(output) == Some(&p.node)
         && p.filters_only()
@@ -4107,11 +4138,18 @@ mod tests {
                 "select acct, cur, sum(amt) from postings where acct = 7 group by acct, cur",
                 ServePath::View,
             ),
-            // One account, but not a plain balance: the extra conjunct means the view — keyed
-            // by account and currency — cannot answer it, so the scan is restricted and
-            // folded. This used to be `materialise`.
+            // One account in one named currency is one key of the view, which is keyed by
+            // account and currency. This was `materialise`, then `index-fold` until cycle 15
+            // (C15-02, E27b's E1): a currency beside the account was read as "not a plain
+            // balance", so no read naming its currency — every keyed read of E27's `multi`
+            // series — ever reached the view.
             (
                 "select acct, sum(amt) from postings where acct = 7 and cur = 0 group by acct",
+                ServePath::View,
+            ),
+            // Any other conjunct still is not a key: restricted and folded.
+            (
+                "select acct, sum(amt) from postings where acct = 7 and amt > 0 group by acct",
                 ServePath::IndexFold,
             ),
             // A `having` over the group key is a `where` in a different position. This used

@@ -255,6 +255,14 @@ fn authorises(acct: Id<Account>, amount: Money<usd>)
     let h = hold(acct, amount, expires: 7.days)?;
     resolve h post 43.17 usd
 }
+
+fn waits(acct: Id<Account>, amount: Money<usd>)
+    -> Result<TxnId, TxnError>
+    ! { append, debit<usd>, credit<usd> }
+{
+    let grace = 7.days;
+    txn idem("w") { post(debit(acct, amount)?, credit(acct, amount)) }
+}
 "#;
 
 fn args_file(contents: &str) -> Temp {
@@ -333,18 +341,19 @@ fn a_set_that_does_not_conserve_is_refused_and_exits_one() {
 
 /// A construct outside the subset exits **2** and names the construct.
 ///
-/// This is the distinction the whole exit-code scheme exists for. `hold` is a real Niles form
-/// that this interpreter cannot evaluate; a caller seeing this must record a language gap, not
-/// a conformance failure, and a single exit code for both would make the two indistinguishable
-/// from a script.
+/// This is the distinction the whole exit-code scheme exists for. A duration literal is a real
+/// Niles form that this interpreter cannot evaluate; a caller seeing this must record a
+/// language gap, not a conformance failure, and a single exit code for both would make the two
+/// indistinguishable from a script. (Until cycle 15 the example was `hold`, which E30b′ made
+/// executable, design §6.2: `authorises` now runs, and seals no posting set.)
 #[test]
 fn a_construct_outside_the_subset_exits_two_and_names_itself() {
     let src = Temp::new("src.niles", TRANSFER);
     let args = args_file("acct a.usd\nmoney 4317 usd 2\n");
-    let out = nilesc(&["run", src.path(), "authorises", "--args", args.path()]);
+    let out = nilesc(&["run", src.path(), "waits", "--args", args.path()]);
     assert_eq!(out.code, 2, "stderr: {}", out.stderr);
     assert!(
-        out.stderr.contains("NotInSubset: hold"),
+        out.stderr.contains("NotInSubset: duration literal"),
         "the construct must be named: {}",
         out.stderr
     );

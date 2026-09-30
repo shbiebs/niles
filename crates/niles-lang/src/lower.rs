@@ -37,6 +37,9 @@ pub fn lower_program(prog: &Program, cat: &Catalog) -> (Lowered, Diagnostics) {
         schemas: HashMap::new(),
         d: Diagnostics::new(),
         sources: HashMap::new(),
+        sides: HashMap::new(),
+        same: HashMap::new(),
+        params: Vec::new(),
     };
     for item in &prog.items {
         lx.item(item);
@@ -58,6 +61,20 @@ struct Lx<'a> {
     /// Memoised source nodes: one node per relation, however many views read it. Sharing
     /// matters — two source nodes for one ledger would maintain the same deltas twice.
     sources: HashMap<String, NodeId>,
+    /// **Which qualifier names which columns**, per node that has a from-list: a relation's
+    /// name or alias, and the run of columns it contributed `(start, len)`. A join's output
+    /// concatenates its sides, so `q.cur` in a self-join of `postings` is the *second*
+    /// `cur`; without this the qualifier was read as nothing and every `q.x` resolved to
+    /// `p.x` (F7).
+    sides: HashMap<NodeId, Vec<(String, ColIdx, ColIdx)>>,
+    /// Per inner join: the column pairs its key makes equal. Two columns called `cur` that
+    /// the join key equates are one value, so an unqualified `cur` is not ambiguous there —
+    /// GBS's `party_position` joins `postings` to `accounts` on `(acct, cur) = (id, cur)`
+    /// and reads `r.cur` after it.
+    same: HashMap<NodeId, Vec<(ColIdx, ColIdx)>>,
+    /// A two-parameter join closure's parameters while its residual is lowered:
+    /// `|l, r| r.cur == l.cur` reads `l` as the left side's columns and `r` as the right's.
+    params: Vec<(String, ColIdx, ColIdx)>,
 }
 
 impl<'a> Lx<'a> {
@@ -179,6 +196,10 @@ impl<'a> Lx<'a> {
                 return None;
             }
             for n in names {
+                if let Some(d) = self.ambiguity(input, &n, e.span()) {
+                    self.d.push(d);
+                    return None;
+                }
                 let Some(i) = self.col_index(input, &n) else {
                     self.d.push(
                         Diagnostic::error("NL0509", format!("`{clause} {n}` names no column"))
@@ -196,11 +217,206 @@ impl<'a> Lx<'a> {
         Some(out)
     }
 
+    /// A column by name alone. `None` when no column has the name **or when more than one
+    /// does and nothing makes them the same value** — first-match was the rule, and it read
+    /// every duplicated name off the left side of a join (F7). Callers that can say why
+    /// they failed ask [`Lx::ambiguity`] first.
     fn col_index(&self, id: NodeId, name: &str) -> Option<ColIdx> {
+        match self.positions(id, name, None).as_slice() {
+            [] => None,
+            [one] => Some(*one),
+            many => self.one_value(id, many).then_some(many[0]),
+        }
+    }
+
+    /// Every position of `name` in `id`'s schema, within `[start, start + len)` if given.
+    fn positions(&self, id: NodeId, name: &str, range: Option<(ColIdx, ColIdx)>) -> Vec<ColIdx> {
+        let (lo, hi) = match range {
+            Some((s, n)) => (s as usize, s as usize + n as usize),
+            None => (0, usize::MAX),
+        };
         self.schema_of(id)
             .iter()
-            .position(|c| c == name)
-            .map(|i| i as ColIdx)
+            .enumerate()
+            .filter(|(i, c)| *i >= lo && *i < hi && *c == name)
+            .map(|(i, _)| i as ColIdx)
+            .collect()
+    }
+
+    /// The node whose from-list `id`'s columns come from: down through operators that keep
+    /// their input's columns in place, and no further.
+    fn frame(&self, mut id: NodeId) -> NodeId {
+        loop {
+            let n = self.circuit.node(id);
+            let keeps = matches!(
+                n.op,
+                Op::Filter { .. }
+                    | Op::Distinct
+                    | Op::OrderBy { .. }
+                    | Op::Limit { .. }
+                    | Op::AsOf { .. }
+                    | Op::ValidAt { .. }
+                    | Op::Index { .. }
+                    | Op::Delay
+                    | Op::Integrate
+                    | Op::Differentiate
+            );
+            if keeps && n.inputs.len() == 1 && self.schema_of(n.inputs[0]) == self.schema_of(id) {
+                id = n.inputs[0];
+            } else {
+                return id;
+            }
+        }
+    }
+
+    /// Whether an inner join's key equates every one of these positions.
+    fn one_value(&self, id: NodeId, at: &[ColIdx]) -> bool {
+        let pairs = self
+            .same
+            .get(&self.frame(id))
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        // Connected through the pairs, starting from the first position.
+        let mut reached = vec![at[0]];
+        let mut grew = true;
+        while grew {
+            grew = false;
+            for (a, b) in pairs {
+                for (x, y) in [(a, b), (b, a)] {
+                    if reached.contains(x) && !reached.contains(y) {
+                        reached.push(*y);
+                        grew = true;
+                    }
+                }
+            }
+        }
+        at.iter().all(|p| reached.contains(p))
+    }
+
+    /// The diagnostic for a name that resolves to more than one column, if it does.
+    fn ambiguity(&self, id: NodeId, name: &str, span: Span) -> Option<Diagnostic> {
+        let at = self.positions(id, name, None);
+        if at.len() < 2 || self.one_value(id, &at) {
+            return None;
+        }
+        let owners: Vec<String> = self
+            .sides
+            .get(&self.frame(id))
+            .map(|s| {
+                s.iter()
+                    .filter(|(_, st, n)| at.iter().any(|p| *p >= *st && *p < st + n))
+                    .map(|(q, _, _)| format!("`{q}.{name}`"))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut d = Diagnostic::error("NL0520", format!("`{name}` names more than one column here"))
+            .primary(span, "ambiguous: nothing says which side's column this is")
+            .note("this used to resolve to the first column with the name — the left side of a join — so a condition on the right side was lowered as a condition on the left, and a self-join compared each row with itself");
+        d = if owners.is_empty() {
+            d.note("rename one side's column before the join, or join on a key that makes the two the same value")
+        } else {
+            d.note(format!("qualify it: {}", owners.join(" or ")))
+        };
+        Some(d)
+    }
+
+    /// A column reference, qualifier and all: `q.cur`, `r.cur` in `|l, r| …`, or `cur`.
+    ///
+    /// A qualifier that names a side (a from-list alias, or a join closure's parameter)
+    /// resolves inside that side's columns. Any other qualifier — a one-parameter closure's
+    /// row, an outer query's alias — says nothing about position, so the name must resolve
+    /// on its own, and a name that does not is refused (NL0520) rather than read off the
+    /// left.
+    fn column_ref(&mut self, input: NodeId, e: &Expr) -> Option<ColIdx> {
+        let name = leaf_name(e)?;
+        if let Some(q) = qualifier(e) {
+            let side = self
+                .params
+                .iter()
+                .find(|(p, _, _)| *p == q)
+                .or_else(|| {
+                    self.sides
+                        .get(&self.frame(input))
+                        .and_then(|s| s.iter().find(|(p, _, _)| *p == q))
+                })
+                .map(|(_, s, n)| (*s, *n));
+            if let Some(range) = side {
+                return match self.positions(input, &name, Some(range)).as_slice() {
+                    [one] => Some(*one),
+                    [] => {
+                        self.d.push(
+                            Diagnostic::error("NL0520", format!("`{q}` has no column `{name}`"))
+                                .primary(e.span(), "not a column of the side this qualifier names")
+                                .note("the qualifier is read, not ignored: a name found only on the other side is not this side's column"),
+                        );
+                        None
+                    }
+                    many => {
+                        if self.one_value(input, many) {
+                            Some(many[0])
+                        } else {
+                            if let Some(d) = self.ambiguity(input, &name, e.span()) {
+                                self.d.push(d);
+                            }
+                            None
+                        }
+                    }
+                };
+            }
+        }
+        if let Some(d) = self.ambiguity(input, &name, e.span()) {
+            self.d.push(d);
+            return None;
+        }
+        self.col_index(input, &name)
+    }
+
+    /// Record a join's sides and key equalities. The sides are passed in, not read off the
+    /// inputs, because a relation's source node is shared by every reader: in a self-join
+    /// both inputs *are* one node, and only the from-list knows that one of them is `p` and
+    /// the other `q`.
+    #[allow(clippy::too_many_arguments)]
+    fn record_join(
+        &mut self,
+        id: NodeId,
+        l: NodeId,
+        r: NodeId,
+        lsides: Vec<(String, ColIdx, ColIdx)>,
+        rsides: Vec<(String, ColIdx, ColIdx)>,
+        kind: IrJoin,
+        lk: &[ColIdx],
+        rk: &[ColIdx],
+    ) {
+        let off = self.schema_of(l).len() as ColIdx;
+        let mut sides = lsides;
+        sides.extend(rsides.into_iter().map(|(q, s, n)| (q, s + off, n)));
+        self.sides.insert(id, sides);
+        let mut same = self.same.get(&self.frame(l)).cloned().unwrap_or_default();
+        for (a, b) in self.same.get(&self.frame(r)).cloned().unwrap_or_default() {
+            same.push((a + off, b + off));
+        }
+        if kind == IrJoin::Inner {
+            same.extend(lk.iter().zip(rk).map(|(a, b)| (*a, *b + off)));
+        }
+        self.same.insert(id, same);
+    }
+
+    /// The qualifiers a from-list item contributes, over the columns of `node`, the node it
+    /// lowered to.
+    fn ref_sides(&self, t: &TableRef, node: NodeId) -> Vec<(String, ColIdx, ColIdx)> {
+        let n = self.schema_of(node).len() as ColIdx;
+        match t {
+            TableRef::Named { name, alias, .. } => {
+                vec![(alias.as_ref().unwrap_or(name).text.clone(), 0, n)]
+            }
+            TableRef::Sub { alias: Some(a), .. } => vec![(a.text.clone(), 0, n)],
+            TableRef::Sub { alias: None, .. } => Vec::new(),
+            TableRef::Join { .. } => self
+                .sides
+                .get(&self.frame(node))
+                .cloned()
+                .unwrap_or_default(),
+        }
     }
 
     fn expr(&mut self, e: &Expr, c: ServeContract) -> Option<NodeId> {
@@ -491,7 +707,6 @@ impl<'a> Lx<'a> {
                     StageKind::FullOuterJoin => IrJoin::FullOuter,
                     _ => IrJoin::Inner,
                 };
-                let residual = args.get(1).and_then(|a| self.scalar(input, &a.value));
                 let lk = self.output_key(input).unwrap_or_default();
                 // The right key defaulting to the left key joined two relations on
                 // whatever column positions the left happened to use. Position agreement
@@ -517,15 +732,49 @@ impl<'a> Lx<'a> {
                 let id = self.circuit.add(
                     Op::Join {
                         kind: jk,
-                        left_key: lk,
-                        right_key: rk,
-                        residual,
+                        left_key: lk.clone(),
+                        right_key: rk.clone(),
+                        residual: None,
                     },
                     vec![input, rhs],
                     c,
                     name.text.clone(),
                 );
                 self.schemas.insert(id, names);
+                let ls = self
+                    .sides
+                    .get(&self.frame(input))
+                    .cloned()
+                    .unwrap_or_default();
+                self.record_join(id, input, rhs, ls, Vec::new(), jk, &lk, &rk);
+                // **The residual resolves against the joined row, and a residual that does
+                // not lower refuses the join.** It was `args.get(1).and_then(|a|
+                // self.scalar(input, …))` — the *left* input only, with `None` read as "no
+                // residual" — so `|l, r| r.cur == l.cur` compared the left row's `cur` with
+                // itself, and a condition naming a right-only column vanished and the join
+                // ran unconstrained (F7). A two-parameter closure's first parameter is the
+                // left side's columns and its second the right's.
+                if let Some(a) = args.get(1) {
+                    let left_len = self.schema_of(input).len() as ColIdx;
+                    let right_len = self.schema_of(rhs).len() as ColIdx;
+                    if let Expr::Closure { params, .. } = &a.value {
+                        if let [(Pat::Bind { name: l, .. }, _), (Pat::Bind { name: r, .. }, _)] =
+                            params.as_slice()
+                        {
+                            self.params = vec![
+                                (l.text.clone(), 0, left_len),
+                                (r.text.clone(), left_len, right_len),
+                            ];
+                        }
+                    }
+                    let residual = self.predicate(id, &a.value, "join");
+                    self.params.clear();
+                    let residual = residual?;
+                    if let Op::Join { residual: slot, .. } = &mut self.circuit.nodes[id as usize].op
+                    {
+                        *slot = Some(residual);
+                    }
+                }
                 return Some(id);
             }
             StageKind::Union | StageKind::UnionAll => {
@@ -640,6 +889,10 @@ impl<'a> Lx<'a> {
                 }
                 let mut keys = Vec::with_capacity(names.len());
                 for (n, asc) in &names {
+                    if let Some(d) = self.ambiguity(input, n, name.span) {
+                        self.d.push(d);
+                        return None;
+                    }
                     let Some(i) = self.col_index(input, n) else {
                         self.d.push(
                             Diagnostic::error(
@@ -887,8 +1140,7 @@ impl<'a> Lx<'a> {
             },
             Expr::Epoch(v, _) => Scalar::LitInt(*v as i128),
             Expr::Null(_) => Scalar::LitNull,
-            Expr::Field { name, .. } => Scalar::Column(self.col_index(input, &name.text)?),
-            Expr::Path(p) => Scalar::Column(self.col_index(input, &p.last().text)?),
+            Expr::Field { .. } | Expr::Path(_) => Scalar::Column(self.column_ref(input, e)?),
             Expr::Unary {
                 op: UnOp::Not,
                 operand,
@@ -1089,6 +1341,7 @@ impl<'a> Lx<'a> {
                 None => node,
             }
         };
+        let mut cur_sides = self.ref_sides(first, cur);
         cur = pin(self, cur);
         // **The rest of the from-list.** `s.from.first()` was the whole of it, so
         // `select ... from t, u` silently dropped `u` and answered from `t` alone. A
@@ -1114,6 +1367,9 @@ impl<'a> Lx<'a> {
             );
             let _ = lk;
             self.schemas.insert(id, names);
+            let rs = self.ref_sides(extra, r);
+            self.record_join(id, cur, r, cur_sides, rs, IrJoin::Inner, &[], &[]);
+            cur_sides = self.sides.get(&id).cloned().unwrap_or_default();
             cur = id;
         }
         if let Some(f) = &s.filter {
@@ -1264,6 +1520,10 @@ impl<'a> Lx<'a> {
                         return None;
                     }
                 };
+                if let Some(d) = self.ambiguity(cur, &one, e.span()) {
+                    self.d.push(d);
+                    return None;
+                }
                 let Some(i) = self.col_index(cur, &one) else {
                     self.d.push(
                         Diagnostic::error("NL0517", format!("`{one}` names no column"))
@@ -1437,6 +1697,10 @@ impl<'a> Lx<'a> {
                     );
                     return None;
                 };
+                if let Some(d) = self.ambiguity(cur, n, e.span()) {
+                    self.d.push(d);
+                    return None;
+                }
                 let Some(i) = self.col_index(cur, n) else {
                     self.d.push(
                         Diagnostic::error("NL0509", format!("`order by {n}` names no column"))
@@ -1808,8 +2072,8 @@ impl<'a> Lx<'a> {
                 let id = self.circuit.add(
                     Op::Join {
                         kind: jk,
-                        left_key: lk,
-                        right_key: rk,
+                        left_key: lk.clone(),
+                        right_key: rk.clone(),
                         residual: None,
                     },
                     vec![l, r],
@@ -1817,6 +2081,8 @@ impl<'a> Lx<'a> {
                     "join",
                 );
                 self.schemas.insert(id, names);
+                let (ls, rs) = (self.ref_sides(left, l), self.ref_sides(right, r));
+                self.record_join(id, l, r, ls, rs, jk, &lk, &rk);
                 if let Some(o) = on {
                     // Resolved after the node exists, because `scalar` resolves column
                     // names against a node's schema and the joined schema is this node's.

@@ -1,0 +1,6 @@
+.decl bal(acct: number, desk: number, b: number)
+bal(a, k, s) :- postings(_, a, "usd", _, _, _), accounts(a, _, k),
+    s = sum x : { postings(_, a, "usd", x, _, _) }.
+.decl answer(acct: number, desk: number, rank: number)
+.output answer
+answer(a, k, n + 1) :- bal(a, k, b), n = count : { bal(_, k, b2), b2 > b }.

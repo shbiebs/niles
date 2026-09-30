@@ -1,0 +1,8 @@
+from postings
+select {acct, cur, x = amt}
+append (
+  from holds
+  filter open
+  select {acct, cur, x = -amount}
+)
+group {acct, cur} (aggregate {available = sum x})

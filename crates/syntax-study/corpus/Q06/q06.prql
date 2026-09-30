@@ -1,0 +1,2 @@
+from postings
+group acct (aggregate {n = count_distinct cur})

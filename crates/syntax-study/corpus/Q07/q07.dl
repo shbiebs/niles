@@ -1,0 +1,7 @@
+.decl earlier(acct: number, cur: symbol, txn: number, before: number)
+earlier(a, c, t, t2) :- postings(t, a, c, _, e, _), postings(t2, a, c, _, e2, _), e2 < e.
+earlier(a, c, t, t2) :- postings(t, a, c, _, e, _), postings(t2, a, c, _, e, _), t2 <= t.
+.decl answer(acct: number, cur: symbol, txn: number, running: number)
+.output answer
+answer(a, c, t, r) :- postings(t, a, c, _, _, _),
+    r = sum x : { earlier(a, c, t, t2), postings(t2, a, c, x, _, _) }.

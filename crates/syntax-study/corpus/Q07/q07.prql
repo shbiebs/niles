@@ -1,0 +1,6 @@
+from postings
+group {acct, cur} (
+  sort {epoch, txn}
+  window rows:..0 (derive {running = sum amt})
+)
+select {acct, cur, txn, running}

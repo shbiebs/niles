@@ -1,0 +1,8 @@
+from parties
+filter parent != null
+select {party = id, ancestor = parent}
+loop (
+  join p = parties (p.id == this.ancestor)
+  filter p.parent != null
+  select {party, ancestor = p.parent}
+)

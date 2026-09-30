@@ -1,0 +1,1 @@
+view answer = sql { select acct, sum(amt) from postings where cur = "usd" group by acct order by sum desc, acct limit 5 };

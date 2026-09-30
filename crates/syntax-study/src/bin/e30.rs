@@ -66,12 +66,30 @@ fn main() {
                     }
                     let p = program_path(t, ext);
                     let Ok(src) = std::fs::read_to_string(&p) else {
-                        println!("{t}\t{s}\t(no program)");
+                        let reason = std::fs::read_to_string(format!("{}.none", p.display()));
+                        match reason {
+                            Ok(r) => println!(
+                                "{t}\t{s}\tNOT EXPRESSIBLE {}",
+                                r.lines().next().unwrap_or("")
+                            ),
+                            Err(_) => println!("{t}\t{s}\t(no program)"),
+                        }
                         continue;
                     };
                     let o = verdict(&mut ctx, t, s, &src, &want);
                     println!("{t}\t{s}\t{}", describe(&o, &want));
                 }
+            }
+        }
+        Some("circuit") => {
+            // A debugging aid: the lowered circuit of a Niles program, operator by operator.
+            let src = std::fs::read_to_string(&args[1]).expect("read");
+            let full = format!("{}\n{src}", syntax_study::niles::SCHEMA);
+            let (prog, _) = niles_lang::parser::parse_program(&full);
+            let (cat, _) = niles_lang::resolve::resolve_program(&prog, 0);
+            let (l, _) = niles_lang::lower::lower_program(&prog, &cat);
+            for n in &l.circuit.nodes {
+                println!("{} {:?} <- {:?}", n.id, n.op, n.inputs);
             }
         }
         _ => {

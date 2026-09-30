@@ -1,0 +1,4 @@
+.decl answer(party: number, ancestor: number)
+.output answer
+answer(p, a) :- parent(p, a).
+answer(p, a) :- answer(p, m), parent(m, a).

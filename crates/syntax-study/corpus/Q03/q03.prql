@@ -1,0 +1,3 @@
+from p = postings
+join a = accounts (a.id == p.acct)
+group {a.desk, p.cur} (aggregate {total = sum p.amt})

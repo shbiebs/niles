@@ -1,0 +1,5 @@
+from postings
+filter cur == "usd"
+group acct (aggregate {balance = sum amt})
+sort {-balance, acct}
+take 5

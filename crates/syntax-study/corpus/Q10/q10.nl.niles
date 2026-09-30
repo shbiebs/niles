@@ -1,0 +1,1 @@
+view answer = sql { select acct, cur, sum(x) from (select acct, cur, amt as x from postings union all select acct, cur, -amount as x from holds where open) group by acct, cur };

@@ -37,6 +37,8 @@ schema study {
         retain forever;
     }
 
-    index ix_postings on postings (acct, cur) anchor;
+    index ix_postings on postings (acct) anchor;
     index ix_holds on holds (acct, cur) anchor;
+    index ix_accounts on accounts (id) anchor;
+    index ix_parties on parties (id) anchor;
 }

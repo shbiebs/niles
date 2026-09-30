@@ -1,0 +1,4 @@
+view answer = postings
+    .join(accounts)
+    .group_by(|r| (r.desk, r.cur))
+    .sum(|r| r.amt);

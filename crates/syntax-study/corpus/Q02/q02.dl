@@ -1,0 +1,3 @@
+.decl answer(acct: number, balance: number)
+.output answer
+answer(a, s) :- postings(_, a, "usd", _, _, _), s = sum x : { postings(_, a, "usd", x, _, _) }, s < 0.

@@ -1,0 +1,4 @@
+.decl answer(desk: number, cur: symbol, total: number)
+.output answer
+answer(k, c, s) :- postings(_, a0, c, _, _, _), accounts(a0, _, k),
+    s = sum x : { postings(_, a, c, x, _, _), accounts(a, _, k) }.

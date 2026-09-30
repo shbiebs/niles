@@ -1,0 +1,9 @@
+from p = postings
+filter p.cur == "usd"
+join a = accounts (a.id == p.acct)
+group {p.acct, a.desk} (aggregate {balance = sum p.amt})
+group desk (
+  sort {-balance}
+  derive {r = rank balance}
+)
+select {acct, desk, r}

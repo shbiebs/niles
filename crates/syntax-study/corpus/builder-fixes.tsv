@@ -1,0 +1,17 @@
+task	surface	first verdict	what was changed
+Q02	NL	REFUSED NL0501 (a bare currency name `usd` is read as a column)	the currency written as a string, first single-quoted (refused, NL0100: the SQL surface lexes only double quotes), then "usd"
+Q02	RS	REFUSED NL0501 (`p.cur == usd`)	the currency written as the string "usd"
+Q02	NL	WRONG (0 rows): `having sum(amt) < 0.00 usd` accepted and lowered to an opaque zero-argument call	the aggregate named by its output, `having sum < 0.00 usd`, as the golden corpus writes it
+Q03	NL	WRONG (0 rows): postings anchored on (acct, cur) joined to accounts anchored on (id) — keys of different arity, silently empty	the Niles schema anchors postings on (acct) alone
+Q03	RS	WRONG (0 rows): as NL	the same schema change
+Q04	RS	WRONG (10 rows): a left join to a grouped count joined ids against counts (finding F6)	rewritten as a set difference, `accounts.map(|a| a.id).except(postings.map(|p| p.acct))`
+Q05	NL	WRONG order: the harness had read the Z-set in row order	harness fix, not a program fix: the rows are presented in the view's declared order (eval::presentation_order), as the server presents them
+Q05	RS	WRONG: `.order_by(|r| (-r.sum, r.acct))` accepted and silently ordered by the first column ascending (F5)	no accepted spelling orders descending: recorded not expressible
+Q06	RS	REFUSED NL0509: a map to a tuple loses the field names, so `r.acct` names nothing	rewritten as a count of (acct, cur) groups, counted again by acct
+Q07	NL	REFUSED (window) then WRONG (self-join, F7)	not expressible
+Q07	RS	WRONG (self-join, F7)	not expressible
+Q08	NL	REFUSED (window)	not expressible
+Q08	RS	(no pipeline form attempted beyond the self-join of F7)	not expressible
+Q09	NL	REFUSED (with recursive)	not expressible
+Q09	RS	REFUSED NL0507 (fixpoint)	not expressible
+Q10	RS	REFUSED NL0509: a map to a tuple loses field names	rewritten as two grouped sums unioned and summed again

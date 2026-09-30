@@ -1,0 +1,6 @@
+.decl flow(acct: number, cur: symbol, id: number, x: number)
+flow(a, c, t, x) :- postings(t, a, c, x, _, _).
+flow(a, c, -h, -x) :- holds(h, a, c, x, 1).
+.decl answer(acct: number, cur: symbol, available: number)
+.output answer
+answer(a, c, s) :- flow(a, c, _, _), s = sum x : { flow(a, c, _, x) }.

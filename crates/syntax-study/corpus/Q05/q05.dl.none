@@ -1,0 +1,1 @@
+A Datalog relation is a set: the task's answer is ordered (largest first, ties by account), and Soufflé has no order or limit to state it with. The five-row set alone is expressible by counting, but it is not the task.

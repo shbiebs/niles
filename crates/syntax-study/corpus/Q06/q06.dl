@@ -1,0 +1,5 @@
+.decl held(acct: number, cur: symbol)
+held(a, c) :- postings(_, a, c, _, _, _).
+.decl answer(acct: number, n: number)
+.output answer
+answer(a, n) :- held(a, _), n = count : { held(a, _) }.

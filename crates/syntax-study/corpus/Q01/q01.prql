@@ -1,0 +1,2 @@
+from postings
+group {acct, cur} (aggregate {balance = sum amt})

@@ -1,0 +1,4 @@
+from a = accounts
+join side:left p = postings (p.acct == a.id)
+filter p.acct == null
+select {a.id}

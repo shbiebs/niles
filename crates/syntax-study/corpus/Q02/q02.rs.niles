@@ -1,0 +1,5 @@
+view answer = postings
+    .where(|p| p.cur == "usd")
+    .group_by(|p| p.acct)
+    .sum(|p| p.amt)
+    .having(|g| g.sum < 0.00 usd);

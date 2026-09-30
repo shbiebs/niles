@@ -1,0 +1,6 @@
+view answer = postings
+    .group_by(|p| (p.acct, p.cur))
+    .sum(|p| p.amt)
+    .union_all(holds.where(|h| h.open).group_by(|h| (h.acct, h.cur)).sum(|h| -h.amount))
+    .group_by(|r| (r.acct, r.cur))
+    .sum(|r| r.sum);

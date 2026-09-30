@@ -207,7 +207,12 @@ pub fn eval_views(
         let src = sources(&cat, d, extra, a, v)?;
         let (z, _) = eval::try_run(&lowered.circuit, view, &src).map_err(|e| e.to_string())?;
         let tag_kinds: &[Kind] = if tag.is_some() { &kinds[1..] } else { kinds };
-        for (r, w) in z.iter() {
+        // A Z-set has no order; the order a view presents is its `OrderBy`'s, applied here
+        // exactly as the server applies it (`eval::presentation_order`).
+        let keys = eval::presentation_order(&lowered.circuit, view);
+        let mut ordered: Vec<(&Vec<Value>, &i128)> = z.iter().collect();
+        ordered.sort_by(|a, b| eval::presented_cmp(a.0, b.0, &keys));
+        for (r, w) in ordered {
             if *w < 0 {
                 return Err(format!("negative weight {w} in `{view}`"));
             }

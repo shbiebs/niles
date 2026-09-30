@@ -1,0 +1,1 @@
+The pipeline has no window stage, a posting's epoch is not a column, and a self-join `.join(postings, |l, r| …)` is accepted but resolves both sides to the left relation's columns (finding F7), so the running sum covers every posting of the account.

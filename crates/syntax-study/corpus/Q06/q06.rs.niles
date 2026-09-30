@@ -1,0 +1,5 @@
+view answer = postings
+    .group_by(|p| (p.acct, p.cur))
+    .count(|p| p.txn)
+    .group_by(|r| r.acct)
+    .count(|r| r.cur);

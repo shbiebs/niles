@@ -1,0 +1,1 @@
+`with recursive` does not parse on the SQL surface (NL0001, NL0002, NL0004, NL0511); the mapping table lists it as specified, not implemented.

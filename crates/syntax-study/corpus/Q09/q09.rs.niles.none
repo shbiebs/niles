@@ -1,0 +1,1 @@
+`.fixpoint(|acc| …) guard measure(…)` is specified but has no lowering (NL0507), as the mapping table says.

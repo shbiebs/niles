@@ -1,0 +1,4 @@
+from postings
+filter cur == "usd"
+group acct (aggregate {balance = sum amt})
+filter balance < 0

@@ -1,0 +1,3 @@
+.decl answer(acct: number)
+.output answer
+answer(a) :- accounts(a, _, _), !postings(_, a, _, _, _, _).

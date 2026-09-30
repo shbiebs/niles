@@ -1,0 +1,1 @@
+view answer = sql { select desk, cur, sum(amt) from postings join accounts on acct = id group by desk, cur };

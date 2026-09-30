@@ -1,0 +1,1 @@
+Niles has no window function on its SQL surface (`over (partition by …)` is a parse error, NL0001/NL0009), a posting's epoch is not a column a query can order by, and the SQL-92 form — a self-join summing the earlier postings — is accepted but resolves both aliases to the left side (finding F7), so it sums every posting of the account.

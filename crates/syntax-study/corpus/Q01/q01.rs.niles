@@ -1,0 +1,1 @@
+view answer = postings.group_by(|p| (p.acct, p.cur)).sum(|p| p.amt);

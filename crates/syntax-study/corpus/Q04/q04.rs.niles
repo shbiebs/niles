@@ -1,0 +1,3 @@
+view answer = accounts
+    .map(|a| a.id)
+    .except(postings.map(|p| p.acct));

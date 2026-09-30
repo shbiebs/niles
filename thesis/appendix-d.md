@@ -25,8 +25,8 @@ component is for is not derivable from its source.
 | `conservation-suite` | Reference oracle and the conservation property tests | 23 |
 | `experiments` | The E-series measurement harness | 0 |
 | `niles-interp` | The imperative-subset interpreter `nilesc run` drives, and the ledger it posts to | 18 |
-| `niles-ir` | Typed IR: circuit types, verifier, reference interpreter, upquery paths | 67 |
-| `niles-lang` | Stage-0 compiler: lexer, parser, type/effect checker, lowering; SQL surface | 139 |
+| `niles-ir` | Typed IR: circuit types, verifier, reference interpreter, upquery paths | 77 |
+| `niles-lang` | Stage-0 compiler: lexer, parser, type/effect checker, lowering; SQL surface | 140 |
 | `nilesc` | The compiler driver: `check`, `verify`, `run` | 0 |
 | `nilescheck-sql` | Hand-written PostgreSQL 16 SQL and PL/pgSQL parser; the catalog checker (E14 PostgreSQL + checker) and SQL+C+L: linearity, conservation through niles-lang's solver, capabilities (E14 columns); since cycle 15 (E30b′) effect annotations (NL0310), body typing (NL0250/NL0255/NL0332) and NSQ002 for dynamic SQL in a ledger writer | 97 |
 | `nilestream` | The engine binary: sweep and serve | 0 |
@@ -34,7 +34,7 @@ component is for is not derivable from its source.
 | `nilestream-core` | REV runtime: resident maps, anchor indices, apply loop, upqueries, contracts | 28 |
 | `nilestream-ledger` | Epoch segments, sequencer, hash chain, durability, admission and commit rules | 32 |
 | `nilestream-optimizer` | Plan-time mode selection and the eviction policies (the adaptive optimizer of §4.6 is specified and not built) | 37 |
-| `nilestream-server` | Daemon: sessions, PostgreSQL wire surface, conformance | 87 |
+| `nilestream-server` | Daemon: sessions, PostgreSQL wire surface, conformance | 88 |
 | `proto-engine` | The research prototype the counted-work experiments run on | 24 |
 | `rev-sidecar` | E27 arms H3 and T: a nilestream-core REV fed by PostgreSQL logical replication (pgoutput) or TigerBeetle CDC, served over the PostgreSQL wire | 12 |
 | `syntax-study` | E30: the syntax study — one corpus in five surfaces, an oracle, the executors and the mutation classification (design docs/study/E30-syntax-design.md); and E30b′, the adversarial study of whether Niles needs its own grammar (docs/study/E30b-design.md) | 101 |
@@ -145,6 +145,7 @@ pub fn add(z: &mut ZSet, row: Row, w: i128)
 pub fn zset(rows: &[(&[i128], i128)]) -> ZSet
 pub fn row(vs: &[Option<i128>]) -> Row
 pub fn eval_scalar(s: &Scalar, r: &[Value]) -> Result<Value, EvalError>
+pub fn like(s: &str, pattern: &str) -> bool
 pub fn keeps(p: &Scalar, r: &[Value]) -> Result<bool, EvalError>
 pub struct Eval<'a>
 pub enum EvalError
@@ -156,6 +157,7 @@ pub fn try_run_with(
 pub fn try_run_node_with(
 pub fn try_run(
 pub fn fold(a: Agg, vals: &[(Value, i128)]) -> Value
+pub fn try_fold(a: Agg, vals: &[(Value, i128)]) -> Result<Value, EvalError>
 pub fn presentation_order(c: &Circuit, output: &str) -> Vec<(ColIdx, bool)>
 pub fn presented_cmp(a: &Row, b: &Row, keys: &[(ColIdx, bool)]) -> std::cmp::Ordering
 pub enum Consistency
@@ -165,6 +167,10 @@ pub enum Lineage
 pub struct ServeContract
 pub type ColIdx
 pub enum Agg
+pub const RECORDED_AT: &str
+pub fn system_time_relation(relation: &str) -> String
+pub fn system_time_of(source: &str) -> Option<&str>
+pub enum WindowFn
 pub enum JoinKind
 pub enum Scalar
 pub enum ScalarOp
@@ -183,9 +189,13 @@ pub struct UpqueryPath
 pub enum NoPath
 pub fn derive(circuit: &Circuit, node: NodeId, epoch: u64) -> Result<UpqueryPath, NoPath>
 pub enum Value
+pub struct TextId(u32)
 pub enum Tri
 pub fn compare(a: Value, b: Value, f: impl Fn(i128, i128) -> bool) -> Tri
+pub enum Mismatch
+pub fn compare_values(
 pub fn arith(
+pub fn arith_values(
 pub fn truth(v: Value) -> Tri
 pub fn days_since_epoch(text: &str) -> Option<i64>
 pub struct Violation

@@ -93,6 +93,7 @@ pub fn add(z: &mut ZSet, row: Row, w: i128)
 pub fn zset(rows: &[(&[i128], i128)]) -> ZSet
 pub fn row(vs: &[Option<i128>]) -> Row
 pub fn eval_scalar(s: &Scalar, r: &[Value]) -> Result<Value, EvalError>
+pub fn like(s: &str, pattern: &str) -> bool
 pub fn keeps(p: &Scalar, r: &[Value]) -> Result<bool, EvalError>
 pub struct Eval<'a>
 pub enum EvalError
@@ -104,6 +105,7 @@ pub fn try_run_with(
 pub fn try_run_node_with(
 pub fn try_run(
 pub fn fold(a: Agg, vals: &[(Value, i128)]) -> Value
+pub fn try_fold(a: Agg, vals: &[(Value, i128)]) -> Result<Value, EvalError>
 pub fn presentation_order(c: &Circuit, output: &str) -> Vec<(ColIdx, bool)>
 pub fn presented_cmp(a: &Row, b: &Row, keys: &[(ColIdx, bool)]) -> std::cmp::Ordering
 pub enum Consistency
@@ -113,6 +115,10 @@ pub enum Lineage
 pub struct ServeContract
 pub type ColIdx
 pub enum Agg
+pub const RECORDED_AT: &str
+pub fn system_time_relation(relation: &str) -> String
+pub fn system_time_of(source: &str) -> Option<&str>
+pub enum WindowFn
 pub enum JoinKind
 pub enum Scalar
 pub enum ScalarOp
@@ -131,9 +137,13 @@ pub struct UpqueryPath
 pub enum NoPath
 pub fn derive(circuit: &Circuit, node: NodeId, epoch: u64) -> Result<UpqueryPath, NoPath>
 pub enum Value
+pub struct TextId(u32)
 pub enum Tri
 pub fn compare(a: Value, b: Value, f: impl Fn(i128, i128) -> bool) -> Tri
+pub enum Mismatch
+pub fn compare_values(
 pub fn arith(
+pub fn arith_values(
 pub fn truth(v: Value) -> Tri
 pub fn days_since_epoch(text: &str) -> Option<i64>
 pub struct Violation

@@ -248,6 +248,15 @@ pub fn budget(scenario: &str) -> Option<f64> {
         // not to a line: with that commit's lowering reverted the count is still 150,324,
         // and with the manual `Ord` replaced by a derived one it is still 150,324. Stated as
         // located, not explained.
+        //
+        // **+5 more later in C15-05b, bisected by commit** (memprobe run in a worktree at
+        // each): `f25a7b7` 150,324; `dcf7a80` (`with`, `with recursive`, joins keyed by `on`,
+        // source widths) 150,326; `c2c6f4d` (`Op::Window`) 150,326 with 64 more live bytes;
+        // `8a74956` (windows and `recorded_at` on the SQL surface) 150,329. Per process — the
+        // seeded engine compiles its balance view once — and per-op 3.8. The +3 is consistent
+        // with the new statement-level scans (each walk of a call collects its children into
+        // a vector) and the +64 live bytes with `Op` growing by the window variant, over the
+        // nodes the installed view keeps; neither is traced to a line.
         "ledger_seeded" => 4.2,
         // **The three served analytical statements, after the fold replaced the copy.**
         //

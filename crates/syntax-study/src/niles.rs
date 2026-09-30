@@ -441,6 +441,9 @@ pub fn loaded_rows(d: &Dataset) -> BTreeMap<String, Vec<String>> {
                     ("cur", Value::Int(k)) => name_of.get(k).cloned().unwrap_or_default(),
                     ("value_date", Value::Int(k)) => crate::kinds::iso(*k as i64),
                     (_, Value::Int(k)) => k.to_string(),
+                    // Since cycle 15 the IR carries money and text; these rows are the
+                    // loaded base, so neither occurs, and each renders as it would print.
+                    (_, v) => v.to_string(),
                 }
             };
             let line = want.iter().map(|c| cell(c)).collect::<Vec<_>>().join("|");

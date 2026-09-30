@@ -96,38 +96,128 @@ pub fn eval_scalar(s: &Scalar, r: &[Value]) -> Result<Value, EvalError> {
         Scalar::Column(c) => *r.get(*c as usize).unwrap_or(&Value::Null),
         Scalar::LitInt(v) => Value::Int(*v),
         Scalar::LitBool(b) => Value::Int(*b as i128),
-        Scalar::LitMoney { minor, .. } => Value::Int(*minor),
-        Scalar::LitText(_) | Scalar::Anchor => Value::Int(0),
+        // The currency travels with the value (decision 8). It used to be dropped here, so
+        // `sum(amt) < 0.00 eur` over usd rows compared the numbers (E30's F13).
+        Scalar::LitMoney { minor, currency } => Value::Money {
+            minor: *minor,
+            currency: *currency,
+        },
+        // A string is a string (decision 6). It used to be `0`, the first currency's code
+        // (E30's F11), and then was refused at lowering unless it named a currency.
+        Scalar::LitText(t) => Value::text(t),
+        Scalar::Anchor => Value::Int(0),
+        Scalar::InCurrency { amount, currency } => {
+            match (eval_scalar(amount, r)?, eval_scalar(currency, r)?) {
+                (Value::Null, _) => Value::Null,
+                (Value::Int(m), Value::Int(c)) => Value::Money {
+                    minor: m,
+                    currency: c as u32,
+                },
+                // Already money: its own currency stands.
+                (v @ Value::Money { .. }, _) => v,
+                (a, c) => {
+                    return Err(EvalError::Mismatch {
+                        op: "currency",
+                        why: crate::value::Mismatch::Kinds(a.kind(), c.kind()),
+                    })
+                }
+            }
+        }
         Scalar::LitNull => Value::Null,
         Scalar::IsNull(inner) => Tri::of(eval_scalar(inner, r)?.is_null()).definite(),
         Scalar::Not(inner) => match truth(eval_scalar(inner, r)?) {
             Tri::Unknown => Value::Null,
             t => t.not().definite(),
         },
-        Scalar::Neg(inner) => arith(eval_scalar(inner, r)?, Value::Int(0), |a, _| {
-            crate::arith::neg(a)
-        })?,
+        Scalar::Neg(inner) => match eval_scalar(inner, r)? {
+            Value::Money { minor, currency } => Value::Money {
+                minor: crate::arith::neg(minor)?,
+                currency,
+            },
+            Value::Text(_) => {
+                return Err(EvalError::Mismatch {
+                    op: "-",
+                    why: crate::value::Mismatch::Kinds("text", "a sign"),
+                })
+            }
+            v => arith(v, Value::Int(0), |a, _| crate::arith::neg(a))?,
+        },
         Scalar::Udf { .. } => Value::Int(0),
         Scalar::Binary { op, lhs, rhs } => {
             let (a, b) = (eval_scalar(lhs, r)?, eval_scalar(rhs, r)?);
+            let mismatch = |op: &'static str| move |why| EvalError::Mismatch { op, why };
+            let num = |op: &'static str,
+                       additive: bool,
+                       f: fn(i128, i128) -> Result<i128, crate::arith::ArithError>|
+             -> Result<Value, EvalError> {
+                Ok(crate::value::arith_values(a, b, additive, f).map_err(mismatch(op))??)
+            };
+            let cmp =
+                |op: &'static str, f: fn(std::cmp::Ordering) -> bool| -> Result<Value, EvalError> {
+                    Ok(tri_value(
+                        crate::value::compare_values(a, b, f).map_err(mismatch(op))?,
+                    ))
+                };
             match op {
-                ScalarOp::Add => arith(a, b, crate::arith::add)?,
-                ScalarOp::Sub => arith(a, b, crate::arith::sub)?,
-                ScalarOp::Mul => arith(a, b, crate::arith::mul)?,
-                ScalarOp::Div => arith(a, b, crate::arith::div)?,
-                ScalarOp::Rem => arith(a, b, crate::arith::rem)?,
-                ScalarOp::Eq => tri_value(compare(a, b, |x, y| x == y)),
-                ScalarOp::Ne => tri_value(compare(a, b, |x, y| x != y)),
-                ScalarOp::Lt => tri_value(compare(a, b, |x, y| x < y)),
-                ScalarOp::Le => tri_value(compare(a, b, |x, y| x <= y)),
-                ScalarOp::Gt => tri_value(compare(a, b, |x, y| x > y)),
-                ScalarOp::Ge => tri_value(compare(a, b, |x, y| x >= y)),
+                ScalarOp::Add => num("+", true, crate::arith::add)?,
+                ScalarOp::Sub => num("-", true, crate::arith::sub)?,
+                ScalarOp::Mul => num("*", false, crate::arith::mul)?,
+                ScalarOp::Div => num("/", false, crate::arith::div)?,
+                ScalarOp::Rem => num("%", false, crate::arith::rem)?,
+                ScalarOp::Eq => cmp("=", |o| o.is_eq())?,
+                ScalarOp::Ne => cmp("<>", |o| o.is_ne())?,
+                ScalarOp::Lt => cmp("<", |o| o.is_lt())?,
+                ScalarOp::Le => cmp("<=", |o| o.is_le())?,
+                ScalarOp::Gt => cmp(">", |o| o.is_gt())?,
+                ScalarOp::Ge => cmp(">=", |o| o.is_ge())?,
                 ScalarOp::And => tri_value(truth(a).and(truth(b))),
                 ScalarOp::Or => tri_value(truth(a).or(truth(b))),
-                ScalarOp::Like => tri_value(compare(a, b, |x, y| x == y)),
+                // SQL's `like`: `%` any run, `_` one character, no escape. Text only.
+                ScalarOp::Like => match (a, b) {
+                    (Value::Null, _) | (_, Value::Null) => Value::Null,
+                    (Value::Text(_), Value::Text(_)) => {
+                        let (s, p) = (a.as_text().expect("text"), b.as_text().expect("text"));
+                        Tri::of(like(&s, &p)).definite()
+                    }
+                    (x, y) => {
+                        return Err(EvalError::Mismatch {
+                            op: "like",
+                            why: crate::value::Mismatch::Kinds(x.kind(), y.kind()),
+                        })
+                    }
+                },
             }
         }
     })
+}
+
+/// SQL `like`: `%` matches any run of characters, `_` exactly one; everything else itself.
+pub fn like(s: &str, pattern: &str) -> bool {
+    let s: Vec<char> = s.chars().collect();
+    let p: Vec<char> = pattern.chars().collect();
+    // Iterative matching with one backtrack point, linear in practice and never recursive.
+    let (mut i, mut j) = (0usize, 0usize);
+    let (mut star, mut mark) = (None::<usize>, 0usize);
+    while i < s.len() {
+        if j < p.len() && (p[j] == '_' || p[j] == s[i]) {
+            i += 1;
+            j += 1;
+        } else if j < p.len() && p[j] == '%' {
+            star = Some(j);
+            mark = i;
+            j += 1;
+        } else if let Some(st) = star {
+            j = st + 1;
+            mark += 1;
+            i = mark;
+        } else {
+            return false;
+        }
+    }
+    while j < p.len() && p[j] == '%' {
+        j += 1;
+    }
+    j == p.len()
 }
 
 /// A three-valued result, carried back into the value domain: unknown *is* null.
@@ -213,6 +303,13 @@ pub enum EvalError {
     /// time the refusal reaches a client, and "this query overflowed somewhere" is not a
     /// message anyone can act on.
     Arithmetic(crate::arith::ArithError),
+    /// **Two values an operator cannot relate** (cycle 15, decisions 6 and 8): money in two
+    /// currencies, or text against a number. Refused, as the checker refuses the same thing
+    /// statically wherever it can see the currencies; this is where it cannot.
+    Mismatch {
+        op: &'static str,
+        why: crate::value::Mismatch,
+    },
 }
 
 impl From<crate::arith::ArithError> for EvalError {
@@ -229,6 +326,15 @@ impl std::fmt::Display for EvalError {
                 "the fixpoint did not converge in {rounds} rounds; the accumulator held {tail:?} rows over the last rounds"
             ),
             EvalError::Arithmetic(e) => write!(f, "{e}"),
+            EvalError::Mismatch { op, why } => match why {
+                crate::value::Mismatch::Currencies(a, b) => write!(
+                    f,
+                    "`{op}` between amounts in two currencies (catalog codes {a} and {b})"
+                ),
+                crate::value::Mismatch::Kinds(a, b) => {
+                    write!(f, "`{op}` between {a} and {b}")
+                }
+            },
         }
     }
 }
@@ -850,7 +956,14 @@ impl<'a> Eval<'a> {
             self.work += 1;
             let mut row_out = k;
             for (i, (a, _)) in aggs.iter().enumerate() {
-                row_out.push(fold(*a, &per_agg[i]));
+                let v = match try_fold(*a, &per_agg[i]) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        self.note_error(e);
+                        Value::Null
+                    }
+                };
+                row_out.push(v);
             }
             add(&mut out, row_out, 1);
         }
@@ -942,7 +1055,13 @@ impl<'a> Eval<'a> {
                     let v = if vals.is_empty() {
                         Value::Null
                     } else {
-                        fold(*agg, &vals)
+                        match try_fold(*agg, &vals) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                self.note_error(e);
+                                Value::Null
+                            }
+                        }
                     };
                     let mut r = orow.clone();
                     r.push(v);
@@ -959,13 +1078,77 @@ impl<'a> Eval<'a> {
 /// Weights matter: `count` sums them, `sum` multiplies, and `min`/`max` ignore rows whose
 /// weight is not positive because a retracted row is not in the collection.
 pub fn fold(a: Agg, vals: &[(Value, i128)]) -> Value {
+    try_fold(a, vals).unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// [`fold`], refusing what has no answer (cycle 15, decision 8): a `sum`, `min`, `max` or
+/// `avg` over money in more than one currency, or over text for `sum`/`avg`. Money in one
+/// currency folds to money in that currency; `min`/`max` of text are by content.
+pub fn try_fold(a: Agg, vals: &[(Value, i128)]) -> Result<Value, EvalError> {
+    let op = match a {
+        Agg::Count => return Ok(Value::Int(vals.iter().map(|(_, w)| *w).sum())),
+        Agg::Sum => "sum",
+        Agg::Min => "min",
+        Agg::Max => "max",
+        Agg::Avg => "avg",
+    };
+    // One currency across every money contribution, and no text where a number is summed.
+    let mut currency: Option<u32> = None;
+    for (v, _) in vals {
+        match v {
+            Value::Money { currency: c, .. } => match currency {
+                None => currency = Some(*c),
+                Some(k) if k != *c => {
+                    return Err(EvalError::Mismatch {
+                        op,
+                        why: crate::value::Mismatch::Currencies(k, *c),
+                    })
+                }
+                _ => {}
+            },
+            Value::Text(_) if matches!(a, Agg::Sum | Agg::Avg) => {
+                return Err(EvalError::Mismatch {
+                    op,
+                    why: crate::value::Mismatch::Kinds("text", "a sum"),
+                })
+            }
+            _ => {}
+        }
+    }
+    if matches!(a, Agg::Min | Agg::Max)
+        && vals
+            .iter()
+            .any(|(v, w)| *w > 0 && matches!(v, Value::Text(_)))
+    {
+        let live = vals
+            .iter()
+            .filter(|(v, w)| *w > 0 && !v.is_null())
+            .map(|(v, _)| *v);
+        return Ok(if a == Agg::Min {
+            live.min()
+        } else {
+            live.max()
+        }
+        .unwrap_or(Value::Null));
+    }
+    let tag = |v: Value| match (v, currency) {
+        (Value::Int(m), Some(c)) => Value::Money {
+            minor: m,
+            currency: c,
+        },
+        (v, _) => v,
+    };
+    Ok(tag(fold_numbers(a, vals)))
+}
+
+fn fold_numbers(a: Agg, vals: &[(Value, i128)]) -> Value {
     match a {
         Agg::Count => Value::Int(vals.iter().map(|(_, w)| *w).sum()),
         Agg::Sum => {
             let mut acc = 0i128;
             let mut any = false;
             for (v, w) in vals {
-                if let Value::Int(x) = v {
+                if let Some(x) = v.int() {
                     acc += x * w;
                     any = true;
                 }
@@ -1413,5 +1596,33 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn like_matches_sql_patterns() {
+        assert!(like("alice", "al%"));
+        assert!(like("alice", "%ice"));
+        assert!(like("bob", "_ob"));
+        assert!(like("a%b", "a%b"));
+        assert!(!like("alice", "_ob"));
+        assert!(!like("al", "al_"));
+        assert!(like("", "%"));
+    }
+
+    #[test]
+    fn a_sum_over_two_currencies_is_refused_and_one_keeps_its_currency() {
+        let m = |minor, currency| Value::Money { minor, currency };
+        assert_eq!(
+            try_fold(Agg::Sum, &[(m(3, 0), 1), (m(4, 0), 2)]),
+            Ok(m(11, 0))
+        );
+        assert!(matches!(
+            try_fold(Agg::Sum, &[(m(3, 0), 1), (m(4, 1), 1)]),
+            Err(EvalError::Mismatch { .. })
+        ));
+        assert_eq!(
+            try_fold(Agg::Max, &[(Value::text("x"), 1), (Value::text("y"), 1)]),
+            Ok(Value::text("y"))
+        );
     }
 }

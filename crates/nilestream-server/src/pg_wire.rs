@@ -340,10 +340,12 @@ pub fn put_rows_streaming(
                 out,
                 r.iter()
                     .map(|v| match v {
-                        Value::Null => None,
-                        Value::Int(i) => Some(*i),
+                        Value::Null => WireCell::Null,
+                        // Money is sent as its minor units, as it was when it was an `Int`.
+                        Value::Int(i) | Value::Money { minor: i, .. } => WireCell::Int(*i),
+                        Value::Text(_) => WireCell::Text(v.as_text().unwrap_or_default()),
                     })
-                    .chain(std::iter::once(Some(anchor))),
+                    .chain(std::iter::once(WireCell::Int(anchor))),
                 &block.formats,
             );
             if out.len() >= REPLY_BUFFER {
@@ -390,9 +392,26 @@ pub fn row_count(block: &RowBlock) -> usize {
 ///
 /// A column with no entry in `formats` is text, which is the protocol's default and is what
 /// keeps a client that negotiated nothing working exactly as before.
+/// One cell of a data row: a number, a string, or null (cycle 15: the IR has text values).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WireCell {
+    Null,
+    Int(i128),
+    /// Sent as its UTF-8 bytes in every format. The row description still names every
+    /// column `int8` (the served schema has no text column); a text cell reaches a client
+    /// only from a text literal or a text column of a non-served relation, a stated limit.
+    Text(std::sync::Arc<str>),
+}
+
+impl From<Option<i128>> for WireCell {
+    fn from(c: Option<i128>) -> WireCell {
+        c.map(WireCell::Int).unwrap_or(WireCell::Null)
+    }
+}
+
 pub fn put_data_row_formatted(
     out: &mut Vec<u8>,
-    cells: impl IntoIterator<Item = Option<i128>>,
+    cells: impl IntoIterator<Item = WireCell>,
     formats: &[Format],
 ) {
     out.push(b'D');
@@ -405,8 +424,12 @@ pub fn put_data_row_formatted(
         let f = formats.get(n as usize).copied().unwrap_or(Format::Text);
         n += 1;
         match c {
-            None => out.extend_from_slice(&(-1i32).to_be_bytes()),
-            Some(v) => {
+            WireCell::Null => out.extend_from_slice(&(-1i32).to_be_bytes()),
+            WireCell::Text(t) => {
+                out.extend_from_slice(&(t.len() as i32).to_be_bytes());
+                out.extend_from_slice(t.as_bytes());
+            }
+            WireCell::Int(v) => {
                 let cell_len_at = out.len();
                 out.extend_from_slice(&0i32.to_be_bytes());
                 let from = out.len();

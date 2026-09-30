@@ -234,7 +234,11 @@ pub fn columns_read(s: &Scalar, out: &mut Vec<ColIdx>) {
     match s {
         Scalar::Column(c) => out.push(*c),
         Scalar::Not(inner) | Scalar::Neg(inner) | Scalar::IsNull(inner) => columns_read(inner, out),
-        Scalar::Binary { lhs, rhs, .. } => {
+        Scalar::Binary { lhs, rhs, .. }
+        | Scalar::InCurrency {
+            amount: lhs,
+            currency: rhs,
+        } => {
             columns_read(lhs, out);
             columns_read(rhs, out);
         }
@@ -261,7 +265,11 @@ fn mentions_udf(s: &Scalar) -> bool {
     match s {
         Scalar::Udf { .. } => true,
         Scalar::Not(inner) | Scalar::Neg(inner) => mentions_udf(inner),
-        Scalar::Binary { lhs, rhs, .. } => mentions_udf(lhs) || mentions_udf(rhs),
+        Scalar::Binary { lhs, rhs, .. }
+        | Scalar::InCurrency {
+            amount: lhs,
+            currency: rhs,
+        } => mentions_udf(lhs) || mentions_udf(rhs),
         _ => false,
     }
 }
@@ -629,6 +637,10 @@ fn shift_columns(s: &Scalar, by: i64) -> Scalar {
         Scalar::Udf { id, args } => Scalar::Udf {
             id: *id,
             args: args.iter().map(|a| shift_columns(a, by)).collect(),
+        },
+        Scalar::InCurrency { amount, currency } => Scalar::InCurrency {
+            amount: Box::new(shift_columns(amount, by)),
+            currency: Box::new(shift_columns(currency, by)),
         },
         other => other.clone(),
     }

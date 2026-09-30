@@ -240,6 +240,14 @@ pub fn budget(scenario: &str) -> Option<f64> {
         // posting. The per-op figure stays 3.8. The same hole let it through a second time:
         // the gate still did not run reproduce, and `make reproduce` itself had exited 2 since
         // `44133cc`. From cycle 15 the gate runs it (DA-11).
+        //
+        // **+2 in cycle 15 (C15-05b), with the IR's text and money values.** 150,322 ->
+        // 150,324 over 40,000 postings, per process, per-op 3.8. Located to the commit that
+        // gives `niles_ir::value::Value` its `Money` and `Text` variants and the evaluator its
+        // money and text rules (with the server and harness arms that change forces), and
+        // not to a line: with that commit's lowering reverted the count is still 150,324,
+        // and with the manual `Ord` replaced by a derived one it is still 150,324. Stated as
+        // located, not explained.
         "ledger_seeded" => 4.2,
         // **The three served analytical statements, after the fold replaced the copy.**
         //

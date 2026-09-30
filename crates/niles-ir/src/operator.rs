@@ -130,6 +130,16 @@ pub enum Scalar {
         id: u32,
         args: Vec<Scalar>,
     },
+    /// **An amount, with the currency it is in** (cycle 15, C15-05b; decision 8). A money
+    /// column is an integer in the base row and its currency is another column, or the
+    /// column's declared type, or pinned by a filter upstream. Where such an amount meets a
+    /// money literal, the lowering wraps it in this, and the evaluator makes a
+    /// `Value::Money` of it, so a comparison or a sum across two currencies is refused at run
+    /// time instead of comparing the numbers (E30's F13).
+    InCurrency {
+        amount: Box<Scalar>,
+        currency: Box<Scalar>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -164,9 +174,11 @@ impl Scalar {
             Scalar::Not(x) | Scalar::Neg(x) | Scalar::IsNull(x) => {
                 x.is_reproducible(certified_udfs)
             }
-            Scalar::Binary { lhs, rhs, .. } => {
-                lhs.is_reproducible(certified_udfs) && rhs.is_reproducible(certified_udfs)
-            }
+            Scalar::Binary { lhs, rhs, .. }
+            | Scalar::InCurrency {
+                amount: lhs,
+                currency: rhs,
+            } => lhs.is_reproducible(certified_udfs) && rhs.is_reproducible(certified_udfs),
             // A column read, a literal of any kind, and the anchor. Each is a *value*: it
             // is the same on every evaluation of the same row at the same epoch, which is
             // the whole of what reproducibility asks. Enumerated rather than defaulted,
@@ -190,7 +202,11 @@ impl Scalar {
         match self {
             Scalar::Column(c) => out.push(*c),
             Scalar::Not(x) | Scalar::Neg(x) => x.columns(out),
-            Scalar::Binary { lhs, rhs, .. } => {
+            Scalar::Binary { lhs, rhs, .. }
+            | Scalar::InCurrency {
+                amount: lhs,
+                currency: rhs,
+            } => {
                 lhs.columns(out);
                 rhs.columns(out);
             }

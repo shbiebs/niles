@@ -1,7 +1,7 @@
 # provenance: cargo run -q --release --manifest-path tools/memprobe/Cargo.toml --bin memprobe
 # configuration: allocation counts only, machine-independent; scenarios=["ledger_seeded", "zset_base_at", "served_group_by_cur", "served_group_by_acct", "served_top_ten", "served_sum_negative", "served_point", "wire_reply_10k", "wire_reply_100k", "served_point_conjunct", "served_having_on_key", "rev_read_hit", "append_in_memory", "rev_metadata_2x_budget", "rev_metadata_per_key", "rev_metadata_churn", "idem_admission_index", "idem_window_sealer"]
 scenario,unit,operations,allocations,allocations_per_op
-ledger_seeded,posting,40000,150322,3.8
+ledger_seeded,posting,40000,150324,3.8
 zset_base_at,row,40000,46665,1.2
 served_group_by_cur,query,3,39,13.0
 served_group_by_acct,query,3,37806,12602.0

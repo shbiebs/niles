@@ -517,6 +517,10 @@ fn scalar_columns(s: &Scalar, f: &mut impl FnMut(ColIdx)) {
         }
         Scalar::IsNull(x) | Scalar::Not(x) | Scalar::Neg(x) => scalar_columns(x, f),
         Scalar::Udf { args, .. } => args.iter().for_each(|a| scalar_columns(a, f)),
+        Scalar::InCurrency { amount, currency } => {
+            scalar_columns(amount, f);
+            scalar_columns(currency, f);
+        }
         _ => {}
     }
 }

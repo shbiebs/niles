@@ -40,6 +40,10 @@ pub fn render(v: Value, k: Kind, codes: &BTreeMap<i128, String>, _day0: i64) -> 
         (Value::Int(i), Kind::Cur) => codes.get(&i).cloned().unwrap_or_else(|| format!("?{i}")),
         (Value::Int(i), Kind::Date) => iso(i as i64),
         (Value::Int(i), _) => i.to_string(),
+        // Since cycle 15 (C15-05b): money renders as its minor units, as it did when it was an
+        // `Int`, and text as itself.
+        (Value::Money { minor, .. }, _) => minor.to_string(),
+        (v @ Value::Text(_), _) => v.to_string(),
     }
 }
 

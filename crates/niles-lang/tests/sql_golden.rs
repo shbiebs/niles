@@ -189,7 +189,8 @@ fn render(z: &ZSet) -> String {
                 .iter()
                 .map(|v| match v {
                     niles_ir::value::Value::Null => "null".to_string(),
-                    niles_ir::value::Value::Int(i) => i.to_string(),
+                    // Money as its minor units and text as itself (cycle 15, C15-05b).
+                    v => v.to_string(),
                 })
                 .collect();
             format!("{} x{w}", cols.join(" "))

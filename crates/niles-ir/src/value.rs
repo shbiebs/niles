@@ -42,29 +42,137 @@ use std::fmt;
 
 /// A value in the reference semantics.
 ///
-/// `Int` carries integers, booleans (0/1), money in minor units and interned text alike:
-/// the reference semantics is about *structure*, and giving each surface type its own
-/// variant here would multiply the cases in every operator without changing any rewrite's
-/// correctness. `Null` is the one distinction that changes answers, so it is the one
-/// distinction this type makes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// `Int` carries integers, booleans (0/1), dates, currency codes, and money whose currency
+/// the circuit does not know. Until cycle 15 it carried text and every money value too, and
+/// two defects came from that: every string literal evaluated as `0` (E30's F11), and a
+/// money literal's currency was dropped, so `having sum(amt) < 0.00 eur` over usd rows
+/// compared the numbers and answered (F13). The author's decisions 6 and 8 of 2026-09-30,
+/// built in C15-05b, give each its own variant:
+///
+/// * **`Text`**, an interned string: equality by identity, ordering and `like` by content.
+/// * **`Money`**, an amount in minor units *with its currency's catalog code*. Two money
+///   values meet in an operator only in one currency; `Money` against `Int` is allowed,
+///   because the integer carries no currency (`amt < 0`).
+///
+/// `Null` is still the one distinction every operator must respect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Value {
     /// Unknown *in the data*. Not an evicted hole, and not `Option::None`.
     Null,
     Int(i128),
+    /// Minor units, and the currency's catalog code.
+    Money {
+        minor: i128,
+        currency: u32,
+    },
+    Text(TextId),
+}
+
+/// An interned string. See [`Value::text`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TextId(u32);
+
+/// **The text interner.** Append-only and process-wide, so `Value` stays `Copy` and two
+/// equal strings are one id. Ordering is by content (below), never by id, because ids depend
+/// on the order strings were first seen, and an answer's order must not. It never shrinks:
+/// every distinct string a process sees is held until it exits, a stated cost.
+fn interner() -> &'static std::sync::RwLock<Interner> {
+    static I: std::sync::OnceLock<std::sync::RwLock<Interner>> = std::sync::OnceLock::new();
+    I.get_or_init(|| std::sync::RwLock::new(Interner::default()))
+}
+
+#[derive(Default)]
+struct Interner {
+    strings: Vec<std::sync::Arc<str>>,
+    ids: std::collections::HashMap<std::sync::Arc<str>, u32>,
 }
 
 impl Value {
     pub fn is_null(self) -> bool {
         self == Value::Null
     }
-    /// The integer, or `None` if null. Callers must decide what null means for them —
-    /// there is deliberately no `unwrap_or(0)`, because that is the §1.1.1 defect written
-    /// as a convenience method.
+    /// The number, or `None` if null or text. Money gives its minor units: the number is
+    /// the same number it always was, and a caller that needs the currency asks
+    /// [`Value::currency`]. Callers must decide what null means for them — there is
+    /// deliberately no `unwrap_or(0)`, because that is the §1.1.1 defect written as a
+    /// convenience method.
     pub fn int(self) -> Option<i128> {
         match self {
-            Value::Int(i) => Some(i),
-            Value::Null => None,
+            Value::Int(i) | Value::Money { minor: i, .. } => Some(i),
+            Value::Null | Value::Text(_) => None,
+        }
+    }
+    /// The currency code of a money value.
+    pub fn currency(self) -> Option<u32> {
+        match self {
+            Value::Money { currency, .. } => Some(currency),
+            _ => None,
+        }
+    }
+    /// The value of a string: its interned id.
+    pub fn text(s: &str) -> Value {
+        if let Some(id) = interner().read().expect("interner").ids.get(s) {
+            return Value::Text(TextId(*id));
+        }
+        let mut w = interner().write().expect("interner");
+        if let Some(id) = w.ids.get(s) {
+            return Value::Text(TextId(*id));
+        }
+        let arc: std::sync::Arc<str> = std::sync::Arc::from(s);
+        let id = w.strings.len() as u32;
+        w.strings.push(arc.clone());
+        w.ids.insert(arc, id);
+        Value::Text(TextId(id))
+    }
+    /// The string a text value holds.
+    pub fn as_text(self) -> Option<std::sync::Arc<str>> {
+        match self {
+            Value::Text(TextId(i)) => interner()
+                .read()
+                .expect("interner")
+                .strings
+                .get(i as usize)
+                .cloned(),
+            _ => None,
+        }
+    }
+    fn rank(self) -> u8 {
+        match self {
+            Value::Null => 0,
+            Value::Int(_) => 1,
+            Value::Money { .. } => 2,
+            Value::Text(_) => 3,
+        }
+    }
+}
+
+impl PartialOrd for Value {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// A total order for keys and sorted answers: by variant, then by value, and text **by
+/// content**. (Comparing a usd with an eur is refused in an operator; ordering them as keys
+/// is not a comparison of amounts, only a place in a map.)
+impl Ord for Value {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        match (self, other) {
+            (Value::Int(a), Value::Int(b)) => a.cmp(b),
+            (
+                Value::Money {
+                    minor: a,
+                    currency: ca,
+                },
+                Value::Money {
+                    minor: b,
+                    currency: cb,
+                },
+            ) => ca.cmp(cb).then(a.cmp(b)),
+            (Value::Text(a), Value::Text(b)) if a == b => Ordering::Equal,
+            (Value::Text(_), Value::Text(_)) => self.as_text().cmp(&other.as_text()),
+            (a, b) => a.rank().cmp(&b.rank()),
         }
     }
 }
@@ -85,7 +193,10 @@ impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Value::Null => write!(f, "null"),
-            Value::Int(i) => write!(f, "{i}"),
+            // Money renders as its minor units, as it did when it was an `Int`: the wire and
+            // every answer file keep the number they always had.
+            Value::Int(i) | Value::Money { minor: i, .. } => write!(f, "{i}"),
+            Value::Text(_) => write!(f, "{}", self.as_text().as_deref().unwrap_or("")),
         }
     }
 }
@@ -143,10 +254,68 @@ impl Tri {
 }
 
 /// Comparison under three-valued logic: any null operand yields unknown.
+///
+/// Numbers only: `Int` with `Int`, and `Money` with `Int` (the integer carries no currency).
+/// Two money values and two texts are compared by [`compare_values`], which can refuse.
 pub fn compare(a: Value, b: Value, f: impl Fn(i128, i128) -> bool) -> Tri {
     match (a, b) {
-        (Value::Int(x), Value::Int(y)) => Tri::of(f(x, y)),
+        (Value::Int(x), Value::Int(y))
+        | (Value::Money { minor: x, .. }, Value::Int(y))
+        | (Value::Int(x), Value::Money { minor: y, .. }) => Tri::of(f(x, y)),
+        (
+            Value::Money {
+                minor: x,
+                currency: cx,
+            },
+            Value::Money {
+                minor: y,
+                currency: cy,
+            },
+        ) if cx == cy => Tri::of(f(x, y)),
         _ => Tri::Unknown,
+    }
+}
+
+/// Why two values cannot meet in an operator (cycle 15, decisions 6 and 8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Mismatch {
+    /// Two money values in different currencies, by catalog code.
+    Currencies(u32, u32),
+    /// Two values of kinds no operator relates (text with a number).
+    Kinds(&'static str, &'static str),
+}
+
+impl Value {
+    pub fn kind(self) -> &'static str {
+        match self {
+            Value::Null => "null",
+            Value::Int(_) => "integer",
+            Value::Money { .. } => "money",
+            Value::Text(_) => "text",
+        }
+    }
+}
+
+/// A comparison that **refuses** what [`compare`] cannot answer: money in two currencies,
+/// and text against a number. Text compares by content. Null is still unknown.
+pub fn compare_values(
+    a: Value,
+    b: Value,
+    f: impl Fn(std::cmp::Ordering) -> bool,
+) -> Result<Tri, Mismatch> {
+    match (a, b) {
+        (Value::Null, _) | (_, Value::Null) => Ok(Tri::Unknown),
+        (Value::Money { currency: x, .. }, Value::Money { currency: y, .. }) if x != y => {
+            Err(Mismatch::Currencies(x, y))
+        }
+        (Value::Text(_), Value::Text(_)) => Ok(Tri::of(f(a.as_text().cmp(&b.as_text())))),
+        (Value::Text(_), other) | (other, Value::Text(_)) => {
+            Err(Mismatch::Kinds("text", other.kind()))
+        }
+        (x, y) => {
+            let (p, q) = (x.int().expect("a number"), y.int().expect("a number"));
+            Ok(Tri::of(f(p.cmp(&q))))
+        }
     }
 }
 
@@ -171,12 +340,68 @@ pub fn arith(
     }
 }
 
+/// Arithmetic that knows money (cycle 15, decision 8). `+` and `-` of two money values need
+/// one currency and keep it; money scaled by an integer (`*`, `/`, `%` with an `Int`) keeps
+/// its currency; `+`/`-` of money and a bare integer is refused, because the integer is not
+/// an amount of anything; text is never an operand. Null still propagates first.
+pub fn arith_values(
+    a: Value,
+    b: Value,
+    additive: bool,
+    f: impl Fn(i128, i128) -> Result<i128, crate::arith::ArithError>,
+) -> Result<Result<Value, crate::arith::ArithError>, Mismatch> {
+    match (a, b) {
+        (Value::Null, _) | (_, Value::Null) => Ok(Ok(Value::Null)),
+        (Value::Text(_), o) | (o, Value::Text(_)) => Err(Mismatch::Kinds("text", o.kind())),
+        (Value::Int(x), Value::Int(y)) => Ok(f(x, y).map(Value::Int)),
+        (
+            Value::Money {
+                minor: x,
+                currency: cx,
+            },
+            Value::Money {
+                minor: y,
+                currency: cy,
+            },
+        ) => {
+            if cx != cy {
+                return Err(Mismatch::Currencies(cx, cy));
+            }
+            if additive {
+                Ok(f(x, y).map(|m| Value::Money {
+                    minor: m,
+                    currency: cx,
+                }))
+            } else {
+                // money × money is not money; the product of two amounts is a number.
+                Ok(f(x, y).map(Value::Int))
+            }
+        }
+        (Value::Money { minor: x, currency }, Value::Int(y))
+        | (Value::Int(y), Value::Money { minor: x, currency }) => {
+            if additive {
+                Err(Mismatch::Kinds("money", "integer"))
+            } else {
+                let r = if matches!(a, Value::Money { .. }) {
+                    f(x, y)
+                } else {
+                    f(y, x)
+                };
+                Ok(r.map(|m| Value::Money { minor: m, currency }))
+            }
+        }
+    }
+}
+
 /// Read a value as a truth value: null is unknown, zero is false, anything else true.
 pub fn truth(v: Value) -> Tri {
     match v {
         Value::Null => Tri::Unknown,
         Value::Int(0) => Tri::False,
         Value::Int(_) => Tri::True,
+        // Not truth values. A predicate that is an amount or a string is a lowering defect;
+        // reading it as unknown discards the row rather than inventing a verdict.
+        Value::Money { .. } | Value::Text(_) => Tri::Unknown,
     }
 }
 
@@ -372,5 +597,78 @@ mod instant_tests {
         ] {
             assert_eq!(days_since_epoch(bad), None, "`{bad}` must be refused");
         }
+    }
+
+    /// **Money meets money only in one currency; text orders by content** (cycle 15,
+    /// C15-05b; decisions 6 and 8).
+    #[test]
+    fn money_and_text_are_compared_by_their_own_rules() {
+        use std::cmp::Ordering;
+        let usd = |m| Value::Money {
+            minor: m,
+            currency: 0,
+        };
+        let eur = |m| Value::Money {
+            minor: m,
+            currency: 1,
+        };
+        assert_eq!(
+            compare_values(usd(1), usd(2), Ordering::is_lt),
+            Ok(Tri::True)
+        );
+        assert_eq!(
+            compare_values(usd(1), eur(2), Ordering::is_lt),
+            Err(Mismatch::Currencies(0, 1))
+        );
+        // An integer carries no currency: `amt < 0`.
+        assert_eq!(
+            compare_values(usd(-1), Value::Int(0), Ordering::is_lt),
+            Ok(Tri::True)
+        );
+        // Text by content, whatever order the strings were interned in.
+        let (b, a) = (Value::text("b-later"), Value::text("a-earlier"));
+        assert_eq!(compare_values(a, b, Ordering::is_lt), Ok(Tri::True));
+        assert!(a < b, "keys order by content too");
+        assert_eq!(
+            compare_values(a, Value::Int(1), Ordering::is_eq),
+            Err(Mismatch::Kinds("text", "integer"))
+        );
+        assert_eq!(Value::text("a-earlier"), a, "one string is one value");
+        assert_eq!(
+            compare_values(Value::Null, eur(1), Ordering::is_eq),
+            Ok(Tri::Unknown)
+        );
+    }
+
+    #[test]
+    fn money_arithmetic_keeps_its_currency_and_refuses_two() {
+        let usd = |m| Value::Money {
+            minor: m,
+            currency: 0,
+        };
+        assert_eq!(
+            arith_values(usd(5), usd(3), true, crate::arith::sub),
+            Ok(Ok(usd(2)))
+        );
+        assert_eq!(
+            arith_values(usd(5), Value::Int(3), false, crate::arith::mul),
+            Ok(Ok(usd(15)))
+        );
+        assert_eq!(
+            arith_values(
+                usd(5),
+                Value::Money {
+                    minor: 1,
+                    currency: 1
+                },
+                true,
+                crate::arith::add
+            ),
+            Err(Mismatch::Currencies(0, 1))
+        );
+        assert_eq!(
+            arith_values(usd(5), Value::Int(1), true, crate::arith::add),
+            Err(Mismatch::Kinds("money", "integer"))
+        );
     }
 }

@@ -2763,7 +2763,10 @@ mod tests {
                     .iter()
                     .map(|v| match v {
                         niles_ir::value::Value::Null => None,
-                        niles_ir::value::Value::Int(i) => Some(i.to_string()),
+                        // Money as its minor units and text as itself (cycle 15, C15-05b).
+                        niles_ir::value::Value::Int(i)
+                        | niles_ir::value::Value::Money { minor: i, .. } => Some(i.to_string()),
+                        v => Some(v.to_string()),
                     })
                     .collect();
                 cells.push(Some(anchor.to_string()));
@@ -3653,7 +3656,10 @@ mod tests {
                         .iter()
                         .map(|v| match v {
                             niles_ir::value::Value::Null => None,
-                            niles_ir::value::Value::Int(i) => Some(i.to_string()),
+                            // Money as its minor units and text as itself (cycle 15, C15-05b).
+                            niles_ir::value::Value::Int(i)
+                            | niles_ir::value::Value::Money { minor: i, .. } => Some(i.to_string()),
+                            v => Some(v.to_string()),
                         })
                         .collect();
                     cells.push(Some(anchor.to_string()));

@@ -360,6 +360,10 @@ fn rewrite_columns(s: &Scalar, f: &mut impl FnMut(ColIdx) -> ColIdx) -> Scalar {
             id: *id,
             args: args.iter().map(|a| rewrite_columns(a, f)).collect(),
         },
+        Scalar::InCurrency { amount, currency } => Scalar::InCurrency {
+            amount: Box::new(rewrite_columns(amount, f)),
+            currency: Box::new(rewrite_columns(currency, f)),
+        },
         other => other.clone(),
     }
 }
@@ -489,13 +493,14 @@ impl<'p> Folder<'p> {
 
     /// The one-column key as an `Option<i128>`.
     ///
-    /// Exhaustive on purpose. `Value` has two variants today and this mapping is total; if a
-    /// third is ever added, this match stops compiling and whoever adds it has to decide what
-    /// it means for a group key, rather than discovering that some values silently grouped
-    /// together.
+    /// Exhaustive on purpose, and it did its job: cycle 15 added `Money` and `Text`, this
+    /// stopped compiling, and the decision is written here. The fold plans only group the
+    /// served ledger by its integer columns (account, currency code), so a money or text key
+    /// cannot reach this; if one did, it groups as null rather than as some integer that
+    /// could collide with a real key.
     fn scalar_key(v: Value) -> Option<i128> {
         match v {
-            Value::Null => None,
+            Value::Null | Value::Money { .. } | Value::Text(_) => None,
             Value::Int(x) => Some(x),
         }
     }
@@ -587,11 +592,22 @@ impl<'p> Folder<'p> {
                     slot[i].any = true;
                 }
                 Agg::Sum => match eval::eval_scalar(e, &self.cur) {
-                    Ok(Value::Int(x)) => {
+                    // The served ledger's amount column is an integer in the base row; the
+                    // plan refuses a fold across currencies before it runs (`rev_engine`'s
+                    // cross-currency refusal), so a money value here is one currency's.
+                    Ok(Value::Int(x)) | Ok(Value::Money { minor: x, .. }) => {
                         slot[i].total += x;
                         slot[i].any = true;
                     }
                     Ok(Value::Null) => {}
+                    Ok(Value::Text(_)) => {
+                        if self.error.is_none() {
+                            self.error = Some(eval::EvalError::Mismatch {
+                                op: "sum",
+                                why: niles_ir::value::Mismatch::Kinds("text", "a sum"),
+                            });
+                        }
+                    }
                     Err(err) => {
                         if self.error.is_none() {
                             self.error = Some(err);

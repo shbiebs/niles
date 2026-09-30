@@ -509,6 +509,9 @@ impl<'a> Lx<'a> {
                         return None;
                     }
                 };
+                if !self.join_keys_agree(&lk, &rk, name.span, "join") {
+                    return None;
+                }
                 let mut names = in_schema.clone();
                 names.extend(self.schema_of(rhs).iter().cloned());
                 let id = self.circuit.add(
@@ -580,6 +583,9 @@ impl<'a> Lx<'a> {
                         return None;
                     }
                 };
+                if !self.join_keys_agree(&lk, &rk, name.span, "`intersect`") {
+                    return None;
+                }
                 let j = self.circuit.add(
                     Op::Join {
                         kind: IrJoin::Semi,
@@ -1572,6 +1578,9 @@ impl<'a> Lx<'a> {
                         .key
                         .clone()
                         .unwrap_or_else(|| lk.clone());
+                    if !self.join_keys_agree(&lk, &rk, s.span, "`intersect`") {
+                        return None;
+                    }
                     let j = self.circuit.add(
                         Op::Join {
                             kind: IrJoin::Semi,
@@ -1787,6 +1796,9 @@ impl<'a> Lx<'a> {
                         return None;
                     }
                 };
+                if !self.join_keys_agree(&lk, &rk, *span, "join") {
+                    return None;
+                }
                 let id = self.circuit.add(
                     Op::Join {
                         kind: jk,
@@ -2045,6 +2057,31 @@ fn first_pat_name(p: &Pat) -> Option<String> {
 /// to the second and not to the first, so `select sum(v) from t` took the projection path
 /// and lowered `sum` as a user function.
 impl Lx<'_> {
+    /// **A keyed join whose two keys differ in length is refused.** Every join the IR executes
+    /// matches a row's left key against a row's right key, so keys of different arity never
+    /// match: `postings` keyed on `(acct, cur)` joined to `accounts` keyed on `(id)` was a
+    /// join that could not produce a row, served as an empty answer with no diagnostic
+    /// (cycle 14, R2-06, found writing E30's Q03).
+    fn join_keys_agree(&mut self, lk: &[ColIdx], rk: &[ColIdx], at: Span, what: &str) -> bool {
+        if lk.len() == rk.len() {
+            return true;
+        }
+        self.d.push(
+            Diagnostic::error(
+                "NL0519",
+                format!(
+                    "the two sides of this {what} are keyed on {} and {} columns",
+                    lk.len(),
+                    rk.len()
+                ),
+            )
+            .primary(at, "keys of different length never match")
+            .note("a keyed join matches the left key against the right key column by column; with different lengths no row can match, and the answer would be empty for a reason no one wrote")
+            .note("key both sides on the columns the relation is joined by: an anchor index on exactly those columns, or a `group by` of them first"),
+        );
+        false
+    }
+
     /// `having`'s aggregate calls, rewritten to the output columns that hold them.
     fn having_aggregates(
         &mut self,

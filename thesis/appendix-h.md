@@ -64,6 +64,7 @@ Two words of an earlier statement are gone and their loss is the point. **α-equ
 | a `group by` column the projection does not name | NL0517 | The aggregate operator emits every grouping column, so the result would carry a column the query never asked for. |
 | a grouping column projected after an aggregate | NL0517 | The operator emits keys before aggregates, so the column cannot be placed where it was written; reordering it silently would be a wrong answer that looks right. |
 | a `having` that tests an aggregate the projection does not compute | NL0518 | Cycle 14 (R2-06). An aggregate *call* in `having` — `having sum(amt) < 0`, as SQL writes it — lowered to an argument-less call and dropped every group, so the query answered no rows with no diagnostic. It now names the output column holding that aggregate; an aggregate the query does not compute has no column to name and is refused. |
+| a keyed join (or `intersect`) whose two sides are keyed on different numbers of columns | NL0519 | Cycle 14 (R2-06). Every join the IR executes matches the left key against the right key column by column, so `postings` anchored on `(acct, cur)` joined to `accounts` anchored on `(id)` could not produce a row — on either surface — and answered empty with no diagnostic. |
 | `SELECT` with no `FROM` | NL0511 | |
 | DDL, DML, TCL, DCL | — | Surface syntax with no circuit; see below. |
 

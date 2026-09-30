@@ -46,7 +46,7 @@ codes: [NL0220]
 circuit (3 nodes):
   0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1, 2] } in=[] key=Some([1, 2]) arity=5 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
   1 Index { key: [1] } in=[0] key=Some([1]) arity=5 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Spilled, retain: Evictable, lineage: Off } conserving=true lineage=Off // group_by
-  2 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Spilled, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
+  2 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Spilled, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
   output v = node 2
 
 === crates/counterproposal/niles/d13_missing_anchor.niles
@@ -54,7 +54,7 @@ codes: [NL0223]
 circuit (3 nodes):
   0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1, 2] } in=[] key=Some([1, 2]) arity=6 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
   1 Index { key: [4] } in=[0] key=Some([4]) arity=6 anchor=Inherited contract=ServeContract { consistency: Snapshot, materialize: Demand, retain: Evictable, lineage: Off } conserving=true lineage=Off // group_by
-  2 Aggregate { group_key: [4], aggs: [(Sum, Column(3))] } in=[0] key=Some([4]) arity=2 anchor=Inherited contract=ServeContract { consistency: Snapshot, materialize: Demand, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
+  2 Aggregate { group_key: [4], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([4]) arity=2 anchor=Inherited contract=ServeContract { consistency: Snapshot, materialize: Demand, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
   output v = node 2
 
 === crates/counterproposal/niles/d1_unbalanced.niles
@@ -78,7 +78,7 @@ codes: [NL0203]
 circuit (5 nodes):
   0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1, 2] } in=[] key=Some([1, 2]) arity=5 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
   1 Index { key: [1] } in=[0] key=Some([1]) arity=5 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 1000 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // group_by
-  2 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 1000 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
+  2 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 1000 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
   3 Index { key: [0] } in=[2] key=Some([0]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Off } conserving=true lineage=Off // group_by
   4 Aggregate { group_key: [0], aggs: [(Sum, Column(1))] } in=[2] key=Some([0]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
   output available = node 4
@@ -90,7 +90,7 @@ circuit (4 nodes):
   0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1, 2] } in=[] key=Some([1, 2]) arity=5 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
   1 Filter { predicate: Binary { op: Gt, lhs: Column(3), rhs: Udf { id: 1054304739, args: [] } } } in=[0] key=Some([1, 2]) arity=5 anchor=Inherited contract=ServeContract { consistency: Snapshot, materialize: Demand, retain: Evictable, lineage: Off } conserving=false lineage=Off // where
   2 Index { key: [1] } in=[1] key=Some([1]) arity=5 anchor=Inherited contract=ServeContract { consistency: Snapshot, materialize: Demand, retain: Evictable, lineage: Off } conserving=false lineage=Off // group_by
-  3 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[1] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Snapshot, materialize: Demand, retain: Evictable, lineage: Off } conserving=false lineage=Off // sum
+  3 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[1] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Snapshot, materialize: Demand, retain: Evictable, lineage: Off } conserving=false lineage=Off // sum
   output statement = node 3
 
 === crates/counterproposal/niles/d7_stale_read_after_boundary.niles
@@ -98,7 +98,7 @@ codes: []
 circuit (3 nodes):
   0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1, 2] } in=[] key=Some([1, 2]) arity=5 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
   1 Index { key: [1] } in=[0] key=Some([1]) arity=5 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 64, millis: 60000 }, materialize: Full, retain: Evictable, lineage: Off } conserving=true lineage=Off // group_by
-  2 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 64, millis: 60000 }, materialize: Full, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
+  2 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 64, millis: 60000 }, materialize: Full, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
   output month_to_date = node 2
 
 === crates/counterproposal/niles/d8_confidential_predicate.niles
@@ -366,9 +366,9 @@ codes: []
 circuit (5 nodes):
   0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1] } in=[] key=Some([1]) arity=6 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
   1 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // group_by
-  2 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
+  2 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
   3 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // group_by
-  4 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
+  4 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
   output fresh_balance = node 4
   output stale_balance = node 2
 
@@ -377,9 +377,9 @@ codes: []
 circuit (5 nodes):
   0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1] } in=[] key=Some([1]) arity=6 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
   1 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // group_by
-  2 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
+  2 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
   3 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // group_by
-  4 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
+  4 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
   output fresh_balance = node 4
   output stale_balance = node 2
 
@@ -388,9 +388,9 @@ codes: [NL0205]
 circuit (5 nodes):
   0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1] } in=[] key=Some([1]) arity=6 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
   1 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // group_by
-  2 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
+  2 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
   3 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // group_by
-  4 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
+  4 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
   output fresh_balance = node 4
   output stale_balance = node 2
 
@@ -399,9 +399,9 @@ codes: []
 circuit (5 nodes):
   0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1] } in=[] key=Some([1]) arity=6 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
   1 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // group_by
-  2 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
+  2 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
   3 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // group_by
-  4 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
+  4 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
   output fresh_balance = node 4
   output stale_balance = node 2
 
@@ -410,9 +410,9 @@ codes: [NL0205]
 circuit (5 nodes):
   0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1] } in=[] key=Some([1]) arity=6 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
   1 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // group_by
-  2 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
+  2 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
   3 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // group_by
-  4 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
+  4 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
   output fresh_balance = node 4
   output stale_balance = node 2
 
@@ -421,9 +421,9 @@ codes: []
 circuit (5 nodes):
   0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1] } in=[] key=Some([1]) arity=6 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
   1 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // group_by
-  2 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
+  2 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
   3 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // group_by
-  4 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
+  4 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
   output fresh_balance = node 4
   output stale_balance = node 2
 
@@ -432,9 +432,9 @@ codes: []
 circuit (5 nodes):
   0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1] } in=[] key=Some([1]) arity=6 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
   1 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // group_by
-  2 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
+  2 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
   3 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // group_by
-  4 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
+  4 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
   output fresh_balance = node 4
   output stale_balance = node 2
 
@@ -443,9 +443,9 @@ codes: []
 circuit (5 nodes):
   0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1] } in=[] key=Some([1]) arity=6 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
   1 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // group_by
-  2 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
+  2 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
   3 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // group_by
-  4 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
+  4 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
   output fresh_balance = node 4
   output stale_balance = node 2
 
@@ -454,9 +454,9 @@ codes: []
 circuit (5 nodes):
   0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1] } in=[] key=Some([1]) arity=6 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
   1 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // group_by
-  2 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
+  2 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
   3 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // group_by
-  4 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
+  4 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
   output fresh_balance = node 4
   output stale_balance = node 2
 
@@ -465,9 +465,9 @@ codes: []
 circuit (5 nodes):
   0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1] } in=[] key=Some([1]) arity=6 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
   1 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // group_by
-  2 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
+  2 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
   3 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // group_by
-  4 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
+  4 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
   output fresh_balance = node 4
   output stale_balance = node 2
 
@@ -476,9 +476,9 @@ codes: [NL0217]
 circuit (5 nodes):
   0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1] } in=[] key=Some([1]) arity=6 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
   1 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // group_by
-  2 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
+  2 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
   3 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // group_by
-  4 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
+  4 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
   output fresh_balance = node 4
   output stale_balance = node 2
 
@@ -487,9 +487,9 @@ codes: []
 circuit (5 nodes):
   0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1] } in=[] key=Some([1]) arity=6 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
   1 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // group_by
-  2 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
+  2 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
   3 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // group_by
-  4 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
+  4 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
   output fresh_balance = node 4
   output stale_balance = node 2
 
@@ -498,9 +498,9 @@ codes: []
 circuit (5 nodes):
   0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1] } in=[] key=Some([1]) arity=6 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
   1 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // group_by
-  2 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
+  2 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
   3 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // group_by
-  4 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
+  4 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
   output fresh_balance = node 4
   output stale_balance = node 2
 
@@ -509,9 +509,9 @@ codes: []
 circuit (5 nodes):
   0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1] } in=[] key=Some([1]) arity=6 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
   1 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // group_by
-  2 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
+  2 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
   3 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // group_by
-  4 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
+  4 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
   output fresh_balance = node 4
   output stale_balance = node 2
 
@@ -520,9 +520,9 @@ codes: []
 circuit (5 nodes):
   0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1] } in=[] key=Some([1]) arity=6 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
   1 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // group_by
-  2 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
+  2 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
   3 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // group_by
-  4 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
+  4 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
   output fresh_balance = node 4
   output stale_balance = node 2
 
@@ -531,9 +531,9 @@ codes: []
 circuit (5 nodes):
   0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1] } in=[] key=Some([1]) arity=6 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
   1 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // group_by
-  2 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
+  2 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
   3 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // group_by
-  4 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
+  4 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
   output fresh_balance = node 4
   output stale_balance = node 2
 
@@ -542,9 +542,9 @@ codes: []
 circuit (5 nodes):
   0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1] } in=[] key=Some([1]) arity=6 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
   1 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // group_by
-  2 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
+  2 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
   3 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // group_by
-  4 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
+  4 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
   output fresh_balance = node 4
   output stale_balance = node 2
 
@@ -553,9 +553,9 @@ codes: [NL0504]
 circuit (6 nodes):
   0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1] } in=[] key=Some([1]) arity=6 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
   1 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // group_by
-  2 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
+  2 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
   3 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // group_by
-  4 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
+  4 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
   5 OrderBy { keys: [(3, true)] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: Snapshot, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // order_by
   output fresh_balance = node 4
   output stale_balance = node 2
@@ -565,9 +565,9 @@ codes: []
 circuit (5 nodes):
   0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1] } in=[] key=Some([1]) arity=6 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
   1 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // group_by
-  2 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
+  2 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
   3 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // group_by
-  4 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
+  4 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
   output fresh_balance = node 4
   output stale_balance = node 2
 
@@ -576,9 +576,9 @@ codes: []
 circuit (5 nodes):
   0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1] } in=[] key=Some([1]) arity=6 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
   1 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // group_by
-  2 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
+  2 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
   3 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // group_by
-  4 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
+  4 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
   output fresh_balance = node 4
   output stale_balance = node 2
 
@@ -587,9 +587,9 @@ codes: [NL0500]
 circuit (5 nodes):
   0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1] } in=[] key=Some([1]) arity=6 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
   1 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // group_by
-  2 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
+  2 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
   3 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // group_by
-  4 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
+  4 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
   output fresh_balance = node 4
   output stale_balance = node 2
 
@@ -598,9 +598,9 @@ codes: []
 circuit (5 nodes):
   0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1] } in=[] key=Some([1]) arity=6 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
   1 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // group_by
-  2 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
+  2 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
   3 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // group_by
-  4 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
+  4 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
   output fresh_balance = node 4
   output stale_balance = node 2
 
@@ -609,9 +609,9 @@ codes: []
 circuit (5 nodes):
   0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1] } in=[] key=Some([1]) arity=6 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
   1 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // group_by
-  2 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
+  2 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
   3 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // group_by
-  4 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
+  4 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
   output fresh_balance = node 4
   output stale_balance = node 2
 
@@ -620,9 +620,9 @@ codes: [NL0204]
 circuit (5 nodes):
   0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1] } in=[] key=Some([1]) arity=6 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
   1 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // group_by
-  2 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
+  2 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
   3 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // group_by
-  4 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
+  4 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
   output fresh_balance = node 4
   output stale_balance = node 2
 
@@ -631,9 +631,9 @@ codes: []
 circuit (5 nodes):
   0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1] } in=[] key=Some([1]) arity=6 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
   1 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // group_by
-  2 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
+  2 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
   3 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // group_by
-  4 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
+  4 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
   output fresh_balance = node 4
   output stale_balance = node 2
 
@@ -642,9 +642,9 @@ codes: [NL0501, NL0506]
 circuit (5 nodes):
   0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1] } in=[] key=Some([1]) arity=6 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
   1 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // group_by
-  2 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
+  2 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
   3 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // group_by
-  4 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
+  4 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
   output fresh_balance = node 4
   output stale_balance = node 2
 
@@ -653,9 +653,9 @@ codes: [NL0505]
 circuit (5 nodes):
   0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1] } in=[] key=Some([1]) arity=6 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
   1 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // group_by
-  2 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
+  2 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
   3 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // group_by
-  4 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
+  4 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
   output fresh_balance = node 4
   output stale_balance = node 2
 
@@ -664,9 +664,9 @@ codes: [NL0501]
 circuit (5 nodes):
   0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1] } in=[] key=Some([1]) arity=6 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
   1 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // group_by
-  2 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
+  2 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 8, millis: 500 }, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
   3 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // group_by
-  4 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
+  4 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
   output fresh_balance = node 4
   output stale_balance = node 2
 
@@ -702,7 +702,7 @@ circuit (16 nodes):
   10 Aggregate { group_key: [1, 2], aggs: [(Sum, Column(3))] } in=[8] key=Some([1, 2]) arity=3 anchor=Inherited contract=ServeContract { consistency: Snapshot, materialize: Demand, retain: Evictable, lineage: Off } conserving=false lineage=Off // sum
   11 Filter { predicate: Binary { op: Ge, lhs: Column(4), rhs: LitInt(20666) } } in=[0] key=Some([1, 2]) arity=6 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 10, millis: 30000 }, materialize: Demand, retain: Evictable, lineage: Off } conserving=false lineage=Off // where
   12 Index { key: [1] } in=[11] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 10, millis: 30000 }, materialize: Demand, retain: Evictable, lineage: Off } conserving=false lineage=Off // group_by
-  13 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[11] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 10, millis: 30000 }, materialize: Demand, retain: Evictable, lineage: Off } conserving=false lineage=Off // sum
+  13 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[11] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 10, millis: 30000 }, materialize: Demand, retain: Evictable, lineage: Off } conserving=false lineage=Off // sum
   14 Index { key: [1] } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 1, millis: 1000 }, materialize: Full, retain: Pinned, lineage: Off } conserving=true lineage=Off // group_by
   15 Aggregate { group_key: [1], aggs: [(Count, Column(0))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 1, millis: 1000 }, materialize: Full, retain: Pinned, lineage: Off } conserving=true lineage=Off // count
   output available_balance = node 4
@@ -722,7 +722,7 @@ circuit (9 nodes):
   4 Aggregate { group_key: [1, 2], aggs: [(Sum, Column(3))] } in=[0] key=Some([1, 2]) arity=3 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Key } conserving=true lineage=Key // sum
   5 Filter { predicate: Binary { op: Ge, lhs: Column(4), rhs: LitInt(20666) } } in=[0] key=Some([1, 2]) arity=6 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 10, millis: 30000 }, materialize: Demand, retain: Evictable, lineage: Off } conserving=false lineage=Off // where
   6 Index { key: [1] } in=[5] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 10, millis: 30000 }, materialize: Demand, retain: Evictable, lineage: Off } conserving=false lineage=Off // group_by
-  7 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[5] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 10, millis: 30000 }, materialize: Demand, retain: Evictable, lineage: Off } conserving=false lineage=Off // sum
+  7 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[5] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Bounded { epochs: 10, millis: 30000 }, materialize: Demand, retain: Evictable, lineage: Off } conserving=false lineage=Off // sum
   8 Aggregate { group_key: [1, 2], aggs: [(Sum, Column(3))] } in=[0] key=Some([1, 2]) arity=3 anchor=Inherited contract=ServeContract { consistency: Snapshot, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // group by
   output available_balance = node 4
   output ledger_balance = node 2
@@ -734,7 +734,7 @@ codes: []
 circuit (3 nodes):
   0 Source { relation: "movements", is_base: true, confidential: [], anchor_key: [1, 2] } in=[] key=Some([1, 2]) arity=5 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // movements
   1 Index { key: [1] } in=[0] key=Some([1]) arity=5 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Off } conserving=true lineage=Off // group_by
-  2 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
+  2 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[0] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: LedgerConsistent, materialize: Demand, retain: Evictable, lineage: Off } conserving=true lineage=Off // sum
   output on_hand = node 2
 
 === niles/nilestream/observability.niles
@@ -1310,7 +1310,7 @@ codes: []
 circuit (3 nodes):
   0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1] } in=[] key=Some([1]) arity=5 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
   1 Filter { predicate: Binary { op: Eq, lhs: Column(1), rhs: LitInt(7) } } in=[0] key=Some([1]) arity=5 anchor=Inherited contract=ServeContract { consistency: Snapshot, materialize: Auto, retain: Evictable, lineage: Off } conserving=false lineage=Off // where
-  2 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[1] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Snapshot, materialize: Auto, retain: Evictable, lineage: Off } conserving=false lineage=Off // group by
+  2 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[1] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Snapshot, materialize: Auto, retain: Evictable, lineage: Off } conserving=false lineage=Off // group by
   output __wire_result = node 2
 
 === daemon: select acct, sum(amt) from postings where cur = 0 group by acct order by sum(amt) desc limit 10

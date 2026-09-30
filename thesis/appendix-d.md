@@ -259,7 +259,7 @@ The IR is a circuit language: nodes are operators, edges carry `Stream<Z<Row>>` 
 
 **The per-view knobs are built** — `serve { consistency, materialize, .. }` is checked by the compiler and read by the runtime. The global table is **specification**; the optimizer knobs in it belong to an optimizer that is not built (§4.6).
 
-**Per view:** `consistency` (six rungs), `freshness` (K, T), `checkpoint` (per-key interval C; Theorem 3.7), `materialize` (`absent | demand | full | spilled | tiered | auto`), `budget_share`, `retain` (`evictable | pinned | forever`), `lineage` (`off | key | full`), `backfill`, `upquery_parallelism`, `checkpoint`.
+**Per view:** `consistency` (six rungs), `freshness` (K, T), `checkpoint` (per-key interval C; Theorem 3.7), `materialize` (`absent | demand | full | spilled | tiered | auto`), `budget_share`, `retain` (`evictable | pinned | forever`), `lineage` (`off | key | full`), `max_rounds` (the round bound of the view's recursions, a positive whole number, default 1,000; cycle 15, the author's decision R2-e — `with recursive` states no measure, so this bound is its only guard, and it may be raised but not removed: NL0528), `backfill`, `upquery_parallelism`, `checkpoint`.
 
 **Global:** epoch period τ, durability mode, memory budget, tiering thresholds, optimizer aggressiveness and hysteresis, wire-protocol toggles, audit endpoints, UDF fuel limits.
 

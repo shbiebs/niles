@@ -188,3 +188,37 @@ fn a_cte_shadows_a_relation_only_inside_its_statement() {
     let (zb, _) = eval::try_run(&l.circuit, "b", &s).expect("b");
     assert_eq!((za.len(), zb.len()), (2, 1));
 }
+
+/// **The round bound is a serve knob** (the author's decision R2-e). Counting to 1,100 needs
+/// about 1,100 rounds: refused under the default bound of 1,000, answered when the view's
+/// contract raises it. The bound is still a bound: zero and a word are NL0528.
+#[test]
+fn a_view_may_raise_its_recursions_round_bound() {
+    let count = "with recursive c(k) as (select k from t union select k + 1 from c where k < 1100) select * from c";
+    let mut s = BTreeMap::new();
+    s.insert("t".to_string(), eval::zset(&[(&[1, 0, 0], 1)]));
+    let lower = |contract: &str| {
+        let src = format!("{SCHEMA}\nview v = sql {{ {count} }} {contract};\n");
+        let (prog, _) = parser::parse_program(&src);
+        let (cat, _) = resolve::resolve_program(&prog, 0);
+        lower::lower_program(&prog, &cat)
+    };
+    let (l, d) = lower("");
+    assert!(!d.has_errors(), "{:?}", d.items);
+    assert!(matches!(
+        eval::try_run(&l.circuit, "v", &s),
+        Err(eval::EvalError::NonTerminating { rounds: 1000, .. })
+    ));
+    let (l, d) = lower("serve { consistency: snapshot, materialize: auto, max_rounds: 1200 }");
+    assert!(!d.has_errors(), "{:?}", d.items);
+    let (z, _) = eval::try_run(&l.circuit, "v", &s).expect("converges under the raised bound");
+    assert_eq!(z.len(), 1100);
+    for bad in ["max_rounds: 0", "max_rounds: many"] {
+        let (_, d) = lower(&format!("serve {{ consistency: snapshot, {bad} }}"));
+        assert!(
+            d.items.iter().any(|x| x.code == "NL0528"),
+            "{bad}: {:?}",
+            d.items
+        );
+    }
+}

@@ -42,6 +42,7 @@ pub fn lower_program(prog: &Program, cat: &Catalog) -> (Lowered, Diagnostics) {
         params: Vec::new(),
         pins: Vec::new(),
         system_time: false,
+        max_rounds: DEFAULT_MAX_ROUNDS,
     };
     for item in &prog.items {
         lx.item(item);
@@ -83,7 +84,13 @@ struct Lx<'a> {
     /// Whether the statement being lowered names `recorded_at`, so that its from-list reads
     /// each base's system-time source rather than the base (cycle 15, C15-05b).
     system_time: bool,
+    /// The round bound of the view being lowered's recursions: its contract's `max_rounds`,
+    /// or [`DEFAULT_MAX_ROUNDS`] (the author's decision R2-e, cycle 15).
+    max_rounds: u32,
 }
+
+/// The round bound a recursion gets when its view's contract does not set `max_rounds`.
+pub const DEFAULT_MAX_ROUNDS: u32 = 1_000;
 
 /// Where a column comes from: see [`Lx::origin`].
 struct Origin {
@@ -115,6 +122,10 @@ impl<'a> Lx<'a> {
 
     fn view(&mut self, v: &ViewDecl) {
         let contract = self.contract_of(&v.name.text);
+        let Some(rounds) = self.contract_rounds(v) else {
+            return;
+        };
+        self.max_rounds = rounds;
         let before = self.d.items.len();
         let Some(id) = self.expr(&v.body, contract) else {
             if self.d.items.len() > before {
@@ -134,6 +145,35 @@ impl<'a> Lx<'a> {
         self.circuit.nodes[id as usize].contract =
             niles_ir::circuit::Checked::new("contract", contract);
         self.circuit.set_output(v.name.text.clone(), id);
+    }
+
+    /// **The `max_rounds` serve knob** (cycle 15; the author's decision R2-e). A recursion's
+    /// round bound is its only guard where no measure is written (`with recursive`), and
+    /// 1,000 refused a closure over a longer chain although it has an answer. A view may
+    /// declare a deeper bound: `serve { .., max_rounds: 5000 }`. It stays a bound — a
+    /// positive integer the IR's `u32` holds — so a recursion that does not converge by then
+    /// is still refused at run time rather than left to stall an epoch. NL0528 otherwise.
+    fn contract_rounds(&mut self, v: &ViewDecl) -> Option<u32> {
+        let Some(value) = v.contract.as_ref().and_then(|c| c.get("max_rounds")) else {
+            return Some(DEFAULT_MAX_ROUNDS);
+        };
+        if let ContractValue::Int(n, _) = value {
+            if let Ok(r) = u32::try_from(*n) {
+                if r > 0 {
+                    return Some(r);
+                }
+            }
+        }
+        let span = v.contract.as_ref().map(|c| c.span).unwrap_or(v.span);
+        self.d.push(
+            Diagnostic::error("NL0528", "`max_rounds` is a positive whole number of rounds")
+                .primary(span, "in this serve contract")
+                .note(format!(
+                    "the bound is what stops a recursion that does not converge; it may be raised, up to {}, and not removed",
+                    u32::MAX
+                )),
+        );
+        None
     }
 
     fn contract_of(&self, view: &str) -> ServeContract {
@@ -751,6 +791,12 @@ impl<'a> Lx<'a> {
             }
         }
         // A currency pinned by an equality filter on the way down.
+        self.filter_pin(&o, &cur_col).map(Scalar::LitInt)
+    }
+
+    /// The currency code an equality filter below `o`'s column pins its relation's currency
+    /// column `cur_col` to, if one does.
+    fn filter_pin(&self, o: &Origin, cur_col: &str) -> Option<i128> {
         for f in &o.filters {
             let n = self.circuit.node(*f);
             let Op::Filter { predicate } = &n.op else {
@@ -778,7 +824,7 @@ impl<'a> Lx<'a> {
                         {
                             if let Some(q) = self.origin(below, *k) {
                                 if q.relation == o.relation && q.column == cur_col {
-                                    return Some(Scalar::LitInt(*v));
+                                    return Some(*v);
                                 }
                             }
                         }
@@ -929,7 +975,7 @@ impl<'a> Lx<'a> {
                 let id = self.circuit.add(
                     Op::Fixpoint {
                         measure: m,
-                        max_rounds: 1_000,
+                        max_rounds: self.max_rounds,
                     },
                     vec![input, produced],
                     c,
@@ -1048,6 +1094,56 @@ impl<'a> Lx<'a> {
         self.schemas.insert(id, cols);
         self.sources.insert(key, id);
         Some(id)
+    }
+
+    /// **An aggregate's amount, carrying its currency where the query leaves it open**
+    /// (cycle 15; the author's decision R2-d, closing F-05b-6).
+    ///
+    /// `select acct, sum(amt) from postings group by acct` over a usd and an eur posting
+    /// answered their integer sum in the reference evaluator — adding two currencies —
+    /// while the server refused the same query. The amount is now tagged with its row's
+    /// currency column, so the fold refuses two currencies as a comparison does. Only where
+    /// needed: when the group key holds that currency column, or a filter, a pin or a
+    /// `Money<c>` type fixes the currency, every group is already one currency and the
+    /// argument stays the bare column — which is what the served balance view and the
+    /// engine's fast paths are built on. `count` reads no amount.
+    fn money_argument(&self, input: NodeId, v: Scalar, group_key: &[ColIdx], agg: Agg) -> Scalar {
+        if agg == Agg::Count {
+            return v;
+        }
+        let Scalar::Column(k) = v else {
+            return v;
+        };
+        if !self.is_money_column(input, k) {
+            return v;
+        }
+        match self.currency_of_amount(input, k) {
+            Some(Scalar::Column(j)) if !group_key.contains(&j) && !self.pinned_below(input, k) => {
+                Scalar::InCurrency {
+                    amount: Box::new(Scalar::Column(k)),
+                    currency: Box::new(Scalar::Column(j)),
+                }
+            }
+            _ => v,
+        }
+    }
+
+    /// Whether a filter below column `col` of `input` pins its relation's currency column.
+    fn pinned_below(&self, input: NodeId, col: ColIdx) -> bool {
+        let Some(o) = self.origin(input, col) else {
+            return false;
+        };
+        let Some(rel) = self.cat.relations.get(&o.relation) else {
+            return false;
+        };
+        let Some(cur_col) = rel
+            .columns
+            .iter()
+            .find(|c| matches!(&c.ty, Ty::Path { path, .. } if path.last().text == "Currency"))
+        else {
+            return false;
+        };
+        self.filter_pin(&o, &cur_col.name).is_some()
     }
 
     /// Whether column `col` of `node` is declared `Money` (with or without a currency).
@@ -1254,6 +1350,7 @@ impl<'a> Lx<'a> {
                         return None;
                     }
                 };
+                let value = self.money_argument(input, value, &group_key, agg);
                 let mut names: Vec<String> = group_key
                     .iter()
                     .filter_map(|i| in_schema.get(*i as usize).cloned())
@@ -2056,9 +2153,9 @@ impl<'a> Lx<'a> {
     /// bag with the multiplicities of the working-table iteration, and the fixpoint keeps a
     /// set, so it would answer a different query under the same text.
     ///
-    /// **The guard.** SQL writes no measure. The round bound (1,000) is the only guard, and
-    /// the measure slot carries `null` to say so rather than a constant that would read as a
-    /// termination argument. A recursion that has not converged by then is refused at run
+    /// **The guard.** SQL writes no measure. The round bound (1,000, or the view's
+    /// `max_rounds`) is the only guard, and the measure slot carries `null` to say so rather
+    /// than a constant that would read as a termination argument. A recursion that has not converged by then is refused at run
     /// time (`NonTerminating`), which stops the epoch instead of stalling it.
     fn recursive_cte(&mut self, cte: &Cte, c: ServeContract) -> Option<NodeId> {
         let name = cte.name.text.as_str();
@@ -2148,7 +2245,7 @@ impl<'a> Lx<'a> {
         let id = self.circuit.add(
             Op::Fixpoint {
                 measure: Scalar::LitNull,
-                max_rounds: 1_000,
+                max_rounds: self.max_rounds,
             },
             vec![base_node, produced],
             c,
@@ -2352,6 +2449,7 @@ impl<'a> Lx<'a> {
                         );
                         return None;
                     };
+                    let v = self.money_argument(cur, v, &declared_key, a);
                     aggs.push((a, v));
                     continue;
                 }
@@ -2562,7 +2660,7 @@ impl<'a> Lx<'a> {
                     let found = lowered.and_then(|v| {
                         agg_columns
                             .iter()
-                            .find(|((ka, kv), _)| *ka == a && *kv == v)
+                            .find(|((ka, kv), _)| *ka == a && *untagged(kv) == v)
                             .map(|(_, i)| *i)
                     });
                     match found {
@@ -3390,6 +3488,15 @@ fn collect_order_keys(e: &Expr, asc: bool, out: &mut Vec<(String, bool)>) -> Res
 }
 
 /// Whether a projection list is `*` — the identity, which emits no `Map`.
+/// An aggregate's argument without the currency tag [`Lx::money_argument`] may have given
+/// it, for matching an `order by` or `having` aggregate against the one the query computes.
+fn untagged(s: &Scalar) -> &Scalar {
+    match s {
+        Scalar::InCurrency { amount, .. } => amount,
+        other => other,
+    }
+}
+
 /// Whether an expression holds a window function anywhere.
 fn contains_window(e: &Expr) -> bool {
     if matches!(e, Expr::Window { .. }) {
@@ -3539,7 +3646,7 @@ impl Lx<'_> {
             let found = lowered.and_then(|v| {
                 agg_columns
                     .iter()
-                    .find(|((ka, kv), _)| *ka == a && *kv == v)
+                    .find(|((ka, kv), _)| *ka == a && *untagged(kv) == v)
                     .map(|(_, i)| *i)
             });
             let Some(name) = found.and_then(|i| out_names.get(i as usize)) else {

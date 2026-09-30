@@ -239,6 +239,9 @@ struct WaitPlan {
     acct: u64,
     cur: u32,
     with_currency: bool,
+    /// Whether the sum's amount is tagged with its currency (decision R2-d), so the answer
+    /// is money in `cur`, as the fold and the reference evaluator give it.
+    money: bool,
 }
 
 /// What a read cost, in the units that distinguish one parity result from another.
@@ -859,11 +862,10 @@ impl RevEngine {
     /// holds, because a schema may declare three currencies and a base hold one, and refusing
     /// that fold would refuse the ordinary case for a hypothetical.
     fn cross_currency_fold(&self, p: &crate::scan_fold::FoldPlan) -> Option<Vec<u32>> {
-        use niles_ir::operator::{Agg, Scalar};
         const CUR: u16 = 2;
         const AMT: u16 = 3;
 
-        if p.aggs() != [(Agg::Sum, Scalar::Column(AMT))] {
+        if !sums_amount(p.aggs()) {
             return None;
         }
         if p.group_key().contains(&CUR) {
@@ -1144,6 +1146,7 @@ impl RevEngine {
             acct,
             cur,
             with_currency,
+            money,
         } = plan;
         match ticket.wait() {
             Some(joined) => {
@@ -1161,6 +1164,7 @@ impl RevEngine {
                     acct,
                     cur,
                     with_currency,
+                    money,
                     joined,
                     anchor,
                 ))
@@ -1531,6 +1535,7 @@ impl crate::session::Serving for std::sync::RwLock<RevEngine> {
                         acct,
                         cur,
                         with_currency,
+                        money,
                     } = plan;
                     let joined = ticket.wait();
                     self.read()
@@ -1542,6 +1547,7 @@ impl crate::session::Serving for std::sync::RwLock<RevEngine> {
                             acct,
                             cur,
                             with_currency,
+                            money,
                             j,
                             anchor,
                         ));
@@ -1702,7 +1708,6 @@ impl RevEngine {
         circuit: &niles_ir::circuit::Circuit,
         output: &str,
     ) -> Option<bool> {
-        use niles_ir::operator::{Agg, Scalar};
         const ACCT: u16 = 1;
         const CUR: u16 = 2;
         const AMT: u16 = 3;
@@ -1710,7 +1715,7 @@ impl RevEngine {
         if circuit.outputs.get(output) != Some(&p.node) || !p.steps_are_empty() {
             return None;
         }
-        if p.aggs() != [(Agg::Sum, Scalar::Column(AMT))] {
+        if !sums_amount(p.aggs()) {
             return None;
         }
         let with_currency = match p.group_key() {
@@ -1819,6 +1824,7 @@ impl RevEngine {
         use niles_ir::value::Value;
 
         let with_currency = self.report_shape(p, circuit, output)?;
+        let money = amount_is_money(p);
         crate::rev_engine::report_race_hook::pause();
 
         // **One guard, and the certification is inside it — A10-02.**
@@ -1853,7 +1859,14 @@ impl RevEngine {
             if with_currency {
                 row.push(Value::Int(*cur as i128));
             }
-            row.push(Value::Int(value));
+            row.push(if money {
+                Value::Money {
+                    minor: value,
+                    currency: *cur as u32,
+                }
+            } else {
+                Value::Int(value)
+            });
             rows.push((row, 1));
         }
 
@@ -1891,7 +1904,6 @@ impl RevEngine {
         acct: u64,
         anchor: u64,
     ) -> ViewAnswer {
-        use niles_ir::operator::{Agg, Scalar};
         /// Column positions in `postings`: `txn, acct, cur, amt, idem`.
         const ACCT: u16 = 1;
         const CUR: u16 = 2;
@@ -1900,7 +1912,7 @@ impl RevEngine {
         if circuit.outputs.get(output) != Some(&p.node) || !p.filters_only() {
             return ViewAnswer::NotApplicable;
         }
-        if p.aggs() != [(Agg::Sum, Scalar::Column(AMT))] {
+        if !sums_amount(p.aggs()) {
             return ViewAnswer::NotApplicable;
         }
         // `group by acct` and `group by acct, cur` are the two spellings of "this account's
@@ -2030,6 +2042,7 @@ impl RevEngine {
                     acct,
                     cur,
                     with_currency,
+                    money: amount_is_money(p),
                 });
             }
             nilestream_core::rev::ReadOutcome::Fold(t) => {
@@ -2153,6 +2166,7 @@ impl RevEngine {
             acct,
             cur,
             with_currency,
+            amount_is_money(p),
             nilestream_core::rev::Joined {
                 answer: answered,
                 // The owner reached this line through a hit or its own fold, and the
@@ -2177,6 +2191,7 @@ impl RevEngine {
         acct: u64,
         cur: u32,
         with_currency: bool,
+        money: bool,
         joined: nilestream_core::rev::Joined,
         anchor: u64,
     ) -> crate::session::Rows {
@@ -2194,7 +2209,14 @@ impl RevEngine {
         if with_currency {
             row.push(Value::Int(cur as i128));
         }
-        row.push(Value::Int(joined.answer.value));
+        row.push(if money {
+            Value::Money {
+                minor: joined.answer.value,
+                currency: cur,
+            }
+        } else {
+            Value::Int(joined.answer.value)
+        });
         let mut z = niles_ir::eval::ZSet::new();
         z.insert(row, 1);
         crate::session::Rows {
@@ -2453,7 +2475,6 @@ pub fn serve_path_of(
     circuit: &niles_ir::circuit::Circuit,
     output: &str,
 ) -> ServePath {
-    use niles_ir::operator::{Agg, Scalar};
     const CUR: u16 = 2;
     const AMT: u16 = 3;
     let Some(p) = plan else {
@@ -2463,7 +2484,7 @@ pub fn serve_path_of(
     if sole.is_some()
         && circuit.outputs.get(output) == Some(&p.node)
         && p.filters_only()
-        && p.aggs() == [(Agg::Sum, Scalar::Column(AMT))]
+        && sums_amount(p.aggs())
         && matches!(p.group_key(), [ACCT_COL] | [ACCT_COL, CUR])
     {
         return ServePath::View;
@@ -2494,6 +2515,38 @@ pub fn serve_path_of(
 /// source's columns where they were (`Filter`, `AsOf`, `ValidAt`), and one filter on that
 /// chain is exactly `acct = k`. Every postings row then meets that filter before it meets
 /// anything else, which is the whole of the soundness argument.
+/// **Whether a plan's aggregates are exactly `sum(amt)`** — the shape the balance view
+/// maintains and the fast paths answer.
+///
+/// Since the author's decision R2-d (cycle 15) the lowering tags a sum's amount with its
+/// row's currency column where the query's key does not fix the currency, so `sum(amt)
+/// group by acct` arrives as `sum(amt in cur)`. That is the same sum: this engine already
+/// refuses it over a base holding two currencies (`cross_currency_fold`) and answers it
+/// from the view only when the base holds one. So both spellings are this shape, and the
+/// serve paths do not change with the tag.
+fn sums_amount(aggs: &[(niles_ir::operator::Agg, niles_ir::operator::Scalar)]) -> bool {
+    use niles_ir::operator::{Agg, Scalar};
+    const CUR: u16 = 2;
+    const AMT: u16 = 3;
+    match aggs {
+        [(Agg::Sum, Scalar::Column(AMT))] => true,
+        [(Agg::Sum, Scalar::InCurrency { amount, currency })] => {
+            matches!(**amount, Scalar::Column(AMT)) && matches!(**currency, Scalar::Column(CUR))
+        }
+        _ => false,
+    }
+}
+
+/// Whether a plan's sum carries its amount's currency (decision R2-d). The view holds the
+/// integer; an answer from it is then money in the key's currency, which is what the fold
+/// and the reference evaluator answer, so the paths stay indistinguishable above them.
+fn amount_is_money(p: &crate::scan_fold::FoldPlan) -> bool {
+    matches!(
+        p.aggs(),
+        [(_, niles_ir::operator::Scalar::InCurrency { .. })]
+    )
+}
+
 fn account_predicate(circuit: &niles_ir::circuit::Circuit) -> Option<u64> {
     use niles_ir::operator::{Op, Scalar, ScalarOp};
     const ACCT: u16 = ACCT_COL;
@@ -4532,6 +4585,7 @@ mod lock_order_tests {
             4242,
             0,
             false,
+            false,
             Joined {
                 answer: nilestream_core::rev::Anchored {
                     value: 0,
@@ -4551,6 +4605,7 @@ mod lock_order_tests {
             columns,
             4242,
             0,
+            false,
             false,
             Joined {
                 answer: nilestream_core::rev::Anchored {

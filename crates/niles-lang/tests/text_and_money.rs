@@ -222,3 +222,44 @@ fn in_a_self_join_an_amount_takes_its_own_sides_currency() {
         other => panic!("expected a currency mismatch, got {other:?}"),
     }
 }
+
+/// **A sum across currencies is refused by the reference evaluator** (the author's decision
+/// R2-d, closing F-05b-6). It answered `-200` here — usd -5.00 plus eur +3.00 — while the
+/// server refused the same query.
+#[test]
+fn a_sum_whose_key_leaves_the_currency_open_refuses_two_currencies() {
+    for view in [
+        "view v = sql { select acct, sum(amt) from postings group by acct };",
+        "view v = postings.group_by(|p| p.acct).sum(|p| p.amt);",
+    ] {
+        match run(view) {
+            Err(EvalError::Mismatch {
+                why: Mismatch::Currencies(_, _),
+                ..
+            }) => {}
+            other => panic!("{view}: expected a currency mismatch, got {other:?}"),
+        }
+    }
+    // Where the key or a filter fixes the currency, each group is one currency, the argument
+    // stays the bare column, and the sums answer.
+    assert_eq!(
+        run("view v = sql { select acct, cur, sum(amt) from postings group by acct, cur };")
+            .unwrap(),
+        ["7 0 -500 x1", "7 1 300 x1", "8 0 500 x1", "8 1 -300 x1"]
+    );
+    assert_eq!(
+        run("view v = sql { select acct, sum(amt) from postings where cur = \"usd\" group by acct };")
+            .unwrap(),
+        ["7 -500 x1", "8 500 x1"]
+    );
+    let (l, _) =
+        lowered("view v = sql { select acct, cur, sum(amt) from postings group by acct, cur };");
+    assert!(
+        l.circuit.nodes.iter().all(|n| !matches!(
+            &n.op,
+            niles_ir::operator::Op::Aggregate { aggs, .. }
+                if aggs.iter().any(|(_, s)| matches!(s, niles_ir::operator::Scalar::InCurrency { .. }))
+        )),
+        "the balance shape keeps its bare argument"
+    );
+}

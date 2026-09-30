@@ -407,6 +407,9 @@ struct Acc {
     /// and zero respectively. Losing that distinction is §1.1.1's defect in aggregate form.
     total: i128,
     any: bool,
+    /// The currency of the money summed, when the amount is tagged with one (decision
+    /// R2-d): the sum is then money in it, as `eval::try_fold` makes it.
+    currency: Option<u32>,
 }
 
 /// **The fold, fed one base record at a time.**
@@ -579,6 +582,7 @@ impl<'p> Folder<'p> {
                 Acc {
                     total: 0,
                     any: false,
+                    currency: None,
                 },
             );
         }
@@ -595,8 +599,23 @@ impl<'p> Folder<'p> {
                     // The served ledger's amount column is an integer in the base row; the
                     // plan refuses a fold across currencies before it runs (`rev_engine`'s
                     // cross-currency refusal), so a money value here is one currency's.
-                    Ok(Value::Int(x)) | Ok(Value::Money { minor: x, .. }) => {
+                    Ok(Value::Int(x)) => {
                         slot[i].total += x;
+                        slot[i].any = true;
+                    }
+                    Ok(Value::Money { minor, currency }) => {
+                        match slot[i].currency {
+                            Some(c) if c != currency => {
+                                if self.error.is_none() {
+                                    self.error = Some(eval::EvalError::Mismatch {
+                                        op: "sum",
+                                        why: niles_ir::value::Mismatch::Currencies(c, currency),
+                                    });
+                                }
+                            }
+                            _ => slot[i].currency = Some(currency),
+                        }
+                        slot[i].total += minor;
                         slot[i].any = true;
                     }
                     Ok(Value::Null) => {}
@@ -639,7 +658,13 @@ impl<'p> Folder<'p> {
                 row.push(match a {
                     Agg::Count => Value::Int(accs[i].total),
                     // `sum` over no non-null rows is null, not zero.
-                    Agg::Sum if accs[i].any => Value::Int(accs[i].total),
+                    Agg::Sum if accs[i].any => match accs[i].currency {
+                        Some(currency) => Value::Money {
+                            minor: accs[i].total,
+                            currency,
+                        },
+                        None => Value::Int(accs[i].total),
+                    },
                     _ => Value::Null,
                 });
             }

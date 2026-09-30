@@ -114,12 +114,7 @@ const NOT_COMPILED: &[(&str, &str)] = &[
     ),
     // --- A deliberate refusal, which is not a gap. ---
     // (`cross` left this list in cycle 15: `a.cross_join(b)` lowers to the product, C15-05b.)
-    (
-        "like",
-        "`like \"ac%\"` is refused with NL0521 (cycle 14, R2-06): the IR's values are \
-               integers, and a text pattern evaluated as 0, so `like` answered an equality \
-               with the first currency's code; a string lowers only as a currency's name",
-    ),
+    // (`like` left this list in cycle 15: a string is a text value, C15-05b.)
     (
         "Self",
         "an outline: `Self { amt: 0.00 usd }` needs the type whose impl block it is in",

@@ -320,6 +320,9 @@ fn every_committed_program_lowers_to_its_recorded_circuit() {
         .iter()
         .find_map(|(name, body)| {
             let old = a.iter().find(|(n, _)| n == name).map(|(_, o)| o.as_str())?;
+            if old == body {
+                return None;
+            }
             let line = old
                 .lines()
                 .zip(body.lines())

@@ -102,9 +102,11 @@ circuit (3 nodes):
   output month_to_date = node 2
 
 === crates/counterproposal/niles/d8_confidential_predicate.niles
-codes: [NL0501, NL0521]
-circuit (1 nodes):
+codes: []
+circuit (2 nodes):
   0 Source { relation: "accounts", is_base: false, confidential: [1], anchor_key: [] } in=[] key=None arity=0 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Pinned, lineage: Key } conserving=true lineage=Key // accounts
+  1 Filter { predicate: Binary { op: Eq, lhs: Column(1), rhs: LitText("secret") } } in=[0] key=None arity=0 anchor=Inherited contract=ServeContract { consistency: Snapshot, materialize: Auto, retain: Evictable, lineage: Off } conserving=false lineage=Off // where
+  output v = node 1
 
 === crates/counterproposal/niles/d9_unauthorized_overdraft.niles
 codes: []

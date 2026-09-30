@@ -40,6 +40,7 @@ pub fn lower_program(prog: &Program, cat: &Catalog) -> (Lowered, Diagnostics) {
         sides: HashMap::new(),
         same: HashMap::new(),
         params: Vec::new(),
+        pins: Vec::new(),
     };
     for item in &prog.items {
         lx.item(item);
@@ -75,6 +76,19 @@ struct Lx<'a> {
     /// A two-parameter join closure's parameters while its residual is lowered:
     /// `|l, r| r.cur == l.cur` reads `l` as the left side's columns and `r` as the right's.
     params: Vec<(String, ColIdx, ColIdx)>,
+    /// Currencies pinned by a conjunct of the `and`-chain being lowered: `(node, column,
+    /// code)` for each `cur = "eur"` beside the amounts it governs (cycle 15, C15-05b).
+    pins: Vec<(NodeId, ColIdx, i128)>,
+}
+
+/// Where a column comes from: see [`Lx::origin`].
+struct Origin {
+    relation: String,
+    column: String,
+    /// `sum`, `min` or `max` between the base column and this one.
+    agg: Option<Agg>,
+    /// The filter nodes on the way down, nearest first.
+    filters: Vec<NodeId>,
 }
 
 impl<'a> Lx<'a> {
@@ -381,6 +395,349 @@ impl<'a> Lx<'a> {
 
     /// [`Lx::column_ref`] for a caller with its own "names no column" diagnostic: `None` when
     /// the reference was refused (and said why), `Some(None)` when it names no column.
+    /// Lower `lhs and rhs` (pins already collected).
+    fn and_chain(&mut self, input: NodeId, lhs: &Expr, rhs: &Expr) -> Option<Scalar> {
+        Some(Scalar::Binary {
+            op: ScalarOp::And,
+            lhs: Box::new(self.scalar(input, lhs)?),
+            rhs: Box::new(self.scalar(input, rhs)?),
+        })
+    }
+
+    /// Every `currency column = "declared currency"` conjunct of an `and`-chain at `input`.
+    fn collect_pins(&mut self, input: NodeId, e: &Expr) {
+        for c in conjuncts(e) {
+            let Expr::Binary {
+                op: BinOp::Eq,
+                lhs,
+                rhs,
+                ..
+            } = c
+            else {
+                continue;
+            };
+            let (col_e, text) = match (&**lhs, &**rhs) {
+                (Expr::Str(t, _), other) | (other, Expr::Str(t, _)) => (other, t),
+                _ => continue,
+            };
+            let Some(code) = self.cat.currencies.get(text.as_str()).map(|c| c.code) else {
+                continue;
+            };
+            let Some(col) = self.quiet_column(input, col_e) else {
+                continue;
+            };
+            let is_currency = self
+                .origin(input, col)
+                .and_then(|o| self.origin_column(&o).cloned())
+                .is_some_and(
+                    |ci| matches!(&ci.ty, Ty::Path { path, .. } if path.last().text == "Currency"),
+                );
+            if is_currency {
+                self.pins.push((input, col, code as i128));
+            }
+        }
+    }
+
+    /// **A comparison or a sum whose operands' types matter** (cycle 15, C15-05b):
+    ///
+    /// * a string against a column: the column's declared type decides. A `Currency`
+    ///   column takes a declared currency's name as its code and refuses any other string
+    ///   (NL0521); a `Text` column takes the string as text; a column of any other type
+    ///   refuses it (NL0521), because the comparison could only answer by coercion;
+    /// * a money literal against an amount column (directly, or through `sum`/`min`/`max`):
+    ///   the amount is lowered with its currency (`Scalar::InCurrency`), so the evaluator
+    ///   refuses a comparison across currencies. If the currency cannot be found, the
+    ///   comparison is refused here (NL0522).
+    ///
+    /// `None` when neither case applies; `Some(None)` when it applies and refused.
+    fn typed_binary(
+        &mut self,
+        input: NodeId,
+        op: BinOp,
+        lhs: &Expr,
+        rhs: &Expr,
+    ) -> Option<Option<Scalar>> {
+        let sop = match op {
+            BinOp::Eq => ScalarOp::Eq,
+            BinOp::Ne => ScalarOp::Ne,
+            BinOp::Lt => ScalarOp::Lt,
+            BinOp::Le => ScalarOp::Le,
+            BinOp::Gt => ScalarOp::Gt,
+            BinOp::Ge => ScalarOp::Ge,
+            BinOp::Like => ScalarOp::Like,
+            BinOp::Add => ScalarOp::Add,
+            BinOp::Sub => ScalarOp::Sub,
+            _ => return None,
+        };
+        let comparison = !matches!(sop, ScalarOp::Add | ScalarOp::Sub);
+        // Which side is the literal, and which the column.
+        let (lit, other, lit_first) = match (lhs, rhs) {
+            (l @ (Expr::Str(..) | Expr::Money { .. }), r) => (l, r, true),
+            (l, r @ (Expr::Str(..) | Expr::Money { .. })) => (r, l, false),
+            _ => return None,
+        };
+        let col = self.quiet_column(input, other)?;
+        let o = self.origin(input, col)?;
+        let info = self.origin_column(&o)?;
+        let ty_name = match &info.ty {
+            Ty::Path { path, .. } => path.last().text.clone(),
+            _ => String::new(),
+        };
+        let col_name = o.column.clone();
+        let other_scalar = |this: &mut Self| this.scalar(input, other);
+        let (l, r) = match lit {
+            Expr::Str(text, span) if comparison && o.agg.is_none() => {
+                let lit_scalar = match ty_name.as_str() {
+                    "Currency" => match self.cat.currencies.get(text.as_str()) {
+                        Some(c) => Scalar::LitInt(c.code as i128),
+                        None => {
+                            self.d.push(
+                                Diagnostic::error(
+                                    "NL0521",
+                                    format!("\"{text}\" is not a declared currency, and `{col_name}` is a currency column"),
+                                )
+                                .primary(*span, "not the name of a declared currency")
+                                .note("a currency column holds a declared currency's code; a string that names none can match no row, and until cycle 14 it evaluated as the first currency's code"),
+                            );
+                            return Some(None);
+                        }
+                    },
+                    "Text" | "String" | "str" => Scalar::LitText(text.clone()),
+                    other_ty => {
+                        self.d.push(
+                            Diagnostic::error(
+                                "NL0521",
+                                format!("a string compared with `{col_name}`, which is `{other_ty}`"),
+                            )
+                            .primary(*span, "a string here")
+                            .note("no coercion: a comparison between a string and a number is answered by neither"),
+                        );
+                        return Some(None);
+                    }
+                };
+                let Some(o_s) = other_scalar(self) else {
+                    return Some(None);
+                };
+                (lit_scalar, o_s)
+            }
+            Expr::Money { .. } if info.money_currency.is_some() => {
+                // The literal first: one that does not lower (an undeclared currency, NL0506)
+                // refuses the comparison here, rather than falling back and being lowered,
+                // and reported, a second time.
+                let Some(lit_s) = self.scalar(input, lit) else {
+                    return Some(None);
+                };
+                let Some(o_s) = other_scalar(self) else {
+                    return Some(None);
+                };
+                let Some(cur) = self.currency_of_amount(input, col) else {
+                    self.d.push(
+                        Diagnostic::error(
+                            "NL0522",
+                            format!("the currency of `{col_name}` is not known here, so it cannot meet a money literal"),
+                        )
+                        .primary(lit.span(), "a money literal")
+                        .secondary(other.span(), "an amount in an unknown currency")
+                        .note("group by the currency column, filter on it, or declare the column `Money<c>`: then the amount carries its currency and a literal in another one is refused at run time")
+                        .note("until cycle 15 the two numbers were compared, so `sum(amt) < 0.00 eur` over usd rows answered (E30's F13)"),
+                    );
+                    return Some(None);
+                };
+                (
+                    lit_s,
+                    Scalar::InCurrency {
+                        amount: Box::new(o_s),
+                        currency: Box::new(cur),
+                    },
+                )
+            }
+            _ => return None,
+        };
+        let (lhs_s, rhs_s) = if lit_first { (l, r) } else { (r, l) };
+        Some(Some(Scalar::Binary {
+            op: sop,
+            lhs: Box::new(lhs_s),
+            rhs: Box::new(rhs_s),
+        }))
+    }
+
+    /// **Where a column comes from** (cycle 15, C15-05b): the relation and column it reads,
+    /// whether an aggregate (`sum`/`min`/`max`) stands between, and the filters on the way,
+    /// found by walking the circuit down from `node`. `None` where a computed expression
+    /// makes the column something the base does not hold.
+    ///
+    /// The lowering needs to know two things it could not see before: whether a string is
+    /// compared with a currency column or a text column (decision 6), and which currency an
+    /// amount is in where it meets a money literal (decision 8).
+    fn origin(&self, node: NodeId, col: ColIdx) -> Option<Origin> {
+        let mut filters = Vec::new();
+        let (mut id, mut c, mut agg) = (node, col, None);
+        for _ in 0..self.circuit.nodes.len() + 1 {
+            let n = self.circuit.node(id);
+            match &n.op {
+                Op::Source { relation, .. } => {
+                    let column = self.schema_of(id).get(c as usize)?.clone();
+                    return Some(Origin {
+                        relation: relation.clone(),
+                        column,
+                        agg,
+                        filters,
+                    });
+                }
+                Op::Filter { .. } => {
+                    filters.push(id);
+                    id = *n.inputs.first()?;
+                }
+                Op::OrderBy { .. }
+                | Op::Limit { .. }
+                | Op::AsOf { .. }
+                | Op::ValidAt { .. }
+                | Op::Distinct
+                | Op::Index { .. }
+                | Op::Union => id = *n.inputs.first()?,
+                Op::Join { .. } => {
+                    let la = self.schema_of(n.inputs[0]).len() as ColIdx;
+                    if c < la {
+                        id = n.inputs[0];
+                    } else {
+                        c -= la;
+                        id = *n.inputs.get(1)?;
+                    }
+                }
+                Op::Map { exprs } => match exprs.get(c as usize)? {
+                    Scalar::Column(k) => {
+                        c = *k;
+                        id = *n.inputs.first()?;
+                    }
+                    _ => return None,
+                },
+                Op::Aggregate { group_key, aggs } => {
+                    if (c as usize) < group_key.len() {
+                        c = group_key[c as usize];
+                    } else {
+                        match aggs.get(c as usize - group_key.len())? {
+                            (a @ (Agg::Sum | Agg::Min | Agg::Max), Scalar::Column(k))
+                                if agg.is_none() =>
+                            {
+                                agg = Some(*a);
+                                c = *k;
+                            }
+                            _ => return None,
+                        }
+                    }
+                    id = *n.inputs.first()?;
+                }
+                _ => return None,
+            }
+        }
+        None
+    }
+
+    /// The declared column an origin names.
+    fn origin_column(&self, o: &Origin) -> Option<&crate::resolve::ColumnInfo> {
+        self.cat
+            .relations
+            .get(&o.relation)?
+            .columns
+            .iter()
+            .find(|c| c.name == o.column)
+    }
+
+    /// The column an expression names at `input`, if it names one, without reporting.
+    fn quiet_column(&mut self, input: NodeId, e: &Expr) -> Option<ColIdx> {
+        let e = match e {
+            Expr::Closure { body, .. } => body,
+            other => other,
+        };
+        if !matches!(e, Expr::Field { .. } | Expr::Path(_)) {
+            return None;
+        }
+        let before = self.d.items.len();
+        let r = self.column_ref(input, e);
+        self.d.items.truncate(before);
+        r
+    }
+
+    /// **The currency of an amount** at `input`'s column `col`, as a scalar the evaluator
+    /// can read (decision 8): the column's declared `Money<c>`; else the row's own currency
+    /// column, when the relation has one and it survives to `input`; else a currency an
+    /// equality filter upstream pins (`where cur = "usd"`). `None` when none of these holds.
+    fn currency_of_amount(&self, input: NodeId, col: ColIdx) -> Option<Scalar> {
+        let o = self.origin(input, col)?;
+        let info = self.origin_column(&o)?;
+        match &info.money_currency {
+            Some(Some(cur)) => {
+                let code = self.cat.currencies.get(cur)?.code;
+                return Some(Scalar::LitInt(code as i128));
+            }
+            Some(None) => {}
+            None => return None,
+        }
+        let rel = self.cat.relations.get(&o.relation)?;
+        let cur_col = rel
+            .columns
+            .iter()
+            .find(|c| matches!(&c.ty, Ty::Path { path, .. } if path.last().text == "Currency"))?
+            .name
+            .clone();
+        // A conjunct of the predicate being lowered that pins this relation's currency.
+        for (node, k, code) in self.pins.iter().rev() {
+            if *node == input {
+                if let Some(q) = self.origin(input, *k) {
+                    if q.relation == o.relation && q.column == cur_col {
+                        return Some(Scalar::LitInt(*code));
+                    }
+                }
+            }
+        }
+        // The row's own currency column, where it is still a column of `input`.
+        for j in 0..self.schema_of(input).len() as ColIdx {
+            if let Some(q) = self.origin(input, j) {
+                if q.relation == o.relation && q.column == cur_col && q.agg.is_none() {
+                    return Some(Scalar::Column(j));
+                }
+            }
+        }
+        // A currency pinned by an equality filter on the way down.
+        for f in &o.filters {
+            let n = self.circuit.node(*f);
+            let Op::Filter { predicate } = &n.op else {
+                continue;
+            };
+            let below = n.inputs[0];
+            let mut stack = vec![predicate];
+            while let Some(p) = stack.pop() {
+                match p {
+                    Scalar::Binary {
+                        op: ScalarOp::And,
+                        lhs,
+                        rhs,
+                    } => {
+                        stack.push(lhs);
+                        stack.push(rhs);
+                    }
+                    Scalar::Binary {
+                        op: ScalarOp::Eq,
+                        lhs,
+                        rhs,
+                    } => {
+                        if let (Scalar::Column(k), Scalar::LitInt(v))
+                        | (Scalar::LitInt(v), Scalar::Column(k)) = (&**lhs, &**rhs)
+                        {
+                            if let Some(q) = self.origin(below, *k) {
+                                if q.relation == o.relation && q.column == cur_col {
+                                    return Some(Scalar::LitInt(*v));
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        None
+    }
+
     fn try_column(&mut self, input: NodeId, e: &Expr) -> Option<Option<ColIdx>> {
         let before = self.d.error_count();
         match self.column_ref(input, e) {
@@ -1119,20 +1476,15 @@ impl<'a> Lx<'a> {
             // `usd` rows under an `eur` filter (E30, found by the first mutation trial). A
             // declared currency's name lowers to its catalog code, the integer the column
             // holds; any other string has no value in the circuit and is refused.
-            Expr::Str(s, span) => match self.cat.currencies.get(s.as_str()) {
+            // **A string is text, unless it names a currency where a currency is meant**
+            // (cycle 15, C15-05b; decision 6). Compared with a column, the column's declared
+            // type decides (see the comparison arm below); on its own, a declared currency's
+            // name is still that currency's code, and anything else is a text value. Until
+            // cycle 14 every string evaluated as `0` (E30's F11), and then was refused unless
+            // it named a currency (NL0521, which now refuses only what is still wrong).
+            Expr::Str(s, _) => match self.cat.currencies.get(s.as_str()) {
                 Some(c) => Scalar::LitInt(c.code as i128),
-                None => {
-                    self.d.push(
-                        Diagnostic::error(
-                            "NL0521",
-                            format!("the string \"{s}\" has no value in the circuit"),
-                        )
-                        .primary(*span, "not the name of a declared currency")
-                        .note("the IR's values are integers, and a string is lowered only as a currency's name, to that currency's code")
-                        .note("this used to evaluate as 0 — the first declared currency's code — so a comparison with it answered as if that currency had been written"),
-                    );
-                    return None;
-                }
+                None => Scalar::LitText(s.clone()),
             },
             Expr::Money {
                 minor, currency, ..
@@ -1226,6 +1578,19 @@ impl<'a> Lx<'a> {
                 }
             }
             Expr::Binary { op, lhs, rhs, .. } => {
+                // `cur = "eur" and amt > 1.00 eur`: the conjunct pins the currency of every
+                // amount beside it, so a usd row (which the conjunct discards) is not a
+                // comparison across currencies. The pins last while this chain is lowered.
+                if *op == BinOp::And {
+                    let mark = self.pins.len();
+                    self.collect_pins(input, e);
+                    let out = self.and_chain(input, lhs, rhs);
+                    self.pins.truncate(mark);
+                    return out;
+                }
+                if let Some(typed) = self.typed_binary(input, *op, lhs, rhs) {
+                    return typed;
+                }
                 let sop = match op {
                     BinOp::Add => ScalarOp::Add,
                     BinOp::Sub => ScalarOp::Sub,

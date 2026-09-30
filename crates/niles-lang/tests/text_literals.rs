@@ -48,12 +48,15 @@ fn a_currency_name_selects_that_currency_on_both_surfaces() {
     }
 }
 
+/// Since cycle 15 (C15-05b, decision 6) a string against a `Text` column is a text value,
+/// so `name == "alice"` and `name like "a%"` lower and evaluate (`text_and_money.rs`). What
+/// NL0521 still refuses is a string that names no declared currency against a currency
+/// column.
 #[test]
-fn any_other_string_is_refused() {
+fn a_string_naming_no_currency_against_a_currency_column_is_refused() {
     for view in [
-        "view v = t.where(|r| r.name == \"alice\");",
         "view v = t.where(|r| r.cur == \"xyz\");",
-        "view v = sql { select * from t where name like \"a%\" };",
+        "view v = sql { select * from t where cur = \"xyz\" };",
     ] {
         let (_, d) = lowered(view);
         assert!(

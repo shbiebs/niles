@@ -328,9 +328,15 @@ impl Circuit {
             }
             out.push(id);
             for n in &self.nodes {
-                if n.inputs.contains(&id) {
+                // Once per *occurrence*: a node may read the same input twice (a self-product,
+                // `postings p cross join postings q`, whose two sides are one source node),
+                // and its in-degree counted both. Decrementing once per node left it at 1
+                // forever, and a self-join was reported as "a cycle not mediated by a delay"
+                // (cycle 15, found by C15-05b's product test).
+                let times = n.inputs.iter().filter(|&&i| i == id).count();
+                if times > 0 {
                     let d = indegree.get_mut(&n.id).unwrap();
-                    *d = d.saturating_sub(1);
+                    *d = d.saturating_sub(times);
                     if *d == 0 {
                         ready.push(n.id);
                     }
@@ -680,5 +686,28 @@ mod tests {
         sorted.sort_unstable();
         assert_eq!(printed.len(), 13, "twelve views plus ledger_balance:\n{e}");
         assert_eq!(printed, sorted, "outputs are not in name order:\n{e}");
+    }
+
+    /// **A node that reads one input twice is not a cycle.** A self-product lowers to a join
+    /// whose two inputs are the same source node; the topological order counted that input
+    /// twice and released it once, so the join never became ready and the circuit failed
+    /// verification as "a cycle not mediated by a delay".
+    #[test]
+    fn a_node_reading_one_input_twice_is_ordered() {
+        let mut c = Circuit::new();
+        let src = source(&mut c, "postings", vec![0]);
+        let j = c.add(
+            Op::Join {
+                kind: crate::operator::JoinKind::Inner,
+                left_key: vec![],
+                right_key: vec![],
+                residual: None,
+            },
+            vec![src, src],
+            internal_contract(),
+            "self product",
+        );
+        c.set_output("v", j);
+        assert_eq!(c.topological_order(), Some(vec![src, j]));
     }
 }

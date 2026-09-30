@@ -344,11 +344,38 @@ pub fn verify(c: &Circuit) -> VerifyReport {
 /// key, join key and aggregate argument is a violation.
 fn confidential_use(c: &Circuit) -> Vec<Violation> {
     use std::collections::BTreeMap;
+    // **Through a recursion, to a fixpoint of its own** (cycle 15, C15-05b). Nodes are in
+    // dependency order except through `Delay`: a fixpoint's accumulator is read by its step
+    // *before* the step's output exists, so one forward pass sealed the accumulator with the
+    // seed's columns alone, and a step that joined a sealed column in and then filtered on
+    // it in the next round was not seen. What a `Delay` carries is its seed's sealing joined
+    // with its fixpoint's output; the pass is repeated until that stops growing, which it
+    // must, since bits are only ever added.
+    let mut delay_extra: BTreeMap<NodeId, Vec<bool>> = BTreeMap::new();
+    loop {
+        let (out, grew) = confidential_pass(c, &mut delay_extra);
+        if !grew {
+            return out;
+        }
+    }
+}
+
+/// Elementwise `or` of two sealing vectors of possibly different lengths.
+fn seal_join(a: &[bool], b: &[bool]) -> Vec<bool> {
+    (0..a.len().max(b.len()))
+        .map(|i| a.get(i).copied().unwrap_or(false) || b.get(i).copied().unwrap_or(false))
+        .collect()
+}
+
+fn confidential_pass(
+    c: &Circuit,
+    delay_extra: &mut std::collections::BTreeMap<NodeId, Vec<bool>>,
+) -> (Vec<Violation>, bool) {
+    use std::collections::BTreeMap;
     let mut sealed: BTreeMap<NodeId, Vec<bool>> = BTreeMap::new();
     let mut out = Vec::new();
+    let mut grew = false;
 
-    // Nodes are in dependency order except through `Delay`, which the structural rules above
-    // already police, so one forward pass suffices.
     for n in &c.nodes {
         let input_sealed = |m: &BTreeMap<NodeId, Vec<bool>>, k: usize| -> Vec<bool> {
             n.inputs
@@ -486,7 +513,16 @@ fn confidential_use(c: &Circuit) -> Vec<Violation> {
                         violate("IR022", format!("right join key {k} is `@confidential`"));
                     }
                 }
+                // The right side's columns start at the left side's *width*, which a
+                // sealing vector does not carry: it ends at the last sealed column.
+                let width_l = n
+                    .inputs
+                    .first()
+                    .and_then(|i| c.nodes.get(*i as usize))
+                    .map(|x| x.arity as usize)
+                    .unwrap_or(0);
                 let mut both = l.clone();
+                both.resize(width_l.max(l.len()), false);
                 both.extend(rgt.iter().copied());
                 if let Some(res) = residual {
                     if reads_sealed(res, &both) {
@@ -498,13 +534,42 @@ fn confidential_use(c: &Circuit) -> Vec<Violation> {
                 }
                 both
             }
+            // A union's column is sealed if either side's is: the two sides' rows share
+            // the output's columns. Passing input 0 through, as this did, unsealed a
+            // column that only the second side carried sealed.
+            Op::Union => seal_join(&input_sealed(&sealed, 0), &input_sealed(&sealed, 1)),
+            Op::Delay => seal_join(
+                &input_sealed(&sealed, 0),
+                delay_extra.get(&n.id).map(Vec::as_slice).unwrap_or(&[]),
+            ),
+            // The fixpoint's output is the seed's rows and the step's; and it is what the
+            // accumulator carries into the next round, so the `Delay` that reads the same
+            // seed is widened to it, and the pass runs again if that added anything.
+            Op::Fixpoint { .. } => {
+                let both = seal_join(&input_sealed(&sealed, 0), &input_sealed(&sealed, 1));
+                for d in &c.nodes {
+                    if matches!(d.op, Op::Delay) && d.inputs.first() == n.inputs.first() {
+                        let have = sealed.get(&d.id).cloned().unwrap_or_default();
+                        if both
+                            .iter()
+                            .enumerate()
+                            .any(|(i, b)| *b && !have.get(i).copied().unwrap_or(false))
+                        {
+                            let e = delay_extra.entry(d.id).or_default();
+                            *e = seal_join(e, &both);
+                            grew = true;
+                        }
+                    }
+                }
+                both
+            }
             // Everything else passes its input's sealing through unchanged: these operators
             // move rows, they do not read columns.
             _ => input_sealed(&sealed, 0),
         };
         sealed.insert(n.id, here);
     }
-    out
+    (out, grew)
 }
 
 /// Every column index a scalar reads.
@@ -980,5 +1045,161 @@ mod tests {
             "the verifier itself left a field unread:\n{}",
             r.render()
         );
+    }
+}
+
+/// Confidentiality through the two operators that take rows from two places (cycle 15,
+/// C15-05b): a union, and a recursion's accumulator.
+#[cfg(test)]
+mod confidentiality_through_unions {
+    use crate::circuit::Circuit;
+    use crate::operator::{JoinKind, Op, Scalar, ScalarOp};
+    use crate::{Consistency, Materialize, Retention, ServeContract};
+
+    fn contract() -> ServeContract {
+        ServeContract {
+            consistency: Consistency::Snapshot,
+            materialize: Materialize::Auto,
+            retain: Retention::Forever,
+            lineage: crate::Lineage::Key,
+        }
+    }
+
+    /// A source of `width` columns; the lowering sets a source's arity to its width.
+    fn source(c: &mut Circuit, name: &str, width: u16, sealed: Vec<u16>) -> crate::circuit::NodeId {
+        let id = c.add(
+            Op::Source {
+                relation: name.into(),
+                is_base: true,
+                anchor_key: vec![],
+                confidential: sealed.into_iter().map(|x| x as _).collect(),
+            },
+            vec![],
+            contract(),
+            name,
+        );
+        c.nodes[id as usize].arity = width;
+        id
+    }
+
+    fn column_is(i: u16) -> Scalar {
+        Scalar::Binary {
+            op: ScalarOp::Eq,
+            lhs: Box::new(Scalar::Column(i as _)),
+            rhs: Box::new(Scalar::LitInt(0)),
+        }
+    }
+
+    fn codes(c: &Circuit) -> Vec<&'static str> {
+        super::confidential_use(c)
+            .into_iter()
+            .map(|v| v.code)
+            .collect()
+    }
+
+    /// `select k, v from q union select who, owner from p`, then a filter on the second
+    /// column. Only the union's second side carries it sealed, and the union passed its first
+    /// side's sealing through.
+    #[test]
+    fn a_column_sealed_on_either_side_of_a_union_is_sealed() {
+        let mut c = Circuit::new();
+        let q = source(&mut c, "q", 2, vec![]);
+        let p = source(&mut c, "p", 2, vec![1]);
+        let u = c.add(Op::Union, vec![q, p], contract(), "union");
+        let f = c.add(
+            Op::Filter {
+                predicate: column_is(1),
+            },
+            vec![u],
+            contract(),
+            "where",
+        );
+        c.outputs.insert("v".into(), f);
+        assert_eq!(codes(&c), vec!["IR022"]);
+    }
+
+    /// `t` (three columns, none sealed) joined to `p` (sealed at its column 1): the sealed
+    /// column is the join's column 4. The pass places the right side at the left side's
+    /// width, which it reads from the left node's arity — and the lowering built every
+    /// source with arity 0, so through the compiler it checked column 1 (`t`'s `v`) in
+    /// column 4's place. `tests/with_cte.rs` in niles-lang holds that path; this holds the
+    /// rule.
+    #[test]
+    fn a_join_seals_the_right_side_at_the_left_side_s_width() {
+        for (col, want) in [(4u16, vec!["IR022"]), (1, vec![])] {
+            let mut c = Circuit::new();
+            let t = source(&mut c, "t", 3, vec![]);
+            let p = source(&mut c, "p", 2, vec![1]);
+            let j = c.add(
+                Op::Join {
+                    kind: JoinKind::Inner,
+                    left_key: vec![0],
+                    right_key: vec![0],
+                    residual: None,
+                },
+                vec![t, p],
+                contract(),
+                "join",
+            );
+            let f = c.add(
+                Op::Filter {
+                    predicate: column_is(col),
+                },
+                vec![j],
+                contract(),
+                "where",
+            );
+            c.outputs.insert("v".into(), f);
+            assert_eq!(codes(&c), want, "a filter on the join's column {col}");
+        }
+    }
+
+    /// A recursion whose step joins a sealed column in, and whose *next* round filters on it
+    /// through the accumulator. One forward pass saw the accumulator with the seed's
+    /// sealing, which is none.
+    #[test]
+    fn a_column_the_step_seals_is_sealed_in_the_accumulator() {
+        let mut c = Circuit::new();
+        let q = source(&mut c, "q", 2, vec![]);
+        let p = source(&mut c, "p", 2, vec![1]);
+        let acc = c.add(Op::Delay, vec![q], contract(), "accumulator");
+        let f = c.add(
+            Op::Filter {
+                predicate: column_is(1),
+            },
+            vec![acc],
+            contract(),
+            "where",
+        );
+        let j = c.add(
+            Op::Join {
+                kind: JoinKind::Inner,
+                left_key: vec![0],
+                right_key: vec![0],
+                residual: None,
+            },
+            vec![f, p],
+            contract(),
+            "join",
+        );
+        let m = c.add(
+            Op::Map {
+                exprs: vec![Scalar::Column(0), Scalar::Column(3)],
+            },
+            vec![j],
+            contract(),
+            "step",
+        );
+        let fx = c.add(
+            Op::Fixpoint {
+                measure: Scalar::LitNull,
+                max_rounds: 10,
+            },
+            vec![q, m],
+            contract(),
+            "fixpoint",
+        );
+        c.outputs.insert("v".into(), fx);
+        assert_eq!(codes(&c), vec!["IR022"]);
     }
 }

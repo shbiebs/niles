@@ -1,0 +1,13 @@
+# commit: ada7f0b8ec51
+# worktree: clean
+# host: Linux 6.18.44-fc-v50 x86_64 — 2 CPUs
+# toolchain: rustc 1.95.0 (59807616e 2026-04-14)
+# protocol: 20 warm-up passes, then 200 timed passes; each pass checks every file once with each checker, alternating; in-process, release build; peak heap from E18's counting allocator
+corpus	surface	files	lines	median pass us	MAD us	us per KLOC	peak heap per check max bytes	peak heap per KLOC max bytes
+E30 corpus	SQL-R1	30	3791	52106	1977	13745	166087	1248774
+E30 corpus	SQL-R2	30	3606	48946	1924	13573	152338	1209032
+E30 corpus	NL	26	1320	4922	318	3729	70599	1247596
+E30 corpus	RS	25	1287	3284	153	2552	70599	1288353
+adversarial	SQL-R1	28	3696	49910	1813	13504	156566	1142971
+adversarial	SQL-R2	4	493	6581	203	13348	140628	1134097
+adversarial	NL	14	774	3069	179	3965	75324	1276678

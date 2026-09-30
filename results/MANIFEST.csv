@@ -74,6 +74,11 @@
 #   C=n/a E30-syntax/programs.tsv E30-syntax/schemas.tsv E30-syntax/mutants.tsv
 #   C=n/a E30-syntax/load.tsv E30-syntax/cost-external.tsv E30-syntax/cost-inprocess.tsv
 #
+#   E30b′'s rows (cycle 15, C15-05) likewise ran no engine: the same executors and checkers.
+#
+#   C=n/a E30b-syntax/programs.tsv E30b-syntax/mutants.tsv E30b-syntax/adversarial.tsv
+#   C=n/a E30b-syntax/cost-inprocess.tsv
+#
 #   E23's two series are additionally *insensitive* to C, and that is measured rather than
 #   assumed: `serve_path` in its own CSV reads `fold` and `report-from-view`, and the path a
 #   checkpoint bounds is `IndexFold`. The marker that attributed the caveat to §9.14.5 is
@@ -325,3 +330,8 @@ E30-syntax/mutants.tsv,machine-dependent,cargo run -q -p syntax-study --bin e30 
 E30-syntax/load.tsv,machine-dependent,cargo run -q -p syntax-study --bin e30 -- load-check (needs PostgreSQL 16 as bench and the approved prqlc and souffle under /opt/arms; deterministic given those; see E30-syntax.md)
 E30-syntax/cost-external.tsv,machine-dependent,cargo run -q --release -p syntax-study --bin e30 -- cost-ext (wall time of prqlc and souffle)
 E30-syntax/cost-inprocess.tsv,machine-dependent,cargo run -q --release --manifest-path tools/memprobe/Cargo.toml --bin e30cost (check time and peak heap per KLOC)
+E30b-syntax.md,byte-deterministic,cargo run -q -p syntax-study --bin e30b -- report
+E30b-syntax/programs.tsv,machine-dependent,cargo run -q --release -p syntax-study --bin e30b -- measure (needs PostgreSQL 16 as bench; deterministic given it; see E30b-syntax.md)
+E30b-syntax/mutants.tsv,machine-dependent,cargo run -q --release -p syntax-study --bin e30b -- mutate (needs PostgreSQL 16 as bench; deterministic given it, and repeated byte for byte; see E30b-syntax.md)
+E30b-syntax/adversarial.tsv,machine-dependent,cargo run -q --release -p syntax-study --bin e30b -- adversarial (needs PostgreSQL 16 as bench; deterministic given it; see E30b-syntax.md)
+E30b-syntax/cost-inprocess.tsv,machine-dependent,cargo run -q --release --manifest-path tools/memprobe/Cargo.toml --bin e30bcost (check time and peak heap per KLOC)

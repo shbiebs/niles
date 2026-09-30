@@ -1,0 +1,61 @@
+case	class	surface	twin	outcome	codes	execution
+A01	schema-level omission	SQL-R1	defective	accepted		
+A01	schema-level omission	SQL-R1	correct	accepted		runs; 200 postings after
+A01	schema-level omission	NL	defective	refused	NL0320	
+A01	schema-level omission	NL	correct	accepted		runs; 0 legs
+A02	schema-level omission	SQL-R1	defective	accepted		
+A02	schema-level omission	SQL-R1	correct	accepted		runs; 202 postings after
+A02	schema-level omission	NL	defective	refused	NL0300	
+A02	schema-level omission	NL	correct	accepted		runs; 2 legs
+A03	dynamic execute	SQL-R1	defective	refused	NSQ002	
+A03	dynamic execute	SQL-R1	correct	refused	NSQ002	runs; 202 postings after
+A03	dynamic execute	NL	defective	not expressible		Niles has no dynamic SQL
+A03	dynamic execute	NL	correct	not expressible		Niles has no dynamic SQL
+A04	dynamic execute	SQL-R1	defective	accepted		
+A04	dynamic execute	SQL-R1	correct	accepted		runs; 202 postings after
+A04	dynamic execute	NL	defective	not expressible		Niles has no dynamic SQL
+A04	dynamic execute	NL	correct	not expressible		Niles has no dynamic SQL
+A05	functions calling functions	SQL-R1	defective	accepted		
+A05	functions calling functions	SQL-R1	correct	accepted		runs; 202 postings after
+A05	functions calling functions	NL	defective	accepted		
+A05	functions calling functions	NL	correct	accepted		runs; 2 legs
+A06	functions calling functions	SQL-R1	defective	refused	NL0310	
+A06	functions calling functions	SQL-R1	correct	accepted		runs; 202 postings after
+A06	functions calling functions	NL	defective	refused	NL0310	
+A06	functions calling functions	NL	correct	accepted		runs; 2 legs
+A07	triggers	SQL-R1	defective	accepted		
+A07	triggers	SQL-R1	correct	accepted		runs; 204 postings after
+A07	triggers	NL	defective	not expressible		Niles has no triggers
+A07	triggers	NL	correct	not expressible		Niles has no triggers
+A08	triggers	SQL-R1	defective	refused	NL0230	
+A08	triggers	SQL-R1	correct	accepted		runs; 204 postings after
+A08	triggers	NL	defective	not expressible		Niles has no triggers
+A08	triggers	NL	correct	not expressible		Niles has no triggers
+A09	declared-effect mismatch	SQL-R1	defective	refused	NL0310	
+A09	declared-effect mismatch	SQL-R1	correct	accepted		runs; 202 postings after
+A09	declared-effect mismatch	NL	defective	refused	NL0310	
+A09	declared-effect mismatch	NL	correct	accepted		runs; 2 legs
+A10	declared-effect mismatch	SQL-R1	defective	refused	NL0310	
+A10	declared-effect mismatch	SQL-R1	correct	accepted		runs; 202 postings after
+A10	declared-effect mismatch	NL	defective	refused	NL0310	
+A10	declared-effect mismatch	NL	correct	accepted		unexecuted: niles-interp refuses `a read of `bal` (the interpreter has no relational tier)`
+A11	currency swap, typed position	SQL-R1	defective	refused	NL0255	
+A11	currency swap, typed position	SQL-R1	correct	accepted		runs; 202 postings after
+A11	currency swap, typed position	SQL-R2	defective	refused	NL0255	
+A11	currency swap, typed position	SQL-R2	correct	accepted		runs; 202 postings after
+A11	currency swap, typed position	NL	defective	not expressible		a Money value's minor units cannot be taken out and re-labelled
+A11	currency swap, typed position	NL	correct	accepted		runs; 2 legs
+A12	currency swap, untyped position	SQL-R1	defective	refused	NL0255	
+A12	currency swap, untyped position	SQL-R1	correct	accepted		runs; 202 postings after
+A12	currency swap, untyped position	SQL-R2	defective	refused	NL0255	
+A12	currency swap, untyped position	SQL-R2	correct	accepted		runs; 202 postings after
+A12	currency swap, untyped position	NL	defective	not expressible		a posting's currency is its Money's; there is no separate label
+A12	currency swap, untyped position	NL	correct	accepted		runs; 2 legs
+A13	back-valued correction	SQL-R1	defective	refused	NL0230	
+A13	back-valued correction	SQL-R1	correct	accepted		runs; 204 postings after
+A13	back-valued correction	NL	defective	not expressible		no Niles form sets a posting's value date (E30 F9)
+A13	back-valued correction	NL	correct	not expressible		no Niles form sets a posting's value date (E30 F9)
+A14	back-valued correction	SQL-R1	defective	accepted		
+A14	back-valued correction	SQL-R1	correct	accepted		runs; 202 postings after
+A14	back-valued correction	NL	defective	not expressible		no Niles form sets a posting's value date (E30 F9)
+A14	back-valued correction	NL	correct	not expressible		no Niles form sets a posting's value date (E30 F9)

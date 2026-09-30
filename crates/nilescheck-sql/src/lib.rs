@@ -93,8 +93,10 @@ pub fn check_all(stmts: &[ast::Stmt]) -> Vec<check::Diag> {
     d.extend(effects::check(stmts));
     // The typing rules re-derive NL0250 where `check2` already found it on columns: a
     // typing report at the same place as an existing one of its code is not added twice.
-    let mut seen: std::collections::BTreeSet<(&str, usize, usize)> =
-        d.iter().map(|x| (x.code, x.span.start, x.span.end)).collect();
+    let mut seen: std::collections::BTreeSet<(&str, usize, usize)> = d
+        .iter()
+        .map(|x| (x.code, x.span.start, x.span.end))
+        .collect();
     for x in typing::check(stmts) {
         if seen.insert((x.code, x.span.start, x.span.end)) {
             d.push(x);

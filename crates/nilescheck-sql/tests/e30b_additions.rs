@@ -21,8 +21,7 @@ fn errors(which: &str, program: &str) -> Vec<&'static str> {
 
 fn all(which: &str, program: &str, errors_only: bool) -> Vec<&'static str> {
     let src = format!("{}\n{program}", schema(which));
-    let (stmts, _) =
-        nilescheck_sql::parse(&src).unwrap_or_else(|e| panic!("{}: {program}", e.msg));
+    let (stmts, _) = nilescheck_sql::parse(&src).unwrap_or_else(|e| panic!("{}: {program}", e.msg));
     let mut v: Vec<&'static str> = nilescheck_sql::check_all(&stmts)
         .into_iter()
         .filter(|d| d.error || !errors_only)
@@ -47,7 +46,10 @@ fn transfer_r1(cur: &str, ann: &str) -> String {
 fn a_body_within_its_declared_row_is_accepted() {
     let c = errors(
         "r1",
-        &transfer_r1("usd", "append; debits usd; credits usd; reads@ledger_consistent"),
+        &transfer_r1(
+            "usd",
+            "append; debits usd; credits usd; reads@ledger_consistent",
+        ),
     );
     assert!(c.is_empty(), "{c:?}");
 }
@@ -56,7 +58,10 @@ fn a_body_within_its_declared_row_is_accepted() {
 fn a_body_posting_a_currency_its_row_does_not_name_is_nl0310() {
     let c = errors(
         "r1",
-        &transfer_r1("eur", "append; debits usd; credits usd; reads@ledger_consistent"),
+        &transfer_r1(
+            "eur",
+            "append; debits usd; credits usd; reads@ledger_consistent",
+        ),
     );
     assert_eq!(c, ["NL0310"]);
 }
@@ -65,7 +70,10 @@ fn a_body_posting_a_currency_its_row_does_not_name_is_nl0310() {
 fn a_wildcard_currency_permits_every_currency() {
     let c = errors(
         "r1",
-        &transfer_r1("eur", "append; debits *; credits *; reads@ledger_consistent"),
+        &transfer_r1(
+            "eur",
+            "append; debits *; credits *; reads@ledger_consistent",
+        ),
     );
     assert!(c.is_empty(), "{c:?}");
 }
@@ -138,7 +146,10 @@ fn a_hold_and_a_grant_are_effects_of_the_functions_that_make_them() {
 
 #[test]
 fn an_unannotated_function_is_not_held_to_anything() {
-    let prog = transfer_r1("eur", "x").replace("comment on function pay(bigint, bigint, eur) is 'effects: x';\n", "");
+    let prog = transfer_r1("eur", "x").replace(
+        "comment on function pay(bigint, bigint, eur) is 'effects: x';\n",
+        "",
+    );
     assert!(errors("r1", &prog).is_empty());
 }
 
@@ -149,7 +160,11 @@ fn r2_legs_take_their_currency_from_the_cur_literal() {
             "create function pay(a bigint, b bigint, m {cur}) returns void language plpgsql as $$\n{HEAD}    insert into postings (txn, acct, cur, amt, epoch, value_date) values\n        (t, a, '{cur}', -(m).minor, e, current_date),\n        (t, b, '{cur}', (m).minor, e, current_date);\nend $$;\ncomment on function pay(bigint, bigint, {cur}) is 'effects: append; debits usd; credits usd; reads@ledger_consistent';\n"
         )
     };
-    assert!(errors("r2", &prog("usd")).is_empty(), "{:?}", errors("r2", &prog("usd")));
+    assert!(
+        errors("r2", &prog("usd")).is_empty(),
+        "{:?}",
+        errors("r2", &prog("usd"))
+    );
     assert_eq!(errors("r2", &prog("eur")), ["NL0310"]);
 }
 
@@ -157,7 +172,10 @@ fn r2_legs_take_their_currency_from_the_cur_literal() {
 fn an_unreadable_annotation_item_is_a_warning_not_a_pass() {
     let c = all(
         "r1",
-        &transfer_r1("usd", "append; debits usd; credits usd; reads@ledger_consistent; moves money"),
+        &transfer_r1(
+            "usd",
+            "append; debits usd; credits usd; reads@ledger_consistent; moves money",
+        ),
         false,
     );
     assert!(c.contains(&"NSQ003"), "{c:?}");
@@ -173,7 +191,13 @@ fn body(params: &str, decls: &str, stmts: &str) -> String {
 
 #[test]
 fn minor_units_of_two_currencies_do_not_add() {
-    let prog = |n: &str| body(&format!("m usd, n {n}"), "    x bigint;", "    x := (m).minor + (n).minor;");
+    let prog = |n: &str| {
+        body(
+            &format!("m usd, n {n}"),
+            "    x bigint;",
+            "    x := (m).minor + (n).minor;",
+        )
+    };
     assert!(errors("r1", &prog("usd")).is_empty());
     assert_eq!(errors("r1", &prog("eur")), ["NL0250"]);
 }
@@ -225,7 +249,11 @@ fn a_ledger_row_labelled_with_another_currency_is_nl0255_in_r2() {
             &format!("    insert into postings (txn, acct, cur, amt, epoch, value_date) values\n        (t, a, '{label}', -(m).minor, e, current_date),\n        (t, b, '{label}', (m).minor, e, current_date);"),
         )
     };
-    assert!(errors("r2", &prog("usd")).is_empty(), "{:?}", errors("r2", &prog("usd")));
+    assert!(
+        errors("r2", &prog("usd")).is_empty(),
+        "{:?}",
+        errors("r2", &prog("usd"))
+    );
     assert_eq!(errors("r2", &prog("eur")), ["NL0255"]);
 }
 
@@ -235,7 +263,9 @@ fn a_declaration_or_a_return_of_the_wrong_currency_is_nl0332() {
     assert!(errors("r1", &decl("usd")).is_empty());
     assert_eq!(errors("r1", &decl("eur")), ["NL0332"]);
     let ret = |n: &str| {
-        format!("create function r(n {n}) returns usd language plpgsql as $$ begin return n; end $$;\n")
+        format!(
+            "create function r(n {n}) returns usd language plpgsql as $$ begin return n; end $$;\n"
+        )
     };
     assert!(errors("r1", &ret("usd")).is_empty());
     assert_eq!(errors("r1", &ret("eur")), ["NL0332"]);
@@ -266,4 +296,52 @@ fn a_parenthesised_minor_is_its_parameter_so_the_legs_cancel() {
     };
     assert!(errors("r1", &prog("m")).is_empty());
     assert_eq!(errors("r1", &prog("row((m).minor + 1)::usd")), ["NL0300"]);
+}
+
+// ---------------------------------------------------------------- 5.3 dynamic SQL in a ledger writer
+
+#[test]
+fn dynamic_sql_outside_a_ledger_writer_is_only_a_warning() {
+    let prog = "create function f(x bigint) returns void language plpgsql as $$ begin execute 'select 1'; end $$;\n";
+    assert!(errors("r1", prog).is_empty());
+    assert!(all("r1", prog, false).contains(&"NSQ001"));
+}
+
+#[test]
+fn dynamic_sql_in_a_function_that_writes_a_ledger_statically_is_nsq002() {
+    let prog = format!(
+        "create function f(a bigint, m usd) returns void language plpgsql as $$\n{HEAD}    insert into postings (txn, acct, cur, amt_usd, epoch, value_date) values (t, a, 'usd', m, e, current_date), (t, a + 1, 'usd', row(-(m).minor)::usd, e, current_date);\n    execute 'select 1';\nend $$;\n"
+    );
+    assert_eq!(errors("r1", &prog), ["NSQ002"]);
+}
+
+#[test]
+fn dynamic_sql_naming_a_ledger_in_a_literal_is_nsq002() {
+    let prog = "create function f(a bigint) returns void language plpgsql as $$ begin execute format('delete from postings where acct = %s', a); end $$;\n";
+    assert_eq!(errors("r1", prog), ["NSQ002"]);
+}
+
+#[test]
+fn dynamic_sql_in_a_caller_of_a_ledger_writer_is_nsq002() {
+    let prog = format!(
+        "create function w(a bigint, m usd) returns void language plpgsql as $$\n{HEAD}    insert into postings (txn, acct, cur, amt_usd, epoch, value_date) values (t, a, 'usd', m, e, current_date), (t, a + 1, 'usd', row(-(m).minor)::usd, e, current_date);\nend $$;\n\
+         create function f(a bigint, m usd) returns void language plpgsql as $$ begin perform w(a, m); execute 'select 1'; end $$;\n"
+    );
+    assert_eq!(errors("r1", &prog), ["NSQ002"]);
+}
+
+#[test]
+fn dynamic_sql_in_a_ledger_triggers_function_is_nsq002() {
+    let prog = "create function tr() returns trigger language plpgsql as $$ begin execute 'select 1'; return new; end $$;\n\
+                create trigger tr_on_postings after insert on postings for each row execute function tr();\n";
+    assert_eq!(errors("r1", prog), ["NSQ002"]);
+    let elsewhere = "create function tr() returns trigger language plpgsql as $$ begin execute 'select 1'; return new; end $$;\n\
+                     create trigger tr_on_holds after insert on holds for each row execute function tr();\n";
+    assert!(errors("r1", elsewhere).is_empty());
+}
+
+#[test]
+fn dynamic_sql_in_an_anonymous_block_that_writes_a_ledger_is_nsq002() {
+    let prog = "do $$ begin insert into postings (txn, acct, cur, amt_usd, epoch, value_date) values (9, 1, 'usd', row(1)::usd, 9, current_date), (9, 2, 'usd', row(-1)::usd, 9, current_date); execute 'select 1'; end $$;\n";
+    assert_eq!(errors("r1", prog), ["NSQ002"]);
 }

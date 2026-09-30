@@ -327,7 +327,11 @@ impl Tx<'_> {
     fn insert(&mut self, i: &Insert) {
         let table = i.table.last().to_string();
         let columns: Vec<String> = if i.columns.is_empty() {
-            self.types.table_columns.get(&table).cloned().unwrap_or_default()
+            self.types
+                .table_columns
+                .get(&table)
+                .cloned()
+                .unwrap_or_default()
         } else {
             i.columns.clone()
         };
@@ -368,7 +372,10 @@ impl Tx<'_> {
                     if c != d {
                         self.push(
                             "NL0255",
-                            format!("a `{c}` inserted into `{table}.{}`, which is `{d}`", columns[k]),
+                            format!(
+                                "a `{c}` inserted into `{table}.{}`, which is `{d}`",
+                                columns[k]
+                            ),
                             row[k].span(),
                         );
                     }
@@ -614,7 +621,9 @@ pub fn check(stmts: &[Stmt]) -> Vec<Diag> {
                     tx.block(b);
                 } else {
                     match &f.body {
-                        Some(FuncBody::Text(text, span)) if f.language.as_deref() == Some("sql") => {
+                        Some(FuncBody::Text(text, span))
+                            if f.language.as_deref() == Some("sql") =>
+                        {
                             if let Ok((inner, _)) = crate::parse(text) {
                                 tx.at = Some(*span);
                                 for x in &inner {

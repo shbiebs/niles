@@ -478,8 +478,15 @@ pub fn check(stmts: &[Stmt]) -> Vec<Diag> {
         }
     };
 
+    // Which units write a ledger, for NSQ002 (E30b′ design §5.3).
+    let writers = crate::effects::Analysis::of(stmts);
     for s in stmts {
         let mut found: Vec<Diag> = Vec::new();
+        let writes_ledger = match s {
+            Stmt::CreateFunction(f) => writers.writes_ledger(f.name.last()),
+            Stmt::Do { .. } => writers.block_writes_ledger(s),
+            _ => false,
+        };
         visit(s, None, &mut |item| {
             let exprs: Vec<(&Expr, Span)> = match &item {
                 Item::Expr(e, sp) => vec![(*e, *sp)],
@@ -491,13 +498,26 @@ pub fn check(stmts: &[Stmt]) -> Vec<Diag> {
                 Item::Stmt(..) => vec![],
                 Item::Dynamic(sp) => {
                     // A named limit, not a pass: the text `execute` runs is built at run time.
-                    found.push(Diag {
-                        code: "NSQ001",
-                        error: false,
-                        msg: "dynamic SQL: `execute` is parsed, but the statement it runs is a run-time string and no rule here has checked it".into(),
-                        span: *sp,
-                        defect: None,
-                    });
+                    // In a unit that writes a ledger it is an error (cycle 15, E30b′ §5.3):
+                    // conservation, typing and effects cannot be checked on a string, and a
+                    // ledger write is exactly what they exist to check.
+                    if writes_ledger {
+                        found.push(Diag {
+                            code: "NSQ002",
+                            error: true,
+                            msg: "dynamic SQL in a function that writes a ledger: the statement it runs exists only at run time, and conservation, typing and effects cannot be checked on it".into(),
+                            span: *sp,
+                            defect: None,
+                        });
+                    } else {
+                        found.push(Diag {
+                            code: "NSQ001",
+                            error: false,
+                            msg: "dynamic SQL: `execute` is parsed, but the statement it runs is a run-time string and no rule here has checked it".into(),
+                            span: *sp,
+                            defect: None,
+                        });
+                    }
                     vec![]
                 }
             };

@@ -168,7 +168,9 @@ impl<'a> Cx<'a> {
                     continue;
                 }
                 let known = match r.get(cur_at) {
-                    Some(Expr::Lit(Literal::Str(c), _)) if self.types.currencies.contains_key(c) => {
+                    Some(Expr::Lit(Literal::Str(c), _))
+                        if self.types.currencies.contains_key(c) =>
+                    {
                         Some(c.clone())
                     }
                     _ => None,
@@ -176,9 +178,14 @@ impl<'a> Cx<'a> {
                 let a = self.minor(amt);
                 let (cur, a) = match known {
                     Some(c) => (c, if opaque { a.add(&self.fresh()) } else { a }),
-                    None => ("(a currency this reading cannot name)".to_string(), self.fresh()),
+                    None => (
+                        "(a currency this reading cannot name)".to_string(),
+                        self.fresh(),
+                    ),
                 };
-                map.entry(key).or_default().movement(Cur::Known(cur), a, nspan(span));
+                map.entry(key)
+                    .or_default()
+                    .movement(Cur::Known(cur), a, nspan(span));
             }
             return;
         }

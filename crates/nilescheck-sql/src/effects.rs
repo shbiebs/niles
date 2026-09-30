@@ -312,9 +312,7 @@ fn legs(types: &Types, i: &Insert) -> Vec<(String, Sign)> {
             if let Some(a) = row.get(amt_at) {
                 if !is_null(a) {
                     let cur = match row.get(cur_at) {
-                        Some(Expr::Lit(Literal::Str(c), _))
-                            if types.currencies.contains_key(c) =>
-                        {
+                        Some(Expr::Lit(Literal::Str(c), _)) if types.currencies.contains_key(c) => {
                             c.clone()
                         }
                         _ => "*".into(),
@@ -425,7 +423,12 @@ struct Local {
     strings: Vec<String>,
 }
 
-fn local(types: &Types, conv: &Conventions, contracts: &BTreeMap<String, String>, s: &Stmt) -> Local {
+fn local(
+    types: &Types,
+    conv: &Conventions,
+    contracts: &BTreeMap<String, String>,
+    s: &Stmt,
+) -> Local {
     let mut l = Local::default();
     let env = match s {
         Stmt::CreateFunction(f) => env_of(f),
@@ -529,6 +532,9 @@ pub struct Analysis {
     /// functions attached to a trigger on a ledger.
     ledger_triggers: BTreeSet<String>,
     ledgers: BTreeSet<String>,
+    types: Types,
+    conv: Conventions,
+    contracts: BTreeMap<String, String>,
 }
 
 impl Analysis {
@@ -577,7 +583,10 @@ impl Analysis {
             declared,
             unreadable,
             ledger_triggers,
-            ledgers: types.ledgers,
+            ledgers: types.ledgers.clone(),
+            types,
+            conv,
+            contracts,
         }
     }
 
@@ -638,10 +647,8 @@ impl Analysis {
     }
 
     /// The same question for an anonymous block, which has no name to call it by.
-    pub fn block_writes_ledger(&self, types_stmt: &Stmt, stmts: &[Stmt]) -> bool {
-        let types = Types::of(stmts);
-        let conv = Conventions::of(stmts);
-        let l = local(&types, &conv, &BTreeMap::new(), types_stmt);
+    pub fn block_writes_ledger(&self, block: &Stmt) -> bool {
+        let l = local(&self.types, &self.conv, &self.contracts, block);
         let mut seen = BTreeSet::new();
         l.writes_ledger
             || self.names_a_ledger(&l.strings)
@@ -685,7 +692,9 @@ pub fn check(stmts: &[Stmt]) -> Vec<Diag> {
         out.push(Diag {
             code: "NSQ003",
             error: false,
-            msg: format!("`{f}`'s effects annotation has an item this checker cannot read: `{item}`"),
+            msg: format!(
+                "`{f}`'s effects annotation has an item this checker cannot read: `{item}`"
+            ),
             span: span_of_function(stmts, f),
             defect: None,
         });

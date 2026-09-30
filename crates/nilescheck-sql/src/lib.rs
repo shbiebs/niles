@@ -8,6 +8,7 @@ pub mod check;
 pub mod check2;
 pub mod conserve;
 pub mod conventions;
+pub mod effects;
 pub mod lex;
 pub mod linear;
 pub mod parser;
@@ -88,5 +89,6 @@ pub fn check_all(stmts: &[ast::Stmt]) -> Vec<check::Diag> {
     d.extend(linear::check(stmts));
     d.extend(conserve::check(stmts));
     d.extend(capability::check(stmts));
+    d.extend(effects::check(stmts));
     d
 }

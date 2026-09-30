@@ -310,3 +310,10 @@ E27-p99-engine.md,byte-deterministic,cargo run -q --release -p comparator -- ren
 E27-p99-engine-detail.md,byte-deterministic,cargo run -q --release -p comparator -- render --shape p99-engine
 E27-hostc.md,byte-deterministic,cargo run -q --release -p comparator -- render --shape counted
 E14-checkcost.md,machine-dependent,cargo run --release --manifest-path tools/memprobe/Cargo.toml --bin checkcost (check time and peak heap per KLOC; see E14-minimal-counterproposal.md Part 2b)
+E30-syntax.md,byte-deterministic,cargo run -q -p syntax-study --bin e30 -- report
+E30-syntax/programs.tsv,machine-dependent,cargo run -q -p syntax-study --bin e30 -- measure (needs PostgreSQL 16 as bench and the approved prqlc and souffle under /opt/arms; deterministic given those; see E30-syntax.md)
+E30-syntax/schemas.tsv,machine-dependent,cargo run -q -p syntax-study --bin e30 -- measure (needs PostgreSQL 16 as bench and the approved prqlc and souffle under /opt/arms; deterministic given those; see E30-syntax.md)
+E30-syntax/mutants.tsv,machine-dependent,cargo run -q -p syntax-study --bin e30 -- mutate (needs PostgreSQL 16 as bench and the approved prqlc and souffle under /opt/arms; deterministic given those; see E30-syntax.md)
+E30-syntax/load.tsv,machine-dependent,cargo run -q -p syntax-study --bin e30 -- load-check (needs PostgreSQL 16 as bench and the approved prqlc and souffle under /opt/arms; deterministic given those; see E30-syntax.md)
+E30-syntax/cost-external.tsv,machine-dependent,cargo run -q --release -p syntax-study --bin e30 -- cost-ext (wall time of prqlc and souffle)
+E30-syntax/cost-inprocess.tsv,machine-dependent,cargo run -q --release --manifest-path tools/memprobe/Cargo.toml --bin e30cost (check time and peak heap per KLOC)

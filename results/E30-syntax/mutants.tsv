@@ -1,0 +1,400 @@
+task	surface	op	site	line	mutation	class	detail
+Q01	SQL	M1	0	1	usd → eur in `amt_usd`	silent	row 1: expected ["1", "usd", "-3329731"], got ["1", "usd", "NULL"]
+Q01	SQL	M1	1	1	eur → usd in `amt_eur`	silent	row 0: expected ["1", "eur", "291173"], got ["1", "eur", "NULL"]
+Q01	SQL	M1	2	1	jpy → usd in `amt_jpy`	silent	row 5: expected ["11", "jpy", "-2649"], got ["11", "jpy", "NULL"]
+Q01	DL	M3	0	3	conjunct `postings(_, a, c, _, _, _)` of `rule body` dropped	static	Error: Witness problem: argument grounded by an aggregator's inner scope is used ungrounded in outer scope in a count/sum/mean aggregate in file p.dl at line 19
+Q01	DL	M3	1	3	conjunct `s = sum x : { postings(_, a, c, x, _, _) }` of `rule body` dropped	static	Error: Ungrounded variable s in file p.dl at line 19
+Q02	SQL	M1	0	1	usd → eur in `amt_usd`	silent	row 0: expected ["1", "-3329731"], got ["1", "NULL"]
+Q02	SQL	M1	1	3	usd → eur in `'usd'`	silent	2 rows expected, 0 returned
+Q02	SQL	M1	2	5	usd → eur in `amt_usd`	silent	2 rows expected, 0 returned
+Q02	SQL	M3	0	3	`where` clause dropped	silent	2 rows expected, 0 returned
+Q02	SQL	M3	1	5	`having` clause dropped	silent	2 rows expected, 18 returned
+Q02	NL	M1	0	1	usd → eur in `"usd"`	silent	2 rows expected, 9 returned
+Q02	NL	M1	1	1	usd → eur in `usd`	equivalent	
+Q02	NL	M3	0	1	`where` clause dropped	silent	2 rows expected, 6 returned
+Q02	NL	M3	1	1	`having` clause dropped	silent	2 rows expected, 18 returned
+Q02	RS	M1	0	2	usd → eur in `"usd"`	silent	2 rows expected, 9 returned
+Q02	RS	M1	1	5	usd → eur in `usd`	equivalent	
+Q02	RS	M3	0	2	`.where` clause dropped	silent	2 rows expected, 6 returned
+Q02	RS	M3	1	5	`.having` clause dropped	silent	2 rows expected, 18 returned
+Q02	PRQL	M1	0	2	usd → eur in `"usd"`	silent	2 rows expected, 9 returned
+Q02	PRQL	M3	0	2	`filter` clause dropped	silent	2 rows expected, 6 returned
+Q02	PRQL	M3	1	4	`filter` clause dropped	silent	2 rows expected, 18 returned
+Q02	DL	M1	0	3	usd → eur in `"usd"`	equivalent	
+Q02	DL	M1	1	3	usd → eur in `"usd"`	silent	2 rows expected, 9 returned
+Q02	DL	M3	0	3	conjunct `postings(_, a, "usd", _, _, _)` of `rule body` dropped	static	Error: Witness problem: argument grounded by an aggregator's inner scope is used ungrounded in outer scope in a count/sum/mean aggregate in file p.dl at line 19
+Q02	DL	M3	1	3	conjunct `s = sum x : { postings(_, a, "usd", x, _, _) }` of `rule body` dropped	static	Error: Ungrounded variable s in file p.dl at line 19
+Q02	DL	M3	2	3	conjunct `s < 0` of `rule body` dropped	silent	2 rows expected, 18 returned
+Q03	SQL	M1	0	1	usd → eur in `amt_usd`	silent	row 2: expected ["1", "usd", "-876699"], got ["1", "usd", "NULL"]
+Q03	SQL	M1	1	1	eur → usd in `amt_eur`	silent	row 0: expected ["1", "eur", "173997"], got ["1", "eur", "NULL"]
+Q03	SQL	M1	2	1	jpy → usd in `amt_jpy`	silent	row 1: expected ["1", "jpy", "-16629"], got ["1", "jpy", "NULL"]
+Q03	SQL	M3	0	3	`on` clause dropped	static	parse: expected `on` or `using` after the joined table (found Ident("group"))
+Q03	NL	M3	0	1	`on` clause dropped	equivalent	
+Q03	DL	M3	0	3	conjunct `postings(_, a0, c, _, _, _)` of `rule body` dropped	static	Warning: Variable a0 only occurs once in file p.dl at line 19
+Q03	DL	M3	1	3	conjunct `accounts(a0, _, k)` of `rule body` dropped	static	Warning: Variable a0 only occurs once in file p.dl at line 19
+Q03	DL	M3	2	4	conjunct `s = sum x : { postings(_, a, c, x, _, _), accounts(a, _, k) }` of `rule body` dropped	static	Error: Ungrounded variable s in file p.dl at line 19
+Q04	SQL	M3	0	3	`where` clause dropped	silent	2 rows expected, 20 returned
+Q04	SQL	M3	1	3	`where` clause dropped	silent	2 rows expected, 0 returned
+Q04	NL	M3	0	1	`where` clause dropped	silent	2 rows expected, 20 returned
+Q04	RS	M3	0	3	`.where` clause dropped	silent	2 rows expected, 20 returned
+Q04	PRQL	M3	0	3	`filter` clause dropped	silent	2 rows expected, 202 returned
+Q04	DL	M3	0	3	conjunct `accounts(a, _, _)` of `rule body` dropped	static	Error: Ungrounded variable a in file p.dl at line 19
+Q04	DL	M3	1	3	conjunct `!postings(_, a, _, _, _, _)` of `rule body` dropped	silent	2 rows expected, 20 returned
+Q05	SQL	M1	0	1	usd → eur in `amt_usd`	silent	row 0: expected ["17", "2000000"], got ["1", "NULL"]
+Q05	SQL	M1	1	3	usd → eur in `'usd'`	silent	row 0: expected ["17", "2000000"], got ["1", "NULL"]
+Q05	SQL	M3	0	3	`where` clause dropped	silent	row 0: expected ["17", "2000000"], got ["1", "NULL"]
+Q05	NL	M1	0	1	usd → eur in `"usd"`	silent	row 0: expected ["17", "2000000"], got ["1", "291173"]
+Q05	NL	M3	0	1	`where` clause dropped	silent	row 0: expected ["17", "2000000"], got ["17", "2010978"]
+Q05	RS	M1	0	2	usd → eur in `"usd"`	silent	row 0: expected ["17", "2000000"], got ["1", "291173"]
+Q05	RS	M3	0	2	`.where` clause dropped	silent	row 0: expected ["17", "2000000"], got ["17", "2010978"]
+Q05	PRQL	M1	0	2	usd → eur in `"usd"`	silent	row 0: expected ["17", "2000000"], got ["1", "291173"]
+Q05	PRQL	M3	0	2	`filter` clause dropped	silent	row 0: expected ["17", "2000000"], got ["17", "2010978"]
+Q06	DL	M3	0	5	conjunct `held(a, _)` of `rule body` dropped	static	Error: Witness problem: argument grounded by an aggregator's inner scope is used ungrounded in outer scope in a count/sum/mean aggregate in file p.dl at line 21
+Q06	DL	M3	1	5	conjunct `n = count : { held(a, _) }` of `rule body` dropped	static	Error: Ungrounded variable n in file p.dl at line 21
+Q07	SQL	M1	0	2	usd → eur in `amt_usd`	silent	row 4: expected ["1", "usd", "10", "-152785"], got ["1", "usd", "10", "NULL"]
+Q07	SQL	M1	1	2	eur → usd in `amt_eur`	silent	row 0: expected ["1", "eur", "30", "77501"], got ["1", "eur", "30", "NULL"]
+Q07	SQL	M1	2	2	jpy → usd in `amt_jpy`	silent	row 47: expected ["11", "jpy", "66", "-2649"], got ["11", "jpy", "66", "NULL"]
+Q07	DL	M3	0	2	conjunct `postings(t, a, c, _, e, _)` of `rule body` dropped	static	Error: Ungrounded variable t in file p.dl at line 18
+Q07	DL	M3	1	2	conjunct `postings(t2, a, c, _, e2, _)` of `rule body` dropped	static	Error: Ungrounded variable t2 in file p.dl at line 18
+Q07	DL	M3	2	2	conjunct `e2 < e` of `rule body` dropped	silent	row 0: expected ["1", "eur", "30", "77501"], got ["1", "eur", "30", "291173"]
+Q07	DL	M3	3	3	conjunct `postings(t, a, c, _, e, _)` of `rule body` dropped	static	Error: Ungrounded variable t in file p.dl at line 19
+Q07	DL	M3	4	3	conjunct `postings(t2, a, c, _, e, _)` of `rule body` dropped	static	Error: Ungrounded variable t2 in file p.dl at line 19
+Q07	DL	M3	5	3	conjunct `t2 <= t` of `rule body` dropped	silent	row 1: expected ["1", "eur", "62", "153483"], got ["1", "eur", "62", "238592"]
+Q07	DL	M3	6	6	conjunct `postings(t, a, c, _, _, _)` of `rule body` dropped	static	Error: Witness problem: argument grounded by an aggregator's inner scope is used ungrounded in outer scope in a count/sum/mean aggregate in file p.dl at line 22
+Q07	DL	M3	7	7	conjunct `r = sum x : { earlier(a, c, t, t2), postings(t2, a, c, x, _, _) }` of `rule body` dropped	static	Error: Ungrounded variable r in file p.dl at line 22
+Q08	SQL	M1	0	3	usd → eur in `amt_usd`	silent	row 0: expected ["1", "1", "5"], got ["1", "1", "1"]
+Q08	SQL	M1	1	6	usd → eur in `'usd'`	silent	row 0: expected ["1", "1", "5"], got ["1", "1", "1"]
+Q08	SQL	M3	0	5	`on` clause dropped	static	parse: expected `on` or `using` after the joined table (found Ident("where"))
+Q08	SQL	M3	1	6	`where` clause dropped	silent	row 0: expected ["1", "1", "5"], got ["1", "1", "1"]
+Q08	NL	M1	0	4	usd → eur in `"usd"`	silent	row 0: expected ["1", "1", "5"], got ["1", "1", "1"]
+Q08	NL	M3	0	3	`on` clause dropped	equivalent	
+Q08	NL	M3	1	4	`where` clause dropped	silent	row 2: expected ["11", "3", "3"], got ["11", "3", "4"]
+Q08	NL	M3	2	10	conjunct `r.desk = b.desk` of `where` dropped	silent	row 0: expected ["1", "1", "5"], got ["1", "1", "17"]
+Q08	NL	M3	3	10	conjunct `(r.bal > b.bal or r.acct = b.acct)` of `where` dropped	silent	row 1: expected ["10", "2", "3"], got ["10", "2", "5"]
+Q08	PRQL	M1	0	2	usd → eur in `"usd"`	silent	row 0: expected ["1", "1", "5"], got ["1", "1", "1"]
+Q08	PRQL	M3	0	2	`filter` clause dropped	silent	row 2: expected ["11", "3", "3"], got ["11", "3", "4"]
+Q08	DL	M1	0	2	usd → eur in `"usd"`	equivalent	
+Q08	DL	M1	1	3	usd → eur in `"usd"`	silent	row 0: expected ["1", "1", "5"], got ["1", "1", "1"]
+Q08	DL	M3	0	2	conjunct `postings(_, a, "usd", _, _, _)` of `rule body` dropped	silent	18 rows expected, 20 returned
+Q08	DL	M3	1	2	conjunct `accounts(a, _, k)` of `rule body` dropped	static	Error: Ungrounded variable k in file p.dl at line 18
+Q08	DL	M3	2	3	conjunct `s = sum x : { postings(_, a, "usd", x, _, _) }` of `rule body` dropped	static	Error: Ungrounded variable s in file p.dl at line 18
+Q08	DL	M3	3	6	conjunct `bal(a, k, b)` of `rule body` dropped	static	Error: Ungrounded variable a in file p.dl at line 22
+Q08	DL	M3	4	6	conjunct `n = count : { bal(_, k, b2), b2 > b }` of `rule body` dropped	static	Error: Ungrounded variable n in file p.dl at line 22
+Q09	SQL	M3	0	2	`where` clause dropped	silent	11 rows expected, 16 returned
+Q09	SQL	M3	1	5	`on` clause dropped	static	parse: expected `on` or `using` after the joined table (found Ident("where"))
+Q09	SQL	M3	2	6	`where` clause dropped	silent	11 rows expected, 18 returned
+Q09	PRQL	M3	0	2	`filter` clause dropped	silent	11 rows expected, 16 returned
+Q09	PRQL	M3	1	6	`filter` clause dropped	silent	11 rows expected, 18 returned
+Q09	DL	M3	0	4	conjunct `answer(p, m)` of `rule body` dropped	static	Error: Ungrounded variable p in file p.dl at line 20
+Q09	DL	M3	1	4	conjunct `parent(m, a)` of `rule body` dropped	static	Error: Ungrounded variable a in file p.dl at line 20
+Q10	SQL	M1	0	3	usd → eur in `amt_usd`	silent	row 1: expected ["1", "usd", "-3329731"], got ["1", "usd", "NULL"]
+Q10	SQL	M1	1	3	eur → usd in `amt_eur`	silent	row 0: expected ["1", "eur", "291173"], got ["1", "eur", "NULL"]
+Q10	SQL	M1	2	3	jpy → usd in `amt_jpy`	silent	row 5: expected ["11", "jpy", "-2649"], got ["11", "jpy", "NULL"]
+Q10	SQL	M1	3	5	usd → eur in `amt_usd`	silent	row 9: expected ["12", "usd", "249405"], got ["12", "usd", "257383"]
+Q10	SQL	M1	4	5	eur → usd in `amt_eur`	silent	row 44: expected ["9", "eur", "-147038"], got ["9", "eur", "-145002"]
+Q10	SQL	M3	0	5	`where` clause dropped	silent	row 2: expected ["10", "eur", "197107"], got ["10", "eur", "194929"]
+Q10	NL	M3	0	1	`where` clause dropped	silent	row 2: expected ["10", "eur", "197107"], got ["10", "eur", "194929"]
+Q10	RS	M3	0	4	`.where` clause dropped	silent	row 2: expected ["10", "eur", "197107"], got ["10", "eur", "194929"]
+Q10	PRQL	M3	0	5	`filter` clause dropped	silent	row 2: expected ["10", "eur", "197107"], got ["10", "eur", "194929"]
+Q10	DL	M3	0	6	conjunct `flow(a, c, _, _)` of `rule body` dropped	static	Error: Witness problem: argument grounded by an aggregator's inner scope is used ungrounded in outer scope in a count/sum/mean aggregate in file p.dl at line 22
+Q10	DL	M3	1	6	conjunct `s = sum x : { flow(a, c, _, x) }` of `rule body` dropped	static	Error: Ungrounded variable s in file p.dl at line 22
+T01	SQL	M1	0	1	usd → eur in `usd`	runtime	execution: [42883] function task(integer, integer, usd) does not exist
+T01	SQL	M1	1	6	usd → eur in `amt_usd`	runtime	execution: [42804] column "amt_eur" is of type eur but expression is of type usd
+T01	SQL	M1	2	7	usd → eur in `'usd'`	runtime	execution: [P0001] a transaction does not conserve
+T01	SQL	M1	3	7	usd → eur in `usd`	runtime	execution: [42804] column "amt_usd" is of type usd but expression is of type eur
+T01	SQL	M1	4	8	usd → eur in `'usd'`	runtime	execution: [P0001] a transaction does not conserve
+T01	SQL	M2	0	7	the sign of `row(-(m).minor)::usd` removed	runtime	execution: [P0001] a transaction does not conserve
+T01	SQL	M2	1	8	`m` negated	runtime	execution: [P0001] a transaction does not conserve
+T01	NL	M1	0	1	usd → eur in `usd`	static	NL0310
+T01	NL	M1	1	2	usd → eur in `usd`	static	NL0310
+T01	NL	M1	2	2	usd → eur in `usd`	static	NL0310
+T01	NL	M2	0	5	debit → credit	runtime	expected Result or Option, found struct
+T01	NL	M2	1	6	credit → debit	runtime	the ledger refused the set: the set does not conserve: USD sums to -24690 rather than zero
+T01	RS	M1	0	1	usd → eur in `usd`	static	NL0310
+T01	RS	M1	1	2	usd → eur in `usd`	static	NL0310
+T01	RS	M1	2	2	usd → eur in `usd`	static	NL0310
+T01	RS	M2	0	5	debit → credit	runtime	expected Result or Option, found struct
+T01	RS	M2	1	6	credit → debit	runtime	the ledger refused the set: the set does not conserve: USD sums to -24690 rather than zero
+T02	SQL	M1	0	1	usd → eur in `usd`	runtime	execution: [42883] function task(integer, integer, integer, usd, usd) does not exist
+T02	SQL	M1	1	1	usd → eur in `usd`	runtime	execution: [42883] function task(integer, integer, integer, usd, usd) does not exist
+T02	SQL	M1	2	6	usd → eur in `amt_usd`	runtime	execution: [42804] column "amt_eur" is of type eur but expression is of type usd
+T02	SQL	M1	3	7	usd → eur in `'usd'`	runtime	execution: [P0001] a transaction does not conserve
+T02	SQL	M1	4	7	usd → eur in `usd`	runtime	execution: [42804] column "amt_usd" is of type usd but expression is of type eur
+T02	SQL	M1	5	8	usd → eur in `'usd'`	runtime	execution: [P0001] a transaction does not conserve
+T02	SQL	M1	6	8	usd → eur in `usd`	runtime	execution: [42804] column "amt_usd" is of type usd but expression is of type eur
+T02	SQL	M1	7	9	usd → eur in `'usd'`	runtime	execution: [P0001] a transaction does not conserve
+T02	SQL	M2	0	7	the sign of `row(-(m).minor)::usd` removed	runtime	execution: [P0001] a transaction does not conserve
+T02	SQL	M2	1	8	`row((m).minor - (fee).minor)::usd` negated	runtime	execution: [P0001] a transaction does not conserve
+T02	SQL	M2	2	9	`fee` negated	runtime	execution: [P0001] a transaction does not conserve
+T02	NL	M1	0	1	usd → eur in `usd`	static	NL0250 NL0310
+T02	NL	M1	1	1	usd → eur in `usd`	static	NL0250 NL0310
+T02	NL	M1	2	3	usd → eur in `usd`	static	NL0310
+T02	NL	M1	3	3	usd → eur in `usd`	static	NL0310
+T02	NL	M2	0	6	debit → credit	unexecuted	its program has no executor
+T02	NL	M2	1	7	credit → debit	unexecuted	its program has no executor
+T02	NL	M2	2	8	credit → debit	unexecuted	its program has no executor
+T02	RS	M1	0	1	usd → eur in `usd`	static	NL0250 NL0310
+T02	RS	M1	1	1	usd → eur in `usd`	static	NL0250 NL0310
+T02	RS	M1	2	3	usd → eur in `usd`	static	NL0310
+T02	RS	M1	3	3	usd → eur in `usd`	static	NL0310
+T02	RS	M2	0	6	debit → credit	unexecuted	its program has no executor
+T02	RS	M2	1	7	credit → debit	unexecuted	its program has no executor
+T02	RS	M2	2	8	credit → debit	unexecuted	its program has no executor
+T03	SQL	M1	0	1	usd → eur in `usd`	runtime	execution: [42883] function task(integer, integer, usd, eur) does not exist
+T03	SQL	M1	1	1	eur → usd in `eur`	runtime	execution: [42883] function task(integer, integer, usd, eur) does not exist
+T03	SQL	M1	2	6	usd → eur in `amt_usd`	runtime	execution: [42701] column "amt_eur" specified more than once
+T03	SQL	M1	3	6	eur → usd in `amt_eur`	runtime	execution: [42701] column "amt_usd" specified more than once
+T03	SQL	M1	4	7	usd → eur in `'usd'`	runtime	execution: [P0001] a transaction does not conserve
+T03	SQL	M1	5	7	usd → eur in `usd`	runtime	execution: [42804] column "amt_usd" is of type usd but expression is of type eur
+T03	SQL	M1	6	8	usd → eur in `'usd'`	runtime	execution: [P0001] a transaction does not conserve
+T03	SQL	M1	7	9	eur → usd in `'eur'`	runtime	execution: [P0001] a transaction does not conserve
+T03	SQL	M1	8	9	eur → usd in `eur`	runtime	execution: [42804] column "amt_eur" is of type eur but expression is of type usd
+T03	SQL	M1	9	10	eur → usd in `'eur'`	runtime	execution: [P0001] a transaction does not conserve
+T03	SQL	M2	0	7	the sign of `row(-(u).minor)::usd` removed	runtime	execution: [P0001] a transaction does not conserve
+T03	SQL	M2	1	8	`u` negated	runtime	execution: [P0001] a transaction does not conserve
+T03	SQL	M2	2	9	the sign of `row(-(x).minor)::eur` removed	runtime	execution: [P0001] a transaction does not conserve
+T03	SQL	M2	3	10	`x` negated	runtime	execution: [P0001] a transaction does not conserve
+T03	NL	M1	0	1	usd → eur in `usd`	runtime	argument 3 is Money<usd> and `task` declares Money<eur>: no typed caller can make this call
+T03	NL	M1	1	1	eur → usd in `eur`	runtime	argument 4 is Money<eur> and `task` declares Money<usd>: no typed caller can make this call
+T03	NL	M1	2	2	usd → eur in `usd`	static	NL0310
+T03	NL	M1	3	2	usd → eur in `usd`	static	NL0310
+T03	NL	M1	4	2	eur → usd in `eur`	static	NL0310
+T03	NL	M1	5	2	eur → usd in `eur`	static	NL0310
+T03	NL	M2	0	5	debit → credit	runtime	expected Result or Option, found struct
+T03	NL	M2	1	5	credit → debit	runtime	the ledger refused the set: the set does not conserve: USD sums to -20000 rather than zero
+T03	NL	M2	2	5	debit → credit	runtime	expected Result or Option, found struct
+T03	NL	M2	3	5	credit → debit	runtime	the ledger refused the set: the set does not conserve: EUR sums to -18000 rather than zero
+T03	RS	M1	0	1	usd → eur in `usd`	runtime	argument 3 is Money<usd> and `task` declares Money<eur>: no typed caller can make this call
+T03	RS	M1	1	1	eur → usd in `eur`	runtime	argument 4 is Money<eur> and `task` declares Money<usd>: no typed caller can make this call
+T03	RS	M1	2	2	usd → eur in `usd`	static	NL0310
+T03	RS	M1	3	2	usd → eur in `usd`	static	NL0310
+T03	RS	M1	4	2	eur → usd in `eur`	static	NL0310
+T03	RS	M1	5	2	eur → usd in `eur`	static	NL0310
+T03	RS	M2	0	5	debit → credit	runtime	expected Result or Option, found struct
+T03	RS	M2	1	5	credit → debit	runtime	the ledger refused the set: the set does not conserve: USD sums to -20000 rather than zero
+T03	RS	M2	2	5	debit → credit	runtime	expected Result or Option, found struct
+T03	RS	M2	3	5	credit → debit	runtime	the ledger refused the set: the set does not conserve: EUR sums to -18000 rather than zero
+T04	SQL	M1	0	1	usd → eur in `usd`	runtime	execution: [42883] function task(integer, integer, usd, usd) does not exist
+T04	SQL	M1	1	1	usd → eur in `usd`	runtime	execution: [42883] function task(integer, integer, usd, usd) does not exist
+T04	SQL	M5	0	7	`perform resolve_post(h, b, c, t);` removed	static	NL0320
+T04	NL	M1	0	1	usd → eur in `usd`	static	NL0310
+T04	NL	M1	1	1	usd → eur in `usd`	unexecuted	its program has no executor
+T04	NL	M1	2	2	usd → eur in `usd`	static	NL0310
+T04	NL	M5	0	5	`resolve h post c` removed	static	NL0320
+T04	RS	M1	0	1	usd → eur in `usd`	static	NL0310
+T04	RS	M1	1	1	usd → eur in `usd`	unexecuted	its program has no executor
+T04	RS	M1	2	2	usd → eur in `usd`	static	NL0310
+T04	RS	M5	0	5	`resolve h post c` removed	static	NL0320
+T05	SQL	M1	0	1	usd → eur in `usd`	runtime	execution: [42883] function task(integer, usd) does not exist
+T05	SQL	M5	0	6	`perform resolve_void(h);` removed	static	NL0320
+T05	NL	M1	0	1	usd → eur in `usd`	static	NL0310
+T05	NL	M1	1	1	usd → eur in `usd`	static	NL0310
+T05	NL	M5	0	3	`resolve h void` removed	static	NL0320
+T05	RS	M1	0	1	usd → eur in `usd`	static	NL0310
+T05	RS	M1	1	1	usd → eur in `usd`	static	NL0310
+T05	RS	M5	0	3	`resolve h void` removed	static	NL0320
+T06	SQL	M1	0	1	usd → eur in `usd`	runtime	execution: [42883] function task(integer, integer, usd, integer, usd, integer, usd) does not exist
+T06	SQL	M1	1	1	usd → eur in `usd`	runtime	execution: [42883] function task(integer, integer, usd, integer, usd, integer, usd) does not exist
+T06	SQL	M1	2	1	usd → eur in `usd`	runtime	execution: [42883] function task(integer, integer, usd, integer, usd, integer, usd) does not exist
+T06	SQL	M1	3	7	usd → eur in `amt_usd`	runtime	execution: [42804] column "amt_eur" is of type eur but expression is of type usd
+T06	SQL	M1	4	8	usd → eur in `'usd'`	runtime	execution: [P0001] a transaction does not conserve
+T06	SQL	M1	5	8	usd → eur in `usd`	runtime	execution: [42804] column "amt_usd" is of type usd but expression is of type eur
+T06	SQL	M1	6	9	usd → eur in `'usd'`	runtime	execution: [P0001] a transaction does not conserve
+T06	SQL	M1	7	9	usd → eur in `usd`	runtime	execution: [42804] column "amt_usd" is of type usd but expression is of type eur
+T06	SQL	M1	8	10	usd → eur in `'usd'`	runtime	execution: [P0001] a transaction does not conserve
+T06	SQL	M1	9	10	usd → eur in `usd`	runtime	execution: [42804] column "amt_usd" is of type usd but expression is of type eur
+T06	SQL	M1	10	11	usd → eur in `'usd'`	runtime	execution: [P0001] a transaction does not conserve
+T06	SQL	M1	11	11	usd → eur in `usd`	runtime	execution: [42804] column "amt_usd" is of type usd but expression is of type eur
+T06	SQL	M2	0	8	`row((m1).minor + (m2).minor + (m3).minor)::usd` negated	runtime	execution: [P0001] a transaction does not conserve
+T06	SQL	M2	1	9	the sign of `row(-(m1).minor)::usd` removed	runtime	execution: [P0001] a transaction does not conserve
+T06	SQL	M2	2	10	the sign of `row(-(m2).minor)::usd` removed	runtime	execution: [P0001] a transaction does not conserve
+T06	SQL	M2	3	11	the sign of `row(-(m3).minor)::usd` removed	runtime	execution: [P0001] a transaction does not conserve
+T06	NL	M1	0	3	usd → eur in `usd`	static	NL0250 NL0310
+T06	NL	M1	1	4	usd → eur in `usd`	static	NL0250 NL0310
+T06	NL	M1	2	5	usd → eur in `usd`	static	NL0250 NL0310
+T06	NL	M1	3	7	usd → eur in `usd`	static	NL0310
+T06	NL	M1	4	7	usd → eur in `usd`	static	NL0310
+T06	NL	M2	0	10	credit → debit	unexecuted	its program has no executor
+T06	NL	M2	1	11	debit → credit	unexecuted	its program has no executor
+T06	NL	M2	2	12	debit → credit	unexecuted	its program has no executor
+T06	NL	M2	3	13	debit → credit	unexecuted	its program has no executor
+T06	RS	M1	0	3	usd → eur in `usd`	static	NL0250 NL0310
+T06	RS	M1	1	4	usd → eur in `usd`	static	NL0250 NL0310
+T06	RS	M1	2	5	usd → eur in `usd`	static	NL0250 NL0310
+T06	RS	M1	3	7	usd → eur in `usd`	static	NL0310
+T06	RS	M1	4	7	usd → eur in `usd`	static	NL0310
+T06	RS	M2	0	10	credit → debit	unexecuted	its program has no executor
+T06	RS	M2	1	11	debit → credit	unexecuted	its program has no executor
+T06	RS	M2	2	12	debit → credit	unexecuted	its program has no executor
+T06	RS	M2	3	13	debit → credit	unexecuted	its program has no executor
+T07	SQL	M1	0	1	usd → eur in `usd`	runtime	execution: [42883] function task(integer, integer, usd) does not exist
+T07	SQL	M1	1	6	usd → eur in `amt_usd`	runtime	execution: [42804] column "amt_eur" is of type eur but expression is of type usd
+T07	SQL	M1	2	7	usd → eur in `'usd'`	runtime	execution: [P0001] a transaction does not conserve
+T07	SQL	M1	3	8	usd → eur in `'usd'`	runtime	execution: [P0001] a transaction does not conserve
+T07	SQL	M1	4	8	usd → eur in `usd`	runtime	execution: [42804] column "amt_usd" is of type usd but expression is of type eur
+T07	SQL	M2	0	7	`x` negated	runtime	execution: [P0001] a transaction does not conserve
+T07	SQL	M2	1	8	the sign of `row(-(x).minor)::usd` removed	runtime	execution: [P0001] a transaction does not conserve
+T07	NL	M1	0	1	usd → eur in `usd`	static	NL0310
+T07	NL	M1	1	2	usd → eur in `usd`	static	NL0310
+T07	NL	M1	2	2	usd → eur in `usd`	static	NL0310
+T07	NL	M2	0	5	credit → debit	runtime	the ledger refused the set: the set does not conserve: USD sums to -2468 rather than zero
+T07	NL	M2	1	6	debit → credit	runtime	expected Result or Option, found struct
+T07	RS	M1	0	1	usd → eur in `usd`	static	NL0310
+T07	RS	M1	1	2	usd → eur in `usd`	static	NL0310
+T07	RS	M1	2	2	usd → eur in `usd`	static	NL0310
+T07	RS	M2	0	5	credit → debit	runtime	the ledger refused the set: the set does not conserve: USD sums to -2468 rather than zero
+T07	RS	M2	1	6	debit → credit	runtime	expected Result or Option, found struct
+T08	SQL	M1	0	1	usd → eur in `usd`	runtime	execution: [42883] function task(integer, integer, integer, usd) does not exist
+T08	SQL	M1	1	6	usd → eur in `amt_usd`	silent	row 0: expected ["10", "usd", "278921"], got ["10", "usd", "0"]
+T08	SQL	M1	2	6	usd → eur in `'usd'`	silent	row 0: expected ["10", "usd", "278921"], got ["10", "usd", "0"]
+T08	SQL	M1	3	9	usd → eur in `amt_usd`	runtime	execution: [42804] column "amt_eur" is of type eur but expression is of type usd
+T08	SQL	M1	4	10	usd → eur in `'usd'`	runtime	execution: [P0001] a transaction does not conserve
+T08	SQL	M1	5	10	usd → eur in `usd`	runtime	execution: [42804] column "amt_usd" is of type usd but expression is of type eur
+T08	SQL	M1	6	11	usd → eur in `'usd'`	runtime	execution: [P0001] a transaction does not conserve
+T08	SQL	M1	7	11	usd → eur in `usd`	runtime	execution: [42804] column "amt_usd" is of type usd but expression is of type eur
+T08	SQL	M1	8	12	usd → eur in `'usd'`	runtime	execution: [P0001] a transaction does not conserve
+T08	SQL	M1	9	12	usd → eur in `usd`	runtime	execution: [42804] column "amt_usd" is of type usd but expression is of type eur
+T08	SQL	M2	0	10	the sign of `row(-(payment).minor)::usd` removed	runtime	execution: [P0001] a transaction does not conserve
+T08	SQL	M2	1	11	`row(applied)::usd` negated	runtime	execution: [P0001] a transaction does not conserve
+T08	SQL	M2	2	12	`row((payment).minor - applied)::usd` negated	runtime	execution: [P0001] a transaction does not conserve
+T08	SQL	M3	0	6	conjunct `acct = loan` of `where` dropped	silent	row 0: expected ["10", "usd", "278921"], got ["10", "usd", "0"]
+T08	SQL	M3	1	6	conjunct `cur = 'usd'` of `where` dropped	silent	row 0: expected ["10", "usd", "278921"], got ["10", "usd", "0"]
+T08	NL	M1	0	2	usd → eur in `"usd"`	unexecuted	its program has no executor
+T08	NL	M1	1	7	usd → eur in `usd`	static	NL0250 NL0251 NL0310
+T08	NL	M1	2	9	usd → eur in `usd`	static	NL0310
+T08	NL	M1	3	9	usd → eur in `usd`	static	NL0310
+T08	NL	M1	4	11	usd → eur in `usd`	static	NL0250 NL0251 NL0310
+T08	NL	M2	0	14	debit → credit	unexecuted	its program has no executor
+T08	NL	M2	1	14	credit → debit	unexecuted	its program has no executor
+T08	NL	M2	2	14	credit → debit	unexecuted	its program has no executor
+T08	NL	M2	3	16	debit → credit	unexecuted	its program has no executor
+T08	NL	M2	4	16	credit → debit	unexecuted	its program has no executor
+T08	NL	M3	0	2	`.where` clause dropped	unexecuted	its program has no executor
+T08	NL	M6	0	5	snapshot → read_your_writes	static	NL0310
+T08	NL	M6	1	9	snapshot → read_your_writes	static	NL0310
+T08	RS	M1	0	2	usd → eur in `"usd"`	unexecuted	its program has no executor
+T08	RS	M1	1	7	usd → eur in `usd`	static	NL0250 NL0251 NL0310
+T08	RS	M1	2	9	usd → eur in `usd`	static	NL0310
+T08	RS	M1	3	9	usd → eur in `usd`	static	NL0310
+T08	RS	M1	4	11	usd → eur in `usd`	static	NL0250 NL0251 NL0310
+T08	RS	M2	0	14	debit → credit	unexecuted	its program has no executor
+T08	RS	M2	1	14	credit → debit	unexecuted	its program has no executor
+T08	RS	M2	2	14	credit → debit	unexecuted	its program has no executor
+T08	RS	M2	3	16	debit → credit	unexecuted	its program has no executor
+T08	RS	M2	4	16	credit → debit	unexecuted	its program has no executor
+T08	RS	M3	0	2	`.where` clause dropped	unexecuted	its program has no executor
+T08	RS	M6	0	5	snapshot → read_your_writes	static	NL0310
+T08	RS	M6	1	9	snapshot → read_your_writes	static	NL0310
+T09	SQL	M1	0	1	usd → eur in `usd`	runtime	execution: [42883] function task(integer, usd, auth_overdraft) does not exist
+T09	NL	M1	0	1	usd → eur in `usd`	static	NL0310 NL0312
+T09	NL	M1	1	1	usd → eur in `usd`	static	NL0312
+T09	NL	M1	2	2	usd → eur in `usd`	static	NL0310
+T09	RS	M1	0	1	usd → eur in `usd`	static	NL0310 NL0312
+T09	RS	M1	1	1	usd → eur in `usd`	static	NL0312
+T09	RS	M1	2	2	usd → eur in `usd`	static	NL0310
+T10	SQL	M1	0	6	usd → eur in `amt_usd`	runtime	execution: [42701] column "amt_eur" specified more than once
+T10	SQL	M1	1	6	eur → usd in `amt_eur`	runtime	execution: [42701] column "amt_usd" specified more than once
+T10	SQL	M1	2	6	jpy → usd in `amt_jpy`	runtime	execution: [42701] column "amt_usd" specified more than once
+T10	SQL	M1	3	8	usd → eur in `amt_usd`	silent	row 0: expected ["10", "usd", "-68627"], got ["10", "usd", "NULL"]
+T10	SQL	M1	4	8	usd → eur in `amt_usd`	silent	row 0: expected ["10", "usd", "-68627"], got ["10", "usd", "NULL"]
+T10	SQL	M1	5	8	usd → eur in `usd`	runtime	execution: [42804] column "amt_usd" is of type usd but expression is of type eur
+T10	SQL	M1	6	9	eur → usd in `amt_eur`	equivalent	
+T10	SQL	M1	7	9	eur → usd in `amt_eur`	equivalent	
+T10	SQL	M1	8	9	eur → usd in `eur`	runtime	execution: [42804] column "amt_eur" is of type eur but expression is of type usd
+T10	SQL	M1	9	10	jpy → usd in `amt_jpy`	equivalent	
+T10	SQL	M1	10	10	jpy → usd in `amt_jpy`	equivalent	
+T10	SQL	M1	11	10	jpy → usd in `jpy`	runtime	execution: [42804] column "amt_jpy" is of type jpy but expression is of type usd
+T10	SQL	M2	0	8	the sign of `row(-(amt_usd).minor)::usd` removed	silent	row 0: expected ["10", "usd", "-68627"], got ["10", "usd", "68627"]
+T10	SQL	M2	1	9	the sign of `row(-(amt_eur).minor)::eur` removed	equivalent	
+T10	SQL	M2	2	10	the sign of `row(-(amt_jpy).minor)::jpy` removed	equivalent	
+T10	SQL	M3	0	13	`where` clause dropped	silent	2 rows expected, 200 returned
+T10	NL	M2	0	4	credit → debit	unexecuted	its program has no executor
+T10	NL	M2	1	4	debit → credit	unexecuted	its program has no executor
+T10	NL	M3	0	2	`.where` clause dropped	unexecuted	its program has no executor
+T10	NL	M6	0	1	ledger_consistent → serializable	static	NL0310
+T10	RS	M2	0	4	credit → debit	unexecuted	its program has no executor
+T10	RS	M2	1	4	debit → credit	unexecuted	its program has no executor
+T10	RS	M3	0	2	`.where` clause dropped	unexecuted	its program has no executor
+T10	RS	M6	0	1	ledger_consistent → serializable	static	NL0310
+V01	SQL	M1	0	2	usd → eur in `amt_usd`	silent	row 1: expected ["1", "usd", "-3329731"], got ["1", "usd", "NULL"]
+V01	SQL	M1	1	2	eur → usd in `amt_eur`	silent	row 0: expected ["1", "eur", "291173"], got ["1", "eur", "NULL"]
+V01	SQL	M1	2	2	jpy → usd in `amt_jpy`	silent	row 5: expected ["11", "jpy", "-2649"], got ["11", "jpy", "NULL"]
+V01	SQL	M6	0	5	read_your_writes → monotonic	equivalent	
+V01	NL	M6	0	4	read_your_writes → monotonic	equivalent	
+V01	RS	M6	0	4	read_your_writes → monotonic	equivalent	
+V02	SQL	M1	0	4	usd → eur in `amt_usd`	silent	row 1: expected ["1", "usd", "-3329731"], got ["1", "usd", "NULL"]
+V02	SQL	M1	1	4	eur → usd in `amt_eur`	silent	row 0: expected ["1", "eur", "291173"], got ["1", "eur", "NULL"]
+V02	SQL	M1	2	4	jpy → usd in `amt_jpy`	silent	row 5: expected ["11", "jpy", "-2649"], got ["11", "jpy", "NULL"]
+V02	SQL	M1	3	6	usd → eur in `amt_usd`	silent	row 9: expected ["12", "usd", "249405"], got ["12", "usd", "257383"]
+V02	SQL	M1	4	6	eur → usd in `amt_eur`	silent	row 44: expected ["9", "eur", "-147038"], got ["9", "eur", "-145002"]
+V02	SQL	M3	0	6	`where` clause dropped	silent	row 2: expected ["10", "eur", "197107"], got ["10", "eur", "194929"]
+V02	SQL	M6	0	9	ledger_consistent → serializable	equivalent	
+V02	NL	M3	0	4	`.where` clause dropped	silent	row 2: expected ["10", "eur", "197107"], got ["10", "eur", "194929"]
+V02	NL	M6	0	7	ledger_consistent → serializable	equivalent	
+V02	RS	M3	0	4	`.where` clause dropped	silent	row 2: expected ["10", "eur", "197107"], got ["10", "eur", "194929"]
+V02	RS	M6	0	7	ledger_consistent → serializable	equivalent	
+V03	SQL	M1	0	4	usd → eur in `amt_usd`	silent	row 1: expected ["1", "usd", "-2360884"], got ["1", "usd", "NULL"]
+V03	SQL	M1	1	4	eur → usd in `amt_eur`	silent	row 0: expected ["1", "eur", "52581"], got ["1", "eur", "NULL"]
+V03	SQL	M1	2	4	jpy → usd in `amt_jpy`	silent	row 5: expected ["12", "jpy", "9966"], got ["12", "jpy", "NULL"]
+V03	SQL	M3	0	6	`where` clause dropped	silent	24 rows expected, 47 returned
+V03	NL	M3	0	6	`.where` clause dropped	silent	24 rows expected, 47 returned
+V03	RS	M3	0	6	`.where` clause dropped	silent	24 rows expected, 47 returned
+V04	SQL	M6	0	5	snapshot → read_your_writes	equivalent	
+V04	NL	M6	0	4	snapshot → read_your_writes	equivalent	
+V04	RS	M6	0	4	snapshot → read_your_writes	equivalent	
+V05	SQL	M1	0	2	usd → eur in `amt_usd`	silent	row 2: expected ["usd", "0"], got ["usd", "NULL"]
+V05	SQL	M1	1	2	eur → usd in `amt_eur`	silent	row 0: expected ["eur", "0"], got ["eur", "NULL"]
+V05	SQL	M1	2	2	jpy → usd in `amt_jpy`	silent	row 1: expected ["jpy", "0"], got ["jpy", "NULL"]
+V05	SQL	M6	0	5	snapshot → read_your_writes	equivalent	
+V05	NL	M6	0	4	snapshot → read_your_writes	equivalent	
+V05	RS	M6	0	4	snapshot → read_your_writes	equivalent	
+B01	SQL	M1	0	1	usd → eur in `amt_usd`	silent	row 1: expected ["1", "usd", "-734794"], got ["1", "usd", "NULL"]
+B01	SQL	M1	1	1	eur → usd in `amt_eur`	silent	row 0: expected ["1", "eur", "77501"], got ["1", "eur", "NULL"]
+B01	SQL	M1	2	1	jpy → usd in `amt_jpy`	silent	row 6: expected ["12", "jpy", "13244"], got ["12", "jpy", "NULL"]
+B01	SQL	M3	0	3	`where` clause dropped	silent	39 rows expected, 47 returned
+B01	SQL	M4	0	3	epoch 5 → 6	silent	39 rows expected, 41 returned
+B01	NL	M4	0	2	epoch 5 → 6	silent	39 rows expected, 41 returned
+B01	RS	M4	0	2	epoch 5 → 6	silent	39 rows expected, 41 returned
+B02	SQL	M1	0	1	usd → eur in `amt_usd`	silent	row 1: expected ["1", "usd", "-776467"], got ["1", "usd", "NULL"]
+B02	SQL	M1	1	1	eur → usd in `amt_eur`	silent	row 0: expected ["1", "eur", "77501"], got ["1", "eur", "NULL"]
+B02	SQL	M1	2	1	jpy → usd in `amt_jpy`	silent	row 6: expected ["12", "jpy", "13244"], got ["12", "jpy", "NULL"]
+B02	SQL	M3	0	3	`where` clause dropped	silent	39 rows expected, 47 returned
+B03	SQL	M1	0	1	usd → eur in `usd`	runtime	execution: [42883] function correct(integer, integer, usd) does not exist
+B03	SQL	M1	1	5	usd → eur in `amt_usd`	runtime	execution: [42804] column "amt_eur" is of type eur but expression is of type usd
+B03	SQL	M1	2	6	usd → eur in `'usd'`	runtime	execution: [P0001] a transaction does not conserve
+B03	SQL	M1	3	6	usd → eur in `usd`	runtime	execution: [42804] column "amt_usd" is of type usd but expression is of type eur
+B03	SQL	M1	4	7	usd → eur in `'usd'`	runtime	execution: [P0001] a transaction does not conserve
+B03	SQL	M1	5	10	usd → eur in `amt_usd`	silent	row 40: expected ["valid", "1", "usd", "-777467"], got ["valid", "1", "usd", "NULL"]
+B03	SQL	M1	6	10	eur → usd in `amt_eur`	silent	row 39: expected ["valid", "1", "eur", "77501"], got ["valid", "1", "eur", "NULL"]
+B03	SQL	M1	7	10	jpy → usd in `amt_jpy`	silent	row 45: expected ["valid", "12", "jpy", "13244"], got ["valid", "12", "jpy", "NULL"]
+B03	SQL	M1	8	13	usd → eur in `amt_usd`	silent	row 1: expected ["system", "1", "usd", "-734794"], got ["system", "1", "usd", "NULL"]
+B03	SQL	M1	9	13	eur → usd in `amt_eur`	silent	row 0: expected ["system", "1", "eur", "77501"], got ["system", "1", "eur", "NULL"]
+B03	SQL	M1	10	13	jpy → usd in `amt_jpy`	silent	row 6: expected ["system", "12", "jpy", "13244"], got ["system", "12", "jpy", "NULL"]
+B03	SQL	M2	0	6	the sign of `row(-(m).minor)::usd` removed	runtime	execution: [P0001] a transaction does not conserve
+B03	SQL	M2	1	7	`m` negated	runtime	execution: [P0001] a transaction does not conserve
+B03	SQL	M3	0	11	`where` clause dropped	silent	78 rows expected, 86 returned
+B03	SQL	M3	1	14	`where` clause dropped	silent	78 rows expected, 86 returned
+B03	SQL	M4	0	14	epoch 5 → 6	silent	78 rows expected, 80 returned
+B04	SQL	M1	0	1	usd → eur in `amt_usd`	silent	row 1: expected ["1", "usd", "-734794"], got ["1", "usd", "NULL"]
+B04	SQL	M1	1	1	eur → usd in `amt_eur`	silent	row 0: expected ["1", "eur", "77501"], got ["1", "eur", "NULL"]
+B04	SQL	M1	2	1	jpy → usd in `amt_jpy`	silent	row 6: expected ["12", "jpy", "13244"], got ["12", "jpy", "NULL"]
+B04	SQL	M3	0	3	conjunct `value_date <= date '2026-01-21'` of `where` dropped	equivalent	
+B04	SQL	M3	1	3	conjunct `epoch <= 5` of `where` dropped	silent	row 1: expected ["1", "usd", "-734794"], got ["1", "usd", "-776467"]
+B04	SQL	M4	0	3	epoch 5 → 6	equivalent	
+B04	NL	M4	0	2	epoch 5 → 6	equivalent	
+B04	RS	M4	0	2	epoch 5 → 6	equivalent	
+B05	SQL	M1	0	1	usd → eur in `amt_usd`	equivalent	
+B05	SQL	M1	1	1	eur → usd in `amt_eur`	equivalent	
+B05	SQL	M1	2	1	jpy → usd in `amt_jpy`	silent	row 0: expected ["22", "2026-01-12", "jpy", "-741"], got ["22", "2026-01-12", "jpy", "NULL"]
+B05	SQL	M3	0	3	conjunct `acct = 3` of `where` dropped	silent	1 rows expected, 54 returned
+B05	SQL	M3	1	4	conjunct `value_date between date '2026-01-11' and date '2026-01-31'` of `where` dropped	silent	1 rows expected, 4 returned
+B05	SQL	M3	2	5	conjunct `epoch <= 5` of `where` dropped	silent	1 rows expected, 4 returned
+B05	SQL	M4	0	5	epoch 5 → 6	silent	1 rows expected, 3 returned
+B05	NL	M3	0	3	conjunct `p.acct == 3` of `.where` dropped	silent	1 rows expected, 54 returned
+B05	NL	M3	1	3	conjunct `p.value_date >= v@2026-01-11` of `.where` dropped	silent	1 rows expected, 4 returned
+B05	NL	M3	2	3	conjunct `p.value_date <= v@2026-01-31` of `.where` dropped	equivalent	
+B05	NL	M4	0	2	epoch 5 → 6	silent	1 rows expected, 3 returned
+B05	RS	M3	0	3	conjunct `p.acct == 3` of `.where` dropped	silent	1 rows expected, 54 returned
+B05	RS	M3	1	3	conjunct `p.value_date >= v@2026-01-11` of `.where` dropped	silent	1 rows expected, 4 returned
+B05	RS	M3	2	3	conjunct `p.value_date <= v@2026-01-31` of `.where` dropped	equivalent	
+B05	RS	M4	0	2	epoch 5 → 6	silent	1 rows expected, 3 returned

@@ -1,0 +1,9 @@
+# commit: 09f60281641a
+# worktree: clean
+# host: Linux 6.18.44-fc-v50 x86_64 — 2 CPUs
+# toolchain: rustc 1.95.0 (59807616e 2026-04-14)
+# protocol: 20 warm-up passes, then 200 timed passes; each pass checks every file once with each checker, alternating; in-process, release build; peak heap from E18's counting allocator
+surface	files	lines	median pass us	MAD us	us per KLOC	peak heap per check max bytes	peak heap per KLOC max bytes
+SQL	30	3781	25143	536	6650	155407	1175374
+NL	27	1371	3351	110	2444	70407	1247596
+RS	26	1338	2603	96	1946	70407	1288353

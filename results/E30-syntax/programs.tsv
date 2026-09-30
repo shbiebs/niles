@@ -1,0 +1,111 @@
+task	surface	verdict	detail	lines	tokens	keywords	operators
+Q01	SQL	correct		3	41	5	1
+Q01	NL	correct		1	23	7	1
+Q01	RS	correct		1	31	3	3
+Q01	PRQL	correct		2	17	4	1
+Q01	DL	correct		3	65	5	4
+Q02	SQL	correct		5	31	6	3
+Q02	NL	correct		1	31	9	2
+Q02	RS	correct		5	50	5	5
+Q02	PRQL	correct		4	21	5	3
+Q02	DL	correct		3	63	4	5
+Q03	SQL	correct		4	67	7	2
+Q03	NL	correct		1	29	9	1
+Q03	RS	correct		4	36	4	3
+Q03	PRQL	correct		3	38	5	3
+Q03	DL	correct		4	83	5	4
+Q04	SQL	correct		3	25	5	2
+Q04	NL	correct		1	21	7	1
+Q04	RS	correct		4	52	9	3
+Q04	PRQL	correct		4	32	5	4
+Q04	DL	correct		3	41	3	4
+Q05	SQL	correct		6	30	9	2
+Q05	NL	correct		1	31	11	1
+Q05	RS	correct		6	61	7	4
+Q05	PRQL	correct		5	26	7	3
+Q05	DL	not expressible	A Datalog relation is a set: the task's answer is ordered (largest first, ties by account), and Soufflé has no order or limit to state it with. The five-row set alone is expressible by counting, but it is not the task.				
+Q06	SQL	correct		3	13	5	0
+Q06	NL	correct		1	27	8	1
+Q06	RS	correct		5	51	4	3
+Q06	PRQL	correct		2	13	4	1
+Q06	DL	correct		5	76	5	4
+Q07	SQL	correct		4	47	8	1
+Q07	NL	not expressible	Niles has no window function on its SQL surface (`over (partition by …)` is a parse error, NL0001/NL0009), and a posting's epoch — the task's order — is not a column a query can read (finding F8). The SQL-92 form, a self-join summing the earlier postings of the same account and currency, resolves its aliases since Niles fix 5/5, but it can only order by `txn`, which is a different query that coincides with this one only where epochs and txn ids happen to agree.				
+Q07	RS	not expressible	The pipeline has no window stage, and a posting's epoch — the task's order — is not a column (finding F8). A self-join `.join(postings, |l, r| r.cur == l.cur && r.txn <= l.txn)` resolves each parameter to its own side since Niles fix 5/5, but it orders by `txn`, which is a different query that coincides with this one only where epochs and txn ids happen to agree.				
+Q07	PRQL	correct		6	40	7	3
+Q07	DL	correct		7	192	5	6
+Q08	SQL	correct		8	72	12	2
+Q08	NL	correct		12	118	14	3
+Q08	RS	not expressible	No window or rank stage in the pipeline. The SQL-92 form needs every account compared with every other account of its desk: `cross_join` is refused (NL0516, "no product operator exists in the IR"), and a keyed join of the balance view with itself matches on its key, (acct, desk), so each account meets only itself. The SQL surface's comma from-list lowers to a join with empty keys, which the evaluator runs as a product (finding F10); the pipeline has no spelling for it.				
+Q08	PRQL	correct		9	68	10	4
+Q08	DL	correct		6	129	5	6
+Q09	SQL	correct		8	57	12	2
+Q09	NL	not expressible	`with recursive` does not parse on the SQL surface (NL0001, NL0002, NL0004, NL0511); the mapping table lists it as specified, not implemented.				
+Q09	RS	not expressible	`.fixpoint(|acc| …) guard measure(…)` is specified but has no lowering (NL0507), as the mapping table says.				
+Q09	PRQL	correct		8	48	6	4
+Q09	DL	correct		4	50	3	3
+Q10	SQL	correct		7	73	10	2
+Q10	NL	correct		1	49	11	2
+Q10	RS	correct		6	99	5	4
+Q10	PRQL	correct		8	45	7	2
+Q10	DL	correct		6	129	5	5
+T01	SQL	correct		9	119	17	6
+T01	NL	correct		9	81	5	7
+T01	RS	correct		9	81	5	7
+T02	SQL	correct		10	154	17	6
+T02	NL	unexecuted	niles-interp refuses `money arithmetic (checked tier only)`	11	109	5	8
+T02	RS	unexecuted	niles-interp refuses `money arithmetic (checked tier only)`	11	109	5	8
+T03	SQL	correct		11	170	18	6
+T03	NL	correct		7	103	4	6
+T03	RS	correct		7	103	4	6
+T04	SQL	correct		8	71	14	3
+T04	NL	unexecuted	niles-interp refuses `hold`	6	70	6	8
+T04	RS	unexecuted	niles-interp refuses `hold`	6	70	6	8
+T05	SQL	correct		7	39	11	2
+T05	NL	unexecuted	niles-interp refuses `hold`	4	55	6	8
+T05	RS	unexecuted	niles-interp refuses `hold`	4	55	6	8
+T06	SQL	correct		12	200	17	6
+T06	NL	unexecuted	niles-interp refuses `money arithmetic (checked tier only)`	16	140	5	8
+T06	RS	unexecuted	niles-interp refuses `money arithmetic (checked tier only)`	16	140	5	8
+T07	SQL	correct		9	119	17	6
+T07	NL	correct		9	81	5	7
+T07	RS	correct		9	81	5	7
+T08	SQL	correct		13	196	20	7
+T08	NL	unexecuted	niles-interp refuses `a read of `loan_balance` (the interpreter has no relational tier)`	18	180	17	12
+T08	RS	unexecuted	niles-interp refuses `a read of `loan_balance` (the interpreter has no relational tier)`	18	180	17	12
+T09	SQL	correct		4	31	9	1
+T09	NL	unexecuted	the interpreter cannot be handed a capability	5	50	2	5
+T09	RS	unexecuted	the interpreter cannot be handed a capability	5	50	2	5
+T10	SQL	correct		14	155	23	7
+T10	NL	unexecuted	niles-interp refuses `a read of `postings` (the interpreter has no relational tier)`	6	96	10	12
+T10	RS	unexecuted	niles-interp refuses `a read of `postings` (the interpreter has no relational tier)`	6	96	10	12
+V01	SQL	correct		5	66	12	1
+V01	NL	correct		4	45	10	4
+V01	RS	correct		4	45	10	4
+V02	SQL	correct		9	98	16	2
+V02	NL	correct		7	113	12	5
+V02	RS	correct		7	113	12	5
+V03	SQL	correct		8	89	17	2
+V03	NL	correct		8	83	16	6
+V03	RS	correct		8	83	16	6
+V04	SQL	correct		5	37	11	1
+V04	NL	correct		4	39	11	4
+V04	RS	correct		4	39	11	4
+V05	SQL	correct		5	62	12	1
+V05	NL	correct		4	35	8	4
+V05	RS	correct		4	35	8	4
+B01	SQL	correct		4	45	6	2
+B01	NL	correct		4	37	4	4
+B01	RS	correct		4	37	4	4
+B02	SQL	correct		4	46	6	2
+B02	NL	correct		4	38	4	4
+B02	RS	correct		4	38	4	4
+B03	SQL	correct		14	206	20	7
+B03	NL	not expressible	A back-valued correction cannot be written: a `txn` block, `post`, `debit` and `credit` have no argument or clause for a posting's value date (the grammar's `Txn` is an idempotency key and a body), so the correction's legs can only take the default value date. The two reads — `.valid_at(v@2026-01-21)` and `.as_of(#5)` — are expressible (B02, B01); the write the task is about is not. SPEC-LANGUAGE §bitemporality records the axis as "Partial".				
+B03	RS	not expressible	A back-valued correction cannot be written: a `txn` block, `post`, `debit` and `credit` have no argument or clause for a posting's value date (the grammar's `Txn` is an idempotency key and a body), so the correction's legs can only take the default value date. The two reads — `.valid_at(v@2026-01-21)` and `.as_of(#5)` — are expressible (B02, B01); the write the task is about is not. SPEC-LANGUAGE §bitemporality records the axis as "Partial".				
+B04	SQL	correct		4	50	7	2
+B04	NL	correct		5	44	5	5
+B04	RS	correct		5	44	5	5
+B05	SQL	correct		5	45	6	3
+B05	NL	correct		4	63	6	9
+B05	RS	correct		4	63	6	9

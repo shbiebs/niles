@@ -1268,56 +1268,56 @@ circuit (4 nodes):
 === daemon: balance view, materialize auto
 codes: []
 circuit (2 nodes):
-  0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1] } in=[] key=Some([1]) arity=5 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
+  0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1] } in=[] key=Some([1]) arity=6 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
   1 Aggregate { group_key: [1, 2], aggs: [(Sum, Column(3))] } in=[0] key=Some([1, 2]) arity=3 anchor=Inherited contract=ServeContract { consistency: Snapshot, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // group by
   output ledger_balance = node 1
 
 === daemon: balance view, materialize full
 codes: []
 circuit (2 nodes):
-  0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1] } in=[] key=Some([1]) arity=5 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
+  0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1] } in=[] key=Some([1]) arity=6 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
   1 Aggregate { group_key: [1, 2], aggs: [(Sum, Column(3))] } in=[0] key=Some([1, 2]) arity=3 anchor=Inherited contract=ServeContract { consistency: Snapshot, materialize: Full, retain: Evictable, lineage: Off } conserving=true lineage=Off // group by
   output ledger_balance = node 1
 
 === daemon: select acct, sum(amt) from postings as of system time 5 where acct = 1 and cur = 0 group by acct
 codes: []
 circuit (4 nodes):
-  0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1] } in=[] key=Some([1]) arity=5 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
-  1 AsOf { epoch: Some(5) } in=[0] key=Some([1]) arity=5 anchor=Pinned(5) contract=ServeContract { consistency: Snapshot, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // as of system time
-  2 Filter { predicate: Binary { op: And, lhs: Binary { op: Eq, lhs: Column(1), rhs: LitInt(1) }, rhs: Binary { op: Eq, lhs: Column(2), rhs: LitInt(0) } } } in=[1] key=Some([1]) arity=5 anchor=Inherited contract=ServeContract { consistency: Snapshot, materialize: Auto, retain: Evictable, lineage: Off } conserving=false lineage=Off // where
+  0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1] } in=[] key=Some([1]) arity=6 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
+  1 AsOf { epoch: Some(5) } in=[0] key=Some([1]) arity=6 anchor=Pinned(5) contract=ServeContract { consistency: Snapshot, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // as of system time
+  2 Filter { predicate: Binary { op: And, lhs: Binary { op: Eq, lhs: Column(1), rhs: LitInt(1) }, rhs: Binary { op: Eq, lhs: Column(2), rhs: LitInt(0) } } } in=[1] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: Snapshot, materialize: Auto, retain: Evictable, lineage: Off } conserving=false lineage=Off // where
   3 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[2] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Snapshot, materialize: Auto, retain: Evictable, lineage: Off } conserving=false lineage=Off // group by
   output __wire_result = node 3
 
 === daemon: select acct, cur, sum(amt) from postings where acct = 7 and cur = 0 group by acct, cur
 codes: []
 circuit (3 nodes):
-  0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1] } in=[] key=Some([1]) arity=5 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
-  1 Filter { predicate: Binary { op: And, lhs: Binary { op: Eq, lhs: Column(1), rhs: LitInt(7) }, rhs: Binary { op: Eq, lhs: Column(2), rhs: LitInt(0) } } } in=[0] key=Some([1]) arity=5 anchor=Inherited contract=ServeContract { consistency: Snapshot, materialize: Auto, retain: Evictable, lineage: Off } conserving=false lineage=Off // where
+  0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1] } in=[] key=Some([1]) arity=6 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
+  1 Filter { predicate: Binary { op: And, lhs: Binary { op: Eq, lhs: Column(1), rhs: LitInt(7) }, rhs: Binary { op: Eq, lhs: Column(2), rhs: LitInt(0) } } } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: Snapshot, materialize: Auto, retain: Evictable, lineage: Off } conserving=false lineage=Off // where
   2 Aggregate { group_key: [1, 2], aggs: [(Sum, Column(3))] } in=[1] key=Some([1, 2]) arity=3 anchor=Inherited contract=ServeContract { consistency: Snapshot, materialize: Auto, retain: Evictable, lineage: Off } conserving=false lineage=Off // group by
   output __wire_result = node 2
 
 === daemon: select acct, cur, sum(amt) from postings as of system time 5 where acct = 7 and cur = 0 group by acct, cur
 codes: []
 circuit (4 nodes):
-  0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1] } in=[] key=Some([1]) arity=5 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
-  1 AsOf { epoch: Some(5) } in=[0] key=Some([1]) arity=5 anchor=Pinned(5) contract=ServeContract { consistency: Snapshot, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // as of system time
-  2 Filter { predicate: Binary { op: And, lhs: Binary { op: Eq, lhs: Column(1), rhs: LitInt(7) }, rhs: Binary { op: Eq, lhs: Column(2), rhs: LitInt(0) } } } in=[1] key=Some([1]) arity=5 anchor=Inherited contract=ServeContract { consistency: Snapshot, materialize: Auto, retain: Evictable, lineage: Off } conserving=false lineage=Off // where
+  0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1] } in=[] key=Some([1]) arity=6 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
+  1 AsOf { epoch: Some(5) } in=[0] key=Some([1]) arity=6 anchor=Pinned(5) contract=ServeContract { consistency: Snapshot, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // as of system time
+  2 Filter { predicate: Binary { op: And, lhs: Binary { op: Eq, lhs: Column(1), rhs: LitInt(7) }, rhs: Binary { op: Eq, lhs: Column(2), rhs: LitInt(0) } } } in=[1] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: Snapshot, materialize: Auto, retain: Evictable, lineage: Off } conserving=false lineage=Off // where
   3 Aggregate { group_key: [1, 2], aggs: [(Sum, Column(3))] } in=[2] key=Some([1, 2]) arity=3 anchor=Inherited contract=ServeContract { consistency: Snapshot, materialize: Auto, retain: Evictable, lineage: Off } conserving=false lineage=Off // group by
   output __wire_result = node 3
 
 === daemon: select acct, sum(amt) from postings where acct = 7 group by acct
 codes: []
 circuit (3 nodes):
-  0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1] } in=[] key=Some([1]) arity=5 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
-  1 Filter { predicate: Binary { op: Eq, lhs: Column(1), rhs: LitInt(7) } } in=[0] key=Some([1]) arity=5 anchor=Inherited contract=ServeContract { consistency: Snapshot, materialize: Auto, retain: Evictable, lineage: Off } conserving=false lineage=Off // where
+  0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1] } in=[] key=Some([1]) arity=6 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
+  1 Filter { predicate: Binary { op: Eq, lhs: Column(1), rhs: LitInt(7) } } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: Snapshot, materialize: Auto, retain: Evictable, lineage: Off } conserving=false lineage=Off // where
   2 Aggregate { group_key: [1], aggs: [(Sum, InCurrency { amount: Column(3), currency: Column(2) })] } in=[1] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Snapshot, materialize: Auto, retain: Evictable, lineage: Off } conserving=false lineage=Off // group by
   output __wire_result = node 2
 
 === daemon: select acct, sum(amt) from postings where cur = 0 group by acct order by sum(amt) desc limit 10
 codes: []
 circuit (5 nodes):
-  0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1] } in=[] key=Some([1]) arity=5 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
-  1 Filter { predicate: Binary { op: Eq, lhs: Column(2), rhs: LitInt(0) } } in=[0] key=Some([1]) arity=5 anchor=Inherited contract=ServeContract { consistency: Snapshot, materialize: Auto, retain: Evictable, lineage: Off } conserving=false lineage=Off // where
+  0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1] } in=[] key=Some([1]) arity=6 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
+  1 Filter { predicate: Binary { op: Eq, lhs: Column(2), rhs: LitInt(0) } } in=[0] key=Some([1]) arity=6 anchor=Inherited contract=ServeContract { consistency: Snapshot, materialize: Auto, retain: Evictable, lineage: Off } conserving=false lineage=Off // where
   2 Aggregate { group_key: [1], aggs: [(Sum, Column(3))] } in=[1] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Snapshot, materialize: Auto, retain: Evictable, lineage: Off } conserving=false lineage=Off // group by
   3 OrderBy { keys: [(1, false)] } in=[2] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Snapshot, materialize: Auto, retain: Evictable, lineage: Off } conserving=false lineage=Off // order by
   4 Limit { count: 10, offset: 0 } in=[3] key=Some([1]) arity=2 anchor=Inherited contract=ServeContract { consistency: Snapshot, materialize: Auto, retain: Evictable, lineage: Off } conserving=false lineage=Off // limit
@@ -1326,6 +1326,6 @@ circuit (5 nodes):
 === daemon: select acct, cur, sum(amt) from postings group by acct, cur
 codes: []
 circuit (2 nodes):
-  0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1] } in=[] key=Some([1]) arity=5 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
+  0 Source { relation: "postings", is_base: true, confidential: [], anchor_key: [1] } in=[] key=Some([1]) arity=6 anchor=Frontier contract=ServeContract { consistency: LedgerConsistent, materialize: Full, retain: Forever, lineage: Key } conserving=true lineage=Key // postings
   1 Aggregate { group_key: [1, 2], aggs: [(Sum, Column(3))] } in=[0] key=Some([1, 2]) arity=3 anchor=Inherited contract=ServeContract { consistency: Snapshot, materialize: Auto, retain: Evictable, lineage: Off } conserving=true lineage=Off // group by
   output __wire_result = node 1

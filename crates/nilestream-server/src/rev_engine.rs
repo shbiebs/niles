@@ -1063,9 +1063,19 @@ impl RevEngine {
             // shape outside the fragment, and it is the oracle the fast path is tested
             // against.
             _ => {
+                // The rows as wide as the schema the circuit was lowered against: a schema
+                // that declares no `value_date` reads the five columns it always did.
+                let width = postings_width(circuit);
                 let mut sources = match restricted {
-                    Some(acct) => self.base_for_account(acct, anchor),
-                    None => self.base_at(anchor),
+                    Some(acct) => self.base_for_account(acct, anchor, width),
+                    None => {
+                        let mut m = std::collections::BTreeMap::new();
+                        m.insert(
+                            "postings".to_string(),
+                            self.postings_at(anchor, width, false),
+                        );
+                        m
+                    }
                 };
                 // A statement naming `recorded_at` reads the system time as well (C15-05b).
                 // `account_predicate` never restricts a circuit that does.
@@ -1073,7 +1083,7 @@ impl RevEngine {
                 if circuit.nodes.iter().any(|n| {
                     matches!(&n.op, niles_ir::operator::Op::Source { relation, .. } if *relation == system)
                 }) {
-                    sources.insert(system, self.postings_at(anchor, true));
+                    sources.insert(system, self.postings_at(anchor, width, true));
                 }
                 self.served_rows.fetch_add(
                     sources.values().map(|z| z.len() as u64).sum::<u64>(),
@@ -2261,19 +2271,10 @@ impl RevEngine {
     /// placeholder: an idempotency key is not something a read model computes with, and a
     /// circuit filtering on one would be filtering on an absence, which the three-valued
     /// rules already handle.
-    fn scan(&self, acct: Option<u64>, anchor: u64, mut f: impl FnMut([niles_ir::value::Value; 5])) {
-        use niles_ir::value::Value;
+    fn scan(&self, acct: Option<u64>, anchor: u64, mut f: impl FnMut([niles_ir::value::Value; 6])) {
         let base = self.base();
         let upto = anchor.min(base.head());
-        let row = |p: &Posting| {
-            [
-                Value::Int(p.txn as i128),
-                Value::Int(p.acct as i128),
-                Value::Int(p.cur as i128),
-                Value::Int(p.amt),
-                Value::Null,
-            ]
-        };
+        let row = |p: &Posting| posting_row(p);
         match acct {
             // Through the anchor index: the cost is that account's own postings rather than
             // the length of history, which is the mechanism §9.4.1 measures.
@@ -2307,7 +2308,10 @@ impl RevEngine {
     /// which the three-valued rules already handle correctly.
     fn base_at(&self, anchor: u64) -> std::collections::BTreeMap<String, niles_ir::eval::ZSet> {
         let mut m = std::collections::BTreeMap::new();
-        m.insert("postings".to_string(), self.postings_at(anchor, false));
+        m.insert(
+            "postings".to_string(),
+            self.postings_at(anchor, POSTING_WIDTH, false),
+        );
         m
     }
 
@@ -2315,7 +2319,7 @@ impl RevEngine {
     /// `recorded_at` is asked for — the system-time read `postings@recorded_at` (cycle 15,
     /// C15-05b). The log already stores every row under that epoch; this is where a query
     /// can see it.
-    fn postings_at(&self, anchor: u64, recorded_at: bool) -> niles_ir::eval::ZSet {
+    fn postings_at(&self, anchor: u64, width: usize, recorded_at: bool) -> niles_ir::eval::ZSet {
         use niles_ir::value::Value;
         let mut z: niles_ir::eval::ZSet = Default::default();
         let base = self.base();
@@ -2327,13 +2331,7 @@ impl RevEngine {
             }
             for r in &e.rows {
                 if let Row::Post(p) = r {
-                    let mut row = vec![
-                        Value::Int(p.txn as i128),
-                        Value::Int(p.acct as i128),
-                        Value::Int(p.cur as i128),
-                        Value::Int(p.amt),
-                        Value::Null,
-                    ];
+                    let mut row = posting_row(p)[..width.min(POSTING_WIDTH)].to_vec();
                     if recorded_at {
                         row.push(Value::Int(e.id as i128));
                     }
@@ -2349,20 +2347,14 @@ impl RevEngine {
         &self,
         acct: u64,
         anchor: u64,
+        width: usize,
     ) -> std::collections::BTreeMap<String, niles_ir::eval::ZSet> {
-        use niles_ir::value::Value;
         let mut z: niles_ir::eval::ZSet = Default::default();
         let base = self.base();
         for p in base.postings_for(acct, anchor.min(base.head())) {
             niles_ir::eval::add(
                 &mut z,
-                vec![
-                    Value::Int(p.txn as i128),
-                    Value::Int(p.acct as i128),
-                    Value::Int(p.cur as i128),
-                    Value::Int(p.amt),
-                    Value::Null,
-                ],
+                posting_row(&p)[..width.min(POSTING_WIDTH)].to_vec(),
                 1,
             );
         }
@@ -2546,6 +2538,47 @@ pub fn serve_path_of(
 /// source's columns where they were (`Filter`, `AsOf`, `ValidAt`), and one filter on that
 /// chain is exactly `acct = k`. Every postings row then meets that filter before it meets
 /// anything else, which is the whole of the soundness argument.
+/// **The served relation's columns**, in declared order: `txn, acct, cur, amt, idem,
+/// value_date`. `idem` is a text column with no integer form here, so it is null — an
+/// idempotency key is not something a read model computes with. `value_date` is the
+/// posting's valid time, the ledger's `valid` (cycle 15, C15-02, E27b's E3): it was always
+/// stored and chained with the posting, and no query could read it.
+pub const POSTING_WIDTH: usize = 6;
+
+fn posting_row(p: &Posting) -> [niles_ir::value::Value; POSTING_WIDTH] {
+    use niles_ir::value::Value;
+    [
+        Value::Int(p.txn as i128),
+        Value::Int(p.acct as i128),
+        Value::Int(p.cur as i128),
+        Value::Int(p.amt),
+        Value::Null,
+        Value::Int(p.valid as i128),
+    ]
+}
+
+/// How many of the served columns the circuit's schema declares: five for a schema written
+/// before `value_date` (its sources have arity 5), six for one that declares it.
+fn postings_width(circuit: &niles_ir::circuit::Circuit) -> usize {
+    circuit
+        .nodes
+        .iter()
+        .find_map(|n| match &n.op {
+            niles_ir::operator::Op::Source { relation, .. } if relation == "postings" => {
+                Some(n.arity as usize)
+            }
+            niles_ir::operator::Op::Source { relation, .. }
+                if niles_ir::operator::system_time_of(relation) == Some("postings") =>
+            {
+                Some((n.arity as usize).saturating_sub(1))
+            }
+            _ => None,
+        })
+        .filter(|w| *w > 0)
+        .unwrap_or(POSTING_WIDTH)
+        .min(POSTING_WIDTH)
+}
+
 /// **Whether a plan's aggregates are exactly `sum(amt)`** — the shape the balance view
 /// maintains and the fast paths answer.
 ///

@@ -1969,9 +1969,18 @@ fn parse_insert(
     while let Some(open) = rest.find('(') {
         let close = shape!(rest[open..].find(')')) + open;
         let raw: Vec<&str> = rest[open + 1..close].split(',').map(|f| f.trim()).collect();
-        if raw.len() != 4 {
+        // `(txn, acct, cur, amt)`, or with the value date as a fifth value (cycle 15,
+        // C15-02, E27b's E3): the posting's valid time, which the ledger has always stored
+        // and chained and which the insert path wrote as 0. A four-value insert still writes
+        // 0, as it always did: the ledger's valid time is not nullable, and making it so
+        // would change the chained record every epoch hash covers.
+        if raw.len() != 4 && raw.len() != 5 {
             return Ok(None);
         }
+        let valid = match raw.get(4) {
+            Some(v) => shape!(v.parse::<i64>().ok()),
+            None => 0,
+        };
         let whole = |t: &str| t.parse::<i128>().ok();
         let txn = u64::try_from(shape!(whole(raw[0]))).ok();
         let acct = u64::try_from(shape!(whole(raw[1]))).ok();
@@ -1993,7 +2002,7 @@ fn parse_insert(
             acct,
             cur,
             amt,
-            valid: 0,
+            valid,
         }));
         rest = &rest[close + 1..];
     }

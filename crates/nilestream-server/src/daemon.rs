@@ -24,6 +24,7 @@ schema bank {
     ledger postings {
         txn: TxnId, acct: Id<Account>, cur: Currency, amt: Money,
         idem: IdemKey window 1_000_000.epochs,
+        value_date: Int,
         conserve per (txn, cur);
         retain forever;
     }

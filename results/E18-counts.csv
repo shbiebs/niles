@@ -14,8 +14,8 @@ served_point_conjunct,query,200,2000,10.0
 served_having_on_key,query,200,4200,21.0
 rev_read_hit,read,1000,0,0.0
 append_in_memory,transaction,500,3500,7.0
-rev_metadata_2x_budget,key,5000,34167,6.8
+rev_metadata_2x_budget,key,5000,34165,6.8
 rev_metadata_per_key,resident key,2500,2500,1.0
-rev_metadata_churn,abandoned read,100000,735093,7.4
+rev_metadata_churn,abandoned read,100000,634604,6.3
 idem_admission_index,identity,100000,100016,1.0
 idem_window_sealer,identity,100000,116666,1.2

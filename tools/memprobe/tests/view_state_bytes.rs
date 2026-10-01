@@ -8,12 +8,13 @@
 //! asserts how the figures move.
 //!
 //! The pre-registered guard (`docs/study/E27b-design.md` §2, E2) was: *zero before any read,
-//! grows with installs, stays bounded by the budget under eviction*. The first two hold. **The
-//! third does not, and this test says so rather than asserting it**: an evicted key leaves a
-//! `Hole` carrying its version, so the view's slots — and its bytes — grow with every key ever
-//! read, while its resident values and policy metadata stay at the budget. Whether a demand
-//! view keeps holes at all is LC-31, which is open; E27b measures the engine as it is, so the
-//! guard asserts the present behaviour and fails if it changes.
+//! grows with installs, stays bounded by the budget under eviction*. **All three hold since
+//! C16-03.** Until then the third did not, and this test recorded it rather than asserting
+//! it: an evicted key left a `Hole` carrying its version, so the view's slots, and its bytes,
+//! grew with every key ever read (F-02-1; E27b measured that engine). LC-31 was decided in
+//! cycle 16 (DB-3): an evicted key is compacted to ⊥, its slot removed, because nothing reads
+//! a hole's version. The third clause is now asserted, and it fails with holes put back,
+//! since each hole costs bytes the budget does not cover.
 
 use memprobe::alloc::Metered;
 use nilestream_server::daemon;
@@ -64,7 +65,7 @@ fn read(s: &mut Session, e: &RevEngine, key: i64) {
 }
 
 #[test]
-fn view_state_bytes_are_zero_before_a_read_grow_with_installs_and_keep_holes_under_eviction() {
+fn view_state_bytes_are_zero_before_a_read_grow_with_installs_and_stay_bounded_under_eviction() {
     assert!(
         memprobe::alloc::metered_installed(),
         "this binary's allocator is not `Metered`, so every figure below would read zero"
@@ -122,19 +123,20 @@ fn view_state_bytes_are_zero_before_a_read_grow_with_installs_and_keep_holes_und
     assert_eq!(stat(&mut s, &e, "resident"), Some(BUDGET as u64));
     assert!(stat(&mut s, &e, "view_metadata_keys").unwrap() <= BUDGET as u64);
 
-    // … and the bytes still grow, by one hole per key read beyond the budget (LC-31, open).
-    // The figure is the hole's cost: less than a resident entry's, and not zero. If holes
-    // are ever compacted this fails, and E27b's "bounded by the budget" clause becomes true.
-    let per_hole = (at_200 - at_100) / 100;
+    // … and so do the bytes: E2's third clause, bounded by the budget under eviction
+    // (LC-31). The maps are B-trees, so the same twenty entries can sit in a node or two more
+    // or fewer after churn: the slack is ten resident entries' worth. A hundred more keys
+    // read with holes put back cost a hundred holes, several times the slack, and fail it.
+    let slack = 10 * per_resident;
+    println!("at_budget={at_budget} at_100={at_100} at_200={at_200} per_resident={per_resident}");
     assert!(
-        per_hole > 0,
-        "the view stopped growing under eviction ({at_100} → {at_200} over 100 new keys): \
-         holes are no longer retained, so the guard's third clause now holds — assert it"
+        at_200 <= at_100 + slack,
+        "the view grew from {at_100} to {at_200} B over 100 keys read under eviction, more \
+         than ten resident entries ({slack} B): evicted keys are being retained (LC-31)"
     );
     assert!(
-        per_hole < per_resident,
-        "an evicted key costs {per_hole} B and a resident one {per_resident} B: a hole is \
-         supposed to be the cheaper of the two"
+        at_200 <= at_budget + slack,
+        "the view holds {at_200} B under eviction against {at_budget} B at the budget"
     );
     // The checkpoint state did not move: nothing was written.
     assert_eq!(stat(&mut s, &e, "checkpoint_bytes"), Some(cp));

@@ -274,13 +274,13 @@ pub fn budget(scenario: &str) -> Option<f64> {
         // Metadata per resident key, isolated: every read in the measured region hits, so
         // the only allocations are the policy maps' own. One entry per map, per key.
         "rev_metadata_per_key" => 2.4,
-        // **An initial measurement, not a target.** One ticket per abandoned read, plus the
-        // `Pending` marker the read leaves in the slot map. 7.4 is what it costs today and
-        // 7.5 is the budget; neither is a figure anyone chose, and the row exists to be
-        // reduced. What it is really for is the `live` column: the policy metadata is bounded
-        // now, and `live` is still linear in the key count because the *markers* are not
-        // (`Rev::slots_len`). This row is the before-value for that repair.
-        "rev_metadata_churn" => 7.5,
+        // One ticket per abandoned read, plus the `Pending` marker the read leaves in the
+        // slot map. It was 7.4 against a budget of 7.5, with `live` linear in the key count
+        // because a reaped marker over ⊥ stayed as a `Bottom` entry. C16-03 removes it
+        // (E-6, LC-31): 6.3 per op and `live` from 12,544,928 B to 70,432 B at 100,000 keys,
+        // the markers of the flights still in the table. Tightened to 6.4, so the repair
+        // cannot come undone without this row failing.
+        "rev_metadata_churn" => 6.4,
         // The two idempotency windows, by the structure each is. Held per identity, forever,
         // by both: a `HashSet<String>` for admission and a `BTreeMap<String, u64>` for the
         // epoch a duplicate is told it committed at. One string clone and one node each.

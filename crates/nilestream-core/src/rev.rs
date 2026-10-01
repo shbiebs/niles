@@ -964,26 +964,18 @@ impl Rev {
     /// test can assert it rather than infer it from a memory figure, and reported over the
     /// wire as `view_metadata_keys`: a view whose metadata is linear in history rather than
     /// in its budget is a view that does not fit, and nothing said so before.
-    /// **Every slot this view holds, resident or not — and it is not bounded by the budget.**
+    /// **Every slot this view holds, resident or not: at most `budget + MAX_FLIGHTS`.**
     ///
     /// `resident_count` counts the entries that hold a value. This counts those *plus* the
-    /// markers: `Pending` while a flight is in the air, and `Bottom`/`Hole` where absence is
-    /// recorded. The residency budget bounds the first number and not this one, deliberately
-    /// — `Slot::is_resident` is false for a marker, so eviction never selects one.
+    /// `Pending` markers of flights in the air. Since C16-03 nothing else is kept: an evicted
+    /// key's slot is removed (LC-31), and a cancelled flight over an absent key removes its
+    /// marker when it is reaped instead of leaving a `Bottom` entry (E-6). Flight records are
+    /// capped at `MAX_FLIGHTS` (C11-04), so the markers are too.
     ///
-    /// That is sound for a marker whose flight is live and **unbounded for one whose flight
-    /// is not**. A read of a cold key that abandons its ticket leaves `Pending`, and nothing
-    /// removes it: `reap_cancelled` runs only when that key is read again, and for a cold key
-    /// it has no `prior` to restore anyway. Ten thousand distinct keys read once each and
-    /// abandoned leave ten thousand slots with zero residents — about 125 bytes a key,
-    /// growing with the number of keys the view has ever been asked about.
-    ///
-    /// Exposed so the next card can measure it rather than infer it, and so
-    /// `metadata_bounded.rs` can assert the defect's present size rather than let it move
-    /// unnoticed. It is a *larger* leak than the policy-metadata one this method arrived
-    /// with, and it is not repaired here: the fix is eviction seeing markers whose flight is
-    /// gone, which changes the two-phase read's state machine and belongs in a card with its
-    /// own guard.
+    /// Until C16-03 this number was not bounded by the budget: evicted keys stayed as
+    /// `Hole(version)`, and a reaped flight over a cold key restored `Bottom` as an entry.
+    /// Cycle 12 measured ten thousand abandoned cold reads leaving ten thousand slots with zero
+    /// residents, about 125 bytes a key. `metadata_bounded.rs` now asserts the bound.
     pub fn slots_len(&self) -> usize {
         self.slots.len()
     }
@@ -996,8 +988,8 @@ impl Rev {
     /// (E27b, C15-02, E2; [`crate::meter`] says how the count is taken).
     ///
     /// What counts as derived state is everything that grows with the keys read: every slot
-    /// (resident values *and* the `Pending`/`Bottom`/`Hole` markers, which `slots_len` says
-    /// the budget does not bound), the per-key policy metadata, the pinned set, and the
+    /// (resident values *and* the `Pending` markers of flights in the air, which `slots_len`
+    /// bounds by `budget + MAX_FLIGHTS`), the per-key policy metadata, the pinned set, and the
     /// in-flight table. What does not: the view's plan, its counters and its caps, which are
     /// the same size for a view that has read nothing as for one that has read everything.
     ///
@@ -1673,17 +1665,21 @@ impl Rev {
             // much longer, and a rule that depends on three distant decisions staying true is
             // one worth making local. The marker this flight installed is the evidence that
             // nothing else has touched the slot; if it is gone, so is the right to restore.
+            //
+            // **What goes back for an absence is no slot at all** (E-6, adjudicated in C16-03).
+            // A flight over a key with no value replaced an absence — ⊥, or a hole left by an
+            // older build — and restoring that absence as a `Bottom` *entry* kept one slot per
+            // abandoned cold read for the life of the process: the marker leak cycle 12
+            // measured. ⊥ is the absence of an entry, so restoring it removes the marker.
+            // With LC-31 every slot is then `Present` or a live flight's `Pending`, and the
+            // map holds at most `budget + MAX_FLIGHTS` entries.
             if let Some(prior) = f.prior {
-                match self.slots.get(key) {
-                    Some(Slot::Pending(a)) if *a == f.anchor => {
+                if matches!(self.slots.get(key), Some(Slot::Pending(a)) if *a == f.anchor) {
+                    if prior.is_resident() {
                         self.slots.insert(key.clone(), prior);
+                    } else {
+                        self.slots.remove(key);
                     }
-                    // The key was evicted entirely while the flight was in the air, which is
-                    // the state `Bottom` describes and the state `prior` would restore.
-                    None => {
-                        self.slots.insert(key.clone(), prior);
-                    }
-                    _ => {}
                 }
             }
         }
@@ -1840,17 +1836,22 @@ impl Rev {
             let Some(victim) = self.choose_victim() else {
                 break;
             };
-            if let Some(s) = self.slots.get_mut(&victim) {
-                // Honest absence: the value goes, the version stays.
-                if s.evict() {
-                    self.resident -= 1;
-                    self.stats.evictions += 1;
-                    self.pinned.remove(&victim);
-                    // The metadata goes with the value. The version stays in the slot, which
-                    // is what honest absence requires; the read count and the clock describe
-                    // an entry that no longer exists and are read only for resident keys.
-                    self.meta.remove(&victim);
-                }
+            // **An evicted key is forgotten: its slot goes, and it reads as ⊥** (LC-31, the
+            // author's decision DB-3, cycle 16). Until C16-03 the slot stayed as
+            // `Hole(version)`, one per key ever read, so the view's memory grew with its
+            // history of reads and not with its budget (F-02-1). Nothing read the version:
+            // a read passes the caller's anchor to the base, and ⊥ reconstructs exactly as a
+            // hole did (`Slot::needs_reconstruction`), so miss ≠ zero holds without it. A
+            // delta for a forgotten key is skipped by `apply_epoch`, as it was for a hole,
+            // because a demand view never installs from a delta.
+            if self.slots.get(&victim).is_some_and(Slot::is_resident) {
+                self.slots.remove(&victim);
+                self.resident -= 1;
+                self.stats.evictions += 1;
+                self.pinned.remove(&victim);
+                // The metadata goes with the value: the read count and the clock describe
+                // an entry that no longer exists and are read only for resident keys.
+                self.meta.remove(&victim);
             }
         }
     }
@@ -1986,9 +1987,9 @@ impl Rev {
     /// this is the other end of the same trade, where the view has been maintained through
     /// every append and the answer is already there.
     ///
-    /// Only `Present` entries are yielded. A `Hole` is an evicted value whose version is
-    /// kept, and including it — or its version without its value — would be inventing a
-    /// number; a caller wanting a report over a view with holes must fold the base instead,
+    /// Only `Present` entries are yielded. An evicted key has no slot at all (LC-31), and
+    /// including it would be inventing a number; a caller wanting a report over a view that
+    /// has evicted must fold the base instead,
     /// which is what [`is_full`](Self::is_full) is for.
     ///
     /// The effective anchor of an entry is the later of its own stamp and the view-wide
@@ -2576,9 +2577,10 @@ mod tests {
     ///
     /// Read at twice the budget, so eviction is continuous, and assert the three things that
     /// together say the bound is real: residency is capped, the metadata is capped with it,
-    /// and — the one a careless fix would break — every key ever read still has a *slot*,
-    /// because an evicted entry is `Hole(e)` and forgetting it would turn honest absence into
-    /// `Bottom` and a miss into a zero.
+    /// and — since LC-31 (C16-03) — the slots are capped too, while every evicted key still
+    /// answers its real value. Until C16-03 this test asserted the opposite: that every key
+    /// ever read kept a slot, because forgetting a hole was thought to turn a miss into a
+    /// zero. It does not: ⊥ reconstructs exactly as a hole did, and nothing read the version.
     #[test]
     fn metadata_is_bounded_by_the_budget() {
         const BUDGET: u64 = 8;
@@ -2615,12 +2617,18 @@ mod tests {
              history, not by the budget, and a long-lived view does not fit",
             v.metadata_len()
         );
-        // Honest absence survives the bound: the value went, the version stayed.
+        assert!(
+            v.slots_len() as u64 <= BUDGET,
+            "the view holds {} slots against a budget of {BUDGET} with no flight in the air: \
+             evicted keys are being retained as holes again (LC-31)",
+            v.slots_len()
+        );
+        // Miss ≠ zero survives the compaction: every key, evicted or not, answers its value.
         for k in 0..KEYS {
-            assert!(
-                v.slot(&vec![k]).version().is_some(),
-                "key {k} has no version after eviction: absence of value became absence of \
-                 history, which is how a miss becomes a zero"
+            assert_eq!(
+                v.read(&base, &vec![k], anchor).value,
+                100 + k as i128,
+                "key {k} after eviction: a forgotten key must reconstruct, not answer zero"
             );
         }
     }
@@ -2934,7 +2942,7 @@ mod tests {
     }
 
     #[test]
-    fn an_evicted_entry_keeps_its_version_and_never_answers_zero() {
+    fn an_evicted_entry_is_forgotten_and_never_answers_zero() {
         let mut base = FoldBase::new(0);
         base.seal(vec![7], 500);
         let mut rt = Runtime::install(
@@ -2950,12 +2958,20 @@ mod tests {
         base.seal(vec![8], 900);
         let head = base.frontier();
         v.read(&base, &vec![8], head);
-        assert!(
-            matches!(v.slot(&vec![7]), Slot::Hole(_)),
-            "must be a hole, not gone: {}",
+        // LC-31 (C16-03): the evicted key is forgotten, not kept as a hole.
+        assert_eq!(
+            v.slot(&vec![7]),
+            Slot::Bottom,
+            "an evicted key is compacted to ⊥: {}",
             v.slot(&vec![7])
         );
-        // And reading it back reconstructs the real value, not the aggregate's identity.
+        assert_eq!(
+            v.slots_len(),
+            1,
+            "one slot, the resident key; no hole is retained"
+        );
+        // And reading it back reconstructs the real value, not the aggregate's identity:
+        // miss ≠ zero rests on ⊥ reconstructing, not on a retained version.
         let head = base.frontier();
         assert_eq!(v.read(&base, &vec![7], head).value, 500);
     }
@@ -4608,9 +4624,9 @@ mod two_phase {
 
     /// **A flight whose owner never returns releases its waiters and puts the slot back.**
     ///
-    /// Honest absence survives cancellation: what goes back is the exact `Hole(e)` the
-    /// marker replaced, version and all, and not a `⊥` that would make the key look never
-    /// seen.
+    /// What goes back is the absence the marker replaced. Since LC-31 (C16-03) that absence
+    /// is ⊥, and ⊥ is no slot at all: the reaped marker is removed rather than left as a
+    /// `Bottom` entry, which was the slot leak E-6. The key still reconstructs exactly.
     #[test]
     fn a_cancelled_flight_restores_the_absence_it_replaced_and_frees_its_waiters() {
         let hist = Hist::default();
@@ -4618,12 +4634,12 @@ mod two_phase {
         hist.seal(&k, 42);
         hist.seal(&filler, 7);
         let a = hist.frontier();
-        // A budget of one, so reading the filler evicts `k` and leaves a hole with a version.
+        // A budget of one, so reading the filler evicts `k`, which is forgotten (LC-31).
         let rt = runtime(Some(1));
         read_split(&rt, &hist, &k, a);
         read_split(&rt, &hist, &filler, a);
-        let hole = view(&rt).view("balance").expect("installed").slot(&k);
-        assert_eq!(hole, Slot::Hole(a), "the evicted entry keeps its version");
+        let absent = view(&rt).view("balance").expect("installed").slot(&k);
+        assert_eq!(absent, Slot::Bottom, "the evicted entry is compacted to ⊥");
 
         let doomed = match view(&rt)
             .view_mut("balance")
@@ -4631,7 +4647,7 @@ mod two_phase {
             .begin_read(&k, a)
         {
             ReadOutcome::Fold(t) => t,
-            _ => panic!("a hole is reconstructed, and the first reader owns the flight"),
+            _ => panic!("⊥ is reconstructed, and the first reader owns the flight"),
         };
         let waiter = match view(&rt)
             .view_mut("balance")
@@ -4653,12 +4669,17 @@ mod two_phase {
             .view_mut("balance")
             .expect("installed")
             .force_reap(&k);
+        let v = view(&rt);
+        let v = v.view("balance").expect("installed");
         assert_eq!(
-            view(&rt).view("balance").expect("installed").slot(&k),
-            hole,
-            "a cancelled flight puts back exactly the absence it replaced. A `⊥` here would \
-             say the key was never seen, which is the one thing honest absence exists to \
-             prevent"
+            v.slot(&k),
+            absent,
+            "a cancelled flight puts back exactly the absence it replaced"
+        );
+        assert_eq!(
+            v.slots_len(),
+            1,
+            "only the filler's slot remains: a reaped marker over ⊥ leaves no entry (E-6)"
         );
     }
 

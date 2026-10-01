@@ -5,17 +5,23 @@
 //!
 //! # Honest absence
 //!
-//! When an entry is evicted, the runtime does **not** forget that the key exists. It keeps
-//! the key and its *version* — the epoch through which deltas had been applied — and drops
-//! only the value. That is a `Hole(e)`, and it is categorically different from `⊥`, which
-//! means "this key has never been seen".
-//!
-//! The reason is the single most important safety property of partial state, and it has a
-//! name: **miss ≠ zero**. A cache that forgets a key entirely cannot distinguish "the
+//! The single most important safety property of partial state has a name: **miss ≠ zero**.
+//! A cache that answers an absent key with the aggregate's identity cannot distinguish "the
 //! balance is zero" from "I evicted the balance", and a system that confuses those two has
-//! a mechanism for creating money out of memory pressure. Keeping the version means a
-//! reconstruction knows exactly which prefix it must fold, and a read that finds a hole
-//! knows it must reconstruct rather than answer zero.
+//! a mechanism for creating money out of memory pressure.
+//!
+//! **What carries the property is [`Slot::needs_reconstruction`], not the version.** Every
+//! slot that is not `Present` — ⊥, a hole, a pending marker — must be reconstructed from
+//! the base before it answers, so absence of a value never becomes a value.
+//!
+//! **Eviction compacts to ⊥ in the runtime (LC-31, decided in cycle 16, C16-03).** The
+//! algebra keeps `Hole(e)`: [`Slot::evict`] drops the value and keeps the version, the
+//! epoch an entry was certified through when it left, which is an audit fact. The served
+//! runtime (`rev::Rev`) does not keep it. It removes an evicted key's slot, so the key
+//! reads as ⊥ again. Nothing reads a hole's version: `Rev::read` passes the *caller's*
+//! anchor to `Base::reconstruct`, and a hole and a ⊥ take the same path. Keeping holes cost
+//! one slot per key ever read, which made a demand view's memory grow with its history of
+//! reads rather than with its budget (F-02-1; cycle 9 measured 125 bytes a key).
 //!
 //! `Pending(e)` exists because reconstruction is not instantaneous. A second reader
 //! arriving during an upquery must join it rather than start a second one, and must not
@@ -41,8 +47,10 @@ pub enum Slot<V> {
     /// version is an audit fact — which epoch an entry was certified through when it left —
     /// not a cost hint, and cycle 9's audit measured what retaining it costs: 125 bytes per
     /// key ever read, 12.7 MB of a 12.7 MB view at 100k keys under a 2,500 budget. Whether
-    /// a demand view keeps holes at all is LC-31, decided by the author; the sentence is
-    /// corrected here because it was wrong regardless of that decision.
+    /// a demand view keeps holes at all was LC-31: the author decided in cycle 16 (DB-3)
+    /// that it does not, and `rev::Rev` compacts an evicted key to ⊥ by removing its slot.
+    /// The variant stays because the algebra has it (§3's lattice of absence) and
+    /// [`Slot::evict`] is the algebra's operation.
     Hole(Epoch),
     /// A reconstruction is in flight, started at this epoch. A second reader joins it.
     Pending(Epoch),
@@ -91,7 +99,8 @@ impl<V> Slot<V> {
         !matches!(self, Slot::Present(..))
     }
 
-    /// Evict: drop the value, keep the version. The operation this whole module exists for.
+    /// Evict, as the algebra defines it: drop the value, keep the version. The served
+    /// runtime goes one step further and forgets the slot (LC-31; see the module note).
     pub fn evict(&mut self) -> bool {
         match self {
             Slot::Present(_, e) => {
@@ -165,7 +174,8 @@ mod tests {
     fn a_hole_is_not_bottom_and_that_is_the_safety_property() {
         // A cache that cannot tell these apart has a mechanism for creating money out of
         // memory pressure: it would answer an evicted balance with the aggregate's
-        // identity. Both must reconstruct, but only a hole knows which prefix to fold.
+        // identity. Both must reconstruct; the hole's version is an audit fact and nothing
+        // reads it, which is why the runtime may compact a hole to ⊥ (LC-31).
         let hole: Slot<i64> = Slot::Hole(42);
         let bottom: Slot<i64> = Slot::Bottom;
         assert_ne!(hole, bottom);

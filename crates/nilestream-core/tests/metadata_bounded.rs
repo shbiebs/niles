@@ -266,18 +266,18 @@ fn the_wire_counter_reports_the_bounded_number() {
     );
 }
 
+/// **The slot map is bounded by the budget plus the flight cap** (E-6, adjudicated in C16-03).
+///
+/// Until C16-03 this test recorded a leak at its measured size: ten thousand abandoned reads
+/// of cold keys left ten thousand slots with no resident. Each reaped flight put back the
+/// absence it had replaced as a `Bottom` *entry*, and each evicted key stayed as a hole.
+/// Now ⊥ is no entry (LC-31): a reaped marker over an absent key is removed, so what remains
+/// is the residents and the markers of flights still in the table, which C11-04 caps.
 #[test]
-fn the_slot_map_is_not_bounded_by_the_budget_and_this_records_how_much() {
-    // **A finding, asserted at its present size rather than left to drift.**
-    //
-    // The policy metadata above is bounded now. The *slots* are not: an abandoned read of a
-    // cold key leaves `Slot::Pending`, `reap_cancelled` only runs when that key is read
-    // again, and for a cold key it has no `prior` to restore anyway. Eviction never selects a
-    // marker because `is_resident` is false for one — which is right while the flight is
-    // live and unbounded once it is gone.
-    //
-    // This is not the card's repair and does not pretend to be. It is here so the number
-    // cannot change without someone noticing, and so the next card has its before-value.
+fn the_slot_map_is_bounded_by_the_budget_and_the_flight_cap() {
+    /// Not imported: private in the crate, and a test that read it from the code under test
+    /// would agree with a wrong value.
+    const MAX_FLIGHTS: usize = 256;
     let mut rt = runtime(BUDGET, Policy::Lru);
     for k in 0..KEYS {
         let v = rt.view_mut("balance").unwrap();
@@ -294,17 +294,21 @@ fn the_slot_map_is_not_bounded_by_the_budget_and_this_records_how_much() {
     );
     println!("slots={slots} meta={meta} in_flight={flights} resident={resident}");
 
-    assert_eq!(meta, 0, "the metadata half of this card");
+    assert_eq!(meta, 0, "nothing installed, so no metadata");
     assert_eq!(resident, 0, "nothing installed");
     assert!(
-        flights <= 256,
+        flights <= MAX_FLIGHTS,
         "C11-04 bounds the flight table at MAX_FLIGHTS and it holds {flights}"
     );
     assert_eq!(
-        slots, KEYS as usize,
-        "**the unrepaired leak, recorded**: {KEYS} abandoned reads left {slots} slots with \
-         {resident} residents against a budget of {BUDGET}. If this number has fallen, the \
-         marker leak has been repaired and this test should become the assertion that it \
-         stays repaired; if it has risen, something else is retaining markers too."
+        slots,
+        resident as usize + flights,
+        "every slot is a resident or a live flight's marker: {KEYS} abandoned reads left \
+         {slots} slots against {flights} flights. More means reaped markers over ⊥ are being \
+         kept as entries again (E-6)"
+    );
+    assert!(
+        slots <= BUDGET as usize + MAX_FLIGHTS,
+        "{slots} slots against a bound of budget {BUDGET} + {MAX_FLIGHTS} flights"
     );
 }

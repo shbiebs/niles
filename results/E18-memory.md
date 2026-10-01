@@ -25,9 +25,9 @@ The tool lives outside the workspace. `GlobalAlloc` cannot be implemented withou
 | `served_having_on_key` | query | 200 | 4200 | 21.0 | 635600 | 3178 | 0 | 1856 |
 | `rev_read_hit` | read | 1000 | 0 | 0.0 | 0 | 0 | 0 | 0 |
 | `append_in_memory` | transaction | 500 | 3500 | 7.0 | 266000 | 532 | 76000 | 76232 |
-| `rev_metadata_2x_budget` | key | 5000 | 34167 | 6.8 | 2015716 | 403 | 860356 | 860532 |
+| `rev_metadata_2x_budget` | key | 5000 | 34165 | 6.8 | 2014244 | 403 | 546980 | 548460 |
 | `rev_metadata_per_key` | resident key | 2500 | 2500 | 1.0 | 40000 | 16 | 0 | 16 |
-| `rev_metadata_churn` | abandoned read | 100000 | 735093 | 7.4 | 54158368 | 542 | 12544928 | 12564896 |
+| `rev_metadata_churn` | abandoned read | 100000 | 634604 | 6.3 | 52142112 | 521 | 70432 | 121952 |
 | `idem_admission_index` | identity | 100000 | 100016 | 1.0 | 10153756 | 102 | 6876816 | 6979652 |
 | `idem_window_sealer` | identity | 100000 | 116666 | 1.2 | 9961568 | 100 | 9961568 | 9961568 |
 
@@ -52,7 +52,7 @@ Allocations per operation, asserted exactly — an allocation count is not a tol
 | `append_in_memory` | 7.7 | 7.0 | 9% |
 | `rev_metadata_2x_budget` | 7.5 | 6.8 | 9% |
 | `rev_metadata_per_key` | 2.4 | 1.0 | 58% |
-| `rev_metadata_churn` | 7.5 | 7.4 | 2% |
+| `rev_metadata_churn` | 6.4 | 6.3 | 1% |
 | `idem_admission_index` | 1.2 | 1.0 | 17% |
 | `idem_window_sealer` | 1.2 | 1.2 | 3% |
 

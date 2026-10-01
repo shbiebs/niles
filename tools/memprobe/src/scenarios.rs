@@ -473,10 +473,10 @@ pub fn append_in_memory() -> Row {
 /// The eviction budget bounds *values*. It does not bound the two policy maps beside them:
 /// `reads_of` (per-key read counts, for the cost-aware policy) and `last_read` (per-key
 /// clock, for LRU) took an entry for every key ever read and gave it back to nobody. The
-/// slot map is different: an evicted entry becomes `Hole(e)`. `MISMATCH-hole-version-unused`
-/// — this said the hole "is the reason a miss is not a zero", and it is not: ⊥ reconstructs at
-/// the requested anchor too, and `Rev::read` never reads a hole's version. What a hole records
-/// is which epoch the entry was certified through when it left, which is an audit fact.
+/// slot map kept one too: an evicted entry became `Hole(e)`. Nothing read the version — ⊥
+/// reconstructs at the requested anchor too — so since C16-03 (LC-31) an evicted key's slot
+/// is removed, and this row's `live` falls by one hole per key evicted. E18 records the move
+/// and its cause.
 ///
 /// Read at `2 x BUDGET` distinct keys, so eviction is continuous and the difference between
 /// "bounded by the budget" and "bounded by history" is a factor of two in this row and
@@ -789,12 +789,12 @@ pub fn rev_metadata_per_key() -> Row {
 /// takes the flight and abandons it — the shape of a refused admission, a competing flight
 /// and an abandoned ticket alike — so nothing installs and nothing is evicted.
 ///
-/// **`live` is the column to read, and it is not flat yet.** The policy metadata is bounded
-/// by the budget as of this row's own assertion below. The `Slot::Pending` each abandoned
-/// read leaves is not: nothing removes a marker whose flight is gone, because eviction only
-/// selects resident entries. So `live` is still linear in `KEYS` — about 125 bytes a key —
-/// and this row is the **before-value** for the card that repairs it, not a demonstration
-/// that it is repaired.
+/// **`live` is the column to read, and since C16-03 it is flat.** The policy metadata was
+/// bounded by cycle 12. The `Slot::Pending` each abandoned read leaves was not: a reaped
+/// flight put back the ⊥ it had replaced as a `Bottom` *entry*, so `live` was linear in
+/// `KEYS`, about 125 bytes a key (E-6). Since C16-03 restoring ⊥ removes the marker (LC-31:
+/// ⊥ is no entry), so the slots that remain are the markers of flights still in the table,
+/// at most `MAX_FLIGHTS` (256), whatever `KEYS` is.
 pub fn rev_metadata_churn() -> Row {
     use nilestream_core::rev::{Key, Policy, ReadMode, ReadOutcome, Runtime};
 
@@ -821,10 +821,15 @@ pub fn rev_metadata_churn() -> Row {
          would make it measure a slot instead"
     );
     assert_eq!(
-        view.slots_len() as u64,
-        KEYS,
-        "the marker leak this row measures has changed size; `live` below is its bytes and \
-         the comparison a later card makes depends on knowing which number moved"
+        view.slots_len(),
+        view.in_flight_len(),
+        "every slot left is a live flight's marker; more means reaped markers over ⊥ are kept \
+         as entries again (E-6), and `live` below grows with `KEYS`"
+    );
+    assert!(
+        view.slots_len() <= 256,
+        "{} slots after {KEYS} abandoned reads: the flight table caps markers at 256",
+        view.slots_len()
     );
     assert!(
         view.metadata_len() as u64 <= BUDGET_HERE,

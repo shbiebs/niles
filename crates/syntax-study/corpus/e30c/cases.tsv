@@ -1,0 +1,15 @@
+case	class	expected	baseline_prediction
+S01	ledger not declared	D1	accepted
+S02	linear handle not declared	K2	accepted
+S03	capability not declared	K3	accepted
+S04	currency scale not declared	K4	accepted
+S05	money as a bare integer	D2	accepted
+S06	ledger copied with LIKE	D1	accepted
+S07	ledger copied with CREATE TABLE AS	D1	accepted
+S08	ledger copied with SELECT INTO	D1	accepted
+S09	conservation removed	D3	accepted
+S10	append-only switched off	D3	accepted
+S11	money added to an undeclared table	D1	accepted
+S12	ledger moved out of its schema	D1	accepted
+S13	a partition outside the ledger	D1	accepted
+S14	money state outside state	D1	accepted

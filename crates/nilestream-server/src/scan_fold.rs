@@ -761,6 +761,22 @@ impl<'p> Folder<'p> {
                     close(&mut row, of(*i));
                     rows.push((row, 1));
                 }
+                // **SQL's scalar aggregate: one row even over no input** (C16-01, F-02-3),
+                // as `eval::aggregate` now answers. `count` is 0 and every other aggregate
+                // null, which is what `close` makes of accumulators that saw nothing.
+                if g.is_empty() && self.plan.group_key.is_empty() {
+                    let empty = vec![
+                        Acc {
+                            total: 0,
+                            any: false,
+                            currency: None,
+                        };
+                        n
+                    ];
+                    let mut row = Row::with_capacity(n);
+                    close(&mut row, &empty);
+                    rows.push((row, 1));
+                }
             }
         }
         Ok((rows.into_iter().collect(), work))

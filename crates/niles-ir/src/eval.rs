@@ -979,6 +979,15 @@ impl<'a> Eval<'a> {
                 slot[i].push((self.scalar(e, r), *w));
             }
         }
+        // **An aggregate with no grouping columns answers one row, even over no input**
+        // (SQL's scalar aggregate; cycle 16, C16-01, finding F-02-3). `select count(amt),
+        // sum(amt) from postings where …` over no rows is `(0, NULL)`, not the absence of a
+        // row. A grouped aggregate over no input forms no group and keeps answering no row.
+        // Until this, both the reference evaluator and the served fold answered no row, and
+        // E27b's q3 stopped on it at 10⁵ the first time a value-date window came up empty.
+        if group_key.is_empty() && raw.is_empty() {
+            raw.insert(Row::new(), vec![Vec::new(); aggs.len()]);
+        }
         let mut out = ZSet::new();
         for (k, per_agg) in raw {
             self.work += 1;

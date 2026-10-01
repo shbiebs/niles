@@ -1,0 +1,331 @@
+meta	series	multi
+meta	commit	3341ba22a0f62856f18b029afb4b72f1831f79b3
+meta	worktree	clean
+meta	host	Linux 6.18.44-fc-v50 x86_64
+meta	cpus	2
+meta	mem_mib	8031
+meta	toolchain	cargo 1.95.0 (f2d3ce0bd 2026-03-21)
+meta	postgres	postgres (PostgreSQL) 16.13 (Ubuntu 16.13-0ubuntu0.24.04.1)
+meta	date	2026-10-01T07:32:15Z
+meta	checkpoint_interval	16
+meta	study	E27b
+meta	accounts	100000
+meta	seed	100
+meta	keys	131003
+meta	budget	6550
+meta	history_txns	1000000
+meta	batches	5000
+meta	universe_legs	2000000
+meta	universe_sha256	904025bd1e9b9092762da71a7fb4a6df79b6987a866cba464a098194f478b83e
+meta	end_legs	0
+meta	end_sha256	
+load	H3	67.174	2000000	904025bd1e9b9092762da71a7fb4a6df79b6987a866cba464a098194f478b83e	0		PostgreSQL loaded as on P (one multi-row insert per batch, epochs sealed in order); publication `h3` on arm.postings; rev-sidecar started after the load with a temporary logical slot, the view certified through the loaded head #5000 with nothing resident, budget 6550
+load	M	68.800	2000000	904025bd1e9b9092762da71a7fb4a6df79b6987a866cba464a098194f478b83e	0		one multi-row insert per batch with explicit epoch ids 1..5000; epochs sealed in order by arm.seal (sha256 chain); materialised view refreshed; vacuum analyze
+load	N	12.107	2000000	904025bd1e9b9092762da71a7fb4a6df79b6987a866cba464a098194f478b83e	0		one insert statement per batch, one epoch each; N epoch = oracle index -1; frontier #4999 after the load, asserted by an `as of system time` probe
+load	P	69.798	2000000	904025bd1e9b9092762da71a7fb4a6df79b6987a866cba464a098194f478b83e	0		one multi-row insert per batch with explicit epoch ids 1..5000; epochs sealed in order by arm.seal (sha256 chain); materialised view refreshed; vacuum analyze
+load	P+	70.740	2000000	904025bd1e9b9092762da71a7fb4a6df79b6987a866cba464a098194f478b83e	0		one multi-row insert per batch with explicit epoch ids 1..5000; epochs sealed in order by arm.seal (sha256 chain); arm.after_load: checkpoints every 16 legs per key, key counts, budget; vacuum analyze
+pss_loaded	H3	293738496
+pss_loaded	M	292955136
+pss_loaded	N	274599936
+pss_loaded	P	292960256
+pss_loaded	P+	321170432
+failure	N run -1: Connection refused (os error 111)
+val	N	-3	c2_q1_p50_us	166.42600000000002
+val	N	-3	c2_q1_p99_us	1387.942
+val	N	-3	c2_q2_p50_us	1118899.2950000002
+val	N	-3	c4_q1_p50_us	91.67500000000001
+val	N	-3	c4_q1_p99_us	6042.067
+val	N	-3	c4_q2_p50_us	1534593.935
+val	N	-3	c4_q2_p99_us	4037116.839
+val	N	-3	commits_per_s	155.38533765152295
+val	N	-3	pss_growth_bytes_per_key_read	6087225.328185328
+val	N	-3	pss_mib	3268.98828125
+val	N	-3	q1_p50_us	260.9
+val	N	-3	q1_p99_us	2561.633
+val	N	-3	q2_p50_us	952190.924
+val	N	-3	q3_p50_us	222.671
+val	N	-3	q4_p50_us	199715.70799999998
+val	N	-3	q5_p50_us	535006.44
+val	N	-3	read_deadlock_retries	0
+val	N	-3	view_state_bytes	26659600
+val	N	-3	view_state_bytes_per_key_read	51466.40926640927
+val	N	-3	write_p50_us	5947.867
+val	N	-3	write_p99_us	21242.347
+val	P+	-3	c2_q1_p50_us	812.13
+val	P+	-3	c2_q1_p99_us	4340.302
+val	P+	-3	c2_q2_p50_us	729.519
+val	P+	-3	c4_q1_p50_us	2097.6189999999997
+val	P+	-3	c4_q1_p99_us	5811.378
+val	P+	-3	c4_q2_p50_us	1971.3270000000002
+val	P+	-3	c4_q2_p99_us	11487.286
+val	P+	-3	commits_per_s	699.2862490149244
+val	P+	-3	pss_growth_bytes_per_key_read	349381.6833976834
+val	P+	-3	pss_mib	478.8876953125
+val	P+	-3	q1_p50_us	861.087
+val	P+	-3	q1_p99_us	6115.985
+val	P+	-3	q2_p50_us	706.624
+val	P+	-3	q3_p50_us	344.48999999999995
+val	P+	-3	q4_p50_us	74076.612
+val	P+	-3	q5_p50_us	822258.509
+val	P+	-3	read_deadlock_retries	0
+val	P+	-3	view_state_bytes	18063360
+val	P+	-3	view_state_bytes_per_key_read	34871.35135135135
+val	P+	-3	write_p50_us	1360.44
+val	P+	-3	write_p99_us	2953.529
+val	P	-3	c2_q1_p50_us	99.524
+val	P	-3	c2_q1_p99_us	2747.4550000000004
+val	P	-3	c2_q2_p50_us	143.44
+val	P	-3	c4_q1_p50_us	136.244
+val	P	-3	c4_q1_p99_us	3465.623
+val	P	-3	c4_q2_p50_us	168.78300000000002
+val	P	-3	c4_q2_p99_us	22528.804
+val	P	-3	commits_per_s	0.474642868660397
+val	P	-3	pss_growth_bytes_per_key_read	406201.82239382237
+val	P	-3	pss_mib	480.0537109375
+val	P	-3	q1_p50_us	211.636
+val	P	-3	q1_p99_us	1152.643
+val	P	-3	q2_p50_us	274.19800000000004
+val	P	-3	q3_p50_us	203.51500000000001
+val	P	-3	q4_p50_us	8124.710999999999
+val	P	-3	q5_p50_us	161.25199999999998
+val	P	-3	read_deadlock_retries	0
+val	P	-3	view_state_bytes	15163392
+val	P	-3	view_state_bytes_per_key_read	29272.95752895753
+val	P	-3	write_p50_us	2069204.624
+val	P	-3	write_p99_us	2356386.0119999996
+val	M	-3	c2_q1_p50_us	153.67000000000002
+val	M	-3	c2_q1_p99_us	1325.405
+val	M	-3	c2_q2_p50_us	242.896
+val	M	-3	c4_q1_p50_us	335.065
+val	M	-3	c4_q1_p99_us	4723.295
+val	M	-3	c4_q2_p50_us	404.88100000000003
+val	M	-3	c4_q2_p99_us	16417.782
+val	M	-3	commits_per_s	0.47836098435046503
+val	M	-3	pss_growth_bytes_per_key_read	406589.28185328183
+val	M	-3	pss_mib	480.240234375
+val	M	-3	q1_p50_us	180.409
+val	M	-3	q1_p99_us	1103.987
+val	M	-3	q2_p50_us	212.50699999999998
+val	M	-3	q3_p50_us	264.205
+val	M	-3	q4_p50_us	5749.452
+val	M	-3	q5_p50_us	184.99599999999998
+val	M	-3	read_deadlock_retries	0
+val	M	-3	view_state_bytes	15163392
+val	M	-3	view_state_bytes_per_key_read	29272.95752895753
+val	M	-3	write_p50_us	2074959.26
+val	M	-3	write_p99_us	2293395.974
+val	H3	-3	c2_q1_p50_us	256.863
+val	H3	-3	c2_q1_p99_us	9282.991
+val	H3	-3	c2_q2_p50_us	228.535
+val	H3	-3	c4_q1_p50_us	278.70599999999996
+val	H3	-3	c4_q1_p99_us	20565.764
+val	H3	-3	c4_q2_p50_us	196.773
+val	H3	-3	c4_q2_p99_us	14590.113
+val	H3	-3	commits_per_s	537.0284038081973
+val	H3	-3	pss_growth_bytes_per_key_read	431236.44787644787
+val	H3	-3	pss_mib	493.1630859375
+val	H3	-3	q1_p50_us	340.319
+val	H3	-3	q1_p99_us	11550.426000000001
+val	H3	-3	q2_p50_us	317.59499999999997
+val	H3	-3	q3_p50_us	285.524
+val	H3	-3	q4_p50_us	76851.839
+val	H3	-3	q5_p50_us	787819.273
+val	H3	-3	read_deadlock_retries	0
+val	H3	-3	view_state_bytes	101968
+val	H3	-3	view_state_bytes_per_key_read	196.84942084942085
+val	H3	-3	write_p50_us	1564.324
+val	H3	-3	write_p99_us	5096.295
+val	P+	-2	c2_q1_p50_us	611.671
+val	P+	-2	c2_q1_p99_us	3903.084
+val	P+	-2	c2_q2_p50_us	622.5859999999999
+val	P+	-2	c4_q1_p50_us	1552.6979999999999
+val	P+	-2	c4_q1_p99_us	9617.113
+val	P+	-2	c4_q2_p50_us	1585.504
+val	P+	-2	c4_q2_p99_us	11827.829
+val	P+	-2	commits_per_s	745.6918584990044
+val	P+	-2	pss_growth_bytes_per_key_read	178141.66469428007
+val	P+	-2	pss_mib	478.5595703125
+val	P+	-2	q1_p50_us	687.3100000000001
+val	P+	-2	q1_p99_us	3937.864
+val	P+	-2	q2_p50_us	515.62
+val	P+	-2	q3_p50_us	348.26
+val	P+	-2	q4_p50_us	83073.685
+val	P+	-2	q5_p50_us	112095.166
+val	P+	-2	q6_p50_us	1513641.238
+val	P+	-2	read_deadlock_retries	0
+val	P+	-2	view_state_bytes	18153472
+val	P+	-2	view_state_bytes_per_key_read	17902.83234714004
+val	P+	-2	write_p50_us	1011.35
+val	P+	-2	write_p99_us	3233.44
+val	P	-2	c2_q1_p50_us	44.058
+val	P	-2	c2_q1_p99_us	1539.4560000000001
+val	P	-2	c2_q2_p50_us	203.916
+val	P	-2	c4_q1_p50_us	123.385
+val	P	-2	c4_q1_p99_us	3398.384
+val	P	-2	c4_q2_p50_us	223.882
+val	P	-2	c4_q2_p99_us	8949.429
+val	P	-2	commits_per_s	0.47768516976014275
+val	P	-2	pss_growth_bytes_per_key_read	209313.07297830374
+val	P	-2	pss_mib	481.7998046875
+val	P	-2	q1_p50_us	222.249
+val	P	-2	q1_p99_us	3520.712
+val	P	-2	q2_p50_us	259.411
+val	P	-2	q3_p50_us	709.963
+val	P	-2	q4_p50_us	6528.701
+val	P	-2	q5_p50_us	1934.373
+val	P	-2	q6_p50_us	38394.723
+val	P	-2	read_deadlock_retries	0
+val	P	-2	view_state_bytes	15163392
+val	P	-2	view_state_bytes_per_key_read	14954.03550295858
+val	P	-2	write_p50_us	2075975.6450000003
+val	P	-2	write_p99_us	2447920.404
+val	M	-2	c2_q1_p50_us	64.52999999999999
+val	M	-2	c2_q1_p99_us	2497.795
+val	M	-2	c2_q2_p50_us	323.48199999999997
+val	M	-2	c4_q1_p50_us	289.192
+val	M	-2	c4_q1_p99_us	3154.437
+val	M	-2	c4_q2_p50_us	356.96700000000004
+val	M	-2	c4_q2_p99_us	12815.027999999998
+val	M	-2	commits_per_s	0.46559084624766606
+val	M	-2	pss_growth_bytes_per_key_read	208796.02366863904
+val	M	-2	pss_mib	481.294921875
+val	M	-2	q1_p50_us	222.559
+val	M	-2	q1_p99_us	1120.002
+val	M	-2	q2_p50_us	283.031
+val	M	-2	q3_p50_us	1337.178
+val	M	-2	q4_p50_us	6148.492
+val	M	-2	q5_p50_us	1406.5720000000001
+val	M	-2	q6_p50_us	36249.165
+val	M	-2	read_deadlock_retries	0
+val	M	-2	view_state_bytes	15163392
+val	M	-2	view_state_bytes_per_key_read	14954.03550295858
+val	M	-2	write_p50_us	2099655.437
+val	M	-2	write_p99_us	2413030.3899999997
+val	H3	-2	c2_q1_p50_us	429.547
+val	H3	-2	c2_q1_p99_us	4712.17
+val	H3	-2	c2_q2_p50_us	496.52400000000006
+val	H3	-2	c4_q1_p50_us	356.067
+val	H3	-2	c4_q1_p99_us	2856.006
+val	H3	-2	c4_q2_p50_us	302.485
+val	H3	-2	c4_q2_p99_us	2851.173
+val	H3	-2	commits_per_s	310.1976452214317
+val	H3	-2	pss_growth_bytes_per_key_read	273829.1124260355
+val	H3	-2	pss_mib	544.9306640625
+val	H3	-2	q1_p50_us	463.832
+val	H3	-2	q1_p99_us	11164.511
+val	H3	-2	q2_p50_us	381.103
+val	H3	-2	q3_p50_us	561.4599999999999
+val	H3	-2	q4_p50_us	77883.622
+val	H3	-2	q5_p50_us	130396.75600000001
+val	H3	-2	q6_p50_us	1681805.6160000002
+val	H3	-2	read_deadlock_retries	0
+val	H3	-2	view_state_bytes	199936
+val	H3	-2	view_state_bytes_per_key_read	197.17554240631165
+val	H3	-2	write_p50_us	1881.2069999999999
+val	H3	-2	write_p99_us	14442.872000000001
+div	N	-2	77	Anchored((53907, 0), 4985): error failed to fill whole buffer || Anchored((93324, 0), 2312): error failed to fill whole buffer || Anchored((17896, 0), 2614): error Broken pipe (os error 32) || Point((70526, 1)): error Broken pipe (os error 32) || Anchored((38608, 0), 3367): error Broken pipe (os error 32)
+err	N	-2	Anchored((53907, 0), 4985) `select acct, cur, sum(amt) from postings as of system time 4984 where acct = 53907 and cur = 0 group by acct, cur`: failed to fill whole buffer
+err	N	-2	Anchored((93324, 0), 2312) `select acct, cur, sum(amt) from postings as of system time 2311 where acct = 93324 and cur = 0 group by acct, cur`: failed to fill whole buffer
+err	N	-2	Anchored((17896, 0), 2614) `select acct, cur, sum(amt) from postings as of system time 2613 where acct = 17896 and cur = 0 group by acct, cur`: Broken pipe (os error 32)
+err	N	-2	Point((70526, 1)) `select acct, cur, sum(amt) from postings where acct = 70526 and cur = 1 group by acct, cur`: Broken pipe (os error 32)
+err	N	-2	Anchored((38608, 0), 3367) `select acct, cur, sum(amt) from postings as of system time 3366 where acct = 38608 and cur = 0 group by acct, cur`: Broken pipe (os error 32)
+err	N	-2	Anchored((8407, 0), 2173) `select acct, cur, sum(amt) from postings as of system time 2172 where acct = 8407 and cur = 0 group by acct, cur`: failed to fill whole buffer
+err	N	-2	Anchored((53811, 0), 443) `select acct, cur, sum(amt) from postings as of system time 442 where acct = 53811 and cur = 0 group by acct, cur`: failed to fill whole buffer
+err	N	-2	Anchored((59232, 0), 710) `select acct, cur, sum(amt) from postings as of system time 709 where acct = 59232 and cur = 0 group by acct, cur`: Broken pipe (os error 32)
+err	N	-2	Point((83612, 1)) `select acct, cur, sum(amt) from postings where acct = 83612 and cur = 1 group by acct, cur`: Broken pipe (os error 32)
+err	N	-2	Point((76897, 0)) `select acct, cur, sum(amt) from postings where acct = 76897 and cur = 0 group by acct, cur`: Broken pipe (os error 32)
+err	N	-2	Anchored((7124, 0), 3819) `select acct, cur, sum(amt) from postings as of system time 3818 where acct = 7124 and cur = 0 group by acct, cur`: failed to fill whole buffer
+err	N	-2	Anchored((20657, 0), 2260) `select acct, cur, sum(amt) from postings as of system time 2259 where acct = 20657 and cur = 0 group by acct, cur`: failed to fill whole buffer
+err	N	-2	Point((59461, 0)) `select acct, cur, sum(amt) from postings where acct = 59461 and cur = 0 group by acct, cur`: Broken pipe (os error 32)
+err	N	-2	Point((12614, 1)) `select acct, cur, sum(amt) from postings where acct = 12614 and cur = 1 group by acct, cur`: Broken pipe (os error 32)
+err	N	-2	Point((11746, 0)) `select acct, cur, sum(amt) from postings where acct = 11746 and cur = 0 group by acct, cur`: Broken pipe (os error 32)
+err	N	-2	Anchored((5360, 0), 3135) `select acct, cur, sum(amt) from postings as of system time 3134 where acct = 5360 and cur = 0 group by acct, cur`: failed to fill whole buffer
+err	N	-2	Point((74709, 0)) `select acct, cur, sum(amt) from postings where acct = 74709 and cur = 0 group by acct, cur`: failed to fill whole buffer
+err	N	-2	Point((15635, 0)) `select acct, cur, sum(amt) from postings where acct = 15635 and cur = 0 group by acct, cur`: Broken pipe (os error 32)
+err	N	-2	Point((30364, 0)) `select acct, cur, sum(amt) from postings where acct = 30364 and cur = 0 group by acct, cur`: Broken pipe (os error 32)
+err	N	-2	Point((67475, 0)) `select acct, cur, sum(amt) from postings where acct = 67475 and cur = 0 group by acct, cur`: Broken pipe (os error 32)
+err	N	-2	head check: Connection refused (os error 111)
+val	N	-2	c2_q1_p50_us	95.48899999999999
+val	N	-2	c2_q1_p99_us	583.155
+val	N	-2	c2_q2_p50_us	734996.663
+val	N	-2	c4_q1_p50_us	109.353
+val	N	-2	c4_q1_p99_us	7151.338
+val	N	-2	c4_q2_p50_us	1530594.011
+val	N	-2	c4_q2_p99_us	3147263.333
+val	N	-2	commits_per_s	387.00213094983366
+val	N	-2	q1_p50_us	216.583
+val	N	-2	q1_p99_us	1050.329
+val	N	-2	q2_p50_us	785573.033
+val	N	-2	q3_p50_us	1168.952
+val	N	-2	q4_p50_us	180711.677
+val	N	-2	q5_p50_us	168398.757
+val	N	-2	q6_p50_us	1232065.215
+val	N	-2	read_deadlock_retries	0
+val	N	-2	write_p50_us	2491.172
+val	N	-2	write_p99_us	7202.6269999999995
+val	P	-1	c2_q1_p50_us	51.014
+val	P	-1	c2_q1_p99_us	448.238
+val	P	-1	c2_q2_p50_us	173.77700000000002
+val	P	-1	c4_q1_p50_us	126.009
+val	P	-1	c4_q1_p99_us	1739.7859999999998
+val	P	-1	c4_q2_p50_us	234.196
+val	P	-1	c4_q2_p99_us	5576.735000000001
+val	P	-1	commits_per_s	0.47524321872518366
+val	P	-1	pss_growth_bytes_per_key_read	142867.64021164022
+val	P	-1	pss_mib	485.3974609375
+val	P	-1	q1_p50_us	146.61700000000002
+val	P	-1	q1_p99_us	3413.2870000000003
+val	P	-1	q2_p50_us	230.822
+val	P	-1	q3_p50_us	282.65700000000004
+val	P	-1	q4_p50_us	7571.876
+val	P	-1	q5_p50_us	193.75300000000001
+val	P	-1	q6_p50_us	35555.59
+val	P	-1	read_deadlock_retries	0
+val	P	-1	view_state_bytes	15171584
+val	P	-1	view_state_bytes_per_key_read	10034.116402116402
+val	P	-1	write_p50_us	2090929.858
+val	P	-1	write_p99_us	2374061.395
+val	M	-1	c2_q1_p50_us	40.188
+val	M	-1	c2_q1_p99_us	340.726
+val	M	-1	c2_q2_p50_us	162.143
+val	M	-1	c4_q1_p50_us	196.57
+val	M	-1	c4_q1_p99_us	1514.667
+val	M	-1	c4_q2_p50_us	351.96099999999996
+val	M	-1	c4_q2_p99_us	2880.867
+val	M	-1	commits_per_s	0.4757354169709839
+val	M	-1	pss_growth_bytes_per_key_read	139238.26455026455
+val	M	-1	pss_mib	480.1591796875
+val	M	-1	q1_p50_us	153.493
+val	M	-1	q1_p99_us	987.7729999999999
+val	M	-1	q2_p50_us	267.908
+val	M	-1	q3_p50_us	266.652
+val	M	-1	q4_p50_us	7125.07
+val	M	-1	q5_p50_us	177.85000000000002
+val	M	-1	q6_p50_us	39993.065
+val	M	-1	read_deadlock_retries	0
+val	M	-1	view_state_bytes	15171584
+val	M	-1	view_state_bytes_per_key_read	10034.116402116402
+val	M	-1	write_p50_us	2090435.436
+val	M	-1	write_p99_us	2393711.62
+val	H3	-1	c2_q1_p50_us	259.467
+val	H3	-1	c2_q1_p99_us	8229.521
+val	H3	-1	c2_q2_p50_us	258.95300000000003
+val	H3	-1	c4_q1_p50_us	467.584
+val	H3	-1	c4_q1_p99_us	3890.438
+val	H3	-1	c4_q2_p50_us	501.287
+val	H3	-1	c4_q2_p99_us	1628.9279999999999
+val	H3	-1	commits_per_s	395.82648471050936
+val	H3	-1	pss_growth_bytes_per_key_read	182384.42328042327
+val	H3	-1	pss_mib	543.12109375
+val	H3	-1	q1_p50_us	353.289
+val	H3	-1	q1_p99_us	2543.01
+val	H3	-1	q2_p50_us	305.135
+val	H3	-1	q3_p50_us	372.712
+val	H3	-1	q4_p50_us	77615.57400000001
+val	H3	-1	q5_p50_us	97427.932
+val	H3	-1	q6_p50_us	1573519.966
+val	H3	-1	read_deadlock_retries	0
+val	H3	-1	view_state_bytes	294560
+val	H3	-1	view_state_bytes_per_key_read	194.8148148148148
+val	H3	-1	write_p50_us	1920.295
+val	H3	-1	write_p99_us	5184.294

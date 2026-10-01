@@ -526,7 +526,12 @@ pub fn render(
 
     // Identity.
     let _ = writeln!(s, "## 1. Every arm held the same data\n");
-    let _ = writeln!(s, "Per point: the universe's legs (count and SHA-256 of the canonical `acct,cur,amt` multiset), then each arm's after loading and after the last run. `=` means equal to the universe's (load) or to the oracle's (end).\n");
+    // The *not read* sentence only where a cell says it, so a study without one renders as
+    // it did before C16-02.
+    let unread = points
+        .values()
+        .any(|st| st.kind("load").any(|r| r[6].is_empty()));
+    let _ = writeln!(s, "Per point: the universe's legs (count and SHA-256 of the canonical `acct,cur,amt` multiset), then each arm's after loading and after the last run. `=` means equal to the universe's (load) or to the oracle's (end){}.\n", if unread { "; *not read* means no end-of-run checksum was taken, because the point ended at a failure or the arm did not answer the read (see the Deviations), and *legs at end* is then — where the oracle's was not taken either" } else { "" });
     let _ = writeln!(s, "| series | size | seed | keys | budget | legs loaded | SHA-256 (prefix) | legs at end | arms equal at load | arms equal at end | failures |\n|---|---|---|---|---|---|---|---|---|---|---|");
     for ((se, n, seed), st) in &points {
         let ul = st.meta.get("universe_sha256").cloned().unwrap_or_default();
@@ -535,10 +540,15 @@ pub fn render(
         let mut eq_end = Vec::new();
         for r in st.kind("load") {
             eq_load.push(format!("{} {}", r[1], if r[4] == ul { "=" } else { "≠" }));
+            // An end checksum the comparator never read is not a difference: `≠` there would
+            // be a wrong fact. It is empty when the arm did not answer the end-of-run read
+            // (C16-02: N was killed by the memory cgroup during that read at multi 10⁵).
             eq_end.push(format!(
                 "{} {}",
                 r[1],
-                if !el.is_empty() && r[6] == el {
+                if r[6].is_empty() {
+                    "not read"
+                } else if !el.is_empty() && r[6] == el {
                     "="
                 } else {
                     "≠"
@@ -554,7 +564,11 @@ pub fn render(
             st.num("budget"),
             st.num("universe_legs"),
             &ul[..ul.len().min(16)],
-            st.num("end_legs"),
+            if el.is_empty() {
+                "—".to_string()
+            } else {
+                st.num("end_legs").to_string()
+            },
             eq_load.join(", "),
             eq_end.join(", "),
             if fails.is_empty() {
@@ -1468,6 +1482,9 @@ pub const DEVIATIONS_B: &[&str] = &[
     "**Concurrency phases are read-only** (writes run only in the 1-client mixed phase), as in E27.",
     "**Allocations per read are not measured on the served binary** (design §11): the metered build counts bytes held on request, not allocations per operation; E18 measures those in-process.",
     "**The 10⁶ point is not in this file**: it is C15-04's (Host C). The container holds 2 cores and 8 GB.",
+    "**The sweep was interrupted once by a container restart and resumed, not restarted** (2026-10-01, about 02:45Z), while `single-10000-7` was running. A point's file is written only when the point completes, so that point had written nothing and the six already written were intact. The driver was started again unchanged with `--skip-existing`; it skipped the six and re-ran `single-10000-7` from its start. No point was discarded or merged with a partial one.",
+    "**At multi-currency 10⁵ the memory cgroup killed N five times, once per seed** (kernel log: `nilestreamd-metered`, anon-rss 3.10–3.29 GiB each; the event at seed 7 also killed one PostgreSQL backend). Five arms are co-resident during a point on a host of 8,031 MiB; design §3 expected that dropping H1, H2 and T would keep 10⁵ within it, and at multi-currency 10⁵ it did not. Seeds 1 and 100: N died in a warm-up run. Its later queries are recorded as errors (`failed to fill whole buffer`, `Broken pipe`), which the comparator counts as divergences, and the next run's connection was refused, which ends a point. These are transport errors after the process died, not wrong answers. Both points are kept as written, with FAILURES and no measured run. By the renderer's rule a failure anywhere at a size refuses that size's seed-replicated metrics, so **view-state bytes per key read at multi-currency 10⁵ are REFUSED for every pair**, and the engine rule's memory clause is not evaluated there.",
+    "**At seeds 7, 42 and 2024 of multi-currency 10⁵ the kill came after the tenth measured run**, during the end-of-run checks, when the comparator reads every leg back from each arm. The comparator reads the end checksum and the arm's state only if it can connect, and records nothing when it cannot. So none of the three records a failure, all three lack N's end checksum and end state, and seed 7 also lacks P+'s. The same OOM event killed one PostgreSQL backend, the likeliest reason P+ did not answer; which cluster it belonged to was not recorded. Their measured runs are complete for every arm, and §1 shows those end checksums as *not read*. The silent skip is a harness defect recorded for the next card. It was not repaired during the sweep, because changing the harness would change what the remaining points measure. Nothing was re-run or tuned. The driver's stop rule (stop on a failure or a divergence) stopped the sweep after this step, so the p99-engine re-run did not start.",
 ];
 
 /// §5's first table (E27b): the derived state each arm holds, per key read and per resident key.

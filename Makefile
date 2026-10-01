@@ -208,6 +208,7 @@ reproduce:
 	cargo run -q --release -p comparator -- render --shape p99
 	cargo run -q --release -p comparator -- render --shape p99-engine
 	cargo run -q --release -p comparator -- render --shape counted
+	cargo run -q --release -p comparator -- render --study e27b
 	cargo run -q -p syntax-study --bin e30 -- report
 	cargo run -q -p syntax-study --bin e30b -- report
 	# Every byte-deterministic experiment, not four of nine. `e3`, `e5`, `e6`, `e9` and

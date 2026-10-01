@@ -360,3 +360,38 @@ E27b-comparator/attempt-1/single-10000-100.tsv,historical,none
 E27b-comparator/attempt-1/single-10000-2024.tsv,historical,none
 E27b-comparator/attempt-1/single-10000-42.tsv,historical,none
 E27b-comparator/attempt-1/single-10000-7.tsv,historical,none
+# E27b (C16-02): the full re-run from its design, rendered by `comparator render --study e27b`.
+# The multi-currency 10^5 points at seeds 1 and 100 carry FAILURES (N killed by the memory
+# cgroup); they are kept as written and refuse that size's memory verdict (E27b's Deviations).
+E27b-comparator.md,byte-deterministic,cargo run -q --release -p comparator -- render --study e27b
+E27b-comparator-detail.md,byte-deterministic,cargo run -q --release -p comparator -- render --study e27b
+E27b-comparator/multi-1000-1.tsv,machine-dependent,cargo run --release -p comparator -- run --study e27b (arms N P+ P M H3; see E27b-comparator.md)
+E27b-comparator/multi-1000-100.tsv,machine-dependent,cargo run --release -p comparator -- run --study e27b (arms N P+ P M H3; see E27b-comparator.md)
+E27b-comparator/multi-1000-2024.tsv,machine-dependent,cargo run --release -p comparator -- run --study e27b (arms N P+ P M H3; see E27b-comparator.md)
+E27b-comparator/multi-1000-42.tsv,machine-dependent,cargo run --release -p comparator -- run --study e27b (arms N P+ P M H3; see E27b-comparator.md)
+E27b-comparator/multi-1000-7.tsv,machine-dependent,cargo run --release -p comparator -- run --study e27b (arms N P+ P M H3; see E27b-comparator.md)
+E27b-comparator/multi-10000-1.tsv,machine-dependent,cargo run --release -p comparator -- run --study e27b (arms N P+ P M H3; see E27b-comparator.md)
+E27b-comparator/multi-10000-100.tsv,machine-dependent,cargo run --release -p comparator -- run --study e27b (arms N P+ P M H3; see E27b-comparator.md)
+E27b-comparator/multi-10000-2024.tsv,machine-dependent,cargo run --release -p comparator -- run --study e27b (arms N P+ P M H3; see E27b-comparator.md)
+E27b-comparator/multi-10000-42.tsv,machine-dependent,cargo run --release -p comparator -- run --study e27b (arms N P+ P M H3; see E27b-comparator.md)
+E27b-comparator/multi-10000-7.tsv,machine-dependent,cargo run --release -p comparator -- run --study e27b (arms N P+ P M H3; see E27b-comparator.md)
+E27b-comparator/multi-100000-1.tsv,machine-dependent,cargo run --release -p comparator -- run --study e27b (arms N P+ P M H3; see E27b-comparator.md)
+E27b-comparator/multi-100000-100.tsv,machine-dependent,cargo run --release -p comparator -- run --study e27b (arms N P+ P M H3; see E27b-comparator.md)
+E27b-comparator/multi-100000-2024.tsv,machine-dependent,cargo run --release -p comparator -- run --study e27b (arms N P+ P M H3; see E27b-comparator.md)
+E27b-comparator/multi-100000-42.tsv,machine-dependent,cargo run --release -p comparator -- run --study e27b (arms N P+ P M H3; see E27b-comparator.md)
+E27b-comparator/multi-100000-7.tsv,machine-dependent,cargo run --release -p comparator -- run --study e27b (arms N P+ P M H3; see E27b-comparator.md)
+E27b-comparator/single-1000-1.tsv,machine-dependent,cargo run --release -p comparator -- run --study e27b (arms N P+ P M H3; see E27b-comparator.md)
+E27b-comparator/single-1000-100.tsv,machine-dependent,cargo run --release -p comparator -- run --study e27b (arms N P+ P M H3; see E27b-comparator.md)
+E27b-comparator/single-1000-2024.tsv,machine-dependent,cargo run --release -p comparator -- run --study e27b (arms N P+ P M H3; see E27b-comparator.md)
+E27b-comparator/single-1000-42.tsv,machine-dependent,cargo run --release -p comparator -- run --study e27b (arms N P+ P M H3; see E27b-comparator.md)
+E27b-comparator/single-1000-7.tsv,machine-dependent,cargo run --release -p comparator -- run --study e27b (arms N P+ P M H3; see E27b-comparator.md)
+E27b-comparator/single-10000-1.tsv,machine-dependent,cargo run --release -p comparator -- run --study e27b (arms N P+ P M H3; see E27b-comparator.md)
+E27b-comparator/single-10000-100.tsv,machine-dependent,cargo run --release -p comparator -- run --study e27b (arms N P+ P M H3; see E27b-comparator.md)
+E27b-comparator/single-10000-2024.tsv,machine-dependent,cargo run --release -p comparator -- run --study e27b (arms N P+ P M H3; see E27b-comparator.md)
+E27b-comparator/single-10000-42.tsv,machine-dependent,cargo run --release -p comparator -- run --study e27b (arms N P+ P M H3; see E27b-comparator.md)
+E27b-comparator/single-10000-7.tsv,machine-dependent,cargo run --release -p comparator -- run --study e27b (arms N P+ P M H3; see E27b-comparator.md)
+E27b-comparator/single-100000-1.tsv,machine-dependent,cargo run --release -p comparator -- run --study e27b (arms N P+ P M H3; see E27b-comparator.md)
+E27b-comparator/single-100000-100.tsv,machine-dependent,cargo run --release -p comparator -- run --study e27b (arms N P+ P M H3; see E27b-comparator.md)
+E27b-comparator/single-100000-2024.tsv,machine-dependent,cargo run --release -p comparator -- run --study e27b (arms N P+ P M H3; see E27b-comparator.md)
+E27b-comparator/single-100000-42.tsv,machine-dependent,cargo run --release -p comparator -- run --study e27b (arms N P+ P M H3; see E27b-comparator.md)
+E27b-comparator/single-100000-7.tsv,machine-dependent,cargo run --release -p comparator -- run --study e27b (arms N P+ P M H3; see E27b-comparator.md)

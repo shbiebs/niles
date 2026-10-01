@@ -24,3 +24,6 @@ __pycache__/
 # The local test role's password, written by tools/pg-provision.sh on the machine that uses
 # it (cycle 14, D-1). A credential never enters history.
 .pg-bench-password
+
+# tools/replay.sh writes its logs and split blocks here (the manual, C16-12).
+.replay/

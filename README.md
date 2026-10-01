@@ -32,7 +32,7 @@ references, one Markdown file per chapter (also delivered as `thesis/Niles-Thesi
 ## Status — read this first
 
 This is a **theory project with a working instrument**. The loop from Niles source text to a
-measured result is closed end to end, and the workspace holds **1270 test functions**.
+measured result is closed end to end, and the workspace holds **1278 test functions**.
 
 ```
   Niles source text
@@ -82,7 +82,7 @@ cannot do (durability, concurrency, distribution, the compiler); no number there
 Reproduce everything:
 
 ```sh
-cargo test --workspace                      # 1270 test functions
+cargo test --workspace                      # 1278 test functions
 cargo test -p niles-interp                  # the Appendix E bootstrap gates
 
 # the compiler, on the thesis's own worked example
@@ -160,6 +160,7 @@ this table.
 | File | What it is |
 |---|---|
 | `docs/SPEC-LANGUAGE.md` | The normative Niles specification. Part V's conformance table is generated from the compiler. |
+| `docs/SPEC-DIALECT.md` | The product language: PostgreSQL's SQL and PL/pgSQL with the checked annotations and the schema rule, the checker's codes, and what C4's soundness can and cannot claim over it. |
 | `docs/SPEC-ENGINE.md` | The normative engine specification, with a status line per requirement. |
 | `docs/keywords.md` | The keyword reference, generated from the compiler's registry. |
 | `docs/reading-the-code.md` | A plain-language guide to Niles, to Rust and to both engines, for readers who have never read code. Covers every keyword of both languages, every sign, literal, type and engine name, technically and by analogy. Not part of the thesis. |

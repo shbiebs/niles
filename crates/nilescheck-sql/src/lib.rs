@@ -8,6 +8,7 @@ pub mod check;
 pub mod check2;
 pub mod conserve;
 pub mod conventions;
+pub mod dialect;
 pub mod effects;
 pub mod lex;
 pub mod linear;
@@ -85,6 +86,15 @@ pub fn check_catalog(stmts: &[ast::Stmt]) -> Vec<check::Diag> {
 /// **SQL+C+L** (R2-05, E14's column of that name): the catalog checker, plus linearity
 /// (`linear.rs`), conservation through `niles-lang`'s solver (`conserve.rs`) and capabilities
 /// (`capability.rs`).
+/// **The dialect** (E30c, cycle 16): SQL+C+L plus the schema rule's catalog pass, K1–K4
+/// (`dialect.rs`). Separate from [`check_all`], so the corpora checked before the dialect existed
+/// (E14, E30, E30b′) read exactly as they did.
+pub fn check_dialect(stmts: &[ast::Stmt]) -> Vec<check::Diag> {
+    let mut d = check_all(stmts);
+    d.extend(dialect::check(stmts));
+    d
+}
+
 pub fn check_all(stmts: &[ast::Stmt]) -> Vec<check::Diag> {
     let mut d = check_catalog(stmts);
     d.extend(linear::check(stmts));

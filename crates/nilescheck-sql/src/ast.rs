@@ -381,6 +381,10 @@ pub struct CreateTable {
     pub as_query: Option<Box<Query>>,
     pub inherits: Vec<Name>,
     pub partition_by: Option<String>,
+    /// `create table t (like s …)`: the tables whose columns are copied (E30c, K1).
+    pub like: Vec<Name>,
+    /// `create table t partition of p …`: the parent (E30c, K1).
+    pub partition_of: Option<Name>,
     pub span: Span,
 }
 

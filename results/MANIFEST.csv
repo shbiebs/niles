@@ -79,6 +79,10 @@
 #   C=n/a E30b-syntax/programs.tsv E30b-syntax/mutants.tsv E30b-syntax/adversarial.tsv
 #   C=n/a E30b-syntax/cost-inprocess.tsv
 #
+#   E30c's rows (cycle 16, C16-10) ran no engine either: PostgreSQL and the checker.
+#
+#   C=n/a E30c-dialect/outcomes.tsv
+#
 #   E23's two series are additionally *insensitive* to C, and that is measured rather than
 #   assumed: `serve_path` in its own CSV reads `fold` and `report-from-view`, and the path a
 #   checkpoint bounds is `IndexFold`. The marker that attributed the caveat to §9.14.5 is
@@ -395,3 +399,5 @@ E27b-comparator/single-100000-100.tsv,machine-dependent,cargo run --release -p c
 E27b-comparator/single-100000-2024.tsv,machine-dependent,cargo run --release -p comparator -- run --study e27b (arms N P+ P M H3; see E27b-comparator.md)
 E27b-comparator/single-100000-42.tsv,machine-dependent,cargo run --release -p comparator -- run --study e27b (arms N P+ P M H3; see E27b-comparator.md)
 E27b-comparator/single-100000-7.tsv,machine-dependent,cargo run --release -p comparator -- run --study e27b (arms N P+ P M H3; see E27b-comparator.md)
+E30c-dialect.md,byte-deterministic,cargo run -q -p syntax-study --bin e30c -- report
+E30c-dialect/outcomes.tsv,machine-dependent,cargo run -q -p syntax-study --bin e30c -- run (needs PostgreSQL 16 as bench and the dialect database tools/e30c-install.sh makes; deterministic given them; see E30c-dialect.md)

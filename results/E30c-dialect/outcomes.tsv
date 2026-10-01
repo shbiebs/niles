@@ -1,0 +1,113 @@
+case	class	expected	twin	mechanism	outcome
+S01	ledger not declared	D1	d	event-trigger	refused E30c D1: journal holds money (amt_usd) and is in schema public, not ledger or state
+S01	ledger not declared	D1	d	catalog-pass	refused NSQ110
+S01	ledger not declared	D1	d	baseline-sqlcl	accepted
+S01	ledger not declared	D1	d	stock-postgresql	accepted
+S01	ledger not declared	D1	c	event-trigger	accepted
+S01	ledger not declared	D1	c	catalog-pass	accepted
+S01	ledger not declared	D1	c	baseline-sqlcl	accepted
+S01	ledger not declared	D1	c	stock-postgresql	accepted
+S02	linear handle not declared	K2	d	event-trigger	accepted
+S02	linear handle not declared	K2	d	catalog-pass	refused NSQ113
+S02	linear handle not declared	K2	d	baseline-sqlcl	accepted
+S02	linear handle not declared	K2	d	stock-postgresql	accepted
+S02	linear handle not declared	K2	c	event-trigger	accepted
+S02	linear handle not declared	K2	c	catalog-pass	accepted
+S02	linear handle not declared	K2	c	baseline-sqlcl	accepted
+S02	linear handle not declared	K2	c	stock-postgresql	accepted
+S03	capability not declared	K3	d	event-trigger	accepted
+S03	capability not declared	K3	d	catalog-pass	refused NSQ114
+S03	capability not declared	K3	d	baseline-sqlcl	accepted
+S03	capability not declared	K3	d	stock-postgresql	accepted
+S03	capability not declared	K3	c	event-trigger	accepted
+S03	capability not declared	K3	c	catalog-pass	accepted
+S03	capability not declared	K3	c	baseline-sqlcl	accepted
+S03	capability not declared	K3	c	stock-postgresql	accepted
+S04	currency scale not declared	K4	d	event-trigger	accepted
+S04	currency scale not declared	K4	d	catalog-pass	refused NSQ115
+S04	currency scale not declared	K4	d	baseline-sqlcl	accepted
+S04	currency scale not declared	K4	d	stock-postgresql	accepted
+S04	currency scale not declared	K4	c	event-trigger	accepted
+S04	currency scale not declared	K4	c	catalog-pass	accepted
+S04	currency scale not declared	K4	c	baseline-sqlcl	accepted
+S04	currency scale not declared	K4	c	stock-postgresql	accepted
+S05	money as a bare integer	D2	d	event-trigger	refused E30c D2: ledger.fees is in schema ledger and holds no money column
+S05	money as a bare integer	D2	d	catalog-pass	refused NSQ111
+S05	money as a bare integer	D2	d	baseline-sqlcl	accepted
+S05	money as a bare integer	D2	d	stock-postgresql	accepted
+S05	money as a bare integer	D2	c	event-trigger	accepted
+S05	money as a bare integer	D2	c	catalog-pass	accepted
+S05	money as a bare integer	D2	c	baseline-sqlcl	accepted
+S05	money as a bare integer	D2	c	stock-postgresql	accepted
+S06	ledger copied with LIKE	D1	d	event-trigger	refused E30c D1: postings_copy holds money (amt_usd, amt_eur, amt_jpy) and is in schema public, not ledger or state
+S06	ledger copied with LIKE	D1	d	catalog-pass	refused NSQ110
+S06	ledger copied with LIKE	D1	d	baseline-sqlcl	accepted
+S06	ledger copied with LIKE	D1	d	stock-postgresql	accepted
+S06	ledger copied with LIKE	D1	c	event-trigger	accepted
+S06	ledger copied with LIKE	D1	c	catalog-pass	accepted
+S06	ledger copied with LIKE	D1	c	baseline-sqlcl	accepted
+S06	ledger copied with LIKE	D1	c	stock-postgresql	accepted
+S07	ledger copied with CREATE TABLE AS	D1	d	event-trigger	refused E30c D1: snapshot holds money (amt_usd, amt_eur, amt_jpy) and is in schema public, not ledger or state
+S07	ledger copied with CREATE TABLE AS	D1	d	catalog-pass	refused NSQ110
+S07	ledger copied with CREATE TABLE AS	D1	d	baseline-sqlcl	accepted
+S07	ledger copied with CREATE TABLE AS	D1	d	stock-postgresql	accepted
+S07	ledger copied with CREATE TABLE AS	D1	c	event-trigger	accepted
+S07	ledger copied with CREATE TABLE AS	D1	c	catalog-pass	accepted
+S07	ledger copied with CREATE TABLE AS	D1	c	baseline-sqlcl	accepted
+S07	ledger copied with CREATE TABLE AS	D1	c	stock-postgresql	accepted
+S08	ledger copied with SELECT INTO	D1	d	event-trigger	refused E30c D1: postings_dump holds money (amt_usd, amt_eur, amt_jpy) and is in schema public, not ledger or state
+S08	ledger copied with SELECT INTO	D1	d	catalog-pass	refused NSQ110
+S08	ledger copied with SELECT INTO	D1	d	baseline-sqlcl	accepted
+S08	ledger copied with SELECT INTO	D1	d	stock-postgresql	accepted
+S08	ledger copied with SELECT INTO	D1	c	event-trigger	accepted
+S08	ledger copied with SELECT INTO	D1	c	catalog-pass	accepted
+S08	ledger copied with SELECT INTO	D1	c	baseline-sqlcl	accepted
+S08	ledger copied with SELECT INTO	D1	c	stock-postgresql	accepted
+S09	conservation removed	D3	d	event-trigger	refused E30c D3: dialect_conserve on ledger.postings may not be dropped from a ledger table
+S09	conservation removed	D3	d	catalog-pass	refused NSQ112
+S09	conservation removed	D3	d	baseline-sqlcl	accepted
+S09	conservation removed	D3	d	stock-postgresql	refused trigger "dialect_conserve" for table "postings" does not exist
+S09	conservation removed	D3	c	event-trigger	accepted
+S09	conservation removed	D3	c	catalog-pass	accepted
+S09	conservation removed	D3	c	baseline-sqlcl	accepted
+S09	conservation removed	D3	c	stock-postgresql	accepted
+S10	append-only switched off	D3	d	event-trigger	refused E30c D3: dialect_append_only on ledger table ledger.postings may not be disabled
+S10	append-only switched off	D3	d	catalog-pass	refused NSQ112
+S10	append-only switched off	D3	d	baseline-sqlcl	accepted
+S10	append-only switched off	D3	d	stock-postgresql	refused trigger "dialect_append_only" for table "postings" does not exist
+S10	append-only switched off	D3	c	event-trigger	accepted
+S10	append-only switched off	D3	c	catalog-pass	accepted
+S10	append-only switched off	D3	c	baseline-sqlcl	accepted
+S10	append-only switched off	D3	c	stock-postgresql	accepted
+S11	money added to an undeclared table	D1	d	event-trigger	refused E30c D1: accounts holds money (limit_amt) and is in schema public, not ledger or state
+S11	money added to an undeclared table	D1	d	catalog-pass	refused NSQ110
+S11	money added to an undeclared table	D1	d	baseline-sqlcl	accepted
+S11	money added to an undeclared table	D1	d	stock-postgresql	accepted
+S11	money added to an undeclared table	D1	c	event-trigger	accepted
+S11	money added to an undeclared table	D1	c	catalog-pass	accepted
+S11	money added to an undeclared table	D1	c	baseline-sqlcl	accepted
+S11	money added to an undeclared table	D1	c	stock-postgresql	accepted
+S12	ledger moved out of its schema	D1	d	event-trigger	refused E30c D1: postings holds money (amt_usd, amt_eur, amt_jpy) and is in schema public, not ledger or state
+S12	ledger moved out of its schema	D1	d	catalog-pass	refused NSQ110
+S12	ledger moved out of its schema	D1	d	baseline-sqlcl	accepted
+S12	ledger moved out of its schema	D1	d	stock-postgresql	accepted
+S12	ledger moved out of its schema	D1	c	event-trigger	accepted
+S12	ledger moved out of its schema	D1	c	catalog-pass	accepted
+S12	ledger moved out of its schema	D1	c	baseline-sqlcl	accepted
+S12	ledger moved out of its schema	D1	c	stock-postgresql	accepted
+S13	a partition outside the ledger	D1	d	event-trigger	refused E30c D1: postings_2026 holds money (amt_usd) and is in schema public, not ledger or state
+S13	a partition outside the ledger	D1	d	catalog-pass	refused NSQ110
+S13	a partition outside the ledger	D1	d	baseline-sqlcl	accepted
+S13	a partition outside the ledger	D1	d	stock-postgresql	accepted
+S13	a partition outside the ledger	D1	c	event-trigger	accepted
+S13	a partition outside the ledger	D1	c	catalog-pass	accepted
+S13	a partition outside the ledger	D1	c	baseline-sqlcl	accepted
+S13	a partition outside the ledger	D1	c	stock-postgresql	accepted
+S14	money state outside state	D1	d	event-trigger	refused E30c D1: holds holds money (amt) and is in schema public, not ledger or state
+S14	money state outside state	D1	d	catalog-pass	refused NSQ110
+S14	money state outside state	D1	d	baseline-sqlcl	accepted
+S14	money state outside state	D1	d	stock-postgresql	accepted
+S14	money state outside state	D1	c	event-trigger	accepted
+S14	money state outside state	D1	c	catalog-pass	accepted
+S14	money state outside state	D1	c	baseline-sqlcl	accepted
+S14	money state outside state	D1	c	stock-postgresql	accepted

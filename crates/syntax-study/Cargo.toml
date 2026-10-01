@@ -25,3 +25,8 @@ path = "src/bin/e30.rs"
 [[bin]]
 name = "e30b"
 path = "src/bin/e30b.rs"
+
+# E30c (cycle 16, C16-10; design `docs/study/E30c-design.md`).
+[[bin]]
+name = "e30c"
+path = "src/bin/e30c.rs"

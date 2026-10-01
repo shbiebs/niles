@@ -54,6 +54,20 @@ impl Conventions {
             match s {
                 Stmt::CreateDomain { name, .. } => {
                     c.domains.insert(name.last().to_string());
+                    // The dialect's placement (E30c, cycle 16): a domain created in schema
+                    // `linear` or `capability` is one, its kind or effect being its name, with
+                    // no comment needed. A schema that never uses the reserved schemas reads
+                    // exactly as before.
+                    if name.0.len() >= 2 {
+                        let schema = name.0[name.0.len() - 2].as_str();
+                        let last = name.last().to_string();
+                        if schema == "linear" {
+                            c.linear.insert(last.clone(), last.clone());
+                        }
+                        if schema == "capability" {
+                            c.capability.insert(last.clone(), last);
+                        }
+                    }
                 }
                 Stmt::CreateFunction(f) => {
                     let n = f.name.last().to_string();

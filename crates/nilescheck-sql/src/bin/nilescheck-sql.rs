@@ -1,12 +1,14 @@
-//! `nilescheck-sql [--catalog-only] FILE…` — parse the files as one script, run every rule,
+//! `nilescheck-sql [--catalog-only | --dialect] FILE…` — parse the files as one script, run every rule,
 //! print one line per diagnostic (`file:line: error[CODE]: message`) and exit 1 if any is an
 //! error. `--catalog-only` runs R2-04's catalog checker alone (E14's "PostgreSQL + checker"
 //! column); without it, SQL+C+L (R2-05): linearity, conservation and capabilities as well.
+//! `--dialect` adds the schema rule's catalog pass (E30c, K1–K4).
 
 fn main() {
     let mut files: Vec<String> = std::env::args().skip(1).collect();
     let catalog_only = files.iter().any(|f| f == "--catalog-only");
-    files.retain(|f| f != "--catalog-only");
+    let dialect = files.iter().any(|f| f == "--dialect");
+    files.retain(|f| f != "--catalog-only" && f != "--dialect");
     if files.is_empty() {
         eprintln!("usage: nilescheck-sql FILE…  (the files are checked as one script, in order)");
         std::process::exit(2);
@@ -41,6 +43,8 @@ fn main() {
     };
     let diags = if catalog_only {
         nilescheck_sql::check_catalog(&stmts)
+    } else if dialect {
+        nilescheck_sql::check_dialect(&stmts)
     } else {
         nilescheck_sql::check_all(&stmts)
     };

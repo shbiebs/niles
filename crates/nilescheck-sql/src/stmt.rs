@@ -897,6 +897,8 @@ impl<'a> Parser<'a> {
             as_query: None,
             inherits: vec![],
             partition_by: None,
+            like: vec![],
+            partition_of: None,
             span: Span::default(),
         };
         if self.is(&Tok::LParen) {
@@ -910,7 +912,12 @@ impl<'a> Parser<'a> {
                 }
             }
             self.expect(&Tok::RParen)?;
-        } else if self.eat_kw("of") || self.eat_kws(&["partition", "of"]) {
+        } else if self.eat_kws(&["partition", "of"]) {
+            t.partition_of = Some(self.name()?);
+            self.rest_of_statement();
+            t.span = self.span_from(start);
+            return Ok(Stmt::CreateTable(Box::new(t)));
+        } else if self.eat_kw("of") {
             self.rest_of_statement();
             t.span = self.span_from(start);
             return Ok(Stmt::CreateTable(Box::new(t)));
@@ -995,7 +1002,7 @@ impl<'a> Parser<'a> {
             return Ok(());
         }
         if self.eat_kw("like") {
-            self.name()?;
+            t.like.push(self.name()?);
             while self.eat_kw("including") || self.eat_kw("excluding") {
                 self.any_word()?;
             }

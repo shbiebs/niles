@@ -19,6 +19,7 @@ members = [
     "crates/nilescheck-sql",
     "crates/rev-sidecar",
     "crates/syntax-study",
+    "tools/skew",
 ]
 
 # **The memory instrument is not part of the system.** `GlobalAlloc` cannot be implemented

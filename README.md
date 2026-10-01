@@ -161,6 +161,7 @@ this table.
 |---|---|
 | `docs/SPEC-LANGUAGE.md` | The normative Niles specification. Part V's conformance table is generated from the compiler. |
 | `docs/SPEC-DIALECT.md` | The product language: PostgreSQL's SQL and PL/pgSQL with the checked annotations and the schema rule, the checker's codes, and what C4's soundness can and cannot claim over it. |
+| `docs/manual/` | The manual. Chapter 2 takes a fresh clone to a passing gate, and chapter 5 gives the counterexamples as decision cards. Every `sh` block is replayed by `tools/replay.sh`. |
 | `docs/SPEC-ENGINE.md` | The normative engine specification, with a status line per requirement. |
 | `docs/keywords.md` | The keyword reference, generated from the compiler's registry. |
 | `docs/reading-the-code.md` | A plain-language guide to Niles, to Rust and to both engines, for readers who have never read code. Covers every keyword of both languages, every sign, literal, type and engine name, technically and by analogy. Not part of the thesis. |

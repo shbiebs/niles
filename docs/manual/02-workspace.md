@@ -67,15 +67,17 @@ and ignored by git
 ```
 
 `make preflight` names every missing precondition at once, rather than failing one test at a
-time:
+time. On a ready workspace it prints four lines: the toolchain, the server, and a SCRAM login as
+`bench` to each of the two databases the tests use (`bank` and `postgres`):
 
 ```sh
+mkdir -p target
 make -s preflight > target/preflight.out 2>&1 || { cat target/preflight.out; exit 1; }
 grep -c '^preflight:' target/preflight.out
 ```
 
 ```expected
-2
+4
 ```
 
 ## 2.4 Build and test

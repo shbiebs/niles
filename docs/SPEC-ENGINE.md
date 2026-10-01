@@ -596,15 +596,7 @@ from `HashMap` iteration, because a currency code is written into the ledger, wh
 permanent, and one that depended on hash order would differ between runs of the same binary on
 the same schema.
 
-**`MISMATCH-A9-F05`: that is true of the wire and false of the compiler.**
-`session::declared_currencies` does sort by declaration span. `niles_lang::lower` does not: a
-money literal's code is `cat.currencies.keys().position(..)` over a `HashMap<String,
-CurrencyInfo>` with the standard hasher, so a compiled circuit names a currency by an order
-that changes between processes. With one declared currency — every schema this project serves
-today — the two agree at zero and nothing has seen it; with two, a `LitMoney` in the IR and
-the same currency on the wire are different integers, and which ones depends on the run. The
-rule above is the intended one; cycle 9's C9-04 makes the catalog carry the declaration index
-so both consumers read it instead of deriving it.
+~~**`MISMATCH-A9-F05`: that is true of the wire and false of the compiler.**~~ **Struck (cycle 16, C16-09): fixed by cycle 9's C9-04.1.** This paragraph recorded that `niles_lang::lower` named a money literal's currency by `cat.currencies.keys().position(..)` over a `HashMap` with the standard hasher, so a compiled circuit and the wire could carry different integers for one currency once a schema declared two. C9-04.1 made the catalog carry the declaration index: `CurrencyInfo::code` is assigned once, in declaration order, by `resolve.rs`, and both the lowering (`lower.rs`, which now reads `c.code` and refuses an undeclared currency with NL0506) and the wire read it. Its test, `crates/niles-lang/tests/currency_codes.rs`, resolves a schema under 200 permuted `HashMap` insertions and asserts the same codes each time (`docs/audit/cycle-9/execution-report.md`, row C9-04.1). The mismatch stayed in this document for seven cycles after its fix; the rule above is now true of both consumers.
 
 Two obligations follow, and neither was discharged:
 

@@ -4,6 +4,8 @@ Normative reference for Niles v0.1. The precedence rule of Section 6.22 governs 
 
 ## B.1 Design Principles
 
+**Settled by measurement, not by this argument (cycle 16).** The project description's "Rust first, SQL second" and this thesis's "SQL-first, Rust-fallback, novel-last" were both superseded by decision D-3 (cycle 14), which made the principal syntax a matter of measurement rather than of either argument. The measurement is E30b′ (H-L2, `results/E30b-syntax.md`): a checked dialect of SQL refuses every defect class the Niles checker refuses except one, schema-level omission. On it the author decided (DB-8, confirmed 2026-10-01) that the product language is PostgreSQL's SQL and PL/pgSQL with a checked dialect. The rule in principle 1 below remains the rule for **Niles's own grammar**, which is now the specification and reference checker of that dialect; it is no longer a claim about what a user of the product writes.
+
 1. **SQL-first, Rust-fallback, novel-last**, applied per construct and auditable. Any construct SQL already expresses is written with SQL's keywords and shape; everything SQL cannot say borrows Rust's spelling; novel syntax is introduced only for what neither can express. The rule carries one exception: a SQL spelling is not reused where it would sacrifice determinism or efficiency the engine depends on — unbounded recursive CTEs are admitted only behind a guard, and `float` is not a legal money type. The rationale, and the reason this ordering was chosen over its inverse, is adjudicated in Appendix J.1.
 2. **One IR.** All surfaces lower to the typed IR of Appendix D; surface constructs are notation, never semantics.
 3. **Types carry the guarantees.** Money with its currency *and scale*, both time axes, consistency, materialization, lineage, retention and confidentiality live in the type system.
@@ -175,7 +177,7 @@ view desk_exposure = /* … */
     serve { consistency: bounded(2.epochs, 5.s), materialize: auto, retain: evictable };
 ```
 
-**Contract terms.** `consistency` (the six rungs of Section 3.7); `checkpoint(C)` (per-key checkpoint interval; the constant in the Bounded Reconstruction Theorem, measured in §9.4.1); `materialize (`absent | demand | full | spilled | tiered | auto`, where `auto` delegates to the optimizer within the other constraints); `budget`; `freshness` (K, T); `retain` (`evictable | pinned | forever`); `lineage` (`off | key | full`); `backfill`; and confidentiality inherited from column annotations.
+**Contract terms.** `consistency` (the six rungs of Section 3.7); `checkpoint(C)` (per-key checkpoint interval; the constant in the Bounded Reconstruction Theorem, measured in §9.4.1); `materialize (`absent | demand | full | spilled | tiered | auto`, where `auto` delegates to the optimizer within the other constraints); `budget`; `freshness` (K, T); `retain` (`evictable | pinned | forever`); `lineage` (`off | key | full`, default `off`; any other value is refused as NL0206 rather than read as `off`, which it was until cycle 16, and the mode reaches the IR's serve contract — `crates/niles-lang/tests/lineage_contract.rs`; what a mode records is H-S9's question, withdrawn); `backfill`; and confidentiality inherited from column annotations.
 
 Reads return `Anchored<T>`:
 

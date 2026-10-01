@@ -38,13 +38,37 @@ Appendix I gives these as algorithms with their estimator update rules; this sec
 
 ## G.6 Instruction Selection and Machine-Code Encoding
 
+<!-- BEGIN:scope-targets.g6 thesis/scope.toml#scopeline -->
+
+*Generated from `thesis/scope.toml`. Do not edit by hand.*
+
+> **Scope: specification and future work.** Compilation targets: native Linux and macOS on ARM64, Windows on x86-64, WSL and WASM. *Decision:* A-3 (2026-09-21), with cycle 14's D-3 keeping the chapter as specification. *What exists:* nothing: nilesc lowers to the typed IR and has no back end. Nothing in this chapter is evaluated; it is a design.
+
+<!-- END:scope-targets.g6 -->
+
 Selection tables live per target as pattern-to-template mappings with costs; maximal munch with an explicit tie-break order (fewer operations, then shorter encoding). Encoding is table-generated from the target model, with an exhaustive encoder test against a reference disassembler corpus per release.
 
 ## G.7 Linear-Scan Register Allocation
 
+<!-- BEGIN:scope-targets.g7 thesis/scope.toml#scopeline -->
+
+*Generated from `thesis/scope.toml`. Do not edit by hand.*
+
+> **Scope: specification and future work.** Compilation targets: native Linux and macOS on ARM64, Windows on x86-64, WSL and WASM. *Decision:* A-3 (2026-09-21), with cycle 14's D-3 keeping the chapter as specification. *What exists:* nothing: nilesc lowers to the typed IR and has no back end. Nothing in this chapter is evaluated; it is a design.
+
+<!-- END:scope-targets.g7 -->
+
 Live intervals from SSA liveness; intervals sorted by start; an active set ordered by end; on pressure, split at the next use and spill the interval with the furthest next use, weighted by loop depth; reloads placed at split points; callee-saved registers allocated last. The allocator's invariant checklist — no overlapping assignment, every use reachable from a definition or a reload — is checked in a debug mode and covered by golden tests per target.
 
 ## G.8 Consensus Wiring and Cross-Shard Commit
+
+<!-- BEGIN:scope-distributed.g8 thesis/scope.toml#scopeline -->
+
+*Generated from `thesis/scope.toml`. Do not edit by hand.*
+
+> **Scope: specification and future work.** Distributed execution, consensus and the cross-shard commit protocol. *Decision:* A-3 (2026-09-21) stopped consensus and distribution. *What exists:* a single-process deterministic simulator: crates/nilestream-consensus (a replicated ledger group and two-phase commit over groups, cross_shard.rs) and crates/nilestream-core/src/distributed.rs. None of it has run over a network. Nothing in this chapter is evaluated; it is a design.
+
+<!-- END:scope-distributed.g8 -->
 
 **What exists is a single-process, deterministic simulator**: `nilestream-consensus`, 23 tests, no sockets, no clock, with message loss, reordering, partition and restart as scheduling decisions the simulator makes. The cross-shard commit protocol has never been run over a network, and no sentence here should be read as saying otherwise.
 

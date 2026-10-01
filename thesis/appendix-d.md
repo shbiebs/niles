@@ -237,7 +237,23 @@ The IR is a circuit language: nodes are operators, edges carry `Stream<Z<Row>>` 
 
 **One of the three is built.** The PostgreSQL surface is implemented and driven by `psql` in conformance tests. The native frame protocol and the MySQL adapter are **specification**: there is no MySQL listener, which is why H-S5's client-compatibility half is unmeasured.
 
+<!-- BEGIN:scope-native-protocol thesis/scope.toml#scopeline -->
+
+*Generated from `thesis/scope.toml`. Do not edit by hand.*
+
+> **Scope: specification and future work.** The native Nilestream frame protocol. *Decision:* never scheduled; Appendix D.4 has described it as specification since cycle 9. *What exists:* nothing. Nothing in this chapter is evaluated; it is a design.
+
+<!-- END:scope-native-protocol -->
+
 **Native.** Length-prefixed versioned frames carrying typed results *with anchors*; sessions hold the ladder watermarks implementing ℓ₁ and ℓ₂.
+
+<!-- BEGIN:scope-mysql thesis/scope.toml#scopeline -->
+
+*Generated from `thesis/scope.toml`. Do not edit by hand.*
+
+> **Scope: specification and future work.** The MySQL wire listener ("the MySQL replacement"). *Decision:* A-3 (2026-09-21) stopped the listener. *What exists:* a packet codec only (crates/nilestream-server/src/mysql_wire.rs, with tests); nothing calls it and no socket accepts MySQL clients. Nothing in this chapter is evaluated; it is a design.
+
+<!-- END:scope-mysql -->
 
 **MySQL adapter.** Handshake, standard authentication plugins, query and prepared-statement lifecycles, text and binary result sets; the supported statement subset is documented and corresponds to the fragment of Appendix H. The anchor is exposed through a session variable and an optional result attribute.
 

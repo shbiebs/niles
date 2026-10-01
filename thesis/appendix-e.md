@@ -1,5 +1,13 @@
 # Appendix E. The Niles Self-Hosting Compiler
 
+<!-- BEGIN:scope-bootstrap thesis/scope.toml#scopeline -->
+
+*Generated from `thesis/scope.toml`. Do not edit by hand.*
+
+> **Scope: specification and future work.** The self-hosting compiler. *Decision:* A-3 (2026-09-21) stopped the bootstrap. *What exists:* stage 0 and the first front-end stage only: crates/niles-interp (an interpreter for the imperative subset), bootstrap/lexer.niles and bootstrap/parser.niles. Nothing from Appendix E.6 onward. Nothing in this chapter is evaluated; it is a design.
+
+<!-- END:scope-bootstrap -->
+
 ## E.0 Status: What Is Built, and What This Appendix Describes
 
 This appendix is written in the present tense throughout, and the reader is owed an explicit statement of what that tense refers to, because the answer differs by section and a document that blurred the difference would be overclaiming.

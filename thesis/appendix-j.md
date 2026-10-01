@@ -8,6 +8,8 @@ Verdicts are of four kinds: **A** (the position stated in the author's own draft
 
 ## J.1 Syntax lineage: SQL-first or Rust-first?
 
+**Settled by measurement, not by this argument (cycle 16).** The project description's "Rust first, SQL second" and this thesis's "SQL-first, Rust-fallback, novel-last" were both superseded by decision D-3 (cycle 14), which made the principal syntax a matter of measurement rather than of either argument. The measurement is E30b′ (H-L2, `results/E30b-syntax.md`): a checked dialect of SQL refuses every defect class the Niles checker refuses except one, schema-level omission. On it the author decided (DB-8, confirmed 2026-10-01) that the product language is PostgreSQL's SQL and PL/pgSQL with a checked dialect. The rule Position A states remains the rule for **Niles's own grammar**, which is now the specification and reference checker of that dialect; it is no longer a claim about what a user of the product writes.
+
 **Position A (later draft).** Rule 1: reuse SQL syntax wherever SQL has a construct. Rule 2: fall back to Rust where SQL has none. Rule 3: invent only for what neither can express.
 
 **Position B (earlier draft).** The inverse: Rust-first, SQL-fallback, novel-last.

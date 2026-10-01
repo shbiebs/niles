@@ -32,6 +32,14 @@ Two questions must survive contact with hardware before any language exists.
 
 ## 8.4 Phase 3 — Adaptive Materialization, Optimizer, and Language Evaluation
 
+<!-- BEGIN:scope-optimizer.p3 thesis/scope.toml#scopeline -->
+
+*Generated from `thesis/scope.toml`. Do not edit by hand.*
+
+> **Scope: specification and future work.** The online adaptive materialization optimizer (C5). *Decision:* A-3 (2026-09-21) shrank the optimizer to the planner and stopped the online optimizer. *What exists:* the planner kept by A-3 (crates/nilestream-optimizer: unnesting, join ordering, three eviction rules); no estimator, no hysteresis schedule, no rent-or-buy break-even. Nothing in this chapter is evaluated; it is a design.
+
+<!-- END:scope-optimizer.p3 -->
+
 **Deliverables.** The optimizer of Contribution 5 live, with its estimators and the offline dynamic program that grades it; the full consistency ladder served; the H-S1, H-S2, H-S3 and H-S7 experiment suites; the SQL surface and both wire protocols with the compatibility corpus; the lineage subsystem at all three modes; and the language-scope corpus — the banking products of Section 6.21 plus the non-financial domain library and the ported SQL workloads.
 
 **Evaluation.** The phase diagram (Section 9.6) drawn from real runs, with Z reported at every point; the optimizer measured against every fixed policy and against the offline optimum; H-S6's enforcement comparison; the compatibility corpus green or its gaps enumerated.
@@ -40,11 +48,27 @@ This phase produces the thesis's core empirical chapters, and its templates are 
 
 ## 8.5 Phase 4 — Distributed Execution and Recovery
 
+<!-- BEGIN:scope-distributed.p4 thesis/scope.toml#scopeline -->
+
+*Generated from `thesis/scope.toml`. Do not edit by hand.*
+
+> **Scope: specification and future work.** Distributed execution, consensus and the cross-shard commit protocol. *Decision:* A-3 (2026-09-21) stopped consensus and distribution. *What exists:* a single-process deterministic simulator: crates/nilestream-consensus (a replicated ledger group and two-phase commit over groups, cross_shard.rs) and crates/nilestream-core/src/distributed.rs. None of it has run over a network. Nothing in this chapter is evaluated; it is a design.
+
+<!-- END:scope-distributed.p4 -->
+
 Scale-out: ledger groups partitioning the account space, each running the Phase-2 spine under established replication; read models subscribing to multiple groups with per-group frontiers joined into vector anchors; recovery drills — node loss, media loss, partition — with frontier reconstruction re-verified in the distributed setting.
 
 The consistency ladder's predicates generalize by replacing the scalar visibility frontier with a vector one; ℓ₃ then requires a *consistent cut* across groups rather than a single scalar epoch, which is the only place the formal machinery genuinely changes shape.
 
 ## 8.6 The Cross-Shard Commit Protocol
+
+<!-- BEGIN:scope-distributed.xs thesis/scope.toml#scopeline -->
+
+*Generated from `thesis/scope.toml`. Do not edit by hand.*
+
+> **Scope: specification and future work.** Distributed execution, consensus and the cross-shard commit protocol. *Decision:* A-3 (2026-09-21) stopped consensus and distribution. *What exists:* a single-process deterministic simulator: crates/nilestream-consensus (a replicated ledger group and two-phase commit over groups, cross_shard.rs) and crates/nilestream-core/src/distributed.rs. None of it has run over a network. Nothing in this chapter is evaluated; it is a design.
+
+<!-- END:scope-distributed.xs -->
 
 Transactions spanning ledger groups — an FX pair across currency-partitioned groups, a transfer across account partitions — commit via an epoch-aligned two-phase protocol. Participants reserve balanced sub-transactions in their open epochs under a shared cross-shard identifier; a consensus-backed coordinator collects reservations and issues commit or abort before the participating epochs seal; sealed epochs record the outcome. The cross-shard transaction is therefore atomic *on the visibility timeline*: either all legs are present at the agreed vector anchor or none are.
 
@@ -63,6 +87,14 @@ Conservation extends because each leg balances per currency locally (Definition 
 The protocol's novelty budget is deliberately small — it is two-phase commit hardened by epoch alignment and consensus-replicated participants — because the thesis's claims live elsewhere. Where a cheaper design is available it is preferred: the deterministic-execution literature shows that pre-agreeing the input order removes the need for a commit *vote* [Thomson et al., SIGMOD '12; Lu et al., PVLDB '20], and the extent to which that technique can subsume the reservation step here is an implementation question this phase settles empirically rather than a claim made in advance.
 
 ## 8.7 Fault Model and Its Boundaries
+
+<!-- BEGIN:scope-distributed.fm thesis/scope.toml#scopeline -->
+
+*Generated from `thesis/scope.toml`. Do not edit by hand.*
+
+> **Scope: specification and future work.** Distributed execution, consensus and the cross-shard commit protocol. *Decision:* A-3 (2026-09-21) stopped consensus and distribution. *What exists:* a single-process deterministic simulator: crates/nilestream-consensus (a replicated ledger group and two-phase commit over groups, cross_shard.rs) and crates/nilestream-core/src/distributed.rs. None of it has run over a network. Nothing in this chapter is evaluated; it is a design.
+
+<!-- END:scope-distributed.fm -->
 
 **In scope:** crash-stop failures, media loss up to the replication factor, network partitions, message loss, duplication and reordering, and the injected schedules of the H-S4 campaign.
 

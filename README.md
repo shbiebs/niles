@@ -4,13 +4,23 @@ A theory of **reconstructible epoch-anchored views (REVs)** — versioned, parti
 materialized derived state over an immutable, epoch-ordered, hash-chained base — and the
 instruments that test it:
 
-- **Niles** — a general-purpose, state-aware replacement for SQL (SQL-first syntax, Rust
-  fallback, novel-last) that makes double-entry invariants, money with per-currency scale,
-  bitemporality and value dates, idempotency windows, per-view consistency,
-  materialization mode, lineage, immutability and retention statically checkable.
+- **Niles** — a state-aware language that makes double-entry invariants, money with
+  per-currency scale, bitemporality and value dates, idempotency windows, per-view
+  consistency, materialization mode, lineage, immutability and retention statically
+  checkable. It is the **specification and reference checker** of the product language,
+  which is PostgreSQL's SQL and PL/pgSQL with a checked dialect (`crates/nilescheck-sql`).
+  It does not replace SQL.
 - **Nilestream** — a from-scratch streaming DBMS pairing a ledger-grade, strictly
   serializable write path with a partial-state read-model runtime over a typed IR that is
-  the stable contract between language and engine; MySQL/PostgreSQL wire compatible.
+  the stable contract between language and engine; it speaks PostgreSQL's wire protocol.
+  It is the theory's **instrument** and the reference implementation of the REV. The
+  product engine is PostgreSQL.
+
+Every component's status — product, instrument, reference, or specification and future
+work — is written once, in [`thesis/scope.toml`](thesis/scope.toml), and rendered into the
+thesis and the roadmap. The MySQL listener, distributed execution, the self-hosting compiler,
+the compilation targets and the online optimizer are **stopped** (decision A-3) and remain
+as specification.
 
 The general core is domain-free: an authoritative base relation with committed writes.
 The double-entry ledger, monetary types and bitemporal semantics are a **domain layer**
@@ -55,13 +65,13 @@ measured result is closed end to end, and the workspace holds **1270 test functi
 | Hash chaining | **Built on FIPS 180-4 SHA-256** (ADR 0003, superseding the placeholder of ADR 0002), no dependency, NIST vectors as tests. The link is over the epoch's rows and the epoch number, so a replay *verifies* a record rather than rebuilding one |
 | **Materialization planner** (`nilestream-optimizer::offline`) | **Built**, 18 tests |
 | **PostgreSQL wire protocol** + `nilestreamd` (`nilestream-server`) | **Built**, 21 tests |
-| **Replicated ledger groups** (`nilestream-consensus`) | **Built**, 9 tests, deterministic sim |
+| **Replicated ledger groups** (`nilestream-consensus`) | **Built in a deterministic simulator; stopped (specification and future work)** |
 | Cost-based join ordering | **Built** — `DPccp` to 12 relations; a three-term cost model (flow + resident state + reconstruction depth) with reconstructibility pruned as a *legality* constraint before costing |
 | Extended query protocol | **Built** — parse/bind/describe/execute with an epoch-keyed plan cache; binary format still refused by name |
-| MySQL wire | **Built** — packet framing, lenenc, handshake, `OK`/`ERR`, column defs, text rows. Money is `NEWDECIMAL`, never `DOUBLE` |
+| MySQL wire | **A codec, and no listener (stopped, specification and future work)** — packet framing, lenenc, handshake, `OK`/`ERR`, column defs, text rows. Money is `NEWDECIMAL`, never `DOUBLE` |
 | TLS | **Negotiation and policy built; cryptography delegated.** Both state machines, the four-way policy, `libpq`'s six `sslmode` values. A `Require` policy with no provider **fails at startup rather than serving cleartext**. No record layer is written here, on purpose |
-| Distributed read path, cross-shard commit | **Built as protocols, tested in simulation, never run over a network.** The coordinator is a ledger group, so 2PC's blocking objection dissolves; a cross-shard upquery needs no coordination, because a frozen prefix cannot change |
-| Bootstrap (Appendix E) | **Stage 0 execution and the first four gates built.** A tree-walking interpreter for the imperative subset, a lexer *written in Niles*, and gates for run / equivalence vs the reference lexer / self-application / fixpoint. A parser and type-checker in Niles are **unwritten** |
+| Distributed read path, cross-shard commit | **Built as protocols, tested in simulation, never run over a network; stopped (specification and future work).** The coordinator is a ledger group, so 2PC's blocking objection dissolves; a cross-shard upquery needs no coordination, because a frozen prefix cannot change |
+| Bootstrap (Appendix E) | **Stopped (specification and future work). Stage 0 execution and the first four gates built.** A tree-walking interpreter for the imperative subset, a lexer *written in Niles*, and gates for run / equivalence vs the reference lexer / self-application / fixpoint. A parser and type-checker in Niles are **unwritten** |
 | Membership change, log compaction, binary format, SCRAM | **Not built**; each refusal names its reason |
 
 **Measurements were taken, and three of them refuted claims the thesis had made.** Chapter 9
@@ -127,7 +137,7 @@ Headline measured findings:
 | `crates/nilestream-optimizer` | Adaptive materialization: modes, estimators, eviction |
 | `crates/nilestream-lineage` | Provenance: explain, reproduce, impact |
 | `crates/nilestream-storage` | Tiering, durability, migration boundary |
-| `crates/nilestream-server` | Daemon; PostgreSQL wire v3 (simple + extended), MySQL wire, TLS negotiation |
+| `crates/nilestream-server` | Daemon; PostgreSQL wire v3 (simple + extended), a MySQL codec with no listener, TLS negotiation |
 | `crates/niles-interp` | Stage-0 execution: a tree-walking interpreter for Niles's imperative subset |
 | `bootstrap/lexer.niles` | A lexer written in Niles — stage 1's first input |
 | `crates/niles-ir` | Typed IR: circuits, contracts, verifier |
@@ -180,8 +190,12 @@ partial capture / void / expiry, the available-balance identity, and tamper dete
 
 ## The seven results
 
+Their statuses are in [`thesis/status.toml`](thesis/status.toml): 1, 2, 3 and 6 are proved,
+4 is partly proved, 5 is specified, and 7 is partly measured.
+
 1. **Versioned partial-state algebra + reconstruction theorem** — eviction and
-   reconstruction are exact at every anchor; corollary: they can never create or destroy
+   reconstruction are exact at every anchor (for the linear keyed fragment the runtime
+   executes); corollary: they can never create or destroy
    money. Discharges by construction the five anomalies partial-state dataflow otherwise
    excludes by protocol.
 2. **Eviction–Consistency Frontier Theorem** — where strict-serializable partial
@@ -189,13 +203,16 @@ partial capture / void / expiry, the available-balance identity, and tamper dete
 3. **Complexity theory of consistency under partial materialization** — the price of each
    consistency rung is workload-shaped, not history-shaped.
 4. **Consistency-effect calculus + Niles soundness** — well-typed programs conserve value,
-   cannot mismatch currencies, cannot overdraw without authorization.
-5. **Adaptive materialization calculus + optimizer** — per view and key range across
-   {absent, demand, full, spilled, tiered}, with competitive guarantees.
+   cannot mismatch currencies, cannot overdraw without authorization. *Partly proved:* the
+   transfer to system traces is a sketch, and the fourth clause is conditional.
+5. **Adaptive materialization calculus** — a mode lattice {absent, demand, full, spilled,
+   tiered} and its cost model. *Specified:* the online optimizer is stopped, and no
+   competitive guarantee is claimed.
 6. **Generality result** — relational completeness, fixpoint completeness over the
    epoch-ordered base, and a proved SQL-fragment translation.
 7. **Bounded Reconstruction Theorem (SC7)** — reconstruction cost is bounded by the per-key
-   checkpoint interval, not by history length. *Produced by an experiment that refuted the
+   checkpoint interval, not by history length. *Partly measured: the probes sample the head
+   anchor only.* *Produced by an experiment that refuted the
    claim the other contributions rested on.*
 
 ## Roadmap
@@ -203,26 +220,32 @@ partial capture / void / expiry, the available-balance identity, and tamper dete
 Phased program (thesis Ch. 8) with pre-registered kill criteria: Phase 0 ledger floor and
 break-even → Phase 1 formal model and language → Phase 2 single-node vertical slice →
 Phase 3 adaptive materialization, optimizer and language evaluation → Phase 4 distributed
-execution → Phase 5 hardening.
+execution → Phase 5 hardening. The online optimizer of Phase 3 and all of Phase 4 are
+stopped, and remain as specification and future work.
 
 
-## GBS — the core banking system built on this
+## GBS — the core banking system
 
-GBS lives in **its own repository**, beside this one, and depends on Nilestream only
-optionally.
+GBS lives in **its own repository**, beside this one. Its product backend is **PostgreSQL**
+(decision DB-4), and its product goal is to replace Loan IQ (syndicated and agency lending)
+and Calypso (capital markets), with pricing and risk from ORE, run as a separate process
+(DB-5, DB-10). Displacing either system also needs proof no code supplies: third-party due
+diligence, SOC and ISO assurance, operational-resilience standing, years in production and a
+managed migration. This thesis evaluates only what is built.
+
+GBS also runs on Nilestream, through an adapter, and that is evidence about the instrument:
+**G3**, GBS's correctness suite on Nilestream, reported 29 rows and 0 failures at GBS
+`966e259` (2026-10-01). **G3p**, the same suite on PostgreSQL, is cycle 16's C16-05 and has
+not run yet.
 
 The extraction produced a finding worth recording here, because it is evidence about this
 project rather than about GBS: across an entire core banking platform — a kernel, seven
 mechanisms and sixteen product lines — GBS used exactly **two** things from Nilestream,
-`Epoch(u64)` and `Minor = i128`. So GBS now defines its own vocabulary and states what it
-needs of a system of record as a three-operation trait, with Nilestream as one adapter and
-an in-memory reference implementation as the other.
-
-That is the right outcome for both projects. GBS's kernel has no dependencies at all, which
-makes its "banking is a library" claim stronger than it could be inside this workspace. And
-it turns a thesis observation into something testable: E14 built the whole REV mechanism in
-stock PostgreSQL 16 and concluded the theory is not engine-specific, so a `gbs-postgres`
-adapter is possible and would be the Nilestream one with different internals.
+`Epoch(u64)` and `Minor = i128`. So GBS defines its own vocabulary and states what it needs of
+a system of record as a trait, with Nilestream as one adapter and an in-memory reference
+implementation as another. E14 built the whole REV mechanism in stock PostgreSQL 16 and
+concluded the theory is not engine-specific, which is what makes the PostgreSQL backend the
+same contract with different internals.
 
 The one place GBS genuinely needs this repository is checking its Niles schema, which needs
 `nilesc`. Its test suite looks for a checkout at `$NILES_ROOT` or a sibling `../niles` and

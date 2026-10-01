@@ -96,7 +96,13 @@ Stated explicitly, because a thesis that cannot name its own refutation is not f
 
 What this project is: **a theory thesis with a systems instrument.** The ordering matters operationally, and it has already decided several design questions — anchors are mandatory even where they cost; the IR verifier stays in the trusted base so the compiler need not; determinism gates are non-negotiable; the optimizer is forbidden from being a correctness dependency; and the reference oracle was built first, because a definition of correctness that cannot be executed is a definition nobody checks.
 
-What it is not: a product, a blockchain, a fork of an existing partial-state system, or an SQL dialect. Its success criterion is the one stated in Chapter 1: the six results standing, their predictions met or their misses understood, and the instrument reproducible by strangers.
+What the thesis is not: a blockchain, a fork of an existing partial-state system, or an evaluation of a product. Its success criterion is the one stated in Chapter 1: the seven results standing at the status each claims, their predictions met or their misses understood, and the instruments reproducible by strangers.
+
+**The project around the thesis does have a product, and the two must not be confused (cycle 16).** An earlier version of the paragraph above said the project is not a product and not an SQL dialect. Both are now false of the project and remain true of the thesis. The product language is PostgreSQL's SQL and PL/pgSQL with a checked dialect, of which Niles is the specification and reference checker (DB-8); the product engine is PostgreSQL, extended in SQL and PL/pgSQL first (DB-1, DB-11); and the product is **GBS**, a core-banking system in a separate repository, whose backend is PostgreSQL (DB-4). `thesis/scope.toml` records each component's status (§1.9).
+
+**GBS's goal is to replace Loan IQ and Calypso, and that is a product goal, not a result of this thesis (DB-5).** Loan IQ is the incumbent for syndicated and agency lending, and Calypso for capital markets: trade capture, pricing and risk, collateral and margin, confirmations, clearing and the sub-ledger. GBS's pricing and risk are to come from ORE, an open-source risk engine built on QuantLib, run as a separate process (DB-10); ISDA's SIMM is not run without the licence ISDA requires of every user. Replacing either incumbent at a bank needs evidence that no code supplies, and the project names it rather than implying it: third-party due diligence under the US banking agencies' interagency guidance on third-party relationships (June 2023); SOC 1 and SOC 2 Type II reports and ISO 27001 certification; a place in the oversight regime of the EU's Digital Operational Resilience Act, under which the European supervisory authorities designated the first critical ICT third-party providers in November 2025; years in production at a comparable institution, for which no source states a minimum regulators require; and a managed migration, whose risk is enforced: the UK regulators fined TSB £48.65m in December 2022 over its April 2018 migration. **This thesis evaluates only what is built**, and none of that list is built by code.
+
+**GBS on Nilestream is evidence about the instrument, and is held by tests.** GBS runs on Nilestream through an adapter. G3, its correctness suite there, drives every product row through a session over a durable Nilestream segment with an evicting REV, and reported 29 rows and 0 failures at GBS `966e259` (2026-10-01). G3p, the same suite on PostgreSQL, is cycle 16's C16-05 and has not run yet; until it has, nothing here says GBS is correct on its product backend.
 
 ## 11.5 The Existence Questions, Answered Against Evidence
 
@@ -178,6 +184,14 @@ What Nilestream demonstrably provides beyond the PostgreSQL construction, on evi
 This list used to include *"cross-shard commit whose coordinator is itself a ledger group"*, and that entry is withdrawn. `cross_shard.rs` implements the protocol's **decision logic** — decide, persist, then tell anyone, with the ordering enforced and tested — over an in-memory participant set; `persist_decision` sets a boolean. There is no ledger group behind it, no segment, no recovery of a coordinator that has forgotten its decision, and no network. The design commitment that a coordinator should be a ledger group is stated in the module's own documentation and is a *design*, not an artefact, and a list of what a repository demonstrably provides may not carry a design. The protocol logic remains a real contribution at the grade it is: a simulated state machine with its safety property checked. The correct sentence for the abstract is that **the theory is the contribution and Nilestream is its instrument**, which is what §11.4 already says and what the rest of the document must be brought into line with.
 
 ### 11.5.4 Is an SQL replacement needed, or only a MySQL/PostgreSQL-compatible engine with REVs?
+
+<!-- BEGIN:scope-mysql.d thesis/scope.toml#scopeline -->
+
+*Generated from `thesis/scope.toml`. Do not edit by hand.*
+
+> **Scope: specification and future work.** The MySQL wire listener ("the MySQL replacement"). *Decision:* A-3 (2026-09-21) stopped the listener. *What exists:* a packet codec only (crates/nilestream-server/src/mysql_wire.rs, with tests); nothing calls it and no socket accepts MySQL clients. Nothing in this chapter is evaluated; it is a design.
+
+<!-- END:scope-mysql.d -->
 
 Splitting the question is what makes it answerable, because the two halves have different answers.
 

@@ -8,8 +8,8 @@ The system is one spine with four segments, each consuming the previous segment'
 
 1. **The ledger write path** — admission, validation against the commit rule, idempotency, authorization, sequencing, epoch sealing, hash chaining, durability.
 2. **The typed intermediate representation** — a DBSP-style circuit language with anchors, effects, contracts and provenance in its types, and the *stable contract between the language and the engine*.
-3. **The read-model runtime (Nilestream-Core)** — REVs executing IR circuits with partial state, eviction, anchored upqueries, the materialization optimizer, and lineage.
-4. **The serving edge** — the native Niles protocol plus MySQL and PostgreSQL wire compatibility.
+3. **The read-model runtime (Nilestream-Core)** — REVs executing IR circuits with partial state, eviction, anchored upqueries, the planner, and lineage declared per view. The online materialization optimizer is specification and future work.
+4. **The serving edge** — PostgreSQL wire protocol v3, built. The native Niles protocol and MySQL wire compatibility are specification and future work; `thesis/scope.toml` is where each component's status is written.
 
 The spine discipline is architectural law: the read side may consume only sealed epochs — never the open epoch, never another view's internals except through declared IR edges. This is what makes Chapter 4's proofs apply to the implementation as built rather than as idealized.
 
@@ -469,6 +469,14 @@ Three properties make this safe to run continuously. It cannot change what an an
 
 ## 6.20 End-to-End Encryption: Threat Model and Requirements
 
+<!-- BEGIN:scope-commitments thesis/scope.toml#scopeline -->
+
+*Generated from `thesis/scope.toml`. Do not edit by hand.*
+
+> **Scope: specification and future work.** Committed (homomorphic) commitments for confidential columns. *Decision:* A-3 (2026-09-21): confidentiality labels stay and are checked; the commitments stop. *What exists:* the labels and their flow check in crates/niles-lang; no commitment scheme. Nothing in this chapter is evaluated; it is a design.
+
+<!-- END:scope-commitments -->
+
 **Requirement.** Fields marked confidential must be protected such that a compromised operator — an honest-but-curious server, stolen media, subpoenaed backups — cannot read them, while the base's ordering, hashing and conservation guarantees still hold.
 
 **Threat model.** The adversary controls storage and can read server memory, except for designated key-holding clients or hardware modules; the adversary cannot break standard cryptography. Availability attacks and traffic analysis are out of scope, and leakage is bounded rather than eliminated (Section 6.19).
@@ -511,6 +519,8 @@ The banking layer's target portfolio, all expressible as `std::bank` and `std::t
 Each is a worked example in the artifact; none requires a kernel change, which is the running scope test of Section 9.11.
 
 ## 6.25 Syntax Lineage and the SQL-First, Rust-Fallback Rule
+
+**Settled by measurement, not by this argument (cycle 16).** The project description's "Rust first, SQL second" and this thesis's "SQL-first, Rust-fallback, novel-last" were both superseded by decision D-3 (cycle 14), which made the principal syntax a matter of measurement rather than of either argument. The measurement is E30b′ (H-L2, `results/E30b-syntax.md`): a checked dialect of SQL refuses every defect class the Niles checker refuses except one, schema-level omission. On it the author decided (DB-8, confirmed 2026-10-01) that the product language is PostgreSQL's SQL and PL/pgSQL with a checked dialect. The rule stated in this section remains the rule for **Niles's own grammar**, which is now the specification and reference checker of that dialect; it is no longer a claim about what a user of the product writes.
 
 **The normative rule** for every surface decision: (1) if SQL already expresses the construct, use SQL's keywords and shape — the sole permitted deviation being pipelined clause *order*, which reads in evaluation order while reusing every SQL keyword verbatim; (2) otherwise, if Rust has an equivalent, use Rust's spelling exactly; (3) otherwise, and only then, invent — and inventions introduce new keywords, types and literals rather than overloading inherited ones.
 

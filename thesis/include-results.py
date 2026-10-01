@@ -122,7 +122,7 @@ def parse_status(text: str) -> list[dict]:
         for k in ("id", "claim", "status", "where", "instrument"):
             if k not in c:
                 raise SystemExit(f"status.toml: claim {c.get('id', '?')} has no `{k}`")
-        if c["status"] != "measured" and c["status"] != "proved" and not c["instrument"]:
+        if c["status"] not in ("measured", "proved") and not c["instrument"]:
             raise SystemExit(
                 f"status.toml: {c['id']} is `{c['status']}` and names no missing instrument. "
                 "A hypothesis with no runner is a hypothesis with no status."
@@ -177,17 +177,18 @@ def status_row(text: str) -> str:
     """
     claims = parse_status(text)
     proved = sum(1 for c in claims if c["status"] == "proved")
+    partly_proved = sum(1 for c in claims if c["status"] == "partly proved")
     measured = sum(1 for c in claims if c["status"] in ("measured", "partly measured"))
     unrun = sum(1 for c in claims if c["status"] == "not measured")
     refuted = sum(1 for c in claims if c["status"] == "refuted")
     specified = sum(1 for c in claims if c["status"] == "specified")
     argued = sum(1 for c in claims if c["status"] == "argued")
     withdrawn = sum(1 for c in claims if c["status"] == "withdrawn")
-    known = {"proved", "measured", "partly measured", "not measured", "refuted",
+    known = {"proved", "partly proved", "measured", "partly measured", "not measured", "refuted",
              "specified", "argued", "withdrawn"}
     other = [c["id"] for c in claims if c["status"] not in known]
     tally = (
-        f"{proved} proved, {measured} measured or partly measured, {specified} specified, "
+        f"{proved} proved, {partly_proved} partly proved, {measured} measured or partly measured, {specified} specified, "
         f"{argued} argued, {refuted} refuted, {withdrawn} withdrawn, "
         f"{unrun} not measured"
     )
@@ -503,6 +504,103 @@ def e12_phase(text: str) -> str:
     return "\n".join(out)
 
 
+# ---------------------------------------------------------------------------------------------
+# Scope: `thesis/scope.toml`, the one place a component's status is written (cycle 16, C16-09).
+# ---------------------------------------------------------------------------------------------
+
+SCOPE_STATUSES = ("product", "instrument", "reference", "specification and future work")
+SCOPE_KEYS = ("id", "component", "short", "status", "decision", "built", "where")
+
+
+def parse_scope(text: str) -> list[dict]:
+    """Read `thesis/scope.toml`: `[[component]]` blocks, the same one-line subset as status.toml.
+
+    Refuses a status outside SCOPE_STATUSES rather than rendering it, so a new word cannot
+    enter the thesis without this reader, the drift test and the file's own header learning it.
+    """
+    comps, cur = [], None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line == "[[component]]":
+            cur = {}
+            comps.append(cur)
+            continue
+        if cur is None or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        k, v = k.strip(), v.strip()
+        if not (len(v) >= 2 and v.startswith('"') and v.endswith('"')):
+            raise SystemExit(
+                f"scope.toml: {cur.get('id', '?')}.{k} is not a one-line basic string"
+            )
+        cur[k] = _unescape(v[1:-1], k, cur.get("id", "?"))
+    seen = set()
+    for c in comps:
+        for k in SCOPE_KEYS:
+            if not c.get(k):
+                raise SystemExit(f"scope.toml: component {c.get('id', '?')} has no `{k}`")
+        if c["status"] not in SCOPE_STATUSES:
+            raise SystemExit(
+                f"scope.toml: {c['id']} has status `{c['status']}`; known: {SCOPE_STATUSES}"
+            )
+        if c["id"] in seen:
+            raise SystemExit(f"scope.toml: {c['id']} appears twice")
+        seen.add(c["id"])
+    return comps
+
+
+def scope_table(text: str) -> str:
+    """Every component: its status, the decision that set it, and what exists."""
+    rows = ["| Component | Status | Decision | What exists | Described in |", "|---|---|---|---|---|"]
+    for c in parse_scope(text):
+        rows.append(
+            f"| {c['component']} | **{c['status']}** | {c['decision']} | {c['built']} | {c['where']} |"
+        )
+    return "\n".join(rows)
+
+
+def scope_summary(text: str) -> str:
+    """One paragraph, grouped by status, for the abstract and the roadmap."""
+    comps = parse_scope(text)
+    by = {s: [c["short"] for c in comps if c["status"] == s] for s in SCOPE_STATUSES}
+
+    def join(xs: list[str]) -> str:
+        # Semicolons, because the phrases carry their own commas.
+        return xs[0] if len(xs) == 1 else "; ".join(xs[:-1]) + "; and " + xs[-1]
+
+    out = [f"**Scope.** Of the {len(comps)} components this thesis describes,"]
+    out.append(f"the **product** is: {join(by['product'])}.")
+    out.append(f"Kept as the theory's **instrument**: {join(by['instrument'])}.")
+    out.append(f"Kept as the **reference** the product is tested against: {join(by['reference'])}.")
+    out.append(
+        f"**Specification and future work** — designed, described in full, and not evaluated "
+        f"anywhere in this thesis: {join(by['specification and future work'])}."
+    )
+    out.append("Source: `thesis/scope.toml`, rendered here and into §1.9, §7, §8, `docs/ROADMAP.md` "
+               "and the head of every chapter describing a stopped component.")
+    return " ".join(out)
+
+
+def scope_line(text: str, name: str) -> str:
+    """The scope line at the head of one component's chapter: block `scope-<id>`."""
+    cid = name.split("scope-", 1)[1] if name.startswith("scope-") else name
+    cid = cid.split(".", 1)[0]
+    for c in parse_scope(text):
+        if c["id"] == cid:
+            tail = (
+                " Nothing in this chapter is evaluated; it is a design."
+                if c["status"] == "specification and future work"
+                else ""
+            )
+            return (
+                f"> **Scope: {c['status']}.** {c['component']}. *Decision:* {c['decision']}. "
+                f"*What exists:* {c['built']}.{tail}"
+            )
+    raise SystemExit(f"scope.toml has no component `{cid}` (block {name})")
+
+
 EXTRACTORS = {
     "contract": lambda t: first_table(t),
     "kwsql": lambda t: keyword_column(t, "## SQL-derived keywords"),
@@ -520,12 +618,20 @@ EXTRACTORS = {
     "statustable": status_table,
     "statussummary": status_summary,
     "statusrow": status_row,
+    "scopetable": scope_table,
+    "scopesummary": scope_summary,
     "verbatim": lambda t: t.strip(),
     "policytable": policy_table,
     "policydeltas": policy_deltas,
     "e7medians": e7_medians,
     "e8rungs": e8_rungs,
     "e12phase": e12_phase,
+}
+
+# Extractors that also receive the block's name, so one source can render a different block
+# per site: `scope-<id>` picks the component.
+NAMED_EXTRACTORS = {
+    "scopeline": scope_line,
 }
 
 MARKER = re.compile(
@@ -542,9 +648,13 @@ def render(doc: str) -> str:
         if not src.exists():
             raise SystemExit(f"{src} does not exist; run the harness that generates it")
         kind = m.group("kind")
-        if kind not in EXTRACTORS:
-            raise SystemExit(f"unknown extractor {kind!r}; known: {sorted(EXTRACTORS)}")
-        body = EXTRACTORS[kind](src.read_text())
+        if kind in NAMED_EXTRACTORS:
+            body = NAMED_EXTRACTORS[kind](src.read_text(), m.group("name"))
+        elif kind in EXTRACTORS:
+            body = EXTRACTORS[kind](src.read_text())
+        else:
+            known = sorted(EXTRACTORS) + sorted(NAMED_EXTRACTORS)
+            raise SystemExit(f"unknown extractor {kind!r}; known: {known}")
         note = f"*Generated from `{m.group('src')}`. Do not edit by hand.*"
         return f"{m.group('begin')}\n{note}\n\n{body}\n\n{m.group('end')}"
 
@@ -554,7 +664,8 @@ def render(doc: str) -> str:
 def main() -> int:
     check = "--check" in sys.argv
     stale = []
-    for path in sorted((ROOT / "thesis").glob("*.md")):
+    # The roadmap renders scope.toml too (C16-09), so it is checked with the thesis.
+    for path in sorted((ROOT / "thesis").glob("*.md")) + [ROOT / "docs/ROADMAP.md"]:
         doc = path.read_text()
         if "<!-- BEGIN:" not in doc:
             continue

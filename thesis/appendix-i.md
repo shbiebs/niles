@@ -1,5 +1,13 @@
 # Appendix I. The Adaptive Materialization Optimizer: Algorithms and Analysis
 
+<!-- BEGIN:scope-optimizer thesis/scope.toml#scopeline -->
+
+*Generated from `thesis/scope.toml`. Do not edit by hand.*
+
+> **Scope: specification and future work.** The online adaptive materialization optimizer (C5). *Decision:* A-3 (2026-09-21) shrank the optimizer to the planner and stopped the online optimizer. *What exists:* the planner kept by A-3 (crates/nilestream-optimizer: unnesting, join ordering, three eviction rules); no estimator, no hysteresis schedule, no rent-or-buy break-even. Nothing in this chapter is evaluated; it is a design.
+
+<!-- END:scope-optimizer -->
+
 **Specification. Nothing in this appendix is built.** It gives Contribution 5 as implementable algorithms, with estimators and the offline procedure against which an online algorithm would be graded — and every verb in it should be read as *would*. There is no estimator, no hysteresis schedule and no rent-or-buy break-even in the repository; `nilestream-optimizer` holds plan-time mode selection and three eviction rules (an LFU, a cost-and-delay credit rule, and fifty-two lines of unused scaffolding), and `offline.rs` is a planner rather than the dynamic program that would compute an offline optimum.
 
 That matters for two claims made elsewhere and now withdrawn. **No competitive ratio is claimed or measured anywhere in this thesis**, and H-S7 — "the optimizer beats fixed policies and approaches its competitive bound" — has nothing to measure against. The greedy (1 − 1/e) recovery of §I.5 needs *two* hypotheses rather than one, and now states both.

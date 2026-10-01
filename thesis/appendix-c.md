@@ -1,5 +1,13 @@
 # Appendix C. Compilation Model and Target Binaries
 
+<!-- BEGIN:scope-targets thesis/scope.toml#scopeline -->
+
+*Generated from `thesis/scope.toml`. Do not edit by hand.*
+
+> **Scope: specification and future work.** Compilation targets: native Linux and macOS on ARM64, Windows on x86-64, WSL and WASM. *Decision:* A-3 (2026-09-21), with cycle 14's D-3 keeping the chapter as specification. *What exists:* nothing: nilesc lowers to the typed IR and has no back end. Nothing in this chapter is evaluated; it is a design.
+
+<!-- END:scope-targets -->
+
 ## C.1 Compilation Pipeline
 
 Source (Niles native, SQL surface, or embedded API) → lex/parse → AST → name resolution → type-and-effect checking (currency rows, linearity, consistency effects, confidentiality flows, idempotency windows) → IR lowering → **IR verification** → optimization → back-end (native code generation or wasm32) → link.

@@ -1,4 +1,36 @@
-# ROADMAP — how Niles replaces SQL and Nilestream replaces PostgreSQL
+# ROADMAP — Nilestream, the instrument, phase by phase
+
+**Read this first (cycle 16, C16-09).** This roadmap was written as "how Niles replaces SQL and Nilestream replaces PostgreSQL". Neither is the plan any longer. The product language is PostgreSQL's SQL and PL/pgSQL with a checked dialect, of which Niles is the specification and reference checker (decision DB-8); the product engine is PostgreSQL (DB-1); and Nilestream, whose phases this document sequences, is the thesis's instrument. The phases below are kept, with their gates and kill criteria, because they are cited by number; a phase for a stopped component is specification and future work, as the table says.
+
+<!-- BEGIN:scope-summary.roadmap thesis/scope.toml#scopesummary -->
+
+*Generated from `thesis/scope.toml`. Do not edit by hand.*
+
+**Scope.** Of the 13 components this thesis describes, the **product** is: PostgreSQL as the engine, with the append-only ledger, the REV mechanism and the checks; PostgreSQL's SQL and PL/pgSQL with a checked dialect as the language; and GBS, a core-banking system whose product goal is to replace Loan IQ and Calypso. Kept as the theory's **instrument**: Nilestream's ledger write path, REV runtime and reference oracle; and Nilestream's PostgreSQL wire surface. Kept as the **reference** the product is tested against: Niles, its full grammar, type system and calculus. **Specification and future work** — designed, described in full, and not evaluated anywhere in this thesis: the MySQL wire listener; the native frame protocol; distributed execution, consensus and cross-shard commit; the self-hosting compiler; the native and WASM compilation targets; the online materialization optimizer of C5; and homomorphic commitments for confidential columns. Source: `thesis/scope.toml`, rendered here and into §1.9, §7, §8, `docs/ROADMAP.md` and the head of every chapter describing a stopped component.
+
+<!-- END:scope-summary.roadmap -->
+
+<!-- BEGIN:scope-table.roadmap thesis/scope.toml#scopetable -->
+
+*Generated from `thesis/scope.toml`. Do not edit by hand.*
+
+| Component | Status | Decision | What exists | Described in |
+|---|---|---|---|---|
+| The engine: PostgreSQL with the append-only ledger, the REV mechanism and the checks | **product** | DB-1 (cycle 16): PostgreSQL is the product engine, whatever the engine comparison (H-E1) finds; DB-11: extended in SQL and PL/pgSQL first, with a compiled extension only where a measurement shows SQL is the bottleneck | E14 rebuilt the REV mechanism in stock PostgreSQL 16 (§6.10.3), and it runs as E27's P+ arm (crates/comparator); crates/rev-sidecar is the hybrid H3 (a PostgreSQL ledger with a REV sidecar). No packaged PostgreSQL ledger schema ships yet | §6.10.3, §9.14, results/E27-comparator.md |
+| The language: PostgreSQL's SQL and PL/pgSQL with a checked dialect | **product** | DB-8 (cycle 16, confirmed by the author 2026-10-01), on the measurements H-L1 (E14 counterproposal) and H-L2 (E30b') | crates/nilescheck-sql: a catalog checker reading annotations from PostgreSQL comments, with linearity, conservation through niles-lang's solver, capabilities, declared effects and body typing. Enforcement at DDL time is not built (cycle 16, C16-10) | §6.10.3, §9.11, results/E14-minimal-counterproposal.md, results/E30b-syntax.md |
+| Niles: the full grammar, type system and consistency-effect calculus | **reference** | H-L1 retired the grammar to a specification; DB-8 made Niles the specification of the dialect's semantics and the reference checker it is tested against. It does not replace SQL | crates/niles-lang (the stage-0 front end, the checker and lowering to the IR), crates/nilesc, crates/niles-interp | §6, Appendix B, §4.5 |
+| Nilestream: the ledger write path, the REV runtime and the reference oracle | **instrument** | A-3 kept it (2026-09-21); DB-1 made it the theory's instrument and reference REV implementation, not the product engine | crates/nilestream-ledger, crates/nilestream-core, crates/conservation-suite, crates/proto-engine | §7.1, §7.4, Appendix D, Appendix K |
+| Nilestream's PostgreSQL wire surface | **instrument** | A-3 kept it (2026-09-21) | crates/nilestream-server: PostgreSQL protocol v3, simple and extended query paths, driven by psql in conformance tests; no binary result format and no SCRAM | §7.3, §7.5, Appendix D.4 |
+| GBS: a core-banking system in Rust, whose product goal is to replace Loan IQ and Calypso | **product** | DB-4 (GBS's backend is PostgreSQL), DB-5 (replacing Loan IQ and Calypso is the product goal; the thesis evaluates only what is built), DB-10 (pricing and risk through ORE as a separate process) | a separate, private repository: the kernel, the mechanisms and the products, with a Nilestream adapter held by its G3 correctness suite. Its PostgreSQL backend and the G3p suite are cycle 16's C16-05, not yet run | §11.4 |
+| The MySQL wire listener ("the MySQL replacement") | **specification and future work** | A-3 (2026-09-21) stopped the listener | a packet codec only (crates/nilestream-server/src/mysql_wire.rs, with tests); nothing calls it and no socket accepts MySQL clients | §7.3, §11.5.4, Appendix D.4 |
+| The native Nilestream frame protocol | **specification and future work** | never scheduled; Appendix D.4 has described it as specification since cycle 9 | nothing | Appendix D.4 |
+| Distributed execution, consensus and the cross-shard commit protocol | **specification and future work** | A-3 (2026-09-21) stopped consensus and distribution | a single-process deterministic simulator: crates/nilestream-consensus (a replicated ledger group and two-phase commit over groups, cross_shard.rs) and crates/nilestream-core/src/distributed.rs. None of it has run over a network | §8.5, §8.6, §8.7, Appendix G.8 |
+| The self-hosting compiler | **specification and future work** | A-3 (2026-09-21) stopped the bootstrap | stage 0 and the first front-end stage only: crates/niles-interp (an interpreter for the imperative subset), bootstrap/lexer.niles and bootstrap/parser.niles. Nothing from Appendix E.6 onward | Appendix E |
+| Compilation targets: native Linux and macOS on ARM64, Windows on x86-64, WSL and WASM | **specification and future work** | A-3 (2026-09-21), with cycle 14's D-3 keeping the chapter as specification | nothing: nilesc lowers to the typed IR and has no back end | Appendix C, Appendix G.6, Appendix G.7 |
+| The online adaptive materialization optimizer (C5) | **specification and future work** | A-3 (2026-09-21) shrank the optimizer to the planner and stopped the online optimizer | the planner kept by A-3 (crates/nilestream-optimizer: unnesting, join ordering, three eviction rules); no estimator, no hysteresis schedule, no rent-or-buy break-even | §4.6, Appendix I |
+| Committed (homomorphic) commitments for confidential columns | **specification and future work** | A-3 (2026-09-21): confidentiality labels stay and are checked; the commitments stop | the labels and their flow check in crates/niles-lang; no commitment scheme | §6.20, §6.21, §6.22, Appendix B.13 |
+
+<!-- END:scope-table.roadmap -->
 
 Speed is the primary goal, so this roadmap is **sequenced by measured value, not by
 instinct**, and every phase carries a numeric gate and a kill criterion.
@@ -270,7 +302,15 @@ faster and the evaluation chapter must not imply it does.
 
 ---
 
-### Phase 7 — Distributed execution over a real network · **OUT OF SCOPE**
+### Phase 7 — Distributed execution over a real network · **STOPPED: specification and future work**
+
+<!-- BEGIN:scope-distributed.roadmap thesis/scope.toml#scopeline -->
+
+*Generated from `thesis/scope.toml`. Do not edit by hand.*
+
+> **Scope: specification and future work.** Distributed execution, consensus and the cross-shard commit protocol. *Decision:* A-3 (2026-09-21) stopped consensus and distribution. *What exists:* a single-process deterministic simulator: crates/nilestream-consensus (a replicated ledger group and two-phase commit over groups, cross_shard.rs) and crates/nilestream-core/src/distributed.rs. None of it has run over a network. Nothing in this chapter is evaluated; it is a design.
+
+<!-- END:scope-distributed.roadmap -->
 
 *Out of scope for this increment. `distributed.rs` and `cross_shard.rs` are models — nothing in the server or the experiments calls either, and there is no network anywhere in this repository (thesis §11.5.3).*
 
@@ -291,6 +331,8 @@ Budgeting zero surprises here would be the least credible line in this document.
 ---
 
 ### Phase 8 — GBS on the engine
+
+**Superseded as the product plan (cycle 16).** GBS's product backend is PostgreSQL (decision DB-4), and its correctness there will be held by a G3p suite (cycle 16's C16-05), which has not run yet. GBS on Nilestream, below, stays as the instrument's evidence: G3 is the correctness suite that holds it, and its latest run is 29 rows and 0 failures at GBS `966e259` (2026-10-01).
 
 **Build.** Run the twenty-nine implemented product lines against Nilestream rather than
 against the in-memory harness. *(This said "eleven … and add the remaining eighteen" while

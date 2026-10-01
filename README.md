@@ -164,6 +164,7 @@ this table.
 | `docs/keywords.md` | The keyword reference, generated from the compiler's registry. |
 | `docs/reading-the-code.md` | A plain-language guide to Niles, to Rust and to both engines, for readers who have never read code. Covers every keyword of both languages, every sign, literal, type and engine name, technically and by analogy. Not part of the thesis. |
 | `docs/ROADMAP.md` | What is planned, what was cut, and what was deleted from the workspace. |
+| `docs/universe.md` | What every comparison is loaded with: the two bank-size profiles, every generator parameter with its provenance (the author's shapes, public sources, assumptions, sweeps), why read skew is a hypothesis, and the read-trace format. Shapes only, no data. |
 | `docs/REQUIREMENTS.md` | The requirements the two specifications answer to. |
 | `docs/BENCHMARK.md` | How to run the wall-clock harness, with the recipe a test reproduces. |
 | `docs/BUILD-LOG.md` | What each work cycle changed, in order, including what it got wrong. |
@@ -179,7 +180,7 @@ this table.
 
 ```sh
 cargo check --workspace   # everything compiles
-cargo test  --workspace   # 33 tests pass today
+cargo test  --workspace   # the count is in "Status" above, held to the source by a test
 ```
 
 The oracle in `crates/conservation-suite/src/oracle.rs` is the ~350-line program that

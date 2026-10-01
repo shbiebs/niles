@@ -241,7 +241,7 @@ The IR is a circuit language: nodes are operators, edges carry `Stream<Z<Row>>` 
 
 *Generated from `thesis/scope.toml`. Do not edit by hand.*
 
-> **Scope: specification and future work.** The native Nilestream frame protocol. *Decision:* never scheduled; Appendix D.4 has described it as specification since cycle 9. *What exists:* nothing. Nothing in this chapter is evaluated; it is a design.
+> **Scope: specification and future work.** The native Nilestream frame protocol. *Decision:* never scheduled; Appendix D.4 has described it as specification since cycle 9. *What exists:* a one-line module stub, crates/nilestream-server/src/native_proto.rs, and nothing else. Nothing in this chapter is evaluated; it is a design.
 
 <!-- END:scope-native-protocol -->
 

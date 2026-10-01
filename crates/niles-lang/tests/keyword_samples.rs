@@ -188,11 +188,9 @@ const NOT_COMPILED: &[(&str, &str)] = &[
     ),
     // (`recorded_at` left this list in cycle 15: the SQL surface reads the system-time
     // column, C15-05b; the sample is now the SQL spelling.)
-    (
-        "lineage",
-        "MISMATCH: `serve { lineage: full }` is not a serve-contract key the \
-                 parser accepts",
-    ),
+    // (`lineage` left this list in cycle 16, C16-09: `serve { lineage: full }` compiles in the
+    // serve-contract frame, and an unknown mode is NL0206 rather than a silent `off`.
+    // `tests/lineage_contract.rs` holds it end to end.)
 ];
 
 fn parses(src: &str) -> bool {
@@ -277,6 +275,15 @@ fn accepted(sample: &str) -> Option<&'static str> {
     )) {
         return Some("declaration clause");
     }
+    // 5b. A **serve contract**, which only exists after a view's pipeline. Lowered, like a
+    // stage, because a contract key the resolver reads and the lowering drops is the same
+    // defect as a stage that parses and lowers wrongly (C16-09: `lineage`).
+    if s.starts_with("serve") {
+        return lowers(&format!(
+            "{FIXTURE}\nview kw_check = t.where(|r| r.open) {s};\n"
+        ))
+        .then_some("serve contract (lowered)");
+    }
     // 6. An **item inside a schema block**, for the declarations that only exist there.
     if parses(&format!(
         "schema kwitem {{ currency usd {{ scale: 2 }} base t {{ acct: Int, retain forever; }} {s} }}\n"
@@ -318,11 +325,11 @@ fn every_keyword_sample_is_syntax_the_compiler_has() {
 #[test]
 fn the_exemption_list_stays_small_and_reasoned() {
     assert!(
-        NOT_COMPILED.len() <= 32,
+        NOT_COMPILED.len() <= 31,
         "{} samples are exempt from compilation, which is more than the registry has decisions \
-         for today (32: fifteen outlines whose `..` or free names stand for something declared \
-         elsewhere, fifteen MISMATCHes where the registry documents a construct the compiler \
-         does not have, and two deliberate refusals). \
+         for today (31: fifteen outlines whose `..` or free names stand for something declared \
+         elsewhere, fourteen MISMATCHes where the registry documents a construct the compiler \
+         does not have, and two deliberate refusals; `lineage` left in cycle 16). \
          Adding a word here is a decision that belongs in the work-order report, not a way \
          to make this test pass.",
         NOT_COMPILED.len()

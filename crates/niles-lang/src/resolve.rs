@@ -467,13 +467,43 @@ fn collect_view(v: &ViewDecl, cat: &mut Catalog, d: &mut Diagnostics) {
         }
         None
     };
+    // **`lineage` is a contract key with three values, and a fourth is refused** (cycle 16,
+    // C16-09; design decision 8 of cycle 14). The key was read as any word, and the lowering
+    // mapped every value it did not recognise to `Lineage::Off`, so `lineage: ful` compiled
+    // to a view with no lineage and said nothing — a contract that reads as if it asks for
+    // something it does not get.
+    let lineage = word("lineage", "off");
+    const LINEAGE_MODES: [&str; 3] = ["off", "key", "full"];
+    // A value the parser already refused has its diagnostic; a second one would only repeat it.
+    let unparsed = matches!(
+        c.and_then(|c| c.get("lineage")),
+        Some(ContractValue::Error(_))
+    );
+    if !unparsed && !LINEAGE_MODES.contains(&lineage.as_str()) {
+        let span = c
+            .and_then(|c| c.get("lineage"))
+            .map(|x| x.span())
+            .unwrap_or(v.span);
+        let mut diag = Diagnostic::error("NL0206", format!("`{lineage}` is not a lineage mode"))
+            .primary(span, "unknown lineage mode")
+            .note("a view's lineage is one of: off, key, full");
+        if let Some(m) = closest(&lineage, LINEAGE_MODES.iter().copied()) {
+            diag = diag.suggest(
+                span,
+                m,
+                format!("did you mean `{m}`?"),
+                Applicability::MachineApplicable,
+            );
+        }
+        d.push(diag);
+    }
     let info = ViewInfo {
         name: v.name.text.clone(),
         rung,
         staleness,
         materialize: word("materialize", "auto"),
         retain: word("retain", "evictable"),
-        lineage: word("lineage", "off"),
+        lineage,
         contract_span: c.map(|c| c.span).unwrap_or(v.span),
         span: v.span,
         tail_is_incremental: tail_stage(&v.body).is_none_or(|k| k.is_incremental()),

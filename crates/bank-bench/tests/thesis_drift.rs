@@ -1296,3 +1296,261 @@ fn the_audit_preflight_measures_the_tree_rather_than_describing_it() {
         "the preflight still describes the pin instead of reading it"
     );
 }
+
+/// One `[[block]]` table of a register (`status.toml`, `scope.toml`): the one-line
+/// `key = "value"` subset `include-results.py` reads, with `\"` and `\\` decoded.
+fn register(file: &str, block: &str) -> Vec<std::collections::BTreeMap<String, String>> {
+    let text = std::fs::read_to_string(repo_root().join(file))
+        .unwrap_or_else(|e| panic!("cannot read {file}: {e}"));
+    let header = format!("[[{block}]]");
+    let mut out: Vec<std::collections::BTreeMap<String, String>> = Vec::new();
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line == header {
+            out.push(Default::default());
+            continue;
+        }
+        let (Some(cur), Some((k, v))) = (out.last_mut(), line.split_once('=')) else {
+            continue;
+        };
+        let v = v.trim();
+        let v = v
+            .strip_prefix('"')
+            .and_then(|v| v.strip_suffix('"'))
+            .unwrap_or(v);
+        cur.insert(
+            k.trim().to_string(),
+            v.replace("\\\"", "\"").replace("\\\\", "\\"),
+        );
+    }
+    out
+}
+
+/// The words in an instrument text that say a claim is weaker than `proved` or `measured`.
+/// A row whose status is one of those words and whose own text contains one of these is a
+/// row that claims more than it says.
+fn overclaims(status: &str, instrument: &str) -> Option<&'static str> {
+    let text = instrument.to_lowercase();
+    let weaker: &[&'static str] = match status {
+        "proved" => &["sketch", "conditional on", "not proved", "unproved"],
+        "measured" => &[
+            "head anchor only",
+            "no experiment samples",
+            "not measured",
+            "unmeasured",
+            "not sampled",
+        ],
+        _ => &[],
+    };
+    weaker.iter().copied().find(|w| text.contains(w))
+}
+
+/// **No status word claims more than its own instrument text** (cycle 16, C16-09).
+///
+/// C4 was `proved` while its instrument said the transfer lemma is "[sketch]" and clause (4)
+/// is "conditional on P6"; SC7 was `measured` while its probes sampled the head anchor only.
+/// Both are now `partly proved` and `partly measured`. The second half is the sabotage
+/// control: the same predicate, given C4's old status, must refuse it.
+#[test]
+fn no_status_word_claims_more_than_its_instrument() {
+    let claims = register("thesis/status.toml", "claim");
+    assert!(
+        claims.len() >= 20,
+        "status.toml should hold every claim; found {}",
+        claims.len()
+    );
+    let mut offenders = Vec::new();
+    for c in &claims {
+        if let Some(w) = overclaims(&c["status"], &c["instrument"]) {
+            offenders.push(format!(
+                "{} is `{}` and its instrument says `{w}`",
+                c["id"], c["status"]
+            ));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "status words stronger than their evidence:\n  {}",
+        offenders.join("\n  ")
+    );
+
+    let c4 = claims
+        .iter()
+        .find(|c| c["id"] == "C4")
+        .expect("C4 has a row");
+    assert_eq!(c4["status"], "partly proved");
+    assert!(
+        overclaims("proved", &c4["instrument"]).is_some(),
+        "the check cannot fail: C4's old status `proved` beside its own instrument text is not refused"
+    );
+    let sc7 = claims
+        .iter()
+        .find(|c| c["id"] == "SC7")
+        .expect("SC7 has a row");
+    assert_eq!(sc7["status"], "partly measured");
+    assert!(
+        overclaims("measured", &sc7["instrument"]).is_some(),
+        "the check cannot fail: SC7's old status `measured` beside its own instrument text is not refused"
+    );
+}
+
+/// **§1.6's status lines say what the register says.**
+///
+/// They had parted company on seven hypotheses: H-F1 and H-F3 read *not measured* where the
+/// register says `argued`; H-S1 *measured* where it says `refuted`; H-S3 *measured* where it
+/// says `partly measured`; and H-S6, H-S8 and H-S10 *not measured* where each has been partly
+/// measured for cycles. Every `*Status:*` line's bold word must begin with the register's.
+#[test]
+fn section_1_6_status_words_match_the_register() {
+    let claims = register("thesis/status.toml", "claim");
+    let intro = thesis("01-introduction.md");
+    let mut current: Option<String> = None;
+    let mut seen = 0;
+    let mut offenders = Vec::new();
+    for line in intro.lines() {
+        if let Some(rest) = line.strip_prefix("**H-") {
+            let id: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric())
+                .collect();
+            current = Some(format!("H-{id}"));
+        }
+        let Some(rest) = line.strip_prefix("*Status:* **") else {
+            continue;
+        };
+        let Some(id) = current.take() else {
+            continue;
+        };
+        let word = rest.split("**").next().unwrap_or("");
+        let Some(row) = claims.iter().find(|c| c["id"] == id) else {
+            continue;
+        };
+        seen += 1;
+        if !word.starts_with(row["status"].as_str()) {
+            offenders.push(format!(
+                "{id}: §1.6 says `{word}`, status.toml says `{}`",
+                row["status"]
+            ));
+        }
+    }
+    assert!(
+        seen >= 13,
+        "found {seen} status lines in §1.6; the parser has lost them"
+    );
+    assert!(
+        offenders.is_empty(),
+        "§1.6 disagrees with the register:\n  {}",
+        offenders.join("\n  ")
+    );
+}
+
+/// **Every component has one status, rendered from `thesis/scope.toml`** (cycle 16, C16-09).
+///
+/// The abstract promised MySQL wire compatibility after decision A-3 stopped the listener; the
+/// conclusion called Nilestream "wire-compatible with MySQL and PostgreSQL"; §7 said there was
+/// "no wire protocol" while §7.5 described one. This holds the rendering sites, the scope line
+/// at the head of every chapter describing a stopped component, and the two sentences.
+#[test]
+fn every_component_has_one_status_rendered_from_scope_toml() {
+    let comps = register("thesis/scope.toml", "component");
+    let known = [
+        "product",
+        "instrument",
+        "reference",
+        "specification and future work",
+    ];
+    for c in &comps {
+        assert!(
+            known.contains(&c["status"].as_str()),
+            "{} has status `{}`",
+            c["id"],
+            c["status"]
+        );
+        assert!(
+            c.get("built").is_some_and(|b| !b.is_empty()),
+            "{} does not say what exists",
+            c["id"]
+        );
+    }
+
+    // The rendering sites.
+    for (file, marker) in [
+        ("thesis/00-front-matter.md", "scope-summary"),
+        ("thesis/01-introduction.md", "scope-table"),
+        ("thesis/07-implementation.md", "scope-table.7"),
+        ("thesis/08-phased-program.md", "scope-distributed.p4"),
+        ("docs/ROADMAP.md", "scope-summary.roadmap"),
+        ("docs/ROADMAP.md", "scope-table.roadmap"),
+    ] {
+        let text = std::fs::read_to_string(repo_root().join(file)).expect("readable");
+        assert!(
+            text.contains(&format!("<!-- BEGIN:{marker} thesis/scope.toml#")),
+            "{file} has no `{marker}` block rendered from scope.toml"
+        );
+    }
+
+    // Every stopped component's chapters carry its scope line, and a newly stopped
+    // component cannot be added to scope.toml without being placed here.
+    let chapters: &[(&str, &[&str])] = &[
+        ("mysql", &["appendix-d.md", "11-discussion.md"]),
+        ("native-protocol", &["appendix-d.md"]),
+        (
+            "distributed",
+            &[
+                "07-implementation.md",
+                "08-phased-program.md",
+                "appendix-g.md",
+            ],
+        ),
+        ("bootstrap", &["appendix-e.md"]),
+        ("targets", &["appendix-c.md", "appendix-g.md"]),
+        (
+            "optimizer",
+            &[
+                "04-novel-contributions.md",
+                "08-phased-program.md",
+                "appendix-i.md",
+            ],
+        ),
+        ("commitments", &["06-architecture-and-niles.md"]),
+    ];
+    for c in comps
+        .iter()
+        .filter(|c| c["status"] == "specification and future work")
+    {
+        let Some((_, files)) = chapters.iter().find(|(id, _)| *id == c["id"]) else {
+            panic!(
+                "{} is stopped and this test names no chapter for its scope line",
+                c["id"]
+            );
+        };
+        for f in *files {
+            assert!(
+                thesis(f).contains(&format!("<!-- BEGIN:scope-{}", c["id"])),
+                "{f} describes `{}`, which is specification and future work, without its scope line",
+                c["id"]
+            );
+        }
+    }
+
+    // The sentences A-3 retired, wherever they would be read first.
+    for f in [
+        "00-front-matter.md",
+        "13-conclusion.md",
+        "01-introduction.md",
+        "06-architecture-and-niles.md",
+    ] {
+        let t = thesis(f);
+        for gone in [
+            "wire-compatible with MySQL",
+            "MySQL/PostgreSQL wire compatib",
+            "MySQL and PostgreSQL wire compatibility",
+            "no wire protocol",
+        ] {
+            assert!(!t.contains(gone), "{f} still says `{gone}`");
+        }
+    }
+}

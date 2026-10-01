@@ -107,7 +107,7 @@ short = "the native frame protocol"
 component = "The native Nilestream frame protocol"
 status = "specification and future work"
 decision = "never scheduled; Appendix D.4 has described it as specification since cycle 9"
-built = "nothing"
+built = "a one-line module stub, crates/nilestream-server/src/native_proto.rs, and nothing else"
 where = "Appendix D.4"
 
 [[component]]

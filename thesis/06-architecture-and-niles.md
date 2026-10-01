@@ -457,9 +457,9 @@ Three operational capabilities follow. **Explain**: for any served answer, retur
 
 ## 6.18 Checkpoints as a Declared View Property
 
-Theorem 3.7 makes the per-key checkpoint interval C the constant in the reconstruction bound, and §9.4.1 measures it: at C = 16 reconstruction cost was flat at ≈ 8.5 base rows across a 64× increase in history, against a predicted C/2 + 1 = 9. C is therefore a *contract term*, declared per view alongside consistency and materialization mode, and not a hidden engine default — because choosing it is choosing a point on the reconstruction-cost/checkpoint-storage trade, and the theory prices that choice.
+Theorem 3.7 makes the per-key checkpoint interval C the constant in the reconstruction bound, and §9.4.1 measures it: at C = 16 reconstruction cost was flat at ≈ 8.5 base rows across a 64× increase in history, against a predicted C/2 + 1 = 9. C is therefore a *contract term*, declared per view alongside consistency and materialization mode, and not a hidden engine default — because choosing it is choosing a point on the reconstruction-cost/checkpoint-storage trade. The theory states both sides — at most C rows per reconstruction (Theorem 3.7(ii)), Θ(H/C) checkpoints and Θ(|K|) running aggregates in memory (Theorem 3.7(iii)), and no structure in the restricted model doing better than Ω(H/C) (Proposition 3.7.2) — but it derives no optimal C, so the choice is the operator's. (Until cycle 16 this sentence said the theory prices the choice; no theorem priced the storage.)
 
-Checkpoints are derived state: each is recomputable from the base, so they are evictable and rebuildable and stand outside the retention guarantee, exactly as views do. This is the base/derived split of H-F4 applied one level down, to the reconstruction path itself.
+Checkpoints are derived state: each is recomputable from the base, so they are evictable and rebuildable in principle and stand outside the retention guarantee, exactly as views do. The implementation never evicts one, which is why their memory is Θ(H/C). This is the base/derived split of H-F4 applied one level down, to the reconstruction path itself.
 
 ## 6.19 The Materialization Optimizer in the Runtime
 

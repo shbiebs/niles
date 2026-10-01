@@ -81,11 +81,11 @@ id = "H-S2"
 claim = "The frontier is real and sits where the theorem says."
 status = "partly measured"
 where = "§9.3, §9.14.1, results/E16-band.md"
-instrument = "a crossover in memory price exists and was located. **The theorem's band was not derived and is not tested**, because Θ(Z) carries no stated constant anywhere in the thesis: a band computed with the constant at 1 and one computed with it at 10 differ by an order of magnitude in exactly the region the experiment measures. `results/E16-band.md` pre-registers the one-sided prediction that is derivable."
+instrument = "a crossover in memory price exists and was located. **The theorem's band was not derived and is not tested**, because Θ(Z) carries no stated constant anywhere in the thesis: a band computed with the constant at 1 and one computed with it at 10 differ by an order of magnitude in exactly the region the experiment measures. `results/E16-band.md` pre-registers the one-sided prediction that is derivable. Cycle 16 (C16-03) moved the theorem's frontier by charging partial state the memory it holds (§4.3, Corollary 4.2.1); the band is still not derivable."
 
 [[claim]]
 id = "H-S3"
-claim = "The price of consistency is workload-shaped, not history-shaped, given a bounding mechanism."
+claim = "The price of consistency is workload-shaped, not history-shaped, in time, given a bounding mechanism; the mechanism's memory is history-shaped, Θ(H/C)."
 status = "partly measured"
 where = "§9.4.1, §9.4.3"
 instrument = "**the two halves ran at opposite checkpoint intervals and nothing recorded it, and cycle 13's E-4 measured the difference rather than assuming it.** The rung half is E8 (§9.4.3); the history half is E10, the only experiment here that varies C, and it is what SC7 rests on. E8 ran only at `checkpoint_interval = 0` -- `Ledger::new()`'s default -- which is the configuration §9.4.1 states the cost law does *not* hold in, so a claim whose proviso is \"given a bounding mechanism\" rested on a read-side leg measured without one. E-4 reran E8 at C in {0, 16, 64}: the paired lax:strict read ratio is 2.52x +/- 0.05 at C = 0 and 1.98x +/- 0.00 at C = 16, while misses, deltas applied, maintenance passes and hit rate are identical to the unit at every interval -- a checkpoint changes what a reconstruction costs, not whether a read misses. C = 64 returns to 2.49x because it covers 11 keys of 10,000 against C = 16's 54, which the new `checkpointed_keys` column reports beside the cost. `partly measured` and not `measured` because the history leg (E10) and the rung leg still sample different anchor distributions: E10 probes at the head, and SC7's bound is stated in expectation over anchors uniform between checkpoints, which no experiment samples (item 14 of the audit matrix)."
@@ -151,13 +151,13 @@ id = "C2"
 claim = "The Eviction–Consistency Frontier Theorem: strictness forces a miss at the top rung to wait for the base."
 status = "proved"
 where = "§4.3"
-instrument = "the theorem is proved from the ℓ₅ predicate. Its two corollaries are arithmetic in the cost model, and one of them now carries the condition under which a break-even exists at all — an earlier draft asserted a threshold for every parameter setting and was false when reconstruction is cheap relative to full residency. No lower bound over eviction policies is claimed: the \"no policy escapes\" and \"information-theoretic\" wording is withdrawn. The *band* is still not derivable, for the reason under H-S2, and nothing here tests one."
+instrument = "the theorem is proved from the ℓ₅ predicate. Its two corollaries are arithmetic in the cost model, and one of them now carries the condition under which a break-even exists at all — an earlier draft asserted a threshold for every parameter setting and was false when reconstruction is cheap relative to full residency. No lower bound over eviction policies is claimed: the \"no policy escapes\" and \"information-theoretic\" wording is withdrawn. The *band* is still not derivable, for the reason under H-S2, and nothing here tests one. **Corollary 4.2.1 was restated in cycle 16 (C16-03) with the memory partial state actually holds** (§3.14: per-key aggregates Θ(|K|) and checkpoints Θ(H/C) beside the Θ(m) resident). The threshold moves to lower miss rates, and past a history length H\\* full materialisation is cheaper at every miss rate."
 
 [[claim]]
 id = "C3"
-claim = "A complexity theory of consistency under partial materialization."
+claim = "A complexity theory of consistency under partial materialization: time workload-shaped given checkpoints; memory Θ(m + |K| + H/C), history-shaped."
 status = "proved"
-where = "§4.4, with the checkpoint hypothesis made explicit"
+where = "§4.4, with the checkpoint hypothesis made explicit; §3.20 (Theorem 3.7(iii), Proposition 3.7.2) for the memory"
 instrument = ""
 
 [[claim]]
@@ -183,10 +183,10 @@ instrument = ""
 
 [[claim]]
 id = "SC7"
-claim = "Per-key checkpoints, and the bound C/2 + 1 in expectation over anchors uniform between checkpoints."
+claim = "Per-key checkpoints: reconstruction time bounded by C (C/2 + 1 in expectation over anchors uniform between checkpoints), at memory Θ(|K| + H/C)."
 status = "partly measured"
 where = "§9.4.1"
-instrument = "**`partly measured`, not `measured` (cycle 16, C16-09): E10's probes sample the head anchor only, while the bound is stated in expectation over anchors uniform between checkpoints, which no experiment samples** (H-S3; item 14 of the cycle-13 audit matrix). Promoted to a named contribution by measurement rather than stated in advance: without checkpoints the cost law of C3 is false, and the mechanism that makes it true was found by the experiment that refuted the claim without it."
+instrument = "**`partly measured`, not `measured` (cycle 16, C16-09): E10's probes sample the head anchor only, while the bound is stated in expectation over anchors uniform between checkpoints, which no experiment samples** (H-S3; item 14 of the cycle-13 audit matrix). Promoted to a named contribution by measurement rather than stated in advance: without checkpoints the cost law of C3 is false, and the mechanism that makes it true was found by the experiment that refuted the claim without it. **Its memory is stated since cycle 16 (C16-03, decision DB-3):** a running balance and a posting count per key, Θ(|K|), and one checkpoint per C postings per key, never pruned, Θ(H/C); Proposition 3.7.2 shows that any structure in the restricted model bounding reconstruction by C at every anchor stores Ω(H/C). E27b measures the memory as `checkpoint_bytes`: at single-currency 10^5 the median is 15,901,376 B, against 11,624,448 B for the whole balance table that full materialisation keeps (results/E27b-comparator.md section 5)."
 
 [[claim]]
 id = "H-E1"

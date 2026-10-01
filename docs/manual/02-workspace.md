@@ -83,8 +83,13 @@ grep -c '^preflight:' target/preflight.out
 ## 2.4 Build and test
 
 ```sh
-cargo build --release --workspace -q 2>&1 | tail -n 5
-cargo test --workspace -q 2>&1 | grep -E '^test result: FAILED' && exit 1 || true
+cargo build --release --workspace -q > target/build.out 2>&1 || { tail -n 20 target/build.out; exit 1; }
+cargo test --workspace -q > target/test.out 2>&1 || { grep -E 'FAILED|panicked' target/test.out | head -n 20; exit 1; }
+grep -c '^test result: ok' target/test.out > /dev/null && echo "every test binary passed"
+```
+
+```expected
+every test binary passed
 ```
 
 ## 2.5 The checkpoint: one slice of the whole system
@@ -128,11 +133,12 @@ psql -h 127.0.0.1 -p 5433 -U anyone -At bank \
 ```
 
 **One durable two-leg event.** A posting set conserves or it does not commit: the one-legged
-insert is refused, and the balanced pair commits as one epoch.
+insert is refused, and the balanced pair commits as one epoch. (The refusal makes `psql` exit
+non-zero, which is the point; `|| true` keeps a script that stops on errors going.)
 
 ```sh
-psql -h 127.0.0.1 -p 5433 -U anyone -At bank \
-    -c "insert into postings values (900001, 4242, 0, 100)" 2>&1 | head -n 1
+{ psql -h 127.0.0.1 -p 5433 -U anyone -At bank \
+    -c "insert into postings values (900001, 4242, 0, 100)" 2>&1 || true; } | head -n 1
 psql -h 127.0.0.1 -p 5433 -U anyone -At bank \
     -c "insert into postings values (900001, 4242, 0, 100), (900001, 4243, 0, -100)"
 ```

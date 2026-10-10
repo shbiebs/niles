@@ -65,7 +65,7 @@ results' headers.
 | reads of a closed facility | a few a year, bursty (audit, regulator, disputes) | author (W6) | not in the generator |
 | screens per user per day; facilities per user | ~150 screens over 10–20 facilities | author (W7) | not in the generator |
 | the view families read | outstandings and positions; cash flows and scheduled activity; facility and deal details; accounting and GL entries; other | author (W8) | not in the generator |
-| **β: skew across view definitions** | which of a key's views are read; swept like α | **assumed**, swept | not in the generator |
+| **β: skew across view definitions** | which of a key's views are read; swept like α | **assumed**, swept | `comparator::universe::view_sampler` (cycle 16, C16-11); no study reads it yet (C15-03 is held, DB-7) |
 | latency targets | 20 ms p99 lookup, 5 s p99 report | author (W12, A-2) | targets, not parameters |
 
 ## 4. Read skew is a hypothesis, not a premise

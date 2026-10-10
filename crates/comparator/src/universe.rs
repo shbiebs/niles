@@ -142,6 +142,17 @@ impl Sampler {
     }
 }
 
+/// **β: which of a key's `k` view definitions a read asks** (cycle 16, C16-11;
+/// `docs/universe.md` §3). A Zipf(β) draw over view ids `1..=k`, with the hot views chosen
+/// by a seeded permutation, exactly as α chooses hot accounts. It is separate from α: α says
+/// which key is read, β says which of that key's views. β = 0 is uniform over the k views.
+/// Swept like α, never fixed: no source measures it (the universe's provenance column says
+/// *assumed*). Nothing reads it yet. Its consumer is C15-03's k-view axis, which DB-7 holds.
+pub fn view_sampler(k: u64, beta: f64, seed: u64) -> Sampler {
+    // A seed distinct from the account sampler's, so the two permutations are independent.
+    Sampler::new(k, beta, seed ^ 0xB37A_0000_B37A)
+}
+
 /// Whether an account holds the second currency: a fixed 35% of accounts, by hash.
 pub fn holds_eur(acct: u64, multi_currency: bool) -> bool {
     multi_currency && (acct.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 32) % 100 < 35
@@ -288,6 +299,28 @@ mod tests {
             assert_eq!(t.legs[0].amt + t.legs[1].amt, 0);
             assert_ne!(t.legs[0].acct, t.legs[1].acct);
         }
+    }
+
+    #[test]
+    fn beta_zero_is_uniform_over_views_and_beta_concentrates_them() {
+        // β = 0: each of k views carries 1/k of the weight.
+        let flat = view_sampler(10, 0.0, 7);
+        for rank in 1..=10 {
+            let share = flat.top_share(rank);
+            assert!(
+                (share - rank as f64 / 10.0).abs() < 1e-9,
+                "rank {rank}: {share}"
+            );
+        }
+        // β = 1.2: the hottest view of ten carries well over a tenth.
+        let skewed = view_sampler(10, 1.2, 7);
+        assert!(skewed.top_share(1) > 0.3, "{}", skewed.top_share(1));
+        // Draws stay inside 1..=k, and the seed fixes the permutation.
+        let mut r = Rng::new(3);
+        for _ in 0..1000 {
+            assert!((1..=10).contains(&skewed.draw(&mut r)));
+        }
+        assert_eq!(view_sampler(10, 1.2, 7).account_at(1), skewed.account_at(1));
     }
 
     #[test]

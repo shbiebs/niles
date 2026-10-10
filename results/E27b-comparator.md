@@ -79,6 +79,7 @@ PostgreSQL configuration, identical on every PostgreSQL arm (§5.3), each non-de
 - **Concurrency phases are read-only** (writes run only in the 1-client mixed phase), as in E27.
 - **Allocations per read are not measured on the served binary** (design §11): the metered build counts bytes held on request, not allocations per operation; E18 measures those in-process.
 - **The 10⁶ point is not in this file**: it is C15-04's (Host C). The container holds 2 cores and 8 GB.
+- **The targeted p99 re-run ran nine days after the main sweep, on E27b's build, by the author's decision of 2026-10-10.** The main sweep's driver stopped at multi-currency 10⁵, as its rule requires, before this step. The author chose to run it on the engine the design named: the binaries were built afresh at `6ecded8` in a separate worktree (every point records that commit and a clean worktree), not at the later head where C16-03 had already compacted holes. The container had been replaced in between (kernel `6.18.44-fc-v114` against the main sweep's `fc-v50`; same 2 cores and 8 GB). Every comparison in the p99 file is within that run, interleaved as designed. Only §8 joins the two runs, reading memory from the main sweep and p99 from this one, as E27 also did. The memory cgroup killed nothing during it, and no arm diverged. Many of its cells, most of them at 10⁵, are REFUSED by the warm-up MAD rule (`results/E27b-p99-engine-detail.md` gives each reason). They are refusals, not directions.
 - **The sweep was interrupted once by a container restart and resumed, not restarted** (2026-10-01, about 02:45Z), while `single-10000-7` was running. A point's file is written only when the point completes, so that point had written nothing and the six already written were intact. The driver was started again unchanged with `--skip-existing`; it skipped the six and re-ran `single-10000-7` from its start. No point was discarded or merged with a partial one.
 - **At multi-currency 10⁵ the memory cgroup killed N five times, once per seed** (kernel log: `nilestreamd-metered`, anon-rss 3.10–3.29 GiB each; the event at seed 7 also killed one PostgreSQL backend). Five arms are co-resident during a point on a host of 8,031 MiB; design §3 expected that dropping H1, H2 and T would keep 10⁵ within it, and at multi-currency 10⁵ it did not. Seeds 1 and 100: N died in a warm-up run. Its later queries are recorded as errors (`failed to fill whole buffer`, `Broken pipe`), which the comparator counts as divergences, and the next run's connection was refused, which ends a point. These are transport errors after the process died, not wrong answers. Both points are kept as written, with FAILURES and no measured run. By the renderer's rule a failure anywhere at a size refuses that size's seed-replicated metrics, so **view-state bytes per key read at multi-currency 10⁵ are REFUSED for every pair**, and the engine rule's memory clause is not evaluated there.
 - **At seeds 7, 42 and 2024 of multi-currency 10⁵ the kill came after the tenth measured run**, during the end-of-run checks, when the comparator reads every leg back from each arm. The comparator reads the end checksum and the arm's state only if it can connect, and records nothing when it cannot. So none of the three records a failure, all three lack N's end checksum and end state, and seed 7 also lacks P+'s. The same OOM event killed one PostgreSQL backend, the likeliest reason P+ did not answer; which cluster it belonged to was not recorded. Their measured runs are complete for every arm, and §1 shows those end checksums as *not read*. The silent skip is a harness defect recorded for the next card. It was not repaired during the sweep, because changing the harness would change what the remaining points measure. Nothing was re-run or tuned. The driver's stop rule (stop on a failure or a divergence) stopped the sweep after this step, so the p99-engine re-run did not start.
@@ -983,25 +984,35 @@ The rule, unchanged (design §8): **N is justified as a product** iff it beats P
 | series | pair | metric | source | 10³ | 10⁴ | 10⁵ |
 |---|---|---|---|---|---|---|
 | multi | N vs P+ | view_state_bytes_per_key_read | this sweep | **N better** | **N better** | REFUSED |
-| multi | N vs P+ | q1_p99_us | p99 re-run | — | — | — |
-| multi | N vs P+ | q2_p99_us | p99 re-run | — | — | — |
-| multi | N vs P+ | c4_q1_p99_us | p99 re-run | — | — | — |
-| multi | N vs P+ | c4_q2_p99_us | p99 re-run | — | — | — |
+| multi | N vs P+ | q1_p99_us | p99 re-run | **N better** | no difference | mixed |
+| multi | N vs P+ | q2_p99_us | p99 re-run | **P+ better** | **P+ better** | NOT RUN |
+| multi | N vs P+ | c4_q1_p99_us | p99 re-run | no difference | no difference | **P+ better** |
+| multi | N vs P+ | c4_q2_p99_us | p99 re-run | **P+ better** | **P+ better** | NOT RUN |
 | multi | N vs H3 | view_state_bytes_per_key_read | this sweep | **H3 better** | **H3 better** | REFUSED |
-| multi | N vs H3 | q1_p99_us | p99 re-run | — | — | — |
-| multi | N vs H3 | q2_p99_us | p99 re-run | — | — | — |
-| multi | N vs H3 | c4_q1_p99_us | p99 re-run | — | — | — |
-| multi | N vs H3 | c4_q2_p99_us | p99 re-run | — | — | — |
+| multi | N vs H3 | q1_p99_us | p99 re-run | no difference | no difference | REFUSED |
+| multi | N vs H3 | q2_p99_us | p99 re-run | **H3 better** | **H3 better** | NOT RUN |
+| multi | N vs H3 | c4_q1_p99_us | p99 re-run | REFUSED | **H3 better** | REFUSED |
+| multi | N vs H3 | c4_q2_p99_us | p99 re-run | **H3 better** | REFUSED | NOT RUN |
 | single | N vs P+ | view_state_bytes_per_key_read | this sweep | **N better** | **N better** | no difference |
-| single | N vs P+ | q1_p99_us | p99 re-run | — | — | — |
-| single | N vs P+ | q2_p99_us | p99 re-run | — | — | — |
-| single | N vs P+ | c4_q1_p99_us | p99 re-run | — | — | — |
-| single | N vs P+ | c4_q2_p99_us | p99 re-run | — | — | — |
+| single | N vs P+ | q1_p99_us | p99 re-run | **N better** | **N better** | no difference |
+| single | N vs P+ | q2_p99_us | p99 re-run | **N better** | no difference | REFUSED |
+| single | N vs P+ | c4_q1_p99_us | p99 re-run | REFUSED | REFUSED | REFUSED |
+| single | N vs P+ | c4_q2_p99_us | p99 re-run | **N better** | **N better** | REFUSED |
 | single | N vs H3 | view_state_bytes_per_key_read | this sweep | **H3 better** | **H3 better** | **H3 better** |
-| single | N vs H3 | q1_p99_us | p99 re-run | — | — | — |
-| single | N vs H3 | q2_p99_us | p99 re-run | — | — | — |
-| single | N vs H3 | c4_q1_p99_us | p99 re-run | — | — | — |
-| single | N vs H3 | c4_q2_p99_us | p99 re-run | — | — | — |
+| single | N vs H3 | q1_p99_us | p99 re-run | **N better** | **N better** | REFUSED |
+| single | N vs H3 | q2_p99_us | p99 re-run | no difference | mixed | REFUSED |
+| single | N vs H3 | c4_q1_p99_us | p99 re-run | **N better** | **N better** | REFUSED |
+| single | N vs H3 | c4_q2_p99_us | p99 re-run | **N better** | **N better** | REFUSED |
 
-**Not evaluated yet: the targeted p99 re-run has no points.**
+**Evaluation**, per series and size:
+
+- `multi`, 10³: no clause of the rule holds — N vs P+: memory **N better**; q1_p99_us **N better**, q2_p99_us **P+ better**, c4_q1_p99_us no difference, c4_q2_p99_us **P+ better** · N vs H3: memory **H3 better**; q1_p99_us no difference, q2_p99_us **H3 better**, c4_q1_p99_us REFUSED, c4_q2_p99_us **H3 better**
+- `multi`, 10⁴: no clause of the rule holds — N vs P+: memory **N better**; q1_p99_us no difference, q2_p99_us **P+ better**, c4_q1_p99_us no difference, c4_q2_p99_us **P+ better** · N vs H3: memory **H3 better**; q1_p99_us no difference, q2_p99_us **H3 better**, c4_q1_p99_us **H3 better**, c4_q2_p99_us REFUSED
+- `multi`, 10⁵: no clause of the rule holds — N vs P+: memory REFUSED; q1_p99_us mixed, c4_q1_p99_us **P+ better** (q2_p99_us, c4_q2_p99_us NOT RUN) · N vs H3: memory REFUSED; q1_p99_us REFUSED, c4_q1_p99_us REFUSED (q2_p99_us, c4_q2_p99_us NOT RUN)
+- `multi`, crossover (S-1): none in range
+
+- `single`, 10³: no clause of the rule holds — N vs P+: memory **N better**; q1_p99_us **N better**, q2_p99_us **N better**, c4_q1_p99_us REFUSED, c4_q2_p99_us **N better** · N vs H3: memory **H3 better**; q1_p99_us **N better**, q2_p99_us no difference, c4_q1_p99_us **N better**, c4_q2_p99_us **N better**
+- `single`, 10⁴: no clause of the rule holds — N vs P+: memory **N better**; q1_p99_us **N better**, q2_p99_us no difference, c4_q1_p99_us REFUSED, c4_q2_p99_us **N better** · N vs H3: memory **H3 better**; q1_p99_us **N better**, q2_p99_us mixed, c4_q1_p99_us **N better**, c4_q2_p99_us **N better**
+- `single`, 10⁵: no clause of the rule holds — N vs P+: memory no difference; q1_p99_us no difference, q2_p99_us REFUSED, c4_q1_p99_us REFUSED, c4_q2_p99_us REFUSED · N vs H3: memory **H3 better**; q1_p99_us REFUSED, q2_p99_us REFUSED, c4_q1_p99_us REFUSED, c4_q2_p99_us REFUSED
+- `single`, crossover (S-1): none in range
 

@@ -218,6 +218,7 @@ reproduce:
 	cargo run -q --release -p comparator -- render --shape p99-engine
 	cargo run -q --release -p comparator -- render --shape counted
 	cargo run -q --release -p comparator -- render --study e27b
+	cargo run -q --release -p comparator -- render --study e27b --shape p99-engine
 	cargo run -q -p syntax-study --bin e30 -- report
 	cargo run -q -p syntax-study --bin e30b -- report
 	cargo run -q -p syntax-study --bin e30c -- report

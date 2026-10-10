@@ -83,7 +83,7 @@ latency under eviction.
 **Criterion.** E27's rule, unchanged. Memory is now **view-state bytes per key read**,
 counted per arm. It was fixed in the design commit `77997dd` before any engine change.
 
-**Evidence** (`results/E27b-comparator.md`, cycle 16).
+**Evidence** (`results/E27b-comparator.md` and `results/E27b-p99-engine.md`, cycle 16).
 - **Memory:**
   - H3 beats N at every size where the clause was evaluated (single 10³–10⁵, multi 10³ and
     10⁴). So N is not justified at any of them, whatever p99 shows.
@@ -92,8 +92,13 @@ counted per arm. It was fixed in the design commit `77997dd` before any engine c
   the median checkpoint state is 15,901,376 B, more than the whole balance table of full
   materialisation (11,624,448 B).
 - **Multi-currency 10⁵ memory is refused.** The memory cgroup killed N at every seed there.
-- **Not evaluated:** the p99 clause, whose targeted re-run did not start (the sweep's driver
-  stops on a failure).
+- **p99** (the targeted re-run, on E27b's build, by the author's decision of 2026-10-10). The
+  result is a trade, as in E27:
+  - N's head reads have the shorter tails in the single-currency series at 10³ and 10⁴.
+  - P+'s and H3's anchored multi-currency reads have the shorter tails.
+  - Most 10⁵ cells are refused by the warm-up MAD rule.
+- **The rule's verdict:** no clause holds at any series and size. H-E1 is refuted in the
+  measured range.
 - **The first attempt stopped on a wrong answer from N** (F-02-3: an empty scalar aggregate
   answered no row). It was fixed before the re-run, and its points are kept apart in
   `results/E27b-comparator/attempt-1/`.
@@ -216,6 +221,7 @@ run.sh`), is rendered from rows committed beside it. Rendering them again must c
 ```sh
 cargo run -q --release -p comparator -- render > /dev/null 2>&1
 cargo run -q --release -p comparator -- render --study e27b > /dev/null 2>&1
+cargo run -q --release -p comparator -- render --study e27b --shape p99-engine > /dev/null 2>&1
 cargo run -q -p syntax-study --bin e30 -- report > /dev/null
 cargo run -q -p syntax-study --bin e30b -- report > /dev/null
 cargo run -q -p syntax-study --bin e30c -- report > /dev/null
@@ -231,4 +237,3 @@ every report is what its rows say
 - The measurements that confirmed the plan (E8, E10, E18 and the rest). They are in the
   thesis's Chapter 9.
 - GBS's decisions other than its backend.
-- The p99 clause of E27b, which waits on the targeted re-run.

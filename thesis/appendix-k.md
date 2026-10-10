@@ -44,7 +44,7 @@ It is not Nilestream. It is the smallest artifact that makes Nilestream's mechan
 
 *Generated from `thesis/status.toml`. Do not edit by hand.*
 
-Of the 24 claims this thesis makes — 17 hypotheses and 7 contributions — 2 argued, 3 measured, 1 not measured, 9 partly measured, 1 partly proved, 5 proved, 1 refuted, 1 specified, 1 withdrawn. **1 hypotheses have no runner at all** (H-S7), and for each of them the table in §1.9 names the instrument that does not exist rather than the result that is pending. Measurements have been taken and some of them refuted the claim they were testing; the sentence this replaces read "no measurements have been taken yet" and stood while §9.1 opened with "measurements that were actually taken".
+Of the 24 claims this thesis makes — 17 hypotheses and 7 contributions — 2 argued, 3 measured, 1 not measured, 9 partly measured, 2 partly proved, 4 proved, 1 refuted, 1 specified, 1 withdrawn. **1 hypotheses have no runner at all** (H-S7), and for each of them the table in §1.9 names the instrument that does not exist rather than the result that is pending. Measurements have been taken and some of them refuted the claim they were testing; the sentence this replaces read "no measurements have been taken yet" and stood while §9.1 opened with "measurements that were actually taken".
 
 <!-- END:status-summary-k -->
 

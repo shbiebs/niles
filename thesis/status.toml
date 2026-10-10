@@ -156,9 +156,9 @@ instrument = "the theorem is proved from the ℓ₅ predicate. Its two corollari
 [[claim]]
 id = "C3"
 claim = "A complexity theory of consistency under partial materialization: time workload-shaped given checkpoints; memory Θ(m + |K| + H/C), history-shaped."
-status = "proved"
+status = "partly proved"
 where = "§4.4, with the checkpoint hypothesis made explicit; §3.20 (Theorem 3.7(iii), Proposition 3.7.2) for the memory"
-instrument = ""
+instrument = "**`partly proved`, by the author's decision of 2026-10-10 on C16-03's review.** Clauses (a) and (b) of Theorem 4.3′, time workload-shaped given checkpoints and the matching lower bounds in the restricted model, are proved as before. Clause (c), memory history-shaped, rests on Proposition 3.7.2, a counting lower bound added in cycle 16 that has not been independently reviewed; until it is, C3 is not called proved."
 
 [[claim]]
 id = "C4"

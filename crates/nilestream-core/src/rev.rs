@@ -4765,10 +4765,18 @@ mod concurrent_differential {
     /// useless here: the race being tested is between an append and a read. The rows are behind
     /// an `RwLock`, and every method of `Base` takes `&self` already — that was T-06's change,
     /// and it is what makes this test expressible at all.
+    ///
+    /// **Rows are indexed by epoch** (cycle 17, C17-01): `seal` writes exactly one row per
+    /// epoch, in epoch order, so epoch `e` is row `e - 1`. `deltas_at` used to scan every row,
+    /// which made the advancer's catch-up quadratic in the rows sealed so far; under an
+    /// unbounded writer on a two-core host the advancer then held the runtime lock long enough
+    /// to starve a reader (3 hangs in 40 runs, thread stacks in cycle 17's evidence bundle).
+    /// `delta_rows_read` counts the rows `deltas_at` inspects, so a test can hold it to O(deltas).
     #[derive(Default)]
     struct SharedBase {
         rows: RwLock<Vec<(Epoch, Key, Value)>>,
         head: AtomicU64,
+        delta_rows_read: AtomicU64,
     }
 
     impl SharedBase {
@@ -4814,11 +4822,33 @@ mod concurrent_differential {
 
         fn deltas_at(&self, e: Epoch) -> Vec<(Key, Value)> {
             let rows = self.rows.read().expect("not poisoned");
-            rows.iter()
-                .filter(|(x, _, _)| *x == e)
-                .map(|(_, k, d)| (k.clone(), *d))
-                .collect()
+            let Some(i) = (e as usize).checked_sub(1) else {
+                return Vec::new();
+            };
+            match rows.get(i) {
+                Some((x, k, d)) => {
+                    self.delta_rows_read.fetch_add(1, Ordering::Relaxed);
+                    debug_assert_eq!(*x, e, "one row per epoch, in epoch order");
+                    vec![(k.clone(), *d)]
+                }
+                None => Vec::new(),
+            }
         }
+    }
+
+    /// The guard for C17-01: reading one epoch's deltas inspects that epoch's rows and no
+    /// others, however long the base has grown. Against the old full scan this reads 1,000.
+    #[test]
+    fn the_fake_bases_deltas_read_only_the_epoch_asked_for() {
+        let base = SharedBase::default();
+        for i in 0..1_000i64 {
+            base.seal(vec![i % KEYS], 1);
+        }
+        let before = base.delta_rows_read.load(Ordering::Relaxed);
+        assert_eq!(base.deltas_at(500), vec![(vec![499 % KEYS], 1)]);
+        assert_eq!(base.delta_rows_read.load(Ordering::Relaxed) - before, 1);
+        assert!(base.deltas_at(1_001).is_empty());
+        assert!(base.deltas_at(0).is_empty());
     }
 
     fn circuit() -> Circuit {
@@ -4848,7 +4878,17 @@ mod concurrent_differential {
             let (base, stop) = (base.clone(), stop.clone());
             std::thread::spawn(move || {
                 let mut i = 0i64;
+                // **Bounded** (cycle 17, C17-01): four times the readers' target and then
+                // idle. The readers' preconditions are unchanged (the frontier must still
+                // move SEAL_TARGET epochs under them), but the base no longer grows without
+                // limit while a starved reader waits, which is what turned a slow run into a
+                // hang.
+                let cap = start_head + 4 * SEAL_TARGET;
                 while !stop.load(Ordering::Relaxed) {
+                    if base.frontier() >= cap {
+                        std::thread::sleep(std::time::Duration::from_micros(200));
+                        continue;
+                    }
                     i += 1;
                     base.seal(vec![i % KEYS], 1);
                     // Advance the view from the writer, as the engine does under its own lock.

@@ -52,6 +52,7 @@ fn build_arms(names: &[String], multi: bool, scratch: &Path, e27b: bool) -> Vec<
                 "M" => Box::new(PgArm::new(PgKind::M, 5453, &root)),
                 "M+" => Box::new(PgArm::new(PgKind::MPlus, 5454, &root)),
                 "H2" => Box::new(PgArm::new(PgKind::H2, 5456, &root)),
+                "P-inc" => Box::new(PgArm::new(PgKind::PInc, 5455, &root)),
                 "H1" => {
                     let mut a = H1Arm::new(5457, 5458, scratch.join("h1"), &root);
                     // The calibrated byte budget, when one has been measured (calibrate-h1).

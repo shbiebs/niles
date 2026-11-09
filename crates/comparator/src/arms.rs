@@ -589,6 +589,9 @@ pub enum PgKind {
     /// pg_ivm 1.15: the balances view maintained incrementally inside each writing
     /// transaction, fully materialised (R2-03).
     H2,
+    /// A plain balance table maintained by an AFTER INSERT trigger, one upsert per leg,
+    /// inside each writing transaction: fully materialised, no extension (cycle 17, C17-03).
+    PInc,
 }
 
 pub struct PgArm {
@@ -602,6 +605,7 @@ const IMMUTABLE: &str = include_str!("../sql/immutable.sql");
 const P_SQL: &str = include_str!("../sql/p.sql");
 const PPLUS_SQL: &str = include_str!("../sql/pplus.sql");
 const H2_SQL: &str = include_str!("../sql/h2.sql");
+const PINC_SQL: &str = include_str!("../sql/pinc.sql");
 pub(crate) const POST_TXN_SQL: &str = include_str!("../sql/post_txn.sql");
 pub(crate) const COMMON_SQL: &str = COMMON;
 pub(crate) const IMMUTABLE_SQL: &str = IMMUTABLE;
@@ -614,6 +618,7 @@ impl PgArm {
             PgKind::M => "m",
             PgKind::MPlus => "mplus",
             PgKind::H2 => "h2",
+            PgKind::PInc => "pinc",
         };
         let mut arm = PgArm {
             kind,
@@ -641,6 +646,7 @@ impl Arm for PgArm {
             PgKind::M => "M",
             PgKind::MPlus => "M+",
             PgKind::H2 => "H2",
+            PgKind::PInc => "P-inc",
         }
     }
     fn describe(&self) -> String {
@@ -649,6 +655,7 @@ impl Arm for PgArm {
             PgKind::PPlus => "the E14 mechanism (partial slots, LRU, C = 16 checkpoints, anchored reconstruction) with the two cycle-14 repairs of sql/pplus.sql; append-only trigger",
             PgKind::M => "P without the append-only trigger (mutable base)",
             PgKind::MPlus => "P+ without the append-only trigger (mutable base)",
+            PgKind::PInc => "a balance table maintained by a plain AFTER INSERT trigger (one upsert per leg) inside each writing transaction, fully materialised, no extension; anchored reads sum the (acct, cur, epoch) index; append-only trigger",
             PgKind::H2 => "pg_ivm 1.15 IMMV `balances` (sum per acct, cur), maintained inside each writing transaction, fully materialised, no eviction; append-only trigger; `shared_preload_libraries = pg_ivm`",
         };
         format!(
@@ -704,7 +711,7 @@ impl Arm for PgArm {
             "select arm.post_txn({idx}, {}, {}, {}, {}::smallint, {}, {})",
             t.id, a.acct, b.acct, a.cur, b.amt, t.value_day
         );
-        if self.mechanism() || self.kind == PgKind::H2 {
+        if self.mechanism() || matches!(self.kind, PgKind::H2 | PgKind::PInc) {
             vec![call]
         } else {
             vec![
@@ -731,10 +738,13 @@ impl Arm for PgArm {
             )?;
         }
         run(&mut c, COMMON)?;
-        if matches!(self.kind, PgKind::P | PgKind::PPlus | PgKind::H2) {
+        if matches!(
+            self.kind,
+            PgKind::P | PgKind::PPlus | PgKind::H2 | PgKind::PInc
+        ) {
             run(&mut c, IMMUTABLE)?;
         }
-        if self.kind == PgKind::H2 {
+        if matches!(self.kind, PgKind::H2 | PgKind::PInc) {
             run(&mut c, POST_TXN_SQL)?;
         }
         run(
@@ -742,6 +752,7 @@ impl Arm for PgArm {
             match self.kind {
                 _ if self.mechanism() => PPLUS_SQL,
                 PgKind::H2 => H2_SQL,
+                PgKind::PInc => PINC_SQL,
                 _ => P_SQL,
             },
         )?;
@@ -750,6 +761,8 @@ impl Arm for PgArm {
             run(&mut c, &format!("select arm.after_load({budget})"))?;
         } else if self.kind == PgKind::H2 {
             run(&mut c, "select arm.after_load_h2()")?;
+        } else if self.kind == PgKind::PInc {
+            run(&mut c, "select arm.after_load_pinc()")?;
         } else {
             run(&mut c, "refresh materialized view arm.balances")?;
         }
@@ -765,6 +778,8 @@ impl Arm for PgArm {
                     "arm.after_load: checkpoints every 16 legs per key, key counts, budget"
                 } else if self.kind == PgKind::H2 {
                     "IMMV created and populated by pgivm.create_immv after the load"
+                } else if self.kind == PgKind::PInc {
+                    "balance table populated in one pass after the load, then the per-leg trigger created"
                 } else {
                     "materialised view refreshed"
                 }
@@ -936,4 +951,45 @@ pub fn sql_table(arms: &[&dyn Arm]) -> String {
         s += " |\n";
     }
     s
+}
+
+#[cfg(test)]
+mod pinc_routing {
+    //! C17-03's static guard. P-inc's correctness against the oracle is checked by the harness
+    //! itself on every run (a `div` row refuses the comparison); this holds the routing that
+    //! makes it P-inc rather than P: head reads from the maintained table, anchored reads from
+    //! the ledger, and **one** statement per write, with no refresh.
+    use super::*;
+
+    #[test]
+    fn pinc_reads_its_table_at_the_head_the_ledger_at_an_anchor_and_writes_once() {
+        let arm = PgArm::new(PgKind::PInc, 5455, Path::new("."));
+        assert_eq!(arm.name(), "P-inc");
+        assert!(!arm.mechanism());
+        assert!(arm.sql(&Query::Point((3, 0))).contains("from arm.balances"));
+        assert!(arm
+            .sql(&Query::Anchored((3, 0), 7))
+            .contains("from arm.postings"));
+        let t = Txn {
+            id: 1,
+            batch: 1,
+            legs: [
+                crate::universe::Leg {
+                    acct: 1,
+                    cur: 0,
+                    amt: -5,
+                },
+                crate::universe::Leg {
+                    acct: 2,
+                    cur: 0,
+                    amt: 5,
+                },
+            ],
+            value_day: 0,
+        };
+        let w = arm.write_sql(1, &t);
+        assert_eq!(w.len(), 1, "P-inc maintains its table in the write: {w:?}");
+        assert!(!w[0].contains("refresh"));
+        assert!(PINC_SQL.contains("create trigger postings_bump after insert"));
+    }
 }

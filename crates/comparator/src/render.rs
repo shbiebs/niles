@@ -72,6 +72,12 @@ pub const PAIRS: &[(&str, &str)] = &[
     ("P+", "H1"),
     ("N", "H2"),
     ("P+", "H2"),
+    // Cycle 17, C17-03: the plain incremental full-materialisation arm. A pair is rendered
+    // only where both arms have points, so E27's and E27b's committed reports are unchanged.
+    ("N", "P-inc"),
+    ("P+", "P-inc"),
+    ("P", "P-inc"),
+    ("P-inc", "H3"),
 ];
 
 /// Arms whose reads come from an asynchronous replica and are checked at its bracketed

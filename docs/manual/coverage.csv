@@ -1,0 +1,35 @@
+area,mechanism,chapter
+language,annotated SQL (SQL+C+L): the dialect's annotations and the static checker,not yet
+language,conservation of money (static obligations and the solver),not yet
+language,linear holds and consumption (NL0320),not yet
+language,capabilities (overdraft only with authority),not yet
+language,currencies and scales,not yet
+language,bitemporality (value dates and recorded_at),not yet
+language,serve contracts (per-view consistency and verified:),not yet
+language,Niles schema declarations and the reference checker,not yet
+language,the syntax studies (E30 and E30b′),05-counterexamples.md
+language,the decisions that made annotated SQL the language,06-decisions.md
+engine,the workspace and the gate,02-workspace.md
+engine,the ledger write path: epochs and the hash chain,not yet
+engine,the REV runtime: partial state and upqueries,not yet
+engine,eviction and the residency budget,not yet
+engine,checkpoints and the cost law (C and Θ(H/C)),not yet
+engine,the absence lattice and holes (LC-31),not yet
+engine,the PostgreSQL wire protocol,not yet
+engine,the reference oracle,not yet
+engine,the counterexample arms (E14 and E27),05-counterexamples.md
+engine,the decisions that fixed the engine's role,06-decisions.md
+gbs,posting sets and per-currency conservation,not yet
+gbs,the command envelope and the controls,not yet
+gbs,the business date and end of day,not yet
+gbs,holds and commitments,not yet
+gbs,participations and the residual rule,not yet
+gbs,schedules and calendars,not yet
+gbs,RFR accrual and its postings,not yet
+gbs,the PostgreSQL ledger and its read model,not yet
+gbs,the G3 and G3p gates,not yet
+gbs,trade capture and the external pricing engine,not yet
+gbs,the decisions that set GBS's scope,06-decisions.md
+front end,the client API and its transport,not yet
+front end,the front-end spike and its rule,not yet
+front end,the decisions on the front end,06-decisions.md

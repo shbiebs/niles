@@ -1,4 +1,4 @@
-.PHONY: gate gate-full preflight check test fmt lint reproduce bootstrap e30 e30b e30c
+.PHONY: gate gate-full preflight check test fmt lint manual reproduce bootstrap e30 e30b e30c
 
 # The results files `make reproduce` regenerates but must not compare across hosts, read out
 # of results/MANIFEST.csv rather than listed here, so the exclusion set cannot drift from the
@@ -60,7 +60,14 @@ preflight:
 # of that round was true only of the part that ran. A byte-deterministic artefact had gone
 # stale in cycle 13 for the same reason. Reproduce ends in `git diff --exit-code`, so the gate
 # now passes only on a tree whose regenerated results are the committed ones.
-gate: preflight fmt lint generated test measurements memory reproduce
+gate: preflight fmt lint generated test measurements memory manual reproduce
+
+# The manual's chapters that replay quickly (cycle 17, C17-13): the coverage map and the
+# decision catalogue, each by `tools/replay.sh`, which runs every `sh` block and checks every
+# `expected` one. Chapter 2 replays the whole gate in a fresh clone and is run by hand.
+manual:
+	tools/replay.sh docs/manual/01-coverage.md
+	tools/replay.sh docs/manual/06-decisions.md
 
 # Kept as a name, so older logs and scripts that say `make gate-full` still run the same thing.
 gate-full: gate

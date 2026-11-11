@@ -7,8 +7,8 @@ set -u
 fail=0
 v=$(cargo --version 2>/dev/null || true)
 case "$v" in
-    "cargo 1.95.0 "*) echo "preflight: toolchain $v" ;;
-    *) echo "preflight: toolchain is '$v', not the 1.95.0 pin (rust-toolchain.toml; RUSTUP_TOOLCHAIN=stable is allowed only if it reports 1.95.0)" >&2; fail=1 ;;
+    "cargo 1.97.0 "*) echo "preflight: toolchain $v" ;;
+    *) echo "preflight: toolchain is '$v', not the 1.97.0 pin (rust-toolchain.toml; RUSTUP_TOOLCHAIN=stable is allowed only if it reports 1.97.0)" >&2; fail=1 ;;
 esac
 port=${PGPORT:-5432}
 if pg_isready -q -h 127.0.0.1 -p "$port"; then

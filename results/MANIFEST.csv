@@ -435,3 +435,4 @@ E27b-p99-engine/single-100000-100.tsv,machine-dependent,cargo run --release -p c
 E27b-p99-engine/single-100000-2024.tsv,machine-dependent,cargo run --release -p comparator -- run --study e27b --shape p99-engine (arms N P+ H3; see E27b-p99-engine.md)
 E27b-p99-engine/single-100000-42.tsv,machine-dependent,cargo run --release -p comparator -- run --study e27b --shape p99-engine (arms N P+ H3; see E27b-p99-engine.md)
 E27b-p99-engine/single-100000-7.tsv,machine-dependent,cargo run --release -p comparator -- run --study e27b --shape p99-engine (arms N P+ H3; see E27b-p99-engine.md)
+C17-01-hang.md,machine-dependent,by hand (cycle 17 C17-01): 200 runs of the concurrent_differential test under timeout 20; command in the file

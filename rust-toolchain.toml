@@ -4,6 +4,6 @@
 #
 # An environment with no egress to static.rust-lang.org cannot install a channel named by
 # version and will fail here; build it with RUSTUP_TOOLCHAIN=stable, which overrides this file
-# and selects the same compiler wherever `stable` is 1.95.0. Check with `cargo --version`.
-channel = "1.95.0"
+# and selects the same compiler wherever `stable` is 1.97.0. Check with `cargo --version`.
+channel = "1.97.0"
 components = ["rustfmt", "clippy"]

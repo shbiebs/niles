@@ -149,6 +149,16 @@ fn main() {
             if let Some(w) = arg(&args, "--warmups") {
                 cfg.warmups = w.parse().expect("--warmups");
             }
+            // `--length-factor N` (M-NOISE, C17-04): every per-run sample count and the number
+            // of warm-up runs, times N. Without it nothing changes.
+            let length_factor: Option<usize> =
+                arg(&args, "--length-factor").map(|f| f.parse().expect("--length-factor"));
+            if let Some(f) = length_factor {
+                assert!(f >= 1, "--length-factor is at least 1");
+                cfg.ops *= f;
+                cfg.conc_reads *= f;
+                cfg.warmups *= f;
+            }
             let skip = args.iter().any(|a| a == "--skip-existing");
             let scratch =
                 PathBuf::from(arg(&args, "--scratch").unwrap_or_else(|| "/var/tmp/e27".into()));
@@ -187,6 +197,9 @@ fn main() {
                     prov.push(("checkpoint_interval".into(), cfg.checkpoint.to_string()));
                     if e27b {
                         prov.push(("study".into(), "E27b".into()));
+                    }
+                    if let Some(f) = length_factor {
+                        prov.push(("length_factor".into(), f.to_string()));
                     }
                     comparator::store::write(&path, &series, &p, &prov).expect("write point");
                     eprintln!(
@@ -398,6 +411,14 @@ fn main() {
             let file = arg(&args, "--out").unwrap_or_else(|| "probe.tsv".into());
             std::fs::create_dir_all(&dir).expect("dir");
             std::fs::write(dir.join(&file), out).expect("write the probe file");
+        }
+        "m-noise" => {
+            // M-NOISE (C17-04): render the verdict from the two lengths' points.
+            let base = root.join("results/M-NOISE");
+            let report = comparator::mnoise::render(&base.join("L1"), &base.join("L2"));
+            let out = root.join("results/M-NOISE.md");
+            std::fs::write(&out, report).expect("write M-NOISE.md");
+            eprintln!("wrote {}", out.display());
         }
         _ => {
             eprintln!("usage: comparator run --series single|multi --sizes 1000,10000 --seeds 1,7 [--arms N,P+,P,M] [--runs 10] [--warmups 3] [--skip-existing]");

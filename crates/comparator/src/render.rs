@@ -141,7 +141,7 @@ pub fn load(dir: &Path) -> BTreeMap<(String, u64, u64), Stored> {
 }
 
 /// The per-run values of `metric` for `arm`: (measured, warm-up), `None` where a run lacked it.
-fn series_of(st: &Stored, arm: &str, metric: &str) -> Series {
+pub fn series_of(st: &Stored, arm: &str, metric: &str) -> Series {
     let mut runs: BTreeMap<i64, Option<f64>> = BTreeMap::new();
     for r in st.kind("val").filter(|r| r[1] == arm) {
         runs.entry(r[2].parse().unwrap_or(0)).or_insert(None);
@@ -172,7 +172,7 @@ fn arms_of(st: &Stored) -> BTreeSet<String> {
     st.kind("load").map(|r| r[1].clone()).collect()
 }
 
-fn diverged(st: &Stored, arm: &str) -> bool {
+pub fn diverged(st: &Stored, arm: &str) -> bool {
     st.kind("div").any(|r| r[1] == arm)
 }
 

@@ -14,6 +14,7 @@
 pub mod arms;
 pub mod h1;
 pub mod h3;
+pub mod mnoise;
 pub mod oracle;
 pub mod pgcluster;
 pub mod probe;

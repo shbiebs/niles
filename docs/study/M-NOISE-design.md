@@ -57,3 +57,38 @@ This container (2 cores, 8 GB). Every point records its host, commit and toolcha
 ## 8. Deviations
 
 - **2026-11-11, presentation only, after the points existed.** `results/M-NOISE.md` gained one line stating the checkpoint interval (16, read from the points' own headers), because the repository's results-header test requires every machine-dependent result to state it. No count, verdict or number changed.
+
+## 9. Host C, the author's Mac (C17-12, run 1)
+
+**Pre-registered 2026-11-11, before the harness change for it and before any Host C point exists.** Purpose: to calibrate the Mac's noise (work order C17-12), since E27c's comparisons at 10⁵ and above run there (§5, outcome 3).
+
+**What runs.** Everything in §§2–4 is unchanged:
+- the cell, the two lengths and the seeds;
+- the order: L1 then L2 per seed;
+- the counting, by `stats::judge`.
+
+**How it runs.** `tools/m-noise-hostc.sh` runs it on Host C under the work order's quiet-machine protocol (§6.3):
+- mains power and other applications closed;
+- `caffeinate -dimsu`;
+- no Time Machine backup.
+
+**The script:**
+- records `sysctl hw.ncpu hw.memsize hw.machine`, `sw_vers` and the load averages at the start and the end, in `results/M-NOISE-hostc/host.txt`;
+- refuses to start when the one-minute load average is above 1.5, and prints why;
+- builds the release binaries before the first point, so no build runs beside a point.
+
+**Outputs** (all machine-dependent):
+- `results/M-NOISE-hostc/L1/single-10000-<seed>.tsv` and `…/L2/…`;
+- `results/M-NOISE-hostc/host.txt`;
+- `results/M-NOISE-hostc.md`, rendered from them by `comparator m-noise --host hostc`. It carries the host header (machine, macOS version, cores, memory, load averages).
+
+**The rule on Host C.** Let m₁ and m₂ be Host C's refused cells out of 30 at L1 and L2. The thresholds are §5's.
+1. **If m₁ = 0**, Host C refuses nothing at this cell at E27b's lengths. Its comparisons at 10⁵ and above are reported without a host caveat.
+2. **Else, if m₂ ≤ m₁ / 2**, the run length is the cause on Host C:
+   - E27c's Host C verdicts are reported with this result beside them. Their lengths are E27b's, fixed by E27c's own design (§7 there).
+   - A design pre-registered after this result for Host C uses L2's lengths.
+3. **Else**, Host C is noisy at this cell too:
+   - E27c's Host C refusals are reported as a host effect, with this result beside them;
+   - the author is told that moving hosts did not remove the noise.
+
+**What does not change.** No design pre-registered before this result changes because of it. Host C's counts are shown beside this container's (12 and 14), descriptively.

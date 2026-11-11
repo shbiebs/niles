@@ -56,4 +56,4 @@ This container (2 cores, 8 GB). Every point records its host, commit and toolcha
 
 ## 8. Deviations
 
-None yet.
+- **2026-11-11, presentation only, after the points existed.** `results/M-NOISE.md` gained one line stating the checkpoint interval (16, read from the points' own headers), because the repository's results-header test requires every machine-dependent result to state it. No count, verdict or number changed.

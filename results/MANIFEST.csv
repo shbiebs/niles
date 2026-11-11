@@ -436,3 +436,14 @@ E27b-p99-engine/single-100000-2024.tsv,machine-dependent,cargo run --release -p 
 E27b-p99-engine/single-100000-42.tsv,machine-dependent,cargo run --release -p comparator -- run --study e27b --shape p99-engine (arms N P+ H3; see E27b-p99-engine.md)
 E27b-p99-engine/single-100000-7.tsv,machine-dependent,cargo run --release -p comparator -- run --study e27b --shape p99-engine (arms N P+ H3; see E27b-p99-engine.md)
 C17-01-hang.md,machine-dependent,by hand (cycle 17 C17-01): 200 runs of the concurrent_differential test under timeout 20; command in the file
+M-NOISE.md,machine-dependent,cargo run --release -p comparator -- m-noise (design docs/study/M-NOISE-design.md)
+M-NOISE/L1/single-10000-1.tsv,machine-dependent,comparator run --study e27b --series single --sizes 10000 --seeds 1 --arms P+,P-inc --dir results/M-NOISE/L1
+M-NOISE/L1/single-10000-7.tsv,machine-dependent,comparator run --study e27b --series single --sizes 10000 --seeds 7 --arms P+,P-inc --dir results/M-NOISE/L1
+M-NOISE/L1/single-10000-42.tsv,machine-dependent,comparator run --study e27b --series single --sizes 10000 --seeds 42 --arms P+,P-inc --dir results/M-NOISE/L1
+M-NOISE/L1/single-10000-100.tsv,machine-dependent,comparator run --study e27b --series single --sizes 10000 --seeds 100 --arms P+,P-inc --dir results/M-NOISE/L1
+M-NOISE/L1/single-10000-2024.tsv,machine-dependent,comparator run --study e27b --series single --sizes 10000 --seeds 2024 --arms P+,P-inc --dir results/M-NOISE/L1
+M-NOISE/L2/single-10000-1.tsv,machine-dependent,comparator run --study e27b --series single --sizes 10000 --seeds 1 --arms P+,P-inc --length-factor 2 --dir results/M-NOISE/L2
+M-NOISE/L2/single-10000-7.tsv,machine-dependent,comparator run --study e27b --series single --sizes 10000 --seeds 7 --arms P+,P-inc --length-factor 2 --dir results/M-NOISE/L2
+M-NOISE/L2/single-10000-42.tsv,machine-dependent,comparator run --study e27b --series single --sizes 10000 --seeds 42 --arms P+,P-inc --length-factor 2 --dir results/M-NOISE/L2
+M-NOISE/L2/single-10000-100.tsv,machine-dependent,comparator run --study e27b --series single --sizes 10000 --seeds 100 --arms P+,P-inc --length-factor 2 --dir results/M-NOISE/L2
+M-NOISE/L2/single-10000-2024.tsv,machine-dependent,comparator run --study e27b --series single --sizes 10000 --seeds 2024 --arms P+,P-inc --length-factor 2 --dir results/M-NOISE/L2

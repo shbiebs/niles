@@ -1,6 +1,6 @@
 # E27c — the REV with its memory accounted for: design, future work
 
-*Cycle 16, card C16-03; the author's decision DB-3(a), and DB-1. **Not run.** Under DB-1 the
+*Cycle 16, card C16-03; the author's decision DB-3(a), and DB-1. **Pre-registered 2026-11-11 (cycle 17, C17-11; decision D17-2); not run.** Under DB-1 the
 product engine is PostgreSQL whatever the engine comparison says, so E27c is thesis evidence
 about the reconstructible epoch-anchored view, not a product decision, and it waits for a cycle
 that schedules it. This document records what it would measure and why, so that the question it
@@ -70,4 +70,10 @@ E27b §9.
 
 ## 7. Status
 
-Future work. Not pre-registered, not scheduled, not run.
+**Pre-registered 2026-11-11** (cycle 17, card C17-11; the author's decision D17-2 of 2026-10-10), before any E27c number. Not run.
+
+- **Arms:** N, N′-lazy, P+, H3 and P-inc (cycle 17's C17-03). N′-window and N′-off are not run: D17-2 chose N′-lazy only.
+- **The rule:** E27b's §8, unchanged, with P-inc added as an arm; refusals as E27b §9.
+- **Sizes and skew:** 10⁴ to 10⁶ accounts; α ∈ {0.6, 1.1}.
+- **Where:** M-NOISE (cycle 17, C17-04; `results/M-NOISE.md` on niles branch `c17/04-m-noise`) found the container's refusals a host effect, not a run-length one, so every E27c comparison at 10⁵ and above runs on the author's Mac (Host C, D17-7), and this container runs only the smoke. Run lengths are E27b's.
+- **Before the run:** N′-lazy is built behind a daemon flag whose default leaves N as E27b measured it, and passes the reconstruction-equivalence and conservation suites under the lazy policy.

@@ -523,6 +523,9 @@ pub struct PointResult {
     pub loads: BTreeMap<String, (LoadReport, Checksum, Checksum)>,
     pub pss_loaded: BTreeMap<String, u64>,
     pub state_end: BTreeMap<String, Vec<(String, i128)>>,
+    /// Arms that did not answer the end-of-run checks, and why (cycle 17, C17-02). Recorded,
+    /// never silent: a point whose checks were not all recorded fails the render.
+    pub end_refused: BTreeMap<String, String>,
     /// (arm, run index; warm-ups negative) -> the run's values.
     pub runs: Vec<(String, i64, RunOut)>,
     pub not_run: BTreeMap<String, Vec<(String, String)>>,
@@ -702,23 +705,38 @@ pub fn run_point(
 
     res.end_checksum = o.checksum();
     for arm in arms.iter() {
-        if let Ok(mut c) = arm.connect() {
-            if let Ok(mut l) = arm.legs(&mut c) {
-                let ck = checksum_of(&mut l);
-                if ck != res.end_checksum {
-                    res.failures.push(format!(
-                        "{}: end-of-run checksum {:?} differs from the oracle's {:?}",
-                        arm.name(),
-                        ck,
-                        res.end_checksum
-                    ));
-                }
-                if let Some(e) = res.loads.get_mut(arm.name()) {
-                    e.2 = ck;
-                }
+        match arm.connect() {
+            Err(e) => record_end(&mut res, arm.name(), Err(format!("connect: {e}"))),
+            Ok(mut c) => {
+                let outcome = arm
+                    .legs(&mut c)
+                    .map(|mut l| checksum_of(&mut l))
+                    .map_err(|e| format!("legs: {e}"));
+                record_end(&mut res, arm.name(), outcome);
+                res.state_end.insert(arm.name().into(), arm.state(&mut c));
             }
-            res.state_end.insert(arm.name().into(), arm.state(&mut c));
         }
     }
     res
+}
+
+/// Record one arm's end-of-run answer: its checksum, compared with the oracle's, or, when it
+/// did not answer, a refusal with the reason (C17-02). Nothing is left unrecorded.
+pub fn record_end(res: &mut PointResult, arm: &str, outcome: Result<Checksum, String>) {
+    match outcome {
+        Ok(ck) => {
+            if ck != res.end_checksum {
+                res.failures.push(format!(
+                    "{arm}: end-of-run checksum {ck:?} differs from the oracle's {:?}",
+                    res.end_checksum
+                ));
+            }
+            if let Some(e) = res.loads.get_mut(arm) {
+                e.2 = ck;
+            }
+        }
+        Err(why) => {
+            res.end_refused.insert(arm.to_string(), why);
+        }
+    }
 }

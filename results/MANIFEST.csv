@@ -79,6 +79,11 @@
 #   C=n/a E30b-syntax/programs.tsv E30b-syntax/mutants.tsv E30b-syntax/adversarial.tsv
 #   C=n/a E30b-syntax/cost-inprocess.tsv
 #
+#   M-NOISE on Host C (cycle 17, C17-12): host.txt records the machine and its load, not a
+#   measurement; its ten points state C=16 in their own headers, and the render repeats it.
+#
+#   C=16 M-NOISE-hostc/host.txt
+#
 #   E30c's rows (cycle 16, C16-10) ran no engine either: PostgreSQL and the checker.
 #
 #   C=n/a E30c-dialect/outcomes.tsv
@@ -447,3 +452,15 @@ M-NOISE/L2/single-10000-7.tsv,machine-dependent,comparator run --study e27b --se
 M-NOISE/L2/single-10000-42.tsv,machine-dependent,comparator run --study e27b --series single --sizes 10000 --seeds 42 --arms P+,P-inc --length-factor 2 --dir results/M-NOISE/L2
 M-NOISE/L2/single-10000-100.tsv,machine-dependent,comparator run --study e27b --series single --sizes 10000 --seeds 100 --arms P+,P-inc --length-factor 2 --dir results/M-NOISE/L2
 M-NOISE/L2/single-10000-2024.tsv,machine-dependent,comparator run --study e27b --series single --sizes 10000 --seeds 2024 --arms P+,P-inc --length-factor 2 --dir results/M-NOISE/L2
+M-NOISE-hostc.md,machine-dependent,cargo run --release -p comparator -- m-noise --host hostc (design docs/study/M-NOISE-design.md §9; run on Host C by tools/m-noise-hostc.sh)
+M-NOISE-hostc/host.txt,machine-dependent,tools/m-noise-hostc.sh on Host C (C17-12 run 1)
+M-NOISE-hostc/L1/single-10000-1.tsv,machine-dependent,comparator run --study e27b --series single --sizes 10000 --seeds 1 --arms P+,P-inc --dir results/M-NOISE-hostc/L1 (Host C, tools/m-noise-hostc.sh)
+M-NOISE-hostc/L1/single-10000-7.tsv,machine-dependent,comparator run --study e27b --series single --sizes 10000 --seeds 7 --arms P+,P-inc --dir results/M-NOISE-hostc/L1 (Host C, tools/m-noise-hostc.sh)
+M-NOISE-hostc/L1/single-10000-42.tsv,machine-dependent,comparator run --study e27b --series single --sizes 10000 --seeds 42 --arms P+,P-inc --dir results/M-NOISE-hostc/L1 (Host C, tools/m-noise-hostc.sh)
+M-NOISE-hostc/L1/single-10000-100.tsv,machine-dependent,comparator run --study e27b --series single --sizes 10000 --seeds 100 --arms P+,P-inc --dir results/M-NOISE-hostc/L1 (Host C, tools/m-noise-hostc.sh)
+M-NOISE-hostc/L1/single-10000-2024.tsv,machine-dependent,comparator run --study e27b --series single --sizes 10000 --seeds 2024 --arms P+,P-inc --dir results/M-NOISE-hostc/L1 (Host C, tools/m-noise-hostc.sh)
+M-NOISE-hostc/L2/single-10000-1.tsv,machine-dependent,comparator run --study e27b --series single --sizes 10000 --seeds 1 --arms P+,P-inc --length-factor 2 --dir results/M-NOISE-hostc/L2 (Host C, tools/m-noise-hostc.sh)
+M-NOISE-hostc/L2/single-10000-7.tsv,machine-dependent,comparator run --study e27b --series single --sizes 10000 --seeds 7 --arms P+,P-inc --length-factor 2 --dir results/M-NOISE-hostc/L2 (Host C, tools/m-noise-hostc.sh)
+M-NOISE-hostc/L2/single-10000-42.tsv,machine-dependent,comparator run --study e27b --series single --sizes 10000 --seeds 42 --arms P+,P-inc --length-factor 2 --dir results/M-NOISE-hostc/L2 (Host C, tools/m-noise-hostc.sh)
+M-NOISE-hostc/L2/single-10000-100.tsv,machine-dependent,comparator run --study e27b --series single --sizes 10000 --seeds 100 --arms P+,P-inc --length-factor 2 --dir results/M-NOISE-hostc/L2 (Host C, tools/m-noise-hostc.sh)
+M-NOISE-hostc/L2/single-10000-2024.tsv,machine-dependent,comparator run --study e27b --series single --sizes 10000 --seeds 2024 --arms P+,P-inc --length-factor 2 --dir results/M-NOISE-hostc/L2 (Host C, tools/m-noise-hostc.sh)

@@ -57,6 +57,10 @@ This container (2 cores, 8 GB). Every point records its host, commit and toolcha
 ## 8. Deviations
 
 - **2026-11-11, presentation only, after the points existed.** `results/M-NOISE.md` gained one line stating the checkpoint interval (16, read from the points' own headers), because the repository's results-header test requires every machine-dependent result to state it. No count, verdict or number changed.
+- **2026-11-11, Host C run (§9), recorded after the points existed; no count or verdict changes.**
+  - *Start load.* The script's load check passed (the author read 1.48 just before), but the next step, `cargo --version` inside the checkout, made rustup download the pinned 1.97.0 toolchain. `host.txt`'s start record therefore shows a load of 2.34. The end record shows 2.23. The points ran after that download and after the 9 s build; no build ran beside a point.
+  - *Toolchain field.* Each point's `toolchain` header reads `cargo 1.97.1`: the provenance asks for `stable`, which on the Mac is 1.97.1. The binaries were built with the pinned 1.97.0, which `host.txt` records.
+  - *Duration.* The ten points took 169 s, not the hour the work order estimated from the container.
 
 ## 9. Host C, the author's Mac (C17-12, run 1)
 

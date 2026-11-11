@@ -413,11 +413,35 @@ fn main() {
             std::fs::write(dir.join(&file), out).expect("write the probe file");
         }
         "m-noise" => {
-            // M-NOISE (C17-04): render the verdict from the two lengths' points.
-            let base = root.join("results/M-NOISE");
-            let report = comparator::mnoise::render(&base.join("L1"), &base.join("L2"));
-            let out = root.join("results/M-NOISE.md");
-            std::fs::write(&out, report).expect("write M-NOISE.md");
+            // M-NOISE (C17-04): render the verdict from the two lengths' points. With
+            // `--host hostc` (C17-12, run 1), Host C's points, its host record and its rule (§9).
+            let hostc = match arg(&args, "--host").as_deref() {
+                None => false,
+                Some("hostc") => true,
+                Some(other) => panic!("--host hostc, not {other}"),
+            };
+            let (base, out) = if hostc {
+                (
+                    root.join("results/M-NOISE-hostc"),
+                    root.join("results/M-NOISE-hostc.md"),
+                )
+            } else {
+                (
+                    root.join("results/M-NOISE"),
+                    root.join("results/M-NOISE.md"),
+                )
+            };
+            let host = hostc.then(|| {
+                std::fs::read_to_string(base.join("host.txt"))
+                    .expect("results/M-NOISE-hostc/host.txt, written by tools/m-noise-hostc.sh")
+            });
+            let (l1, l2) = (base.join("L1"), base.join("L2"));
+            let report = comparator::mnoise::render_target(&comparator::mnoise::Target {
+                l1: &l1,
+                l2: &l2,
+                host,
+            });
+            std::fs::write(&out, report).expect("write the M-NOISE render");
             eprintln!("wrote {}", out.display());
         }
         _ => {

@@ -182,7 +182,7 @@ That last sentence is the protocol's most consequential simplification, and Sect
 | checkpoints | one per C postings per key, never pruned by the implementation | Σ_k ⌊h_k/C⌋ ≤ H/C |
 | holes | one `Hole(e)` per evicted key ever read, Θ(\|R\|) for the set R of keys ever read | **zero since C16-03**: LC-31 compacts an evicted key to ⊥ (§3.20) |
 
-Full materialization holds Θ(|K|). **So with C > 0 partial state is never smaller than full state in order**: its saving is at most the constant-factor difference between a full entry and a per-key aggregate, and the checkpoint term grows with history. E27b measures it: at single-currency 10⁵ the engine's median checkpoint state is 15,901,376 B, more than the 11,624,448 B of the whole balance table full materialization keeps (`results/E27b-comparator.md` §5).
+Full materialization holds Θ(|K|). **So with C > 0 partial state is never smaller than full state in order**: its saving is at most the constant-factor difference between a full entry and a per-key aggregate, and the checkpoint term grows with history. E27b measures it (N as of `6ecded8`, before LC-31): at single-currency 10⁵ the engine's median checkpoint state is 15,901,376 B, more than the 11,624,448 B of the whole balance table full materialization keeps (`results/E27b-comparator.md` §5).
 
 **Cost law (stated here, proved as Contribution 3).** For a workload W with popularity distribution π (Zipf α), working set, read/write mix, and memory budget m:
 

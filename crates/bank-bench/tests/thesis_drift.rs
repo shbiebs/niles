@@ -1554,3 +1554,49 @@ fn every_component_has_one_status_rendered_from_scope_toml() {
         }
     }
 }
+
+/// **Every E27b figure about N names the build it was measured on** (cycle 17, C17-15).
+///
+/// E27b measured N at `6ecded8`, before LC-31 compacted its holes, so its N figures describe
+/// an engine that no longer exists as measured. A line of the thesis that names E27b and cites
+/// an N figure must say so. A line counts as citing one when it names E27b and carries a
+/// figure (a number with a thousands separator) or a statement about N (`N is`, `N beats`,
+/// `N's`, `checkpoint state`).
+#[test]
+fn every_e27b_n_figure_carries_the_build_it_was_measured_on() {
+    let root = repo_root();
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(root.join("thesis"))
+        .expect("thesis/")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "md"))
+        .collect();
+    files.push(root.join("thesis/status.toml"));
+    let grouped = |l: &str| {
+        let b = l.as_bytes();
+        (0..b.len().saturating_sub(4)).any(|i| {
+            b[i].is_ascii_digit()
+                && b[i + 1] == b','
+                && b[i + 2..i + 5].iter().all(u8::is_ascii_digit)
+        })
+    };
+    let mut bare = Vec::new();
+    for f in files {
+        let text = std::fs::read_to_string(&f).expect("readable");
+        for (n, line) in text.lines().enumerate() {
+            if !line.contains("E27b") {
+                continue;
+            }
+            let cites_n = grouped(line)
+                || ["N is", "N beats", "N's", "checkpoint state"]
+                    .iter()
+                    .any(|p| line.contains(p));
+            if cites_n && !line.contains("N as of `6ecded8`, before LC-31") {
+                bare.push(format!("{}:{}", f.display(), n + 1));
+            }
+        }
+    }
+    assert!(
+        bare.is_empty(),
+        "these lines cite an E27b figure about N without \"N as of `6ecded8`, before LC-31\": {bare:?}"
+    );
+}

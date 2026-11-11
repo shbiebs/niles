@@ -43,7 +43,7 @@ id = "pg-engine"
 short = "PostgreSQL as the engine, with the append-only ledger, the REV mechanism and the checks"
 component = "The engine: PostgreSQL with the append-only ledger, the REV mechanism and the checks"
 status = "product"
-decision = "DB-1 (cycle 16): PostgreSQL is the product engine, whatever the engine comparison (H-E1) finds; DB-11: extended in SQL and PL/pgSQL first, with a compiled extension only where a measurement shows SQL is the bottleneck"
+decision = "DB-1 (cycle 16): PostgreSQL is the product engine, whatever the engine comparison (H-E1) finds, confirmed by D17-1 (cycle 17) at the scope it was measured (10^3 to 10^5 accounts, one view per account, 2 cores) and reopened only if a corrected N′ beats P-inc and H3 on both clauses of the engine rule at 10^6 or at ten views per account on the large host; DB-11: extended in SQL and PL/pgSQL first, with a compiled extension only where a measurement shows SQL is the bottleneck"
 built = "E14 rebuilt the REV mechanism in stock PostgreSQL 16 (§6.10.3), and it runs as E27's P+ arm (crates/comparator); crates/rev-sidecar is the hybrid H3 (a PostgreSQL ledger with a REV sidecar). No packaged PostgreSQL ledger schema ships yet"
 where = "§6.10.3, §9.14, results/E27-comparator.md"
 
@@ -71,7 +71,7 @@ short = "Nilestream's ledger write path, REV runtime and reference oracle"
 component = "Nilestream: the ledger write path, the REV runtime and the reference oracle"
 status = "instrument"
 decision = "A-3 kept it (2026-09-21); DB-1 made it the theory's instrument and reference REV implementation, not the product engine"
-built = "crates/nilestream-ledger, crates/nilestream-core, crates/conservation-suite, crates/proto-engine"
+built = "crates/nilestream-ledger, crates/nilestream-core, crates/conservation-suite, crates/proto-engine. A recorded engine note (cycle 17, C17-01): `Runtime::advance` holds the runtime's lock across a whole catch-up, so a read issued during a catch-up waits for all of it"
 where = "§7.1, §7.4, Appendix D, Appendix K"
 
 [[component]]
@@ -88,8 +88,8 @@ id = "gbs"
 short = "GBS, a core-banking system whose product goal is to replace Loan IQ and Calypso"
 component = "GBS: a core-banking system in Rust, whose product goal is to replace Loan IQ and Calypso"
 status = "product"
-decision = "DB-4 (GBS's backend is PostgreSQL), DB-5 (replacing Loan IQ and Calypso is the product goal; the thesis evaluates only what is built), DB-10 (pricing and risk through ORE as a separate process)"
-built = "a separate, private repository: the kernel, the mechanisms and the products, with a Nilestream adapter held by its G3 correctness suite. Its PostgreSQL backend and the G3p suite are cycle 16's C16-05, not yet run"
+decision = "DB-4 (GBS's backend is PostgreSQL), DB-5 (replacing Loan IQ and Calypso is the product goal; the thesis evaluates only what is built), DB-10 (pricing and risk through ORE as a separate process), D17-4 (GBS is decoupled from AGPL code: its own PostgreSQL wire client and an Apache-2.0 licence file, so its product crates link nothing from this repository, which stays AGPL-3.0-only)"
+built = "a separate, private repository: the kernel, the mechanisms and the products, with an optional Nilestream adapter held by its G3 correctness suite. Its role is banking as a library over PostgreSQL's general relational core, and the thesis evaluates only what is built. Its PostgreSQL backend runs the same suite as G3p, at 29 rows and 0 failures (cycle 17)"
 where = "§11.4"
 
 [[component]]

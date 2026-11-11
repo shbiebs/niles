@@ -11,7 +11,7 @@
 use conservation_suite::faults::{inject, Fault};
 use conservation_suite::oracle::{Acct as OAcct, Cur as OCur};
 use conservation_suite::properties::{differential, schedule, Answer, Observable, Op, Unavailable};
-use proto_engine::ledger::{Ledger, Posting, Row};
+use proto_engine::ledger::{CheckpointPolicy, Ledger, Posting, Row};
 use proto_engine::policy::EvictionPolicy;
 use proto_engine::view::{PartialView, ViewMode};
 use proto_engine::{Acct, Cur, Minor};
@@ -29,11 +29,16 @@ struct Sut {
 
 impl Sut {
     fn new(checkpoints: usize) -> Self {
+        Self::with_policy(checkpoints, CheckpointPolicy::Eager)
+    }
+
+    /// Under a checkpoint policy (C17-11): `Lazy` is E27c's N′-lazy.
+    fn with_policy(checkpoints: usize, policy: CheckpointPolicy) -> Self {
         Sut {
             ledger: if checkpoints == 0 {
                 Ledger::new()
             } else {
-                Ledger::with_checkpoints(checkpoints)
+                Ledger::with_checkpoint_policy(checkpoints, policy)
             },
             // Three slots against sixty-four keys: almost every read reconstructs.
             view: PartialView::new(ViewMode::Demand, 3, EvictionPolicy::Lru),
@@ -135,9 +140,57 @@ impl Observable for Sut {
 }
 
 fn run(seed: u64, checkpoints: usize, len: usize) -> conservation_suite::properties::Report {
+    run_with(seed, checkpoints, len, CheckpointPolicy::Eager)
+}
+
+fn run_with(
+    seed: u64,
+    checkpoints: usize,
+    len: usize,
+    policy: CheckpointPolicy,
+) -> conservation_suite::properties::Report {
     let s = schedule(seed, 8, len);
-    let mut sut = Sut::new(checkpoints);
+    let mut sut = Sut::with_policy(checkpoints, policy);
     differential(&mut sut, &s, |sut, op| sut.drive(op))
+}
+
+// ── C17-11: the same suites under the lazy checkpoint policy (E27c's N′-lazy) ─────────────
+
+#[test]
+fn lazy_checkpointed_reconstruction_agrees_with_the_oracle() {
+    for seed in [1u64, 7, 42, 100, 2024] {
+        for c in [1usize, 2, 16] {
+            let r = run_with(seed, c, 600, CheckpointPolicy::Lazy);
+            assert!(r.compared > 100, "seed {seed}, C={c}: it must compare");
+            assert!(
+                r.ok(),
+                "lazy, seed {seed}, C={c}: {} divergences, first {:?}",
+                r.divergences.len(),
+                r.divergences.first()
+            );
+        }
+    }
+}
+
+#[test]
+fn lazy_answers_survive_a_crash_campaign_an_eviction_storm_and_duplicate_delivery() {
+    for (seed, fault) in [
+        (1u64, Fault::Crash),
+        (2024, Fault::Crash),
+        (7, Fault::EvictionStorm { times: 6 }),
+        (42, Fault::DuplicateDelivery),
+    ] {
+        let base = schedule(seed, 8, 500);
+        let campaign = inject(&base, fault, 7);
+        let mut sut = Sut::with_policy(4, CheckpointPolicy::Lazy);
+        let r = differential(&mut sut, &campaign, |sut, op| sut.drive(op));
+        assert!(r.compared > 100);
+        assert!(
+            r.ok(),
+            "lazy, seed {seed}, {fault:?}: {:?}",
+            r.divergences.first()
+        );
+    }
 }
 
 #[test]

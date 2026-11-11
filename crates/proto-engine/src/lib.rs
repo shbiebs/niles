@@ -28,7 +28,7 @@ pub mod view;
 pub mod workload;
 
 pub use cost::CostModel;
-pub use ledger::{Hold, Ledger, Outcome, Posting, Reject, Row};
+pub use ledger::{CheckpointPolicy, Hold, Ledger, Outcome, Posting, Reject, Row};
 pub use policy::EvictionPolicy;
 pub use view::{PartialView, Slot, ViewMode, ViewStats};
 pub use workload::Zipf;

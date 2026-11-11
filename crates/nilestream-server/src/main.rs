@@ -115,6 +115,7 @@ fn main() {
     let mut rounds = 3u32;
     let mut budget = 100_000usize;
     let mut checkpoint = 0usize;
+    let mut checkpoint_policy = proto_engine::CheckpointPolicy::Eager;
     let mut full = false;
     let mut durable: Option<String> = None;
     // **Durability is a choice that has to be made out loud (LC-16).** Neither flag is a
@@ -150,6 +151,18 @@ fn main() {
             // and was the only setting the daemon could run at until cycle 14 (R2-02), which
             // is why E16, E19 and E23 all ran without the mechanism the cost law needs.
             "--checkpoint" => checkpoint = flag("--checkpoint", &args[i + 1]),
+            // Which keys carry checkpoint state (cycle 17, C17-11): `eager`, the default and
+            // N as E27b measured it, or `lazy`, E27c's N′-lazy (only keys that have been read).
+            "--checkpoint-policy" => {
+                match args[i + 1].as_str() {
+                    "eager" => checkpoint_policy = proto_engine::CheckpointPolicy::Eager,
+                    "lazy" => checkpoint_policy = proto_engine::CheckpointPolicy::Lazy,
+                    other => {
+                        eprintln!("nilestreamd: --checkpoint-policy expects `eager` or `lazy`, not `{other}`");
+                        std::process::exit(2);
+                    }
+                }
+            }
             "--mode" => match args[i + 1].as_str() {
                 "full" => full = true,
                 "demand" => full = false,
@@ -301,13 +314,19 @@ fn main() {
     if checkpoint > 0 {
         eprintln!("  per-key checkpoints every {checkpoint} postings (C = {checkpoint})");
     }
-    let base = RevEngine::seeded_with_checkpoints(
+    if checkpoint_policy == proto_engine::CheckpointPolicy::Lazy {
+        eprintln!(
+            "  checkpoint policy: lazy (only keys that have been read carry checkpoint state)"
+        );
+    }
+    let base = RevEngine::seeded_with_checkpoint_policy(
         accounts,
         rounds,
         budget,
         mode,
         proto_engine::EvictionPolicy::Lru,
         checkpoint,
+        checkpoint_policy,
     )
     .with_idem_window(idem_window);
     let base = match &durable {

@@ -763,10 +763,33 @@ impl RevEngine {
         policy: EvictionPolicy,
         checkpoint_interval: usize,
     ) -> RevEngine {
+        Self::seeded_with_checkpoint_policy(
+            accounts,
+            postings_per_account,
+            budget,
+            mode,
+            policy,
+            checkpoint_interval,
+            proto_engine::CheckpointPolicy::Eager,
+        )
+    }
+
+    /// The same, with the checkpoint policy chosen (cycle 17, C17-11): `Eager` is N as E27b
+    /// measured it; `Lazy` is E27c's N′-lazy, which builds a key's checkpoint state only once
+    /// the key is read.
+    pub fn seeded_with_checkpoint_policy(
+        accounts: i64,
+        postings_per_account: u32,
+        budget: usize,
+        mode: ViewMode,
+        policy: EvictionPolicy,
+        checkpoint_interval: usize,
+        checkpoint_policy: proto_engine::CheckpointPolicy,
+    ) -> RevEngine {
         let mut ledger = if checkpoint_interval == 0 {
             Ledger::new()
         } else {
-            Ledger::with_checkpoints(checkpoint_interval)
+            Ledger::with_checkpoint_policy(checkpoint_interval, checkpoint_policy)
         };
         let mut txn = 0u64;
         for round in 0..postings_per_account {

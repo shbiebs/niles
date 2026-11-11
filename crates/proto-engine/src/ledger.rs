@@ -77,6 +77,29 @@ pub struct RowRef {
     pub idx: u32,
 }
 
+/// When the per-key checkpoint state is built (cycle 17, C17-11: E27c's N′-lazy).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CheckpointPolicy {
+    /// From a key's first posting: a running balance, a posting count and a checkpoint every
+    /// `checkpoint_interval` postings on every key. N as E27b measured it, and the default.
+    #[default]
+    Eager,
+    /// Only for keys that have been read. A key never read has no running balance, no count
+    /// and no checkpoint. A key's first read folds its history once, through the anchor
+    /// index, records a checkpoint at the head, and from then on the key is maintained as
+    /// under `Eager`.
+    Lazy,
+}
+
+/// The checkpoint state of the keys a `Lazy` ledger has activated. Behind a lock because a
+/// key is activated by a read, which holds the ledger shared.
+#[derive(Default)]
+struct LazyState {
+    checkpoints: HashMap<(Acct, Cur), Vec<(Epoch, Minor)>>,
+    posting_seen: HashMap<(Acct, Cur), usize>,
+    running: HashMap<(Acct, Cur), Minor>,
+}
+
 #[derive(Default)]
 pub struct Ledger {
     pub epochs: Vec<EpochRec>,
@@ -124,6 +147,11 @@ pub struct Ledger {
     /// A checkpoint is derived state (it is recomputable from the base), so it does not
     /// weaken the immutability or retention argument.
     pub checkpoint_interval: usize,
+    /// Which keys carry checkpoint state; see [`CheckpointPolicy`]. Set before the first
+    /// append.
+    pub checkpoint_policy: CheckpointPolicy,
+    /// Under `Lazy`, the activated keys' state; empty under `Eager`.
+    lazy: std::sync::Mutex<LazyState>,
     checkpoints: HashMap<(Acct, Cur), Vec<(Epoch, Minor)>>,
     posting_seen: HashMap<(Acct, Cur), usize>,
     running: HashMap<(Acct, Cur), Minor>,
@@ -279,6 +307,16 @@ impl Ledger {
         Self {
             chaining: true,
             checkpoint_interval: interval,
+            ..Default::default()
+        }
+    }
+
+    /// Checkpoints every `interval` postings under `policy` (C17-11).
+    pub fn with_checkpoint_policy(interval: usize, policy: CheckpointPolicy) -> Self {
+        Self {
+            chaining: true,
+            checkpoint_interval: interval,
+            checkpoint_policy: policy,
             ..Default::default()
         }
     }
@@ -441,9 +479,22 @@ impl Ledger {
                     // the interval's non-zero-ness a type fact says which.
                     if let Some(interval) = std::num::NonZeroUsize::new(self.checkpoint_interval) {
                         let key = (p.acct, p.cur);
-                        let run = self.running.entry(key).or_insert(0);
+                        // Under `Lazy` a key's state lives in `lazy`, and only once a read
+                        // has activated it; a key never read gets nothing here.
+                        let lazy = self
+                            .lazy
+                            .get_mut()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        let (running, seen_map) = match self.checkpoint_policy {
+                            CheckpointPolicy::Eager => (&mut self.running, &mut self.posting_seen),
+                            CheckpointPolicy::Lazy if lazy.running.contains_key(&key) => {
+                                (&mut lazy.running, &mut lazy.posting_seen)
+                            }
+                            CheckpointPolicy::Lazy => continue,
+                        };
+                        let run = running.entry(key).or_insert(0);
                         *run += p.amt;
-                        let seen = self.posting_seen.entry(key).or_insert(0);
+                        let seen = seen_map.entry(key).or_insert(0);
                         let before = *seen / interval;
                         *seen += 1;
                         if *seen / interval > before && !crossed.contains(&key) {
@@ -464,9 +515,23 @@ impl Ledger {
         // One checkpoint per key per epoch, written after every row of the epoch has been
         // folded, so the recorded value is the end-of-epoch value.
         crossed.sort_unstable();
-        for key in crossed {
-            let run = *self.running.get(&key).unwrap_or(&0);
-            self.checkpoints.entry(key).or_default().push((id, run));
+        match self.checkpoint_policy {
+            CheckpointPolicy::Eager => {
+                for key in crossed {
+                    let run = *self.running.get(&key).unwrap_or(&0);
+                    self.checkpoints.entry(key).or_default().push((id, run));
+                }
+            }
+            CheckpointPolicy::Lazy => {
+                let lazy = self
+                    .lazy
+                    .get_mut()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                for key in crossed {
+                    let run = *lazy.running.get(&key).unwrap_or(&0);
+                    lazy.checkpoints.entry(key).or_default().push((id, run));
+                }
+            }
         }
 
         self.epochs.push(EpochRec {
@@ -532,14 +597,27 @@ impl Ledger {
         // checkpoint read costs one row.
         let mut start = 0usize;
         if self.checkpoint_interval > 0 {
-            if let Some(cps) = self.checkpoints.get(&(acct, cur)) {
+            let newest = |cps: &Vec<(Epoch, Minor)>| {
                 let ci = cps.partition_point(|(e, _)| *e <= anchor);
-                if ci > 0 {
-                    let (cp_epoch, cp_val) = cps[ci - 1];
-                    total = cp_val;
-                    touched += 1;
-                    start = refs.partition_point(|r| r.epoch <= cp_epoch);
+                (ci > 0).then(|| cps[ci - 1])
+            };
+            let found = match self.checkpoint_policy {
+                CheckpointPolicy::Eager => self.checkpoints.get(&(acct, cur)).and_then(newest),
+                CheckpointPolicy::Lazy => {
+                    let mut lazy = self
+                        .lazy
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if !lazy.running.contains_key(&(acct, cur)) {
+                        touched += self.activate(&mut lazy, refs, acct, cur);
+                    }
+                    lazy.checkpoints.get(&(acct, cur)).and_then(newest)
                 }
+            };
+            if let Some((cp_epoch, cp_val)) = found {
+                total = cp_val;
+                touched += 1;
+                start = refs.partition_point(|r| r.epoch <= cp_epoch);
             }
         }
 
@@ -554,6 +632,45 @@ impl Ledger {
         }
         self.count_rows(touched);
         (total, touched)
+    }
+
+    /// A `Lazy` key's first read: fold its whole history once through the anchor index, and
+    /// start its state from the head. Returns the rows it touched, which the read counts.
+    fn activate(&self, lazy: &mut LazyState, refs: &[RowRef], acct: Acct, cur: Cur) -> u64 {
+        let mut total: Minor = 0;
+        let mut seen = 0usize;
+        let mut touched = 0u64;
+        for rr in refs {
+            touched += 1;
+            if let Row::Post(p) = &self.epochs[rr.epoch as usize].rows[rr.idx as usize] {
+                if p.acct == acct && p.cur == cur {
+                    total += p.amt;
+                    seen += 1;
+                }
+            }
+        }
+        lazy.running.insert((acct, cur), total);
+        lazy.posting_seen.insert((acct, cur), seen);
+        // Definition 3.9's checkpoint: the key's value at the end of the head epoch.
+        if let Some(head) = self.epochs.last().map(|e| e.id) {
+            lazy.checkpoints.insert((acct, cur), vec![(head, total)]);
+        }
+        touched
+    }
+
+    /// Keys holding checkpoint state (running balance, posting count or checkpoints). Under
+    /// `Lazy` these are exactly the keys read so far (the count probe of C17-11).
+    pub fn keys_with_checkpoint_state(&self) -> usize {
+        match self.checkpoint_policy {
+            CheckpointPolicy::Eager => self.running.len().max(self.posting_seen.len()),
+            CheckpointPolicy::Lazy => {
+                let lazy = self
+                    .lazy
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                lazy.running.len().max(lazy.posting_seen.len())
+            }
+        }
     }
 
     /// Unindexed reconstruction: fold the whole prefix. Used only as the *ablation* that
@@ -640,19 +757,45 @@ impl Ledger {
         HashMap<(Acct, Cur), Minor>,
         HashMap<(Acct, Cur), Epoch>,
     ) {
-        (
-            self.checkpoints.clone(),
-            self.posting_seen.clone(),
-            self.running.clone(),
-            self.key_first.clone(),
-        )
+        match self.checkpoint_policy {
+            CheckpointPolicy::Eager => (
+                self.checkpoints.clone(),
+                self.posting_seen.clone(),
+                self.running.clone(),
+                self.key_first.clone(),
+            ),
+            CheckpointPolicy::Lazy => {
+                let lazy = self
+                    .lazy
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                (
+                    lazy.checkpoints.clone(),
+                    lazy.posting_seen.clone(),
+                    lazy.running.clone(),
+                    self.key_first.clone(),
+                )
+            }
+        }
     }
 
     pub fn checkpoint_coverage(&self) -> (usize, usize) {
-        (
-            self.checkpoints.values().filter(|v| !v.is_empty()).count(),
-            self.checkpoints.values().map(|v| v.len()).sum(),
-        )
+        let count = |cps: &HashMap<(Acct, Cur), Vec<(Epoch, Minor)>>| {
+            (
+                cps.values().filter(|v| !v.is_empty()).count(),
+                cps.values().map(|v| v.len()).sum(),
+            )
+        };
+        match self.checkpoint_policy {
+            CheckpointPolicy::Eager => count(&self.checkpoints),
+            CheckpointPolicy::Lazy => count(
+                &self
+                    .lazy
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .checkpoints,
+            ),
+        }
     }
 
     /// Through the **anchor index**, which is the mechanism the whole thesis is about: the
@@ -1275,6 +1418,138 @@ mod idem_window_tests {
             l.submit("k0", vec![post(100, 1, 5), post(100, 999, -5)]),
             Err(Reject::Duplicate),
             "with no window, the first identity is still known"
+        );
+    }
+}
+
+#[cfg(test)]
+mod lazy_tests {
+    //! C17-11: E27c's N′-lazy. The count probe, and value equivalence with `Eager` and with
+    //! the unindexed scan at every anchor, including anchors before a key's activation.
+    use super::*;
+
+    const USD: Cur = 840;
+
+    fn transfer(l: &mut Ledger, txn: u64, from: Acct, to: Acct, amt: Minor) {
+        let leg = |acct, amt| {
+            Row::Post(Posting {
+                txn,
+                acct,
+                cur: USD,
+                amt,
+                valid: 0,
+            })
+        };
+        l.submit(&format!("t{txn}"), vec![leg(from, -amt), leg(to, amt)])
+            .expect("a conserved transfer");
+    }
+
+    fn seeded(policy: CheckpointPolicy) -> Ledger {
+        let mut l = Ledger::with_checkpoint_policy(4, policy);
+        for t in 0..400u64 {
+            transfer(
+                &mut l,
+                t + 1,
+                t % 50,
+                (t * 7 + 3) % 50,
+                10 + (t as Minor % 9),
+            );
+        }
+        l
+    }
+
+    #[test]
+    fn lazy_holds_no_checkpoint_state_for_a_key_never_read() {
+        let eager = seeded(CheckpointPolicy::Eager);
+        let lazy = seeded(CheckpointPolicy::Lazy);
+        assert_eq!(eager.keys_with_checkpoint_state(), 50, "every key, eagerly");
+        assert_eq!(
+            lazy.keys_with_checkpoint_state(),
+            0,
+            "nothing read, nothing held"
+        );
+        assert_eq!(lazy.checkpoint_coverage(), (0, 0));
+        let head = lazy.head();
+        for acct in [3, 17, 41] {
+            assert_eq!(
+                lazy.reconstruct_balance(acct, USD, head),
+                eager.reconstruct_balance(acct, USD, head)
+            );
+        }
+        assert_eq!(
+            lazy.keys_with_checkpoint_state(),
+            3,
+            "exactly the keys read"
+        );
+        let (cps, seen, running, _) = lazy.checkpoint_state_image();
+        for map_keys in [
+            cps.keys().copied().collect::<HashSet<_>>(),
+            seen.keys().copied().collect(),
+            running.keys().copied().collect(),
+        ] {
+            assert_eq!(
+                map_keys,
+                [(3, USD), (17, USD), (41, USD)].into_iter().collect(),
+                "no state for a key never read"
+            );
+        }
+    }
+
+    #[test]
+    fn lazy_answers_equal_eager_and_the_scan_at_every_anchor_across_activation() {
+        let mut eager = seeded(CheckpointPolicy::Eager);
+        let mut lazy = seeded(CheckpointPolicy::Lazy);
+        // Activate some keys mid-history, then keep appending, so later reads use checkpoints
+        // written after activation, and reads below the activation point fold from genesis.
+        for acct in [0, 9, 25] {
+            let h = lazy.head();
+            assert_eq!(
+                lazy.reconstruct_balance(acct, USD, h),
+                eager.reconstruct_balance(acct, USD, h)
+            );
+        }
+        for t in 400..700u64 {
+            transfer(
+                &mut eager,
+                t + 1,
+                t % 50,
+                (t * 11 + 5) % 50,
+                3 + (t as Minor % 7),
+            );
+            transfer(
+                &mut lazy,
+                t + 1,
+                t % 50,
+                (t * 11 + 5) % 50,
+                3 + (t as Minor % 7),
+            );
+        }
+        let head = lazy.head();
+        for acct in 0..50 {
+            for anchor in (0..=head).step_by(13).chain([head]) {
+                let scan = lazy.reconstruct_balance_scan(acct, USD, anchor);
+                assert_eq!(
+                    lazy.reconstruct_balance(acct, USD, anchor),
+                    scan,
+                    "lazy {acct}@{anchor}"
+                );
+                assert_eq!(
+                    eager.reconstruct_balance(acct, USD, anchor),
+                    scan,
+                    "eager {acct}@{anchor}"
+                );
+            }
+        }
+        // Conservation at every anchor holds under both: every key's answer sums to zero.
+        for anchor in (0..=head).step_by(29) {
+            let total: Minor = (0..50)
+                .map(|a| lazy.reconstruct_balance(a, USD, anchor))
+                .sum();
+            assert_eq!(total, 0, "conservation at {anchor}");
+        }
+        assert!(
+            lazy.checkpoint_coverage().1 > 0,
+            "activated keys checkpoint after activation"
         );
     }
 }

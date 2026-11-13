@@ -1031,6 +1031,18 @@ impl RevEngine {
                 ViewAnswer::Wait(plan) => return QueryStep::Wait(plan),
             }
         }
+        // **C17-19: a pinned keyed balance is the ledger's reconstruction**, decided by
+        // `serve_path_of` like every other path, so `explain` names what runs. Counted as a
+        // served read with the rows the reconstruction touched.
+        if planned.is_none() && serve_path_of(None, circuit, output) == ServePath::Pinned {
+            if let Some(p) = crate::scan_fold::plan_through_as_of(circuit, output) {
+                if let Some(rows) = self.answer_pinned_from_ledger(&p, circuit, output, anchor) {
+                    self.served
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    return QueryStep::Done(Ok(rows));
+                }
+            }
+        }
         // Counted here rather than on entry: a query the maintained view answered is not a
         // read of the scan surface, and adding it to both totals double-counted every one.
         self.served
@@ -1935,6 +1947,71 @@ impl RevEngine {
         })
     }
 
+    /// **A pinned keyed balance, reconstructed by the ledger** (cycle 17, C17-19; E27c
+    /// design §7.2). `Ledger::reconstruct_balance_counted` starts from the newest per-key
+    /// checkpoint at or before the anchor and folds only the key's postings after it, so the
+    /// rows read are bounded by C where the key has checkpoints (SC7); under the lazy policy
+    /// a key's first read folds its history once and starts them. The answer is the one the
+    /// materialising path gives — absence of the key at the anchor is no row, not zero;
+    /// `the_pinned_path_agrees_with_the_materialising_path_at_every_anchor` holds the two
+    /// together under both policies. `None` where the base's currencies make the read
+    /// ambiguous, exactly where the view refuses; the old path then answers.
+    fn answer_pinned_from_ledger(
+        &self,
+        p: &crate::scan_fold::FoldPlan,
+        circuit: &niles_ir::circuit::Circuit,
+        output: &str,
+        anchor: u64,
+    ) -> Option<crate::session::Rows> {
+        let (acct, named, with_currency) = keyed_balance_shape(p, circuit, output)?;
+        let named = named.and_then(|c| u32::try_from(c).ok());
+        let several = self.currency_count() != 1;
+        let cur = match named {
+            Some(c) => c,
+            None if several => return None,
+            None => self.sole_currency()?,
+        };
+        let mut columns: Vec<String> = (0..p.width()).map(|i| format!("c{i}")).collect();
+        columns.push("anchor".into());
+        let base = self.base();
+        let at = anchor.min(base.head());
+        // The existence rule of `answer_from_view`, word for word in effect.
+        let exists = if several || named.is_some() {
+            base.key_exists_at(acct, cur, at)
+        } else {
+            base.key_update_count(acct, at) > 0
+        };
+        if !exists {
+            return Some(crate::session::Rows {
+                columns,
+                rows: crate::session::RowSource::Evaluated {
+                    z: niles_ir::eval::ZSet::new(),
+                    anchor,
+                },
+            });
+        }
+        let (value, touched) = base.reconstruct_balance_counted(
+            acct as proto_engine::Acct,
+            cur as proto_engine::Cur,
+            at,
+        );
+        drop(base);
+        self.served_rows
+            .fetch_add(touched, std::sync::atomic::Ordering::Relaxed);
+        Some(Self::rows_from_answer(
+            columns,
+            acct,
+            cur,
+            with_currency,
+            amount_is_money(p),
+            nilestream_core::rev::Joined {
+                answer: nilestream_core::rev::Anchored { value, anchor },
+                base_rows: 1,
+            },
+            anchor,
+        ))
+    }
+
     /// **One account's balance, out of the maintained REV** — or `None`, meaning this query
     /// is not that question and the general path must answer it.
     ///
@@ -2449,6 +2526,13 @@ pub enum ServePath {
     View,
     /// A fold over the rows of **one account**, reached through the anchor index.
     IndexFold,
+    /// **One key's balance pinned with `as of system time`, reconstructed by the ledger**
+    /// (cycle 17, C17-19): from the newest per-key checkpoint at or before the anchor, then
+    /// the key's postings after it up to the anchor. This is SC7's mechanism on the wire.
+    /// Before C17-19 a pinned keyed read took `IndexFold`'s cost through the materialising
+    /// path and never read a checkpoint (E27c design §7.2). It neither reads nor installs a
+    /// view entry: the view holds one version per key, at the head.
+    Pinned,
     /// A fold over the whole base, in one pass, with no intermediate Z-set.
     Fold,
     /// The whole base materialised as a Z-set and the circuit evaluated over it: the honest
@@ -2470,6 +2554,7 @@ impl ServePath {
             ServePath::Report => "report-from-view",
             ServePath::View => "view",
             ServePath::IndexFold => "index-fold",
+            ServePath::Pinned => "pinned-reconstruct",
             ServePath::Fold => "fold",
             ServePath::Materialise => "materialise",
             ServePath::Refused => "refused-cross-currency",
@@ -2485,6 +2570,7 @@ impl ServePath {
             ServePath::Report,
             ServePath::View,
             ServePath::IndexFold,
+            ServePath::Pinned,
             ServePath::Fold,
             ServePath::Materialise,
         ] {
@@ -2506,6 +2592,9 @@ impl ServePath {
             }
             ServePath::IndexFold => {
                 "one pass over one account's postings, reached through the anchor index; O(that account's history)"
+            }
+            ServePath::Pinned => {
+                "one key's balance at a pinned epoch, reconstructed by the ledger from its newest checkpoint at or before the anchor; O(the checkpoint interval) where the key has checkpoints, O(its history to the anchor) where it has none; no view entry is read or installed"
             }
             ServePath::Fold => {
                 "one pass over the base with a per-group accumulator and no intermediate Z-set; O(base rows + groups)"
@@ -2547,6 +2636,15 @@ pub fn serve_path_of(
     const CUR: u16 = 2;
     const AMT: u16 = 3;
     let Some(p) = plan else {
+        // C17-19: a keyed balance pinned with `as of system time` is the view's shape with
+        // an `AsOf` between the base and its filters, which `scan_fold::plan` refuses.
+        if is_pinned(circuit) {
+            if let Some(q) = crate::scan_fold::plan_through_as_of(circuit, output) {
+                if keyed_balance_shape(&q, circuit, output).is_some() {
+                    return ServePath::Pinned;
+                }
+            }
+        }
         return ServePath::Materialise;
     };
     let sole = p.sole_key_filter(ACCT_COL, CUR);
@@ -2634,6 +2732,39 @@ fn postings_width(circuit: &niles_ir::circuit::Circuit) -> usize {
 /// refuses it over a base holding two currencies (`cross_currency_fold`) and answers it
 /// from the view only when the base holds one. So both spellings are this shape, and the
 /// serve paths do not change with the tag.
+/// Whether the circuit is pinned to an epoch (`as of system time e`).
+fn is_pinned(circuit: &niles_ir::circuit::Circuit) -> bool {
+    circuit
+        .nodes
+        .iter()
+        .any(|n| matches!(n.op, niles_ir::operator::Op::AsOf { epoch: Some(_) }))
+}
+
+/// **The view's static conditions on a keyed balance read**, shared by `serve_path_of` and
+/// the engine so the two cannot disagree: the aggregate is the output, the chain is filters
+/// only, the aggregate is exactly `sum(amt)`, it groups by the account (and possibly the
+/// currency), and the restriction is one account (and possibly one currency). Returns the
+/// account, the named currency if any, and whether the currency is in the group key.
+fn keyed_balance_shape(
+    p: &crate::scan_fold::FoldPlan,
+    circuit: &niles_ir::circuit::Circuit,
+    output: &str,
+) -> Option<(u64, Option<u64>, bool)> {
+    let (acct, named) = p.sole_key_filter(ACCT_COL, CUR_COL)?;
+    if circuit.outputs.get(output) != Some(&p.node) || !p.filters_only() {
+        return None;
+    }
+    if !sums_amount(p.aggs()) {
+        return None;
+    }
+    let with_currency = match p.group_key() {
+        [ACCT_COL] => false,
+        [ACCT_COL, CUR_COL] => true,
+        _ => return None,
+    };
+    Some((acct, named, with_currency))
+}
+
 fn sums_amount(aggs: &[(niles_ir::operator::Agg, niles_ir::operator::Scalar)]) -> bool {
     use niles_ir::operator::{Agg, Scalar};
     const CUR: u16 = 2;
@@ -2978,7 +3109,7 @@ mod tests {
     }
 
     /// Render a Z-set the way `Serving::query` renders one, so the two can be compared.
-    fn rendered(z: &niles_ir::eval::ZSet, anchor: u64) -> Vec<Vec<Option<String>>> {
+    pub(super) fn rendered(z: &niles_ir::eval::ZSet, anchor: u64) -> Vec<Vec<Option<String>>> {
         let mut rows = Vec::new();
         for (r, w) in z {
             if *w <= 0 {
@@ -6361,6 +6492,149 @@ mod fallback_rate_tests {
              keyed reads rebuilt the value from the base, which means resident entries are \
              being discarded rather than served",
             s.misses
+        );
+    }
+}
+
+#[cfg(test)]
+mod pinned_reads {
+    //! **C17-19: a pinned keyed balance is the ledger's checkpointed reconstruction.**
+    //!
+    //! Before this card a read `as of system time e` behind the head never read a checkpoint:
+    //! `scan_fold::plan` refused the `AsOf` node, so the read was materialised from the
+    //! account's postings up to e, and N's base rows on E27c's historical anchors equalled
+    //! H3's (E27c design §7.2). These hold the new path to the old answer at every anchor,
+    //! under both checkpoint policies, and hold its cost to the checkpoint interval.
+    use super::*;
+    use crate::session::Serving;
+
+    fn lower(sql: &str) -> niles_ir::circuit::Circuit {
+        let program = format!(
+            "{}\nview __wire_result = sql {{ {sql} }} serve {{ consistency: snapshot, materialize: auto }};\n",
+            crate::daemon::DEFAULT_SCHEMA
+        );
+        let (prog, d) = niles_lang::parser::parse_program(&program);
+        assert!(!d.has_errors(), "{sql}: {:?}", d.items);
+        let (cat, _) = niles_lang::resolve::resolve_program(&prog, 0);
+        let (lowered, ld) = niles_lang::lower::lower_program(&prog, &cat);
+        assert!(!ld.has_errors(), "{sql}: {:?}", ld.items);
+        lowered.circuit
+    }
+
+    fn engine(c: usize, policy: proto_engine::CheckpointPolicy) -> RevEngine {
+        // Six accounts, eight rounds, one transaction per epoch: account 0 (the house) posts
+        // in every one of the 48 epochs, accounts 1–6 in eight each, account 99 in none.
+        RevEngine::seeded_with_checkpoint_policy(
+            6,
+            8,
+            3,
+            ViewMode::Demand,
+            EvictionPolicy::Lru,
+            c,
+            policy,
+        )
+    }
+
+    fn texts(z: &niles_ir::eval::ZSet, anchor: u64) -> Vec<Vec<Option<String>>> {
+        super::tests::rendered(z, anchor)
+    }
+
+    #[test]
+    fn the_pinned_path_agrees_with_the_materialising_path_at_every_anchor() {
+        for policy in [
+            proto_engine::CheckpointPolicy::Eager,
+            proto_engine::CheckpointPolicy::Lazy,
+        ] {
+            for c in [0usize, 2, 16] {
+                let e = engine(c, policy);
+                let head = e.frontier();
+                assert!(head >= 40, "the seed builds one epoch per transaction");
+                for acct in [0u64, 1, 3, 6, 99] {
+                    for at in 0..=head {
+                        for sql in [
+                            format!("select acct, sum(amt) from postings as of system time {at} where acct = {acct} group by acct"),
+                            format!("select acct, cur, sum(amt) from postings as of system time {at} where acct = {acct} and cur = 0 group by acct, cur"),
+                        ] {
+                            let circuit = lower(&sql);
+                            assert_eq!(
+                                e.serve_path_at(&circuit, "__wire_result", at),
+                                ServePath::Pinned,
+                                "{sql}"
+                            );
+                            let got = e.query(&circuit, "__wire_result", at).expect("answers");
+                            let (oracle, _) =
+                                niles_ir::eval::try_run(&circuit, "__wire_result", &e.base_at(at))
+                                    .expect("oracle");
+                            assert_eq!(
+                                got.text(),
+                                texts(&oracle, at),
+                                "{policy:?}, C = {c}: {sql}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_pinned_read_starts_from_a_checkpoint() {
+        // Account 0 has one posting per epoch. With checkpoints every C of its postings, a
+        // pinned read touches the checkpoint and fewer than C postings after it; with none,
+        // it touches every posting up to the anchor.
+        //
+        // **The lazy policy, as C17-11 built it:** a key's first read folds its history once
+        // and records one checkpoint, at the head; checkpoints follow from then on. So an
+        // anchor *behind* that first read has no checkpoint at or before it and folds from
+        // genesis, exactly as with none, and an anchor at or after it is bounded. That is
+        // stated here because it decides what E27c's historical anchors cost N′-lazy.
+        let rows_of = |e: &RevEngine, at: u64| {
+            let circuit = lower(&format!(
+                "select acct, sum(amt) from postings as of system time {at} where acct = 0 group by acct"
+            ));
+            let before = e.read_stats();
+            e.query(&circuit, "__wire_result", at).expect("answers");
+            let after = e.read_stats();
+            (
+                after.rows_touched - before.rows_touched,
+                after.misses - before.misses,
+            )
+        };
+        let none = engine(0, proto_engine::CheckpointPolicy::Eager);
+        let head = none.frontier();
+        let (rows, misses) = rows_of(&none, head);
+        assert_eq!(misses, 1, "a pinned read is one served reconstruction");
+        assert!(
+            rows >= 40,
+            "without checkpoints the whole history is read: {rows}"
+        );
+
+        let eager = engine(2, proto_engine::CheckpointPolicy::Eager);
+        for at in 0..=head {
+            let (rows, _) = rows_of(&eager, at);
+            assert!(
+                rows <= 3,
+                "eager, C = 2, anchor {at}: {rows} rows, above C + 1"
+            );
+        }
+
+        let lazy = engine(2, proto_engine::CheckpointPolicy::Lazy);
+        let (first, _) = rows_of(&lazy, head);
+        assert!(
+            first >= 40,
+            "the lazy policy's first read folds the history once: {first}"
+        );
+        for at in 0..head {
+            assert_eq!(
+                rows_of(&lazy, at).0,
+                rows_of(&none, at).0,
+                "lazy, anchor {at} behind the first read: no checkpoint at or before it"
+            );
+        }
+        assert_eq!(
+            rows_of(&lazy, head).0,
+            1,
+            "lazy, at the first read's head: its checkpoint"
         );
     }
 }

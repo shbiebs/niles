@@ -16,7 +16,7 @@
 | `nilestream-core` | REV runtime: resident maps, anchor indices, apply loop, upqueries, contracts | 32 |
 | `nilestream-ledger` | Epoch segments, sequencer, hash chain, durability, admission and commit rules | 32 |
 | `nilestream-optimizer` | Plan-time mode selection and the eviction policies (the adaptive optimizer of §4.6 is specified and not built) | 37 |
-| `nilestream-server` | Daemon: sessions, PostgreSQL wire surface, conformance | 90 |
+| `nilestream-server` | Daemon: sessions, PostgreSQL wire surface, conformance | 91 |
 | `proto-engine` | The research prototype the counted-work experiments run on | 25 |
 | `rev-sidecar` | E27 arms H3 and T: a nilestream-core REV fed by PostgreSQL logical replication (pgoutput) or TigerBeetle CDC, served over the PostgreSQL wire | 12 |
 | `syntax-study` | E30: the syntax study — one corpus in five surfaces, an oracle, the executors and the mutation classification (design docs/study/E30-syntax-design.md); and E30b′, the adversarial study of whether Niles needs its own grammar (docs/study/E30b-design.md) | 101 |

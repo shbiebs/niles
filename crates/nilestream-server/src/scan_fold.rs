@@ -317,6 +317,22 @@ fn conjuncts(p: &Scalar, f: &mut impl FnMut(&Scalar)) {
 /// source, an aggregate this cannot fold — returns `None`, and the caller materialises. A
 /// planner that guessed would be trading a wrong answer for a fast one.
 pub fn plan<'c>(c: &'c Circuit, output: &str) -> Option<FoldPlan<'c>> {
+    plan_with(c, output, false)
+}
+
+/// **The same plan for a read pinned with `as of system time`** (cycle 17, C17-19).
+///
+/// `Op::AsOf` is the identity in the reference evaluator (`niles_ir::eval`): the pin is
+/// applied where the engine chooses the anchor the base is read at, not by the operator.
+/// `plan` refuses it, so a pinned keyed balance read never reached the plan-based paths and
+/// was materialised from the account's postings up to the anchor. This variant lets the
+/// chain pass through `AsOf` and nothing else; its only caller is the pinned-balance path
+/// in `rev_engine`, which answers at the anchor it is given. `ValidAt` is still refused.
+pub fn plan_through_as_of<'c>(c: &'c Circuit, output: &str) -> Option<FoldPlan<'c>> {
+    plan_with(c, output, true)
+}
+
+fn plan_with<'c>(c: &'c Circuit, output: &str, through_as_of: bool) -> Option<FoldPlan<'c>> {
     let out = *c.outputs.get(output)?;
     // Walk down from the output through the stages that sit *above* an aggregate, looking
     // for one. `order by` and `limit` are evaluated by the reference from the folded value,
@@ -332,7 +348,7 @@ pub fn plan<'c>(c: &'c Circuit, output: &str) -> Option<FoldPlan<'c>> {
                 {
                     return None;
                 }
-                let (relation, mut steps) = chain(c, *n.inputs.first()?)?;
+                let (relation, mut steps) = chain(c, *n.inputs.first()?, through_as_of)?;
                 steps.extend(
                     pushed
                         .into_iter()
@@ -421,7 +437,11 @@ fn rewrite_columns(s: &Scalar, f: &mut impl FnMut(ColIdx) -> ColIdx) -> Scalar {
 }
 
 /// The `Source → (Filter | Map)*` chain feeding an aggregate, in application order.
-fn chain<'c>(c: &'c Circuit, from: NodeId) -> Option<(&'c str, Vec<Step<'c>>)> {
+fn chain<'c>(
+    c: &'c Circuit,
+    from: NodeId,
+    through_as_of: bool,
+) -> Option<(&'c str, Vec<Step<'c>>)> {
     let mut steps = Vec::new();
     let mut id = from;
     loop {
@@ -446,6 +466,7 @@ fn chain<'c>(c: &'c Circuit, from: NodeId) -> Option<(&'c str, Vec<Step<'c>>)> {
                 steps.push(Step::Map(exprs.as_slice()));
                 id = *n.inputs.first()?;
             }
+            Op::AsOf { .. } if through_as_of => id = *n.inputs.first()?,
             _ => return None,
         }
     }

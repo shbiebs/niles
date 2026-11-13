@@ -135,7 +135,7 @@ These are observations from smokes of the harness at `d2e642e`, in the container
      - The historical half of the rule would measure the served as-of path as built, not SC7's bound. Item 14 would stay unsampled.
 2. **64× history does not fit in the container.**
    - Every process the session starts, PostgreSQL clusters included, runs under a 6 GiB memory-cgroup limit.
-   - At 64× (6.4 × 10⁶ transactions, 1.28 × 10⁷ legs), N's daemon was killed by the OOM killer during the load at about 4.86 GB of anonymous memory. This happened twice with all five arms and twice with N alone, the comparator holding 1.8 GB.
+   - At 64× (6.4 × 10⁶ transactions, 1.28 × 10⁷ legs), N's daemon was killed by the OOM killer during the load at about 4.86 GB of anonymous memory. This happened to both N-type daemons in a run with all five arms, and then twice with N alone. The comparator held 1.8 GB each time.
    - Its resident size rose linearly to about 1.45 GB and then jumped, the pattern of a large contiguous structure being reallocated. A per-account leg read was tried for the checksums and withdrawn, because the kill happens before that read.
    - At 16× (3.2 × 10⁶ legs), all five arms loaded and verified with no kill, and the cgroup's peak usage reached its limit (page cache included). N's PSS after the load was 484 MB.
 3. **Durations in the container, for planning only** (seed 1, α 0.6, all five arms, the full shapes):

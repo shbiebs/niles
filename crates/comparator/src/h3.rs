@@ -218,6 +218,10 @@ impl Arm for H3Arm {
         let rows = c.simple("select rev_stats").ok()?;
         rows.by_name("view_state_bytes").map(|v| v as u64)
     }
+    fn reconstruction_counters(&self, c: &mut Client) -> Option<(i128, i128)> {
+        let rows = c.simple("select rev_stats").ok()?;
+        Some((rows.by_name("misses")?, rows.by_name("rows_touched")?))
+    }
     fn at_head(&self, c: &mut Client, head: u64) -> Result<bool, String> {
         let rows = c
             .simple("select max(id) from arm.epochs")

@@ -167,6 +167,18 @@ pub trait Arm: Sync {
     fn view_state_bytes(&self, _c: &mut Client) -> Option<u64> {
         None
     }
+    /// **E27c's checkpoint state** (design §7.1, item 5): the part of the derived state that
+    /// exists so a reconstruction can start from a checkpoint, reported beside the total.
+    /// `None` where the arm holds none (H3, P-inc, P, M) or cannot count it.
+    fn checkpoint_bytes(&self, _c: &mut Client) -> Option<u64> {
+        None
+    }
+    /// **E27c's reconstruction counters** (design §7.1, item 5): `(misses, rows_touched)`,
+    /// cumulative since the arm started, so that a counted pass can take their differences.
+    /// `None` on arms that do not count them (the PostgreSQL arms).
+    fn reconstruction_counters(&self, _c: &mut Client) -> Option<(i128, i128)> {
+        None
+    }
     fn stop(&mut self);
 }
 
@@ -281,6 +293,10 @@ pub struct NArm {
     /// transaction's value day, q3 and q4 are asked, and the binary is the metered build.
     /// Off, the arm is E27's exactly, so E27's rendering and its reproduction do not move.
     pub e27b: bool,
+    /// **E27c's N′-lazy** (C17-11, C17-12): the same daemon started with
+    /// `--checkpoint-policy lazy`, so a key carries checkpoint state only once it has been
+    /// read. Off, the arm is N.
+    pub lazy: bool,
     child: Option<Child>,
     /// Oracle epoch index i is N's epoch `f_start + i`; established by probing during the
     /// load (it is -1 on the unseeded daemon, whose first sealed epoch is #0).
@@ -302,6 +318,7 @@ impl NArm {
             multi_currency,
             checkpoint,
             e27b: false,
+            lazy: false,
             child: None,
             f_start: 0,
         }
@@ -322,6 +339,36 @@ impl NArm {
             // daemon's default schema.
             if self.e27b { " value_date: Int," } else { "" }
         )
+    }
+
+    /// The daemon's command line. N's is E27b's exactly; N′-lazy's differs from it only by
+    /// `--checkpoint-policy lazy` (guarded by `e27c_arms`).
+    pub fn daemon_args(&self, schema: &Path, budget: usize) -> Vec<String> {
+        let mut a: Vec<String> = [
+            "--port",
+            &self.port.to_string(),
+            "--schema",
+            &schema.display().to_string(),
+            "--durable",
+            &self.dir.join("segment").display().to_string(),
+            "--accounts",
+            "0",
+            "--rounds",
+            "0",
+            "--budget",
+            &budget.to_string(),
+            "--checkpoint",
+            &self.checkpoint.to_string(),
+            "--mode",
+            "demand",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        if self.lazy {
+            a.extend(["--checkpoint-policy".to_string(), "lazy".to_string()]);
+        }
+        a
     }
 
     fn epoch(&self, idx: u64) -> u64 {
@@ -346,9 +393,23 @@ impl NArm {
 
 impl Arm for NArm {
     fn name(&self) -> &'static str {
-        "N"
+        if self.lazy {
+            "N'-lazy"
+        } else {
+            "N"
+        }
     }
     fn describe(&self) -> String {
+        if self.lazy {
+            return format!(
+                "N′-lazy: the same metered daemon as N (`nilestreamd-metered`) with \
+                 --checkpoint-policy lazy, on 127.0.0.1:{}, --durable (SyncPolicy::Always), \
+                 --mode demand, LRU, --checkpoint {}, budget 5% of keys: a key's running \
+                 balance, posting count and checkpoints exist only once the key has been read \
+                 (its first read folds its history once)",
+                self.port, self.checkpoint
+            );
+        }
         if self.e27b {
             return format!(
                 "Nilestream daemon, metered build (`nilestreamd-metered`: the shipped `main.rs` \
@@ -425,24 +486,7 @@ impl Arm for NArm {
         std::fs::write(&schema, self.schema()).map_err(|e| e.to_string())?;
         let log = std::fs::File::create(self.dir.join("daemon.log")).map_err(|e| e.to_string())?;
         let child = Command::new(&self.binary)
-            .args([
-                "--port",
-                &self.port.to_string(),
-                "--schema",
-                &schema.display().to_string(),
-                "--durable",
-                &self.dir.join("segment").display().to_string(),
-                "--accounts",
-                "0",
-                "--rounds",
-                "0",
-                "--budget",
-                &budget.to_string(),
-                "--checkpoint",
-                &self.checkpoint.to_string(),
-                "--mode",
-                "demand",
-            ])
+            .args(self.daemon_args(&schema, budget))
             .stdout(Stdio::null())
             .stderr(log)
             .spawn()
@@ -551,6 +595,14 @@ impl Arm for NArm {
         let v = rows.by_name("view_state_bytes")?;
         let k = rows.by_name("checkpoint_bytes")?;
         Some((v + k) as u64)
+    }
+    fn checkpoint_bytes(&self, c: &mut Client) -> Option<u64> {
+        let rows = c.simple("select nilestream_stats").ok()?;
+        rows.by_name("checkpoint_bytes").map(|k| k as u64)
+    }
+    fn reconstruction_counters(&self, c: &mut Client) -> Option<(i128, i128)> {
+        let rows = c.simple("select nilestream_stats").ok()?;
+        Some((rows.by_name("misses")?, rows.by_name("rows_touched")?))
     }
     fn at_head(&self, c: &mut Client, head: u64) -> Result<bool, String> {
         self.frontier_is(c, self.epoch(head))
@@ -856,6 +908,17 @@ impl Arm for PgArm {
         let rows = c.simple(&format!("select {sum}")).ok()?;
         rows.nth(0).map(|v| v as u64)
     }
+    /// E27c §7.1: P+'s checkpoint state is its per-key checkpoints and per-key counts, the
+    /// counterparts of N's; the arms without the mechanism hold none.
+    fn checkpoint_bytes(&self, c: &mut Client) -> Option<u64> {
+        if !self.mechanism() {
+            return None;
+        }
+        let rows = c
+            .simple("select pg_total_relation_size('arm.checkpoints') + pg_total_relation_size('arm.key_counts')")
+            .ok()?;
+        rows.nth(0).map(|v| v as u64)
+    }
     fn at_head(&self, c: &mut Client, head: u64) -> Result<bool, String> {
         let rows = c
             .simple("select max(id) from arm.epochs")
@@ -991,5 +1054,36 @@ mod pinc_routing {
         assert_eq!(w.len(), 1, "P-inc maintains its table in the write: {w:?}");
         assert!(!w[0].contains("refresh"));
         assert!(PINC_SQL.contains("create trigger postings_bump after insert"));
+    }
+}
+
+#[cfg(test)]
+mod e27c_arms {
+    //! C17-12 run 3's static guard: N′-lazy is N's daemon with one flag more, under its own
+    //! name, port and directory, and nothing else moves (E27c design §7.1, item 3).
+    use super::*;
+
+    #[test]
+    fn n_lazy_is_n_with_the_lazy_policy_and_nothing_else() {
+        let bin = PathBuf::from("nilestreamd-metered");
+        let mut n = NArm::new(5450, PathBuf::from("/s/n"), bin.clone(), false, 16);
+        n.e27b = true;
+        let mut l = NArm::new(5463, PathBuf::from("/s/n"), bin, false, 16);
+        l.e27b = true;
+        l.lazy = true;
+        assert_eq!(n.name(), "N");
+        assert_eq!(l.name(), "N'-lazy");
+        let schema = Path::new("/s/schema.niles");
+        let a = n.daemon_args(schema, 50);
+        assert!(!a.iter().any(|x| x.contains("checkpoint-policy")), "{a:?}");
+        let mut b = l.daemon_args(schema, 50);
+        assert_eq!(b.split_off(b.len() - 2), ["--checkpoint-policy", "lazy"]);
+        // The same command line otherwise, but for the port.
+        let port = |v: &[String]| v.iter().position(|x| x == "--port").unwrap() + 1;
+        let (mut a2, mut b2) = (a.clone(), b.clone());
+        a2.remove(port(&a));
+        b2.remove(port(&b));
+        assert_eq!(a2, b2);
+        assert_eq!(n.schema(), l.schema(), "the same served relation");
     }
 }

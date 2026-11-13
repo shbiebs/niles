@@ -47,6 +47,14 @@ fn build_arms(names: &[String], multi: bool, scratch: &Path, e27b: bool) -> Vec<
                     a.e27b = e27b;
                     Box::new(a)
                 }
+                // E27c's N′-lazy (C17-11): the same daemon as N under `--checkpoint-policy
+                // lazy`, on its own port and data directory.
+                "N'-lazy" => {
+                    let mut a = NArm::new(5463, scratch.join("nlazy"), bin.clone(), multi, 16);
+                    a.e27b = e27b;
+                    a.lazy = true;
+                    Box::new(a)
+                }
                 "P" => Box::new(PgArm::new(PgKind::P, 5451, &root)),
                 "P+" => Box::new(PgArm::new(PgKind::PPlus, 5452, &root)),
                 "M" => Box::new(PgArm::new(PgKind::M, 5453, &root)),
@@ -87,13 +95,22 @@ fn main() {
     let root = repo_root();
     // `--study e27b` (cycle 15, C15-02): the same harness, with N as changed by E27b's E1–E4
     // and measured by the metered builds, into E27b's own directories and files. Without it
-    // every command is E27's, byte for byte.
-    let e27b = match arg(&args, "--study").as_deref() {
-        None | Some("e27") => false,
-        Some("e27b") => true,
-        Some(other) => panic!("--study e27|e27b, not {other}"),
+    // every command is E27's, byte for byte. `--study e27c` (cycle 17, C17-12 run 3; design
+    // §7.1) is E27b's harness with N′-lazy, the history axis, α and the counted pass, into
+    // E27c's own directories; `e27b` stays true under it, because E27c's N is E27b's.
+    let (e27b, e27c) = match arg(&args, "--study").as_deref() {
+        None | Some("e27") => (false, false),
+        Some("e27b") => (true, false),
+        Some("e27c") => (true, true),
+        Some(other) => panic!("--study e27|e27b|e27c, not {other}"),
     };
-    let study = if e27b { "E27b" } else { "E27" };
+    let study = if e27c {
+        "E27c"
+    } else if e27b {
+        "E27b"
+    } else {
+        "E27"
+    };
     let dir = PathBuf::from(arg(&args, "--dir").unwrap_or_else(|| {
         root.join(format!("results/{study}-comparator"))
             .display()
@@ -149,6 +166,24 @@ fn main() {
             if let Some(w) = arg(&args, "--warmups") {
                 cfg.warmups = w.parse().expect("--warmups");
             }
+            // E27c §7.1: α ∈ {0.6, 1.1}, the history axis, and the counted pass on the main
+            // shape. Refused outside E27c, so E27's and E27b's commands cannot drift.
+            let alpha = arg(&args, "--alpha");
+            let factor = arg(&args, "--history-factor");
+            if !e27c && (alpha.is_some() || factor.is_some()) {
+                eprintln!("comparator: --alpha and --history-factor are E27c's (--study e27c)");
+                std::process::exit(2);
+            }
+            if let Some(a) = alpha {
+                cfg.alpha = a.parse().expect("--alpha");
+            }
+            if let Some(f) = factor {
+                cfg.history_factor = f.parse().expect("--history-factor");
+                assert!(cfg.history_factor >= 1, "--history-factor is at least 1");
+            }
+            if e27c && !p99 {
+                cfg.anchor_pass = 200;
+            }
             let skip = args.iter().any(|a| a == "--skip-existing");
             let scratch =
                 PathBuf::from(arg(&args, "--scratch").unwrap_or_else(|| "/var/tmp/e27".into()));
@@ -157,7 +192,7 @@ fn main() {
             } else {
                 root.join("target/release/nilestreamd")
             };
-            if names.iter().any(|n| n == "N") && !bin.exists() {
+            if names.iter().any(|n| n == "N" || n == "N'-lazy") && !bin.exists() {
                 eprintln!("comparator: {} is missing; run `cargo build --release -p nilestream-server --bin nilestreamd` (or, for --study e27b, `cargo build --release --manifest-path tools/memprobe/Cargo.toml --bins`) first", bin.display());
                 std::process::exit(2);
             }
@@ -175,7 +210,9 @@ fn main() {
                         for a in arms.iter() {
                             p.not_run.entry(a.name().into()).or_default().push((
                                 "q2".into(),
-                                if e27b {
+                                if e27c {
+                                    "E27c design §7.1 item 4: q1 only on the multi-currency series at 10⁵, as E27b §6; the historical distribution's verdict there is NOT RUN".into()
+                                } else if e27b {
                                     "E27b design §6: q1 only on the multi-currency series at 10⁵, as in E27 (the author's decision of 2026-09-28); q2's p50 verdict is in E27b-comparator".into()
                                 } else {
                                     "the author's decision of 2026-09-28: on the multi-currency series at 10⁵ and above, Nilestream answers every anchored read by folding the whole ledger, so 1,000 q2 reads per run cost hours per point (a 10⁴ point took 21 minutes); q2's p50 verdict is in E27".into()
@@ -185,7 +222,12 @@ fn main() {
                     }
                     let mut prov = comparator::store::provenance(&root);
                     prov.push(("checkpoint_interval".into(), cfg.checkpoint.to_string()));
-                    if e27b {
+                    if e27c {
+                        prov.push(("study".into(), "E27c".into()));
+                        prov.push(("alpha".into(), cfg.alpha.to_string()));
+                        prov.push(("history_factor".into(), cfg.history_factor.to_string()));
+                        prov.push(("anchor_pass".into(), cfg.anchor_pass.to_string()));
+                    } else if e27b {
                         prov.push(("study".into(), "E27b".into()));
                     }
                     comparator::store::write(&path, &series, &p, &prov).expect("write point");
@@ -215,6 +257,12 @@ fn main() {
             comparator::render::render_counted(&host, &root.join("results/E27-comparator"), &out)
                 .expect("render");
             eprintln!("wrote {}", out.display());
+        }
+        "render" if e27c => {
+            // E27c design §7.1 item 8: the renderer is written in the session that reads the
+            // points, from §7.1, without changing it.
+            eprintln!("comparator: E27c's renderer is not written yet (design §7.1, item 8)");
+            std::process::exit(2);
         }
         "render" => {
             // Every arm this comparator knows, described; the renderer lists those that appear

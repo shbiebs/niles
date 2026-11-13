@@ -53,6 +53,13 @@ pub struct Config {
     pub mix: Vec<(&'static str, f64)>,
     /// The share of q1 among the concurrent phases' reads (the rest are q2).
     pub conc_q1_share: f64,
+    /// **E27c's history axis** (design §4, §7.1): the history loaded before any measurement
+    /// is this many times the declared one (ten transactions per account). 1 is E27/E27b's.
+    pub history_factor: u64,
+    /// **E27c's counted pass** (design §7.1, item 5): after the measured runs, this many q1
+    /// reads and then this many q2 reads per arm, outside every timed region, with the arm's
+    /// reconstruction counters read around each half. 0 (E27, E27b) skips it.
+    pub anchor_pass: usize,
 }
 
 impl Config {
@@ -70,6 +77,8 @@ impl Config {
             write_every: 10,
             mix: MIX.to_vec(),
             conc_q1_share: 0.7,
+            history_factor: 1,
+            anchor_pass: 0,
         }
     }
 
@@ -549,6 +558,15 @@ fn add_memory(arm: &dyn Arm, loaded: u64, keys_read: usize, out: &mut RunOut) {
             );
         }
     }
+    // E27c §7.1: the checkpoint part of that state, separately; absent where the arm holds
+    // none.
+    if let Some(b) = arm
+        .connect()
+        .ok()
+        .and_then(|mut c| arm.checkpoint_bytes(&mut c))
+    {
+        out.values.insert("checkpoint_bytes".into(), b as f64);
+    }
     if let Some(p) = arm.pss() {
         out.values
             .insert("pss_mib".into(), p as f64 / (1024.0 * 1024.0));
@@ -569,7 +587,8 @@ pub fn run_point(
     seed: u64,
     log: &mut dyn FnMut(&str),
 ) -> PointResult {
-    let params = Params::declared(accounts, seed, cfg.alpha, cfg.multi_currency);
+    let mut params = Params::declared(accounts, seed, cfg.alpha, cfg.multi_currency);
+    params.history_txns *= cfg.history_factor.max(1);
     let u = Universe::generate(&params);
     let mut o = Oracle::of(&u);
     assert!(o.conserves(), "the generated history conserves");
@@ -703,6 +722,20 @@ pub fn run_point(
         log(&format!("  run {idx} done"));
     }
 
+    let pass = if cfg.anchor_pass > 0 {
+        counted_pass(
+            arms,
+            &u,
+            &o,
+            cfg.anchor_pass,
+            seed,
+            accounts,
+            &mut res.failures,
+        )
+    } else {
+        BTreeMap::new()
+    };
+
     res.end_checksum = o.checksum();
     for arm in arms.iter() {
         match arm.connect() {
@@ -716,6 +749,9 @@ pub fn run_point(
                 res.state_end.insert(arm.name().into(), arm.state(&mut c));
             }
         }
+    }
+    for (arm, rows) in pass {
+        res.state_end.entry(arm).or_default().extend(rows);
     }
     res
 }
@@ -739,4 +775,86 @@ pub fn record_end(res: &mut PointResult, arm: &str, outcome: Result<Checksum, St
             res.end_refused.insert(arm.to_string(), why);
         }
     }
+}
+
+/// **E27c's counted pass** (design §7.1, item 5): base rows per reconstruction at the two
+/// anchor distributions. After the measured runs and outside every timed region, each arm
+/// answers `n` q1 reads (the head) and then `n` q2 reads (an anchor uniform between the key's
+/// first epoch and the head), the same keys and anchors on every arm, each checked against
+/// the oracle. Where the arm counts them, its `misses` and `rows_touched` are read before and
+/// after each half, and the differences are recorded as `state` rows named
+/// `anchors {q}: reads|misses|rows_touched|divergences`; on an arm that does not count them,
+/// only `reads` and `divergences` are recorded, so the rendering says *not counted* rather
+/// than zero. A divergence in the pass refuses the arm at this point (E27b §9), recorded as a
+/// failure.
+pub fn counted_pass(
+    arms: &[Box<dyn Arm>],
+    u: &Universe,
+    o: &Oracle,
+    n: usize,
+    seed: u64,
+    accounts: u64,
+    failures: &mut Vec<String>,
+) -> BTreeMap<String, Vec<(String, i128)>> {
+    // Its own stream, so the pass never shifts the scripts' draws.
+    let mut r = Rng::new(seed ^ accounts.rotate_left(29) ^ 0xE27C);
+    let halves: Vec<(&'static str, Vec<(Query, Answer)>)> = ["q1", "q2"]
+        .iter()
+        .map(|&id| {
+            let reads = (0..n)
+                .map(|_| {
+                    let q = draw_read(id, u, o, &mut r);
+                    let a = expected(o, &q);
+                    (q, a)
+                })
+                .collect();
+            (id, reads)
+        })
+        .collect();
+    let mut out: BTreeMap<String, Vec<(String, i128)>> = BTreeMap::new();
+    for arm in arms.iter() {
+        let Ok(mut c) = arm.connect() else {
+            failures.push(format!("{}: counted pass: could not connect", arm.name()));
+            continue;
+        };
+        let rows = out.entry(arm.name().to_string()).or_default();
+        for (id, reads) in &halves {
+            let before = arm.reconstruction_counters(&mut c);
+            let mut d = Divergence::default();
+            let mut errs = Vec::new();
+            let mut lat = Vec::new();
+            let at = AtHead {
+                oracle: o,
+                head: o.head(),
+            };
+            for (q, want) in reads {
+                exec_read(
+                    arm.as_ref(),
+                    &mut c,
+                    q,
+                    want,
+                    &at,
+                    &mut lat,
+                    &mut d,
+                    &mut errs,
+                );
+            }
+            let after = arm.reconstruction_counters(&mut c);
+            rows.push((format!("anchors {id}: reads"), reads.len() as i128));
+            rows.push((format!("anchors {id}: divergences"), d.count as i128));
+            if let (Some((m0, r0)), Some((m1, r1))) = (before, after) {
+                rows.push((format!("anchors {id}: misses"), m1 - m0));
+                rows.push((format!("anchors {id}: rows_touched"), r1 - r0));
+            }
+            if d.count > 0 {
+                failures.push(format!(
+                    "{}: counted pass ({id}): {} oracle divergences, e.g. {:?}",
+                    arm.name(),
+                    d.count,
+                    d.examples.first()
+                ));
+            }
+        }
+    }
+    out
 }

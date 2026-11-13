@@ -121,3 +121,33 @@ E27b §9.
    - It records the load averages and `vm.swapusage` before and after every point. **A point during which swap in use grew is labelled swap-affected.** Its latency and memory figures are not compared (as E27-hostc's were not), and the result says so.
    - **Order:** single 10⁵, then multi 10⁵, then single 10⁶. Within each: α 0.6, then 1.1; seeds 1, 7, 42, 100, 2024; per (α, seed), the main point, then the p99 point. The run resumes per point.
 8. **Rendering.** The rule and the metrics are fixed by this entry. The renderer is written in the session that reads the points, from this entry, without changing it. Any presentation choice made after the points exist is recorded as a deviation.
+
+### 7.2 Before any point: what the container smoke showed (2026-11-13)
+
+These are observations from smokes of the harness at `d2e642e`, in the container, written to scratch. They are not results and enter no table. They are recorded here because two of them bear on §7.1 before any point exists. §7.1 stands unchanged until the author decides.
+
+1. **N's historical anchors do not start from a checkpoint.**
+   - In the counted pass, N, N′-lazy and H3 report the same Δ`rows_touched` for the same 200 q2 reads, in every smoke: 476,686 at 10³ (α 1.1, 4× history) and 35,358 at 10⁵ (α 0.6). N's `fallbacks` counter stays 0.
+   - A keyed read `as of system time e` behind the head is answered by the served engine's index fold (`RevEngine::scan` → `postings_for`). That fold reads the account's postings up to e through the anchor index. It never consults the ledger's per-key checkpoints, which `Ledger::reconstruct_balance_counted` does use.
+   - So N's checkpoints bound only reconstructions at the head (q1), where N needed a few base rows per miss in the same pass against tens for N′-lazy and H3.
+   - **Consequences:**
+     - For q2, prediction 2 of §5 ("N and N′-lazy stay flat in H") cannot hold as the daemon is built. Their q2 cost is the key's postings up to the anchor, which grows with H, as H3's does.
+     - The historical half of the rule would measure the served as-of path as built, not SC7's bound. Item 14 would stay unsampled.
+2. **64× history does not fit in the container.**
+   - Every process the session starts, PostgreSQL clusters included, runs under a 6 GiB memory-cgroup limit.
+   - At 64× (6.4 × 10⁶ transactions, 1.28 × 10⁷ legs), N's daemon was killed by the OOM killer during the load at about 4.86 GB of anonymous memory. This happened twice with all five arms and twice with N alone, the comparator holding 1.8 GB.
+   - Its resident size rose linearly to about 1.45 GB and then jumped, the pattern of a large contiguous structure being reallocated. A per-account leg read was tried for the checksums and withdrawn, because the kill happens before that read.
+   - At 16× (3.2 × 10⁶ legs), all five arms loaded and verified with no kill, and the cgroup's peak usage reached its limit (page cache included). N's PSS after the load was 484 MB.
+3. **Durations in the container, for planning only** (seed 1, α 0.6, all five arms, the full shapes):
+
+   | size | main point | p99 point |
+   |---|---|---|
+   | 10⁴ | 71 s | 76 s |
+   | 10⁵ | 747 s | 487 s |
+
+   Loading the three PostgreSQL arms is most of a point at 16× (about 480 s of a 571 s load-only point).
+4. **10⁶ on Host C, extrapolated, not measured.**
+   - N's PSS after the load scales at about 130–150 B per leg (264 MB at 2 × 10⁶ legs in E27b; 484 MB at 3.2 × 10⁶ here). That puts each N-type daemon near 3 GB at 2 × 10⁷ legs.
+   - If the jump of item 2 recurs, each daemon peaks during its load at about twice that.
+   - Two such daemons, three clusters and the comparator may exceed 16 GiB at load time. §7.1 item 7's label then marks those points swap-affected, because it compares swap in use across the whole point, load included.
+   - The 10⁶ stage runs last, so the 10⁵ stages' `points.tsv` will show the swap behaviour first.

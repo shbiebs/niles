@@ -77,3 +77,47 @@ E27b §9.
 - **Sizes and skew:** 10⁴ to 10⁶ accounts; α ∈ {0.6, 1.1}.
 - **Where:** M-NOISE (cycle 17, C17-04; `results/M-NOISE.md` on niles branch `c17/04-m-noise`) found the container's refusals a host effect, not a run-length one, so every E27c comparison at 10⁵ and above runs on the author's Mac (Host C, D17-7), and this container runs only the smoke. Run lengths are E27b's.
 - **Before the run:** N′-lazy is built behind a daemon flag whose default leaves N as E27b measured it, and passes the reconstruction-equivalence and conservation suites under the lazy policy.
+
+### 7.1 Run 3's choices (2026-11-12)
+
+**Pre-registered 2026-11-12** (cycle 17, card C17-12 run 3; the author's decisions of 2026-11-12, recorded in the project's `cycle-17-decisions.md`), before any E27c point, before the harness changes for E27c and before its run script. Nothing above is changed; this entry fixes what §§2–7 left open.
+
+1. **Where, and which series.**
+   - **Host C** (the author's Mac, arm64, 16 GiB; D17-7): single-currency at 10⁵ and 10⁶, multi-currency at 10⁵. **Multi-currency at 10⁶ is not run**, because on 16 GiB it would swap. That is a stated limit of E27c, not a result.
+   - **The container:** the history sweep of §4, single-currency at 10⁴ accounts, at 1×, 4×, 16× and 64× E27b's history (10, 40, 160 and 640 transactions per account; 1× is E27b's declared history and the sweep's reference). Its view-state bytes and base-row counts carry predictions 1 and 3 of §5. Its latency cells are subject to the container's noise (`results/M-NOISE.md`) and are reported with that beside them.
+   - **Not run:** 10⁴ multi-currency, and 10³. They are not in the author's list of 2026-11-12.
+2. **Skew:** α ∈ {0.6, 1.1} in every series, size and history length, as §7 fixed.
+3. **Arms and builds.**
+   - **N and N′-lazy** are the same metered daemon (`nilestreamd-metered`, built by `tools/memprobe`, as E27b's N). N′-lazy is started with `--checkpoint-policy lazy` (C17-11), on its own port and data directory.
+   - **H3** is E27b's: `rev-sidecar-metered`, built by `tools/memprobe` on the host that runs it. The build is checked in the container first.
+   - **P+ and P-inc** are as E27b and C17-03, each on its own cluster with §5.3's settings.
+   - Every comparison is within one host.
+4. **Shapes and run lengths:** E27b's, unchanged.
+   - **The main shape:** §5 of E27b (3 warm-ups, 10 measured runs, 200 operations at one client with every tenth a two-leg transfer, then 2 and 4 clients over q1 and q2).
+   - **The targeted p99 shape:** §6 of E27b (2,000 point reads at one client, q1 and q2 half each, no writes, then 4 × 500). On the multi-currency series at 10⁵ it asks q1 only, as E27b §6 does.
+   - Budget 5% of keys, LRU, C = 16.
+5. **Metrics, made precise.**
+   - **Derived-state bytes per key read:** E27b §4.1's, per arm. **Checkpoint state** is reported separately:
+     - N and N′-lazy: the daemon's `checkpoint_bytes` (the ledger's per-key running balances, posting counts and checkpoints, as a clone under the metering allocator);
+     - P+: `pg_total_relation_size` of `arm.checkpoints` and `arm.key_counts`;
+     - H3 and P-inc hold none.
+
+     The total is E27b's view-state bytes, which includes it.
+   - **Head and historical anchors:** q1 asks at the head. q2's anchor is drawn uniformly between the key's first epoch and the head (`crates/comparator/src/run.rs`, `draw_read`), which is §3's historical distribution. E27 and E27b already drew q2 this way, for latency. What neither recorded is base rows per reconstruction for each distribution, which is what item 14 lacks.
+   - **Base rows per reconstruction:** after each main-shape point's measured runs, and outside every timed region, a counted pass runs on each arm.
+     - It asks 200 q1 reads, then 200 q2 reads, with the same keys and anchors on every arm. Every answer is checked against the oracle; a divergence there refuses that arm, as §9 of E27b does.
+     - The arm's `misses` and `rows_touched` counters are read before and after each half. Base rows per reconstruction is Δ`rows_touched` ÷ Δ`misses`, per half.
+     - N, N′-lazy and H3 count these. P+ and P-inc do not, and are reported as *not counted*, never as zero.
+6. **The rule (§6), read before any number.** E27b §8 with P-inc added. It is evaluated for each REV arm R ∈ {N, N′-lazy} separately, per size range, per history length and per anchor distribution (q1; q2):
+   - **R is justified** iff it beats P+, H3 **and** P-inc by the joint gate, above the floor, on view-state bytes per key read **and** on p99 read latency under eviction. The latency is the p99 shape's query for that distribution, at 1 and 4 clients.
+   - **H3 is recommended** iff it matches R within the gate on both. **P+** likewise iff it matches R on both, and **P-inc** iff it matches R on both.
+   - Where the p99 shape asks no q2 (multi-currency at 10⁵), the historical distribution's verdict is **NOT RUN**, with the reason.
+   - Refusals are E27b §9's. Under C17-02, an arm whose end-of-run check was not recorded is refused.
+   - S-1 applies across sizes and across history lengths.
+   - §5's predictions are checked descriptively beside the rule, from the points: checkpoint bytes and base rows per reconstruction against H, for N and N′-lazy.
+7. **Host C protocol** (D17-7; work order §6.3).
+   - The author quits Claude and its VM, keeps the Mac on mains power with other applications closed and no Time Machine backup, and runs the script under `caffeinate`.
+   - The script refuses to start above a one-minute load average of 1.5, as runs 1 and 2 did.
+   - It records the load averages and `vm.swapusage` before and after every point. **A point during which swap in use grew is labelled swap-affected.** Its latency and memory figures are not compared (as E27-hostc's were not), and the result says so.
+   - **Order:** single 10⁵, then multi 10⁵, then single 10⁶. Within each: α 0.6, then 1.1; seeds 1, 7, 42, 100, 2024; per (α, seed), the main point, then the p99 point. The run resumes per point.
+8. **Rendering.** The rule and the metrics are fixed by this entry. The renderer is written in the session that reads the points, from this entry, without changing it. Any presentation choice made after the points exist is recorded as a deviation.

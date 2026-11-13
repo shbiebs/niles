@@ -6583,11 +6583,9 @@ mod pinned_reads {
         // pinned read touches the checkpoint and fewer than C postings after it; with none,
         // it touches every posting up to the anchor.
         //
-        // **The lazy policy, as C17-11 built it:** a key's first read folds its history once
-        // and records one checkpoint, at the head; checkpoints follow from then on. So an
-        // anchor *behind* that first read has no checkpoint at or before it and folds from
-        // genesis, exactly as with none, and an anchor at or after it is bounded. That is
-        // stated here because it decides what E27c's historical anchors cost N′-lazy.
+        // Under the lazy policy a key's first read folds its history once and builds the
+        // checkpoints the eager policy holds for it (C17-19, `Ledger::activate`), so every
+        // later read, at any anchor, is bounded as under the eager one.
         let rows_of = |e: &RevEngine, at: u64| {
             let circuit = lower(&format!(
                 "select acct, sum(amt) from postings as of system time {at} where acct = 0 group by acct"
@@ -6624,17 +6622,12 @@ mod pinned_reads {
             first >= 40,
             "the lazy policy's first read folds the history once: {first}"
         );
-        for at in 0..head {
+        for at in 0..=head {
             assert_eq!(
                 rows_of(&lazy, at).0,
-                rows_of(&none, at).0,
-                "lazy, anchor {at} behind the first read: no checkpoint at or before it"
+                rows_of(&eager, at).0,
+                "lazy, anchor {at}: after the first read, the eager policy's cost"
             );
         }
-        assert_eq!(
-            rows_of(&lazy, head).0,
-            1,
-            "lazy, at the first read's head: its checkpoint"
-        );
     }
 }

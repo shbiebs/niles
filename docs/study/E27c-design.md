@@ -151,3 +151,24 @@ These are observations from smokes of the harness at `d2e642e`, in the container
    - If the jump of item 2 recurs, each daemon peaks during its load at about twice that.
    - Two such daemons, three clusters and the comparator may exceed 16 GiB at load time. §7.1 item 7's label then marks those points swap-affected, because it compares swap in use across the whole point, load included.
    - The 10⁶ stage runs last, so the 10⁵ stages' `points.tsv` will show the swap behaviour first.
+
+### 7.3 The author's decisions of 2026-11-13, and what changed before any point
+
+**Recorded 2026-11-13, before any E27c point.** The decisions answer §7.2, and the project's `cycle-17-decisions.md` records them. Card C17-19 carries them out on this branch.
+
+1. **N's pinned reads start from a checkpoint** (C17-19, `8249c01`).
+   - A keyed `sum(amt)` read `as of system time e` is now served by the ledger's reconstruction (`ServePath::Pinned`, `pinned-reconstruct` in `explain`). That reconstruction starts from the newest per-key checkpoint at or before e. It reads and installs no view entry.
+   - Its answer equals the materialising path's at every anchor, under both checkpoint policies (`the_pinned_path_agrees_with_the_materialising_path_at_every_anchor`).
+   - **So E27c's N is E27b's N with C17-19.** E27b's N answered pinned reads by the materialising path. §2's N row is read that way, and every E27c figure for N's q2 is compared with E27b's knowing it.
+   - §7.2 finding 1's consequences no longer hold. q2 now samples §3's historical distribution through SC7's mechanism on N and N′-lazy, which is what item 14 lacks.
+2. **N′-lazy's first read builds the key's checkpoints through its history** (C17-19 (2/2), `6e8dc9a`).
+   - A key's first read folds its history once and builds exactly the state the eager policy holds for it: running balance, posting count, and every checkpoint (`a_lazy_keys_state_after_its_first_read_is_the_eager_ledgers`). C17-11 started the state at the head.
+   - §2's N′-lazy row ("a key's first read folds it once and starts its checkpoints") is read that way.
+   - Prediction 1 of §5 for N′-lazy stands as written: its derived state grows with the history of the keys read.
+   - Prediction 2: after a key's first read, N′-lazy's historical anchors are bounded as N's are. A first read is history-shaped once per key.
+3. **64× runs on Host C.**
+   - 1×, 4× and 16× stay in the container.
+   - 64× is a fourth Host C stage, `sweep-64`: 10⁴ accounts, single-currency, 64× E27b's history, α ∈ {0.6, 1.1}, five seeds, both shapes, so 20 points.
+   - Its view-state bytes, checkpoint bytes and base-row counts are set beside the container's histories. The metered byte totals differ between the two hosts only by the standard library's type sizes, as `results/E18-memory.md` records, and that is stated beside them.
+   - Its latency stands alone; it is never compared across hosts.
+4. **Host C's order** (amending §7.1 item 7): single 10⁵, multi 10⁵, `sweep-64`, single 10⁶. That is 80 main points and 80 p99 points. Single 10⁶ stays last, because it is the stage most likely to swap (§7.2 item 4).

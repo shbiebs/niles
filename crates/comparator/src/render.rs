@@ -184,6 +184,44 @@ fn not_run(st: &Stored, arm: &str, metric: &str) -> Option<String> {
         .map(|r| r[3].clone())
 }
 
+/// One arm's end-of-run cell: `=`, `≠`, a recorded refusal with its reason (C17-02), or, for
+/// a point written before C17-02, *not read*. An end checksum the comparator never read is
+/// not a difference, so `≠` there would be a wrong fact.
+pub fn end_cell(st: &Stored, arm: &str, end: &str, oracle_end: &str) -> String {
+    if end.is_empty() {
+        match st
+            .kind("refused")
+            .find(|r| r[1] == arm && r[2] == "end-of-run")
+        {
+            Some(r) => format!("REFUSED ({})", r.get(3).map(String::as_str).unwrap_or("")),
+            None => "not read".into(),
+        }
+    } else if !oracle_end.is_empty() && end == oracle_end {
+        "=".into()
+    } else {
+        "≠".into()
+    }
+}
+
+/// The arms of a point written since C17-02 whose end-of-run check is neither answered nor
+/// refused. Always empty for a point that ended at a failure (its checks never ran, and the
+/// failure is recorded) and for a point written before C17-02 (rendered as it always was).
+pub fn unrecorded_end_checks(st: &Stored) -> Vec<String> {
+    if st.meta.get("end_checks").map(String::as_str) != Some("recorded")
+        || st.kind("failure").next().is_some()
+    {
+        return Vec::new();
+    }
+    st.kind("load")
+        .filter(|r| r[6].is_empty())
+        .filter(|r| {
+            !st.kind("refused")
+                .any(|x| x[1] == r[1] && x[2] == "end-of-run")
+        })
+        .map(|r| r[1].clone())
+        .collect()
+}
+
 /// Every judged cell, for one point.
 pub fn cells(st: &Stored, study: &Study) -> Vec<(Cell, Option<String>)> {
     let arms = arms_of(st);
@@ -332,6 +370,20 @@ pub fn render(
         .unwrap_or("detail")
         .to_string();
     let points = load(dir);
+    // C17-02: a point that records its end-of-run checks must account for every arm.
+    let silent: Vec<String> = points
+        .iter()
+        .flat_map(|((se, n, seed), st)| {
+            unrecorded_end_checks(st)
+                .into_iter()
+                .map(move |arm| format!("{se}-{n}-{seed}: {arm}"))
+        })
+        .collect();
+    if !silent.is_empty() {
+        return Err(std::io::Error::other(format!(
+            "end-of-run checks neither answered nor refused (C17-02): {silent:?}"
+        )));
+    }
     let all_arms: BTreeSet<String> = points.values().flat_map(arms_of).collect();
     let mut s = String::new();
     let mut d = String::new();
@@ -549,17 +601,7 @@ pub fn render(
             // An end checksum the comparator never read is not a difference: `≠` there would
             // be a wrong fact. It is empty when the arm did not answer the end-of-run read
             // (C16-02: N was killed by the memory cgroup during that read at multi 10⁵).
-            eq_end.push(format!(
-                "{} {}",
-                r[1],
-                if r[6].is_empty() {
-                    "not read"
-                } else if !el.is_empty() && r[6] == el {
-                    "="
-                } else {
-                    "≠"
-                }
-            ));
+            eq_end.push(format!("{} {}", r[1], end_cell(st, &r[1], &r[6], &el)));
         }
         let fails: Vec<String> = st.kind("failure").map(|r| r[1].clone()).collect();
         let _ = writeln!(
@@ -1798,6 +1840,81 @@ fn engine_rule(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// C17-02's sabotage: one arm answers the end-of-run read and one does not. The point
+    /// records the second as a refusal with its reason, and its cell says so rather than
+    /// staying silent; with the refusal removed, the point fails the render's check.
+    #[test]
+    fn an_arm_that_drops_its_end_of_run_answer_is_a_refused_row_not_silence() {
+        use crate::arms::LoadReport;
+        use crate::run::{record_end, PointResult};
+        let report = || LoadReport {
+            seconds: 0.1,
+            statements: 1,
+            notes: vec![],
+        };
+        let oracle = (2u64, "abc".to_string());
+        let mut res = PointResult {
+            accounts: 1000,
+            seed: 1,
+            end_checksum: oracle.clone(),
+            ..Default::default()
+        };
+        for arm in ["N", "P+"] {
+            res.loads
+                .insert(arm.into(), (report(), oracle.clone(), (0, String::new())));
+        }
+        record_end(&mut res, "N", Ok(oracle.clone()));
+        record_end(
+            &mut res,
+            "P+",
+            Err("connect: the arm did not answer".into()),
+        );
+        assert!(res.failures.is_empty());
+
+        let dir = std::env::temp_dir().join(format!("c1702-{}", std::process::id()));
+        let path = dir.join("single-1000-1.tsv");
+        crate::store::write(&path, "single", &res, &[]).unwrap();
+        let st = Stored::read(&path).unwrap();
+        let cell = |arm: &str| {
+            let r = st.kind("load").find(|r| r[1] == arm).unwrap().clone();
+            end_cell(&st, arm, &r[6], "abc")
+        };
+        assert_eq!(cell("N"), "=");
+        assert_eq!(cell("P+"), "REFUSED (connect: the arm did not answer)");
+        assert!(unrecorded_end_checks(&st).is_empty());
+
+        // The defect C17-02 removes: the same point with the refusal gone is silent, and the
+        // render refuses it.
+        let text = std::fs::read_to_string(&path).unwrap();
+        let silent: String = text
+            .lines()
+            .filter(|l| !l.starts_with("refused\t"))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        std::fs::write(&path, silent).unwrap();
+        let st = Stored::read(&path).unwrap();
+        assert_eq!(unrecorded_end_checks(&st), vec!["P+".to_string()]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A point written before C17-02 renders as it always did: *not read*, and no failure.
+    #[test]
+    fn a_point_from_before_the_fix_still_renders_not_read() {
+        let mut st = Stored::default();
+        st.records.push(vec![
+            "load".into(),
+            "N".into(),
+            "0.1".into(),
+            "2".into(),
+            "x".into(),
+            "0".into(),
+            String::new(),
+            "n".into(),
+        ]);
+        assert_eq!(end_cell(&st, "N", "", "abc"), "not read");
+        assert!(unrecorded_end_checks(&st).is_empty());
+    }
 
     /// A point file as `store::write` produces it, cut down to one metric.
     fn point(n: f64, p: f64, diverged: bool) -> Stored {

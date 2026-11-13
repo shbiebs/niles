@@ -72,6 +72,9 @@ pub fn write(
     let _ = writeln!(s, "meta\tuniverse_sha256\t{}", p.universe_checksum.1);
     let _ = writeln!(s, "meta\tend_legs\t{}", p.end_checksum.0);
     let _ = writeln!(s, "meta\tend_sha256\t{}", p.end_checksum.1);
+    // C17-02: this point records every arm's end-of-run answer, or a refusal. Points written
+    // before it carry no such line, and render as they always did.
+    let _ = writeln!(s, "meta\tend_checks\trecorded");
     for (arm, (rep, ck, end)) in &p.loads {
         let _ = writeln!(
             s,
@@ -96,6 +99,9 @@ pub fn write(
         for (q, why) in v {
             let _ = writeln!(s, "notrun\t{arm}\t{q}\t{}", clean(why));
         }
+    }
+    for (arm, why) in &p.end_refused {
+        let _ = writeln!(s, "refused\t{arm}\tend-of-run\t{}", clean(why));
     }
     for f in &p.failures {
         let _ = writeln!(s, "failure\t{}", clean(f));

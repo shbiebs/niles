@@ -4,18 +4,18 @@
 # run's pre-registration, and nothing here may contradict them.
 #
 # What it runs (§7.1 items 1–4): arms N, N'-lazy, P+, H3 and P-inc; single-currency at 10⁴
-# accounts with 1×, 4×, 16× and 64× E27b's history (10, 40, 160 and 640 transactions per
-# account; 1× is the reference); α ∈ {0.6, 1.1}; seeds 1, 7, 42, 100, 2024; for each
-# (history, α, seed) the main point (with the counted pass), then the p99 point. Histories
-# in increasing order, so the largest, which may not fit, comes last. 80 main and 80 p99
-# points in all.
+# accounts with 1×, 4× and 16× E27b's history (10, 40 and 160 transactions per account; 1× is
+# the reference); α ∈ {0.6, 1.1}; seeds 1, 7, 42, 100, 2024; for each (history, α, seed) the
+# main point (with the counted pass), then the p99 point. 60 main and 60 p99 points in all.
+# 64× does not fit in this container's 6 GiB memory cgroup (§7.2) and runs on Host C as
+# tools/e27c-hostc.sh's sweep-64 stage (§7.3).
 #
 # What carries the predictions here is counted: view-state and checkpoint bytes, and base
 # rows per reconstruction from the counted pass (§5 predictions 1 and 3). Latency cells are
 # subject to this container's noise (results/M-NOISE.md on branch c17/04-m-noise) and are
 # reported with that beside them (§7.1 item 1).
 #
-# E27C_HISTORIES picks histories (default "1 4 16 64"); a re-run resumes, because a point
+# E27C_HISTORIES picks histories (default "1 4 16"); a re-run resumes, because a point
 # already written is skipped. Before and after every point it records the load averages and
 # the memory available (`free -m`) in points.tsv.
 #
@@ -36,9 +36,13 @@ if ! git diff --quiet HEAD -- crates tools/memprobe Cargo.toml Cargo.lock; then
     echo "e27c-sweep: the checkout has local changes under crates/, tools/memprobe or Cargo.*; every point would record MODIFIED." >&2
     exit 2
 fi
-histories=${E27C_HISTORIES:-1 4 16 64}
+histories=${E27C_HISTORIES:-1 4 16}
 for h in $histories; do
-    case "$h" in 1|4|16|64) ;; *) echo "e27c-sweep: history $h is not one of 1, 4, 16, 64 (§4)" >&2; exit 2 ;; esac
+    case "$h" in
+        1|4|16) ;;
+        64) echo "e27c-sweep: 64× runs on Host C (tools/e27c-hostc.sh, stage sweep-64; E27c §7.3): it does not fit in this container (§7.2)" >&2; exit 2 ;;
+        *) echo "e27c-sweep: history $h is not one of 1, 4, 16 (§4, §7.3)" >&2; exit 2 ;;
+    esac
 done
 
 cargo build --release -p comparator

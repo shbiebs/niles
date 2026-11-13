@@ -3,14 +3,16 @@
 # docs/study/E27c-design.md; its §7.1, committed before this script, is this run's
 # pre-registration, and nothing here may contradict it.
 #
-# What it runs (§7.1 items 1–4): arms N, N'-lazy, P+, H3 and P-inc; single-currency at 10⁵ and
-# 10⁶ and multi-currency at 10⁵ (multi-currency at 10⁶ is not run: on 16 GiB it would swap);
-# α ∈ {0.6, 1.1}; seeds 1, 7, 42, 100, 2024; for each (α, seed) the main point (E27b's shape,
-# with the counted pass), then the p99 point (E27b's targeted shape; q1 only on multi). The
-# order is single 10⁵, multi 10⁵, single 10⁶. 60 main points and 60 p99 points in all.
+# What it runs (§7.1 items 1–4, §7.3): arms N, N'-lazy, P+, H3 and P-inc; single-currency at
+# 10⁵ and 10⁶ and multi-currency at 10⁵ (multi-currency at 10⁶ is not run: on 16 GiB it would
+# swap); and the history sweep's 64× point, single-currency at 10⁴ with 64× E27b's history,
+# which does not fit in the container (§7.2, §7.3); α ∈ {0.6, 1.1}; seeds 1, 7, 42, 100,
+# 2024; for each (α, seed) the main point (E27b's shape, with the counted pass), then the p99
+# point (E27b's targeted shape; q1 only on multi). The order is single 10⁵, multi 10⁵, the
+# 64× sweep point, single 10⁶. 80 main points and 80 p99 points in all.
 #
 # How long: see the estimate the session gave with this script. It is long, so it runs in
-# stages: E27C_STAGES picks them (default "single-100000 multi-100000 single-1000000"), and a
+# stages: E27C_STAGES picks them (default "single-100000 multi-100000 sweep-64 single-1000000"), and a
 # re-run resumes, because a point already written is skipped. Running one stage per night is
 # fine; every stage is copied out when it finishes.
 #
@@ -66,20 +68,20 @@ if ! git diff --quiet HEAD -- crates tools/memprobe Cargo.toml Cargo.lock; then
     exit 2
 fi
 
-stages=${E27C_STAGES:-single-100000 multi-100000 single-1000000}
+stages=${E27C_STAGES:-single-100000 multi-100000 sweep-64 single-1000000}
 for st in $stages; do
     case "$st" in
-        single-100000|multi-100000|single-1000000) ;;
-        *) echo "e27c-hostc: unknown stage $st (single-100000, multi-100000 or single-1000000; §7.1 item 1)" >&2; exit 2 ;;
+        single-100000|multi-100000|sweep-64|single-1000000) ;;
+        *) echo "e27c-hostc: unknown stage $st (single-100000, multi-100000, sweep-64 or single-1000000; §7.1 item 1, §7.3)" >&2; exit 2 ;;
     esac
 done
 
 free_gib=$(df -g "$HOME" | awk 'NR==2 {print $4}')
 echo "e27c-hostc: ${free_gib} GiB free on the home volume"
 case " $stages " in
-    *" single-1000000 "*)
+    *" single-1000000 "*|*" sweep-64 "*)
         if [ "${free_gib:-0}" -lt 40 ]; then
-            echo "e27c-hostc: under 40 GiB free; the 10⁶ stage writes about 2 × 10⁷ legs into three clusters and two daemon segments. Free some space first, or set E27C_STAGES to the 10⁵ stages." >&2
+            echo "e27c-hostc: under 40 GiB free; the 10⁶ stage writes about 2 × 10⁷ legs, and the 64× stage 1.28 × 10⁷, into three clusters and two daemon segments. Free some space first, or set E27C_STAGES to the 10⁵ stages." >&2
             exit 2
         fi ;;
 esac
@@ -126,7 +128,7 @@ if [ ! -f "$out/host.txt" ]; then
     } > "$out/host.txt"
 fi
 if [ ! -f "$out/points.tsv" ]; then
-    printf 'shape\talpha\tseries\tsize\tseed\tstarted_utc\tseconds\tload1_before\tload1_after\tswap_used_mib_before\tswap_used_mib_after\tswap_affected\n' > "$out/points.tsv"
+    printf 'shape\talpha\thistory_factor\tseries\tsize\tseed\tstarted_utc\tseconds\tload1_before\tload1_after\tswap_used_mib_before\tswap_used_mib_after\tswap_affected\n' > "$out/points.tsv"
 fi
 record "start ($stages)"
 cat "$out/host.txt"
@@ -134,10 +136,12 @@ cat "$out/host.txt"
 arms="N,N'-lazy,P+,H3,P-inc"
 scratch="$HOME/.e27-scratch"
 
-# One point: skipped if written; otherwise run, then one row of points.tsv.
+# One point: skipped if written; otherwise run, then one row of points.tsv. History factor 1
+# (E27b's history) writes under $shape/a$alpha/, any other under $shape/a$alpha/h$h/.
 point() {
-    shape=$1 alpha=$2 series=$3 size=$4 seed=$5
+    shape=$1 alpha=$2 series=$3 size=$4 seed=$5 h=$6
     dir="$out/$shape/a$alpha"
+    if [ "$h" != 1 ]; then dir="$dir/h$h"; fi
     file="$dir/$series-$size-$seed.tsv"
     if [ -f "$file" ]; then
         echo "e27c-hostc: skip $file"
@@ -151,12 +155,12 @@ point() {
     l0=$(load1) s0=$(swap_used) t0=$(date +%s) d0=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     # shellcheck disable=SC2086 # $extra is a list of flags
     ./target/release/comparator run --study e27c --series "$series" --sizes "$size" \
-        --seeds "$seed" --alpha "$alpha" --arms "$arms" $extra --dir "$dir" \
+        --seeds "$seed" --alpha "$alpha" --history-factor "$h" --arms "$arms" $extra --dir "$dir" \
         --skip-existing --scratch "$scratch"
     l1=$(load1) s1=$(swap_used) t1=$(date +%s)
     affected=no
     if awk -v a="$s0" -v b="$s1" 'BEGIN { exit !(b > a) }'; then affected=yes; fi
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$shape" "$alpha" "$series" \
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$shape" "$alpha" "$h" "$series" \
         "$size" "$seed" "$d0" "$((t1 - t0))" "$l0" "$l1" "$s0" "$s1" "$affected" >> "$out/points.tsv"
     if [ "$affected" = yes ]; then
         echo "e27c-hostc: $file is swap-affected (swap in use $s0 → $s1 MiB); it is kept and will be labelled, not compared"
@@ -176,11 +180,13 @@ started=$(date +%s)
 for st in $stages; do
     series=${st%-*}
     size=${st#*-}
+    h=1
+    if [ "$st" = sweep-64 ]; then series=single size=10000 h=64; fi
     echo "e27c-hostc: $(date -u +%FT%TZ) stage $st"
     for alpha in 0.6 1.1; do
         for seed in 1 7 42 100 2024; do
-            point main "$alpha" "$series" "$size" "$seed"
-            point p99 "$alpha" "$series" "$size" "$seed"
+            point main "$alpha" "$series" "$size" "$seed" "$h"
+            point p99 "$alpha" "$series" "$size" "$seed" "$h"
         done
     done
     record "stage $st done"
@@ -188,6 +194,6 @@ for st in $stages; do
 done
 record end
 echo "e27c-hostc: measured in $(( $(date +%s) - started )) s"
-echo "e27c-hostc: points marked swap-affected: $(awk -F'\t' 'NR > 1 && $12 == "yes"' "$out/points.tsv" | wc -l | tr -d ' ')"
-echo "e27c-hostc: points with a failure line: $(grep -l '^failure' "$out"/*/a*/*.tsv 2>/dev/null | wc -l | tr -d ' ')"
+echo "e27c-hostc: points marked swap-affected: $(awk -F'\t' 'NR > 1 && $13 == "yes"' "$out/points.tsv" | wc -l | tr -d ' ')"
+echo "e27c-hostc: points with a failure line: $(grep -rl '^failure' "$out"/main "$out"/p99 2>/dev/null | wc -l | tr -d ' ')"
 echo "e27c-hostc: done"

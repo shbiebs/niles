@@ -5,14 +5,15 @@
 #
 # What it runs (§7.1 items 1–4, §7.3): arms N, N'-lazy, P+, H3 and P-inc; single-currency at
 # 10⁵ and 10⁶ and multi-currency at 10⁵ (multi-currency at 10⁶ is not run: on 16 GiB it would
-# swap); and the history sweep's 64× point, single-currency at 10⁴ with 64× E27b's history,
-# which does not fit in the container (§7.2, §7.3); α ∈ {0.6, 1.1}; seeds 1, 7, 42, 100,
-# 2024; for each (α, seed) the main point (E27b's shape, with the counted pass), then the p99
-# point (E27b's targeted shape; q1 only on multi). The order is single 10⁵, multi 10⁵, the
-# 64× sweep point, single 10⁶. 80 main points and 80 p99 points in all.
+# swap); and the history sweep, single-currency at 10⁴ with 64× E27b's history (§7.3) and,
+# since §7.4, with 1×, 4× and 16× as well; α ∈ {0.6, 1.1}; seeds 1, 7, 42, 100, 2024; for
+# each (α, seed) the main point (E27b's shape, with the counted pass), then the p99 point
+# (E27b's targeted shape; q1 only on multi). The order is single 10⁵, multi 10⁵, sweep-64,
+# single 10⁶ (run first, 2026-11-13 to 15), then sweep-1, sweep-4, sweep-16 (§7.4). 70 main
+# points and 70 p99 points in all.
 #
 # How long: see the estimate the session gave with this script. It is long, so it runs in
-# stages: E27C_STAGES picks them (default "single-100000 multi-100000 sweep-64 single-1000000"), and a
+# stages: E27C_STAGES picks them (default: all seven, in that order), and a
 # re-run resumes, because a point already written is skipped. Running one stage per night is
 # fine; every stage is copied out when it finishes.
 #
@@ -68,11 +69,11 @@ if ! git diff --quiet HEAD -- crates tools/memprobe Cargo.toml Cargo.lock; then
     exit 2
 fi
 
-stages=${E27C_STAGES:-single-100000 multi-100000 sweep-64 single-1000000}
+stages=${E27C_STAGES:-single-100000 multi-100000 sweep-64 single-1000000 sweep-1 sweep-4 sweep-16}
 for st in $stages; do
     case "$st" in
-        single-100000|multi-100000|sweep-64|single-1000000) ;;
-        *) echo "e27c-hostc: unknown stage $st (single-100000, multi-100000, sweep-64 or single-1000000; §7.1 item 1, §7.3)" >&2; exit 2 ;;
+        single-100000|multi-100000|sweep-64|single-1000000|sweep-1|sweep-4|sweep-16) ;;
+        *) echo "e27c-hostc: unknown stage $st (single-100000, multi-100000, sweep-64, single-1000000, sweep-1, sweep-4 or sweep-16; §7.1 item 1, §7.3, §7.4)" >&2; exit 2 ;;
     esac
 done
 
@@ -181,7 +182,9 @@ for st in $stages; do
     series=${st%-*}
     size=${st#*-}
     h=1
-    if [ "$st" = sweep-64 ]; then series=single size=10000 h=64; fi
+    case "$st" in
+        sweep-*) series=single size=10000 h=${st#sweep-} ;;
+    esac
     echo "e27c-hostc: $(date -u +%FT%TZ) stage $st"
     for alpha in 0.6 1.1; do
         for seed in 1 7 42 100 2024; do

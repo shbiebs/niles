@@ -260,15 +260,10 @@ fn main() {
         }
         "render" if e27c => {
             // E27c design §7.1 item 8: written in the session that read the points, from §7.1
-            // and §7.3 without changing them. Host C's points, and the container's sweep where
-            // it exists.
+            // and §7.3 without changing them; every point is Host C's since §7.4.
             let out = root.join("results/E27c.md");
-            comparator::render_e27c::render(
-                &root.join("results/E27c-hostc"),
-                &root.join("results/E27c-sweep"),
-                &out,
-            )
-            .expect("render");
+            comparator::render_e27c::render(&root.join("results/E27c-hostc"), &out)
+                .expect("render");
             eprintln!("wrote {}", out.display());
         }
         "render" => {

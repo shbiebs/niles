@@ -18,6 +18,7 @@ pub mod oracle;
 pub mod pgcluster;
 pub mod probe;
 pub mod render;
+pub mod render_e27c;
 pub mod run;
 pub mod stats;
 pub mod store;

@@ -441,6 +441,8 @@ E27b-p99-engine/single-100000-2024.tsv,machine-dependent,cargo run --release -p 
 E27b-p99-engine/single-100000-42.tsv,machine-dependent,cargo run --release -p comparator -- run --study e27b --shape p99-engine (arms N P+ H3; see E27b-p99-engine.md)
 E27b-p99-engine/single-100000-7.tsv,machine-dependent,cargo run --release -p comparator -- run --study e27b --shape p99-engine (arms N P+ H3; see E27b-p99-engine.md)
 C17-01-hang.md,machine-dependent,by hand (cycle 17 C17-01): 200 runs of the concurrent_differential test under timeout 20; command in the file
+# E27c (C17-12 run 3): rendered from Host C's points; the container's sweep joins it when it exists
+E27c.md,byte-deterministic,cargo run -q --release -p comparator -- render --study e27c
 # E27c on Host C (C17-12 run 3): written by `caffeinate -dimsu sh tools/e27c-hostc.sh` on the author's Mac at d98778d; staged with SHA256SUMS verified
 E27c-hostc/SHA256SUMS,machine-dependent,sh tools/e27c-hostc.sh on Host C (see E27c.md)
 E27c-hostc/host.txt,machine-dependent,sh tools/e27c-hostc.sh on Host C (see E27c.md)

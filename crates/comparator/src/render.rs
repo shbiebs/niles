@@ -42,7 +42,7 @@ pub const METRICS: &[(&str, &str)] = &[
 /// (series, arm A, arm B, metric) → the size verdicts along the sweep.
 type SizeVerdicts = BTreeMap<(String, String, String, String), Vec<(u64, Verdict)>>;
 /// (series, size) → every judged cell, with the NOT RUN reason where there is one.
-type CellsBySize = BTreeMap<(String, u64), Vec<(Cell, Option<String>)>>;
+pub(crate) type CellsBySize = BTreeMap<(String, u64), Vec<(Cell, Option<String>)>>;
 /// (series, size, family, arm) → (samples, p50s, p99s, p999s) over seeds.
 type Pooled = BTreeMap<(String, u64, String, String), (u64, Vec<f64>, Vec<f64>, Vec<f64>)>;
 /// (series, size, arm) → (PSS after load per seed, state figures per seed).
@@ -107,7 +107,7 @@ fn pct(x: f64) -> String {
     }
 }
 
-fn size_label(n: u64) -> String {
+pub(crate) fn size_label(n: u64) -> String {
     match n {
         1_000 => "10³".into(),
         10_000 => "10⁴".into(),
@@ -141,7 +141,7 @@ pub fn load(dir: &Path) -> BTreeMap<(String, u64, u64), Stored> {
 }
 
 /// The per-run values of `metric` for `arm`: (measured, warm-up), `None` where a run lacked it.
-fn series_of(st: &Stored, arm: &str, metric: &str) -> Series {
+pub(crate) fn series_of(st: &Stored, arm: &str, metric: &str) -> Series {
     let mut runs: BTreeMap<i64, Option<f64>> = BTreeMap::new();
     for r in st.kind("val").filter(|r| r[1] == arm) {
         runs.entry(r[2].parse().unwrap_or(0)).or_insert(None);
@@ -260,7 +260,7 @@ pub fn cells(st: &Stored, study: &Study) -> Vec<(Cell, Option<String>)> {
 }
 
 /// One cell of §2's size table: what the seeds of one (series, size) say about a pair.
-enum SizeCell {
+pub(crate) enum SizeCell {
     /// Neither arm of the pair was in these points, or the metric is absent by design.
     Missing,
     NotRun,
@@ -272,7 +272,7 @@ enum SizeCell {
 }
 
 impl SizeCell {
-    fn verdict(&self) -> Option<&Verdict> {
+    pub(crate) fn verdict(&self) -> Option<&Verdict> {
         match self {
             SizeCell::Seeds(v, _) | SizeCell::Tally(v, _) => Some(v),
             _ => None,
@@ -280,9 +280,9 @@ impl SizeCell {
     }
 }
 
-type Points = BTreeMap<(String, u64, u64), Stored>;
+pub(crate) type Points = BTreeMap<(String, u64, u64), Stored>;
 
-fn cells_by_size(points: &Points, study: &Study) -> CellsBySize {
+pub(crate) fn cells_by_size(points: &Points, study: &Study) -> CellsBySize {
     let mut all_cells: CellsBySize = BTreeMap::new();
     for ((se, n, _), st) in points {
         all_cells
@@ -294,7 +294,7 @@ fn cells_by_size(points: &Points, study: &Study) -> CellsBySize {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn size_cell(
+pub(crate) fn size_cell(
     points: &Points,
     all_cells: &CellsBySize,
     study: &Study,
@@ -1633,7 +1633,7 @@ type RuleParts<'a> = (
 const RULE_P99: &[&str] = &["q1_p99_us", "q2_p99_us", "c4_q1_p99_us", "c4_q2_p99_us"];
 const RULE_MEMORY: &str = "view_state_bytes_per_key_read";
 
-fn word_of(v: &Verdict) -> String {
+pub(crate) fn word_of(v: &Verdict) -> String {
     match v {
         Verdict::Refused(w) if w == "mixed" => "mixed".into(),
         o => o.word(),

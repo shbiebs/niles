@@ -1,0 +1,33 @@
+commit: d98778d19f7c7d451e913c73fe7d94702765dd1f
+toolchain: cargo 1.97.0 (c980f4866 2026-06-30)
+postgres: postgres (PostgreSQL) 16.15 (Homebrew)
+start (single-100000 multi-100000 sweep-64 single-1000000): 2026-11-13T15:00:03Z
+  machine: arm64, 10 CPUs, 16384 MiB
+  macOS: macOS 27.0.1 (26A434)
+  load averages: { 1.40 1.67 1.71 }
+  swap: total = 0.00M  used = 0.00M  free = 0.00M  (encrypted)
+  free on the home volume: 58 GiB
+stage single-100000 done: 2026-11-13T16:39:33Z
+  machine: arm64, 10 CPUs, 16384 MiB
+  macOS: macOS 27.0.1 (26A434)
+  load averages: { 3.53 3.36 3.12 }
+  swap: total = 0.00M  used = 0.00M  free = 0.00M  (encrypted)
+  free on the home volume: 54 GiB
+stage multi-100000 done: 2026-11-13T17:58:48Z
+  machine: arm64, 10 CPUs, 16384 MiB
+  macOS: macOS 27.0.1 (26A434)
+  load averages: { 1.84 2.12 2.12 }
+  swap: total = 0.00M  used = 0.00M  free = 0.00M  (encrypted)
+  free on the home volume: 54 GiB
+stage sweep-64 done: 2026-11-14T03:28:52Z
+  machine: arm64, 10 CPUs, 16384 MiB
+  macOS: macOS 27.0.1 (26A434)
+  load averages: { 3.33 4.47 4.24 }
+  swap: total = 0.00M  used = 0.00M  free = 0.00M  (encrypted)
+  free on the home volume: 47 GiB
+stage single-1000000 done: 2026-11-15T06:39:32Z
+  machine: arm64, 10 CPUs, 16384 MiB
+  macOS: macOS 27.0.1 (26A434)
+  load averages: { 2.99 4.06 4.24 }
+  swap: total = 1024.00M  used = 145.75M  free = 878.25M  (encrypted)
+  free on the home volume: 40 GiB

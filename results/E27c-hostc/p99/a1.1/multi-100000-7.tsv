@@ -1,0 +1,577 @@
+meta	series	multi
+meta	commit	d98778d19f7c7d451e913c73fe7d94702765dd1f
+meta	worktree	clean
+meta	host	Darwin 27.0.0 arm64
+meta	cpus	10
+meta	mem_mib	16384
+meta	toolchain	cargo 1.97.1 (c980f4866 2026-06-30)
+meta	postgres	postgres (PostgreSQL) 16.15 (Homebrew)
+meta	date	2026-11-13T17:37:49Z
+meta	checkpoint_interval	16
+meta	study	E27c
+meta	alpha	1.1
+meta	history_factor	1
+meta	anchor_pass	0
+meta	accounts	100000
+meta	seed	7
+meta	keys	94775
+meta	budget	4739
+meta	history_txns	1000000
+meta	batches	5000
+meta	universe_legs	2000000
+meta	universe_sha256	c5f7771e86aa79f05656aef39ea1f075d121184167a07404adc04e883caed768
+meta	end_legs	2000000
+meta	end_sha256	c5f7771e86aa79f05656aef39ea1f075d121184167a07404adc04e883caed768
+meta	end_checks	recorded
+load	H3	23.713	2000000	c5f7771e86aa79f05656aef39ea1f075d121184167a07404adc04e883caed768	2000000	c5f7771e86aa79f05656aef39ea1f075d121184167a07404adc04e883caed768	PostgreSQL loaded as on P (one multi-row insert per batch, epochs sealed in order); publication `h3` on arm.postings; rev-sidecar started after the load with a temporary logical slot, the view certified through the loaded head #5000 with nothing resident, budget 4739
+load	N	28.187	2000000	c5f7771e86aa79f05656aef39ea1f075d121184167a07404adc04e883caed768	2000000	c5f7771e86aa79f05656aef39ea1f075d121184167a07404adc04e883caed768	one insert statement per batch, one epoch each; N epoch = oracle index -1; frontier #4999 after the load, asserted by an `as of system time` probe
+load	N'-lazy	28.239	2000000	c5f7771e86aa79f05656aef39ea1f075d121184167a07404adc04e883caed768	2000000	c5f7771e86aa79f05656aef39ea1f075d121184167a07404adc04e883caed768	one insert statement per batch, one epoch each; N epoch = oracle index -1; frontier #4999 after the load, asserted by an `as of system time` probe
+load	P+	25.409	2000000	c5f7771e86aa79f05656aef39ea1f075d121184167a07404adc04e883caed768	2000000	c5f7771e86aa79f05656aef39ea1f075d121184167a07404adc04e883caed768	one multi-row insert per batch with explicit epoch ids 1..5000; epochs sealed in order by arm.seal (sha256 chain); arm.after_load: checkpoints every 16 legs per key, key counts, budget; vacuum analyze
+load	P-inc	24.129	2000000	c5f7771e86aa79f05656aef39ea1f075d121184167a07404adc04e883caed768	2000000	c5f7771e86aa79f05656aef39ea1f075d121184167a07404adc04e883caed768	one multi-row insert per batch with explicit epoch ids 1..5000; epochs sealed in order by arm.seal (sha256 chain); balance table populated in one pass after the load, then the per-leg trigger created; vacuum analyze
+state	H3	resident	4739
+state	H3	reads	26000
+state	H3	hits	19187
+state	H3	misses	6813
+state	H3	rows_touched	1586795
+state	H3	evictions	2072
+state	H3	view_metadata_keys	4739
+state	H3	view_slots	4739
+state	H3	view_state_bytes	895496
+state	N	resident	4739
+state	N	reads	26017
+state	N	hits	19192
+state	N	misses	6825
+state	N	rows_touched	4076055
+state	N	view_answers	26000
+state	N	fallbacks	0
+state	N	view_metadata_keys	4739
+state	N	view_state_bytes	895848
+state	N	checkpoint_bytes	14521440
+state	N'-lazy	resident	4739
+state	N'-lazy	reads	26017
+state	N'-lazy	hits	19192
+state	N'-lazy	misses	6825
+state	N'-lazy	rows_touched	6228130
+state	N'-lazy	view_answers	26000
+state	N'-lazy	fallbacks	0
+state	N'-lazy	view_metadata_keys	4739
+state	N'-lazy	view_state_bytes	893832
+state	N'-lazy	checkpoint_bytes	6582848
+state	P+	bytes arm.rev	1810432
+state	P+	bytes arm.checkpoints	9584640
+state	P+	bytes arm.key_counts	9142272
+state	P+	bytes arm.postings	391602176
+state	P+	resident	4739
+state	P+	bytes arm.rev_meta	139264
+state	P-inc	bytes arm.balances	14278656
+state	P-inc	bytes arm.postings	391602176
+state	P-inc	resident	94775
+notrun	H3	q2	E27c design §7.1 item 4: q1 only on the multi-currency series at 10⁵, as E27b §6; the historical distribution's verdict there is NOT RUN
+notrun	N	q2	E27c design §7.1 item 4: q1 only on the multi-currency series at 10⁵, as E27b §6; the historical distribution's verdict there is NOT RUN
+notrun	N'-lazy	q2	E27c design §7.1 item 4: q1 only on the multi-currency series at 10⁵, as E27b §6; the historical distribution's verdict there is NOT RUN
+notrun	P+	q2	E27c design §7.1 item 4: q1 only on the multi-currency series at 10⁵, as E27b §6; the historical distribution's verdict there is NOT RUN
+notrun	P-inc	q2	E27c design §7.1 item 4: q1 only on the multi-currency series at 10⁵, as E27b §6; the historical distribution's verdict there is NOT RUN
+val	N	-3	c4_q1_p50_us	42.792
+val	N	-3	c4_q1_p99_us	100.583
+val	N	-3	checkpoint_bytes	14521440
+val	N	-3	q1_p50_us	43.084
+val	N	-3	q1_p99_us	109.416
+val	N	-3	read_deadlock_retries	0
+val	N	-3	view_state_bytes	14684320
+val	N	-3	view_state_bytes_per_key_read	16611.221719457015
+val	N'-lazy	-3	c4_q1_p50_us	43.791000000000004
+val	N'-lazy	-3	c4_q1_p99_us	126.625
+val	N'-lazy	-3	checkpoint_bytes	5476832
+val	N'-lazy	-3	q1_p50_us	39.208999999999996
+val	N'-lazy	-3	q1_p99_us	388.25
+val	N'-lazy	-3	read_deadlock_retries	0
+val	N'-lazy	-3	view_state_bytes	5640808
+val	N'-lazy	-3	view_state_bytes_per_key_read	6381.004524886878
+val	P+	-3	c4_q1_p50_us	122.292
+val	P+	-3	c4_q1_p99_us	280.25
+val	P+	-3	checkpoint_bytes	18726912
+val	P+	-3	q1_p50_us	80.834
+val	P+	-3	q1_p99_us	123.333
+val	P+	-3	read_deadlock_retries	0
+val	P+	-3	view_state_bytes	19021824
+val	P+	-3	view_state_bytes_per_key_read	21517.900452488688
+val	H3	-3	c4_q1_p50_us	65.625
+val	H3	-3	c4_q1_p99_us	1894.583
+val	H3	-3	q1_p50_us	83
+val	H3	-3	q1_p99_us	7480.2080000000005
+val	H3	-3	read_deadlock_retries	0
+val	H3	-3	view_state_bytes	165072
+val	H3	-3	view_state_bytes_per_key_read	186.73303167420815
+val	P-inc	-3	c4_q1_p50_us	38.083
+val	P-inc	-3	c4_q1_p99_us	80.041
+val	P-inc	-3	q1_p50_us	33.958000000000006
+val	P-inc	-3	q1_p99_us	65.375
+val	P-inc	-3	read_deadlock_retries	0
+val	P-inc	-3	view_state_bytes	14278656
+val	P-inc	-3	view_state_bytes_per_key_read	16152.325791855204
+val	N'-lazy	-2	c4_q1_p50_us	42.75
+val	N'-lazy	-2	c4_q1_p99_us	88.459
+val	N'-lazy	-2	checkpoint_bytes	5736640
+val	N'-lazy	-2	q1_p50_us	36.125
+val	N'-lazy	-2	q1_p99_us	65.459
+val	N'-lazy	-2	read_deadlock_retries	0
+val	N'-lazy	-2	view_state_bytes	6017304
+val	N'-lazy	-2	view_state_bytes_per_key_read	3899.743357096565
+val	P+	-2	c4_q1_p50_us	119.375
+val	P+	-2	c4_q1_p99_us	284.625
+val	P+	-2	checkpoint_bytes	18726912
+val	P+	-2	q1_p50_us	62.083
+val	P+	-2	q1_p99_us	119.833
+val	P+	-2	read_deadlock_retries	0
+val	P+	-2	view_state_bytes	19161088
+val	P+	-2	view_state_bytes_per_key_read	12418.073882047958
+val	H3	-2	c4_q1_p50_us	32.042
+val	H3	-2	c4_q1_p99_us	401.792
+val	H3	-2	q1_p50_us	17.75
+val	H3	-2	q1_p99_us	461.459
+val	H3	-2	read_deadlock_retries	0
+val	H3	-2	view_state_bytes	278664
+val	H3	-2	view_state_bytes_per_key_read	180.59883344134803
+val	P-inc	-2	c4_q1_p50_us	39.041000000000004
+val	P-inc	-2	c4_q1_p99_us	80.5
+val	P-inc	-2	q1_p50_us	31.916999999999998
+val	P-inc	-2	q1_p99_us	42.125
+val	P-inc	-2	read_deadlock_retries	0
+val	P-inc	-2	view_state_bytes	14278656
+val	P-inc	-2	view_state_bytes_per_key_read	9253.827608554764
+val	N	-2	c4_q1_p50_us	43.25
+val	N	-2	c4_q1_p99_us	92.791
+val	N	-2	checkpoint_bytes	14521440
+val	N	-2	q1_p50_us	35.333999999999996
+val	N	-2	q1_p99_us	53.792
+val	N	-2	read_deadlock_retries	0
+val	N	-2	view_state_bytes	14803392
+val	N	-2	view_state_bytes_per_key_read	9593.902786779003
+val	P+	-1	c4_q1_p50_us	120.5
+val	P+	-1	c4_q1_p99_us	240.917
+val	P+	-1	checkpoint_bytes	18726912
+val	P+	-1	q1_p50_us	63.25000000000001
+val	P+	-1	q1_p99_us	128.833
+val	P+	-1	read_deadlock_retries	0
+val	P+	-1	view_state_bytes	19283968
+val	P+	-1	view_state_bytes_per_key_read	8927.762962962963
+val	H3	-1	c4_q1_p50_us	28
+val	H3	-1	c4_q1_p99_us	293.959
+val	H3	-1	q1_p50_us	17.666999999999998
+val	H3	-1	q1_p99_us	344.833
+val	H3	-1	read_deadlock_retries	0
+val	H3	-1	view_state_bytes	389368
+val	H3	-1	view_state_bytes_per_key_read	180.26296296296297
+val	P-inc	-1	c4_q1_p50_us	39.5
+val	P-inc	-1	c4_q1_p99_us	89.792
+val	P-inc	-1	q1_p50_us	31.708000000000002
+val	P-inc	-1	q1_p99_us	40.75
+val	P-inc	-1	read_deadlock_retries	0
+val	P-inc	-1	view_state_bytes	14278656
+val	P-inc	-1	view_state_bytes_per_key_read	6610.488888888889
+val	N	-1	c4_q1_p50_us	42.959
+val	N	-1	c4_q1_p99_us	86.709
+val	N	-1	checkpoint_bytes	14521440
+val	N	-1	q1_p50_us	35.667
+val	N	-1	q1_p99_us	52.125
+val	N	-1	read_deadlock_retries	0
+val	N	-1	view_state_bytes	14911832
+val	N	-1	view_state_bytes_per_key_read	6903.625925925926
+val	N'-lazy	-1	c4_q1_p50_us	42.75
+val	N'-lazy	-1	c4_q1_p99_us	88.292
+val	N'-lazy	-1	checkpoint_bytes	5950496
+val	N'-lazy	-1	q1_p50_us	37.083999999999996
+val	N'-lazy	-1	q1_p99_us	61.458999999999996
+val	N'-lazy	-1	read_deadlock_retries	0
+val	N'-lazy	-1	view_state_bytes	6340336
+val	N'-lazy	-1	view_state_bytes_per_key_read	2935.340740740741
+val	H3	0	c4_q1_p50_us	27
+val	H3	0	c4_q1_p99_us	237.291
+val	H3	0	q1_p50_us	17.625
+val	H3	0	q1_p99_us	232.917
+val	H3	0	read_deadlock_retries	0
+val	H3	0	view_state_bytes	486448
+val	H3	0	view_state_bytes_per_key_read	178.316715542522
+val	P-inc	0	c4_q1_p50_us	38.417
+val	P-inc	0	c4_q1_p99_us	93.917
+val	P-inc	0	q1_p50_us	32.167
+val	P-inc	0	q1_p99_us	43.042
+val	P-inc	0	read_deadlock_retries	0
+val	P-inc	0	view_state_bytes	14278656
+val	P-inc	0	view_state_bytes_per_key_read	5234.1114369501465
+val	N	0	c4_q1_p50_us	41.958
+val	N	0	c4_q1_p99_us	92.625
+val	N	0	checkpoint_bytes	14521440
+val	N	0	q1_p50_us	36.75
+val	N	0	q1_p99_us	53.167
+val	N	0	read_deadlock_retries	0
+val	N	0	view_state_bytes	15004400
+val	N	0	view_state_bytes_per_key_read	5500.146627565982
+val	N'-lazy	0	c4_q1_p50_us	42.458
+val	N'-lazy	0	c4_q1_p99_us	91.875
+val	N'-lazy	0	checkpoint_bytes	6023680
+val	N'-lazy	0	q1_p50_us	37.75
+val	N'-lazy	0	q1_p99_us	57.375
+val	N'-lazy	0	read_deadlock_retries	0
+val	N'-lazy	0	view_state_bytes	6506640
+val	N'-lazy	0	view_state_bytes_per_key_read	2385.131964809384
+val	P+	0	c4_q1_p50_us	121.166
+val	P+	0	c4_q1_p99_us	241.542
+val	P+	0	checkpoint_bytes	18726912
+val	P+	0	q1_p50_us	64.875
+val	P+	0	q1_p99_us	114.833
+val	P+	0	read_deadlock_retries	0
+val	P+	0	view_state_bytes	19423232
+val	P+	0	view_state_bytes_per_key_read	7119.953079178886
+val	P-inc	1	c4_q1_p50_us	39.292
+val	P-inc	1	c4_q1_p99_us	82.459
+val	P-inc	1	q1_p50_us	32.25
+val	P-inc	1	q1_p99_us	41.583
+val	P-inc	1	read_deadlock_retries	0
+val	P-inc	1	view_state_bytes	14278656
+val	P-inc	1	view_state_bytes_per_key_read	4427.49023255814
+val	N	1	c4_q1_p50_us	42.125
+val	N	1	c4_q1_p99_us	94.583
+val	N	1	checkpoint_bytes	14521440
+val	N	1	q1_p50_us	36.042
+val	N	1	q1_p99_us	52.625
+val	N	1	read_deadlock_retries	0
+val	N	1	view_state_bytes	15098560
+val	N	1	view_state_bytes_per_key_read	4681.724031007752
+val	N'-lazy	1	c4_q1_p50_us	42
+val	N'-lazy	1	c4_q1_p99_us	92.959
+val	N'-lazy	1	checkpoint_bytes	6159392
+val	N'-lazy	1	q1_p50_us	36.917
+val	N'-lazy	1	q1_p99_us	54.958
+val	N'-lazy	1	read_deadlock_retries	0
+val	N'-lazy	1	view_state_bytes	6738352
+val	N'-lazy	1	view_state_bytes_per_key_read	2089.411472868217
+val	P+	1	c4_q1_p50_us	120.667
+val	P+	1	c4_q1_p99_us	258.916
+val	P+	1	checkpoint_bytes	18726912
+val	P+	1	q1_p50_us	63.833
+val	P+	1	q1_p99_us	123.41699999999999
+val	P+	1	read_deadlock_retries	0
+val	P+	1	view_state_bytes	19546112
+val	P+	1	view_state_bytes_per_key_read	6060.80992248062
+val	H3	1	c4_q1_p50_us	26.542
+val	H3	1	c4_q1_p99_us	231.708
+val	H3	1	q1_p50_us	17.541
+val	H3	1	q1_p99_us	218.042
+val	H3	1	read_deadlock_retries	0
+val	H3	1	view_state_bytes	580504
+val	H3	1	view_state_bytes_per_key_read	180.00124031007752
+val	N	2	c4_q1_p50_us	41.875
+val	N	2	c4_q1_p99_us	89.083
+val	N	2	checkpoint_bytes	14521440
+val	N	2	q1_p50_us	37
+val	N	2	q1_p99_us	52.5
+val	N	2	read_deadlock_retries	0
+val	N	2	view_state_bytes	15199552
+val	N	2	view_state_bytes_per_key_read	4088.098977945132
+val	N'-lazy	2	c4_q1_p50_us	42.042
+val	N'-lazy	2	c4_q1_p99_us	99.791
+val	N'-lazy	2	checkpoint_bytes	6435168
+val	N'-lazy	2	q1_p50_us	36.5
+val	N'-lazy	2	q1_p99_us	52.375
+val	N'-lazy	2	read_deadlock_retries	0
+val	N'-lazy	2	view_state_bytes	7112544
+val	N'-lazy	2	view_state_bytes_per_key_read	1913.0026896180743
+val	P+	2	c4_q1_p50_us	120.667
+val	P+	2	c4_q1_p99_us	265.792
+val	P+	2	checkpoint_bytes	18726912
+val	P+	2	q1_p50_us	64.417
+val	P+	2	q1_p99_us	133.167
+val	P+	2	read_deadlock_retries	0
+val	P+	2	view_state_bytes	19668992
+val	P+	2	view_state_bytes_per_key_read	5290.2076385153305
+val	H3	2	c4_q1_p50_us	26.875
+val	H3	2	c4_q1_p99_us	189.875
+val	H3	2	q1_p50_us	17.459
+val	H3	2	q1_p99_us	155.833
+val	H3	2	read_deadlock_retries	0
+val	H3	2	view_state_bytes	682872
+val	H3	2	view_state_bytes_per_key_read	183.66648735879505
+val	P-inc	2	c4_q1_p50_us	39.375
+val	P-inc	2	c4_q1_p99_us	86.542
+val	P-inc	2	q1_p50_us	32.708
+val	P-inc	2	q1_p99_us	42.416999999999994
+val	P-inc	2	read_deadlock_retries	0
+val	P-inc	2	view_state_bytes	14278656
+val	P-inc	2	view_state_bytes_per_key_read	3840.4131253362025
+val	N'-lazy	3	c4_q1_p50_us	42.5
+val	N'-lazy	3	c4_q1_p99_us	87.583
+val	N'-lazy	3	checkpoint_bytes	6467456
+val	N'-lazy	3	q1_p50_us	36.917
+val	N'-lazy	3	q1_p99_us	53.5
+val	N'-lazy	3	read_deadlock_retries	0
+val	N'-lazy	3	view_state_bytes	7238264
+val	N'-lazy	3	view_state_bytes_per_key_read	1722.166071853438
+val	P+	3	c4_q1_p50_us	122.834
+val	P+	3	c4_q1_p99_us	326.541
+val	P+	3	checkpoint_bytes	18726912
+val	P+	3	q1_p50_us	64.20800000000001
+val	P+	3	q1_p99_us	177.292
+val	P+	3	read_deadlock_retries	0
+val	P+	3	view_state_bytes	19791872
+val	P+	3	view_state_bytes_per_key_read	4708.986914108969
+val	H3	3	c4_q1_p50_us	27.083000000000002
+val	H3	3	c4_q1_p99_us	190.083
+val	H3	3	q1_p50_us	17.25
+val	H3	3	q1_p99_us	149.375
+val	H3	3	read_deadlock_retries	0
+val	H3	3	view_state_bytes	773080
+val	H3	3	view_state_bytes_per_key_read	183.9352843207233
+val	P-inc	3	c4_q1_p50_us	39.542
+val	P-inc	3	c4_q1_p99_us	96.208
+val	P-inc	3	q1_p50_us	32.042
+val	P-inc	3	q1_p99_us	42
+val	P-inc	3	read_deadlock_retries	0
+val	P-inc	3	view_state_bytes	14278656
+val	P-inc	3	view_state_bytes_per_key_read	3397.253390435403
+val	N	3	c4_q1_p50_us	43.333
+val	N	3	c4_q1_p99_us	93.166
+val	N	3	checkpoint_bytes	14521440
+val	N	3	q1_p50_us	36.458000000000006
+val	N	3	q1_p99_us	50.708000000000006
+val	N	3	read_deadlock_retries	0
+val	N	3	view_state_bytes	15293904
+val	N	3	view_state_bytes_per_key_read	3638.8065667380442
+val	P+	4	c4_q1_p50_us	121.75
+val	P+	4	c4_q1_p99_us	264.25
+val	P+	4	checkpoint_bytes	18726912
+val	P+	4	q1_p50_us	62.62500000000001
+val	P+	4	q1_p99_us	180.792
+val	P+	4	read_deadlock_retries	0
+val	P+	4	view_state_bytes	19898368
+val	P+	4	view_state_bytes_per_key_read	4259.068493150685
+val	H3	4	c4_q1_p50_us	25.208
+val	H3	4	c4_q1_p99_us	174.75
+val	H3	4	q1_p50_us	17.416999999999998
+val	H3	4	q1_p99_us	145.583
+val	H3	4	read_deadlock_retries	0
+val	H3	4	view_state_bytes	850096
+val	H3	4	view_state_bytes_per_key_read	181.9554794520548
+val	P-inc	4	c4_q1_p50_us	39
+val	P-inc	4	c4_q1_p99_us	82.25
+val	P-inc	4	q1_p50_us	32.083
+val	P-inc	4	q1_p99_us	39.583
+val	P-inc	4	read_deadlock_retries	0
+val	P-inc	4	view_state_bytes	14278656
+val	P-inc	4	view_state_bytes_per_key_read	3056.219178082192
+val	N	4	c4_q1_p50_us	43.458000000000006
+val	N	4	c4_q1_p99_us	110.084
+val	N	4	checkpoint_bytes	14521440
+val	N	4	q1_p50_us	36.084
+val	N	4	q1_p99_us	53.667
+val	N	4	read_deadlock_retries	0
+val	N	4	view_state_bytes	15363384
+val	N	4	view_state_bytes_per_key_read	3288.3955479452056
+val	N'-lazy	4	c4_q1_p50_us	42.666000000000004
+val	N'-lazy	4	c4_q1_p99_us	87.042
+val	N'-lazy	4	checkpoint_bytes	6497152
+val	N'-lazy	4	q1_p50_us	36.333
+val	N'-lazy	4	q1_p99_us	51.459
+val	N'-lazy	4	read_deadlock_retries	0
+val	N'-lazy	4	view_state_bytes	7338544
+val	N'-lazy	4	view_state_bytes_per_key_read	1570.75
+val	H3	5	c4_q1_p50_us	51.833000000000006
+val	H3	5	c4_q1_p99_us	560.3340000000001
+val	H3	5	q1_p50_us	17.25
+val	H3	5	q1_p99_us	262.875
+val	H3	5	read_deadlock_retries	0
+val	H3	5	view_state_bytes	871000
+val	H3	5	view_state_bytes_per_key_read	170.38341158059467
+val	P-inc	5	c4_q1_p50_us	39.791
+val	P-inc	5	c4_q1_p99_us	84.125
+val	P-inc	5	q1_p50_us	31.791
+val	P-inc	5	q1_p99_us	40.459
+val	P-inc	5	read_deadlock_retries	0
+val	P-inc	5	view_state_bytes	14278656
+val	P-inc	5	view_state_bytes_per_key_read	2793.1643192488264
+val	N	5	c4_q1_p50_us	125.16599999999998
+val	N	5	c4_q1_p99_us	399.70799999999997
+val	N	5	checkpoint_bytes	14521440
+val	N	5	q1_p50_us	36.958
+val	N	5	q1_p99_us	176.334
+val	N	5	read_deadlock_retries	0
+val	N	5	view_state_bytes	15390600
+val	N	5	view_state_bytes_per_key_read	3010.680751173709
+val	N'-lazy	5	c4_q1_p50_us	124.66699999999999
+val	N'-lazy	5	c4_q1_p99_us	384.20799999999997
+val	N'-lazy	5	checkpoint_bytes	6519936
+val	N'-lazy	5	q1_p50_us	37.875
+val	N'-lazy	5	q1_p99_us	179.208
+val	N'-lazy	5	read_deadlock_retries	0
+val	N'-lazy	5	view_state_bytes	7387808
+val	N'-lazy	5	view_state_bytes_per_key_read	1445.189358372457
+val	P+	5	c4_q1_p50_us	142.334
+val	P+	5	c4_q1_p99_us	339.25
+val	P+	5	checkpoint_bytes	18726912
+val	P+	5	q1_p50_us	63.667
+val	P+	5	q1_p99_us	201.042
+val	P+	5	read_deadlock_retries	0
+val	P+	5	view_state_bytes	20086784
+val	P+	5	view_state_bytes_per_key_read	3929.339593114241
+val	P-inc	6	c4_q1_p50_us	38.708999999999996
+val	P-inc	6	c4_q1_p99_us	82.875
+val	P-inc	6	q1_p50_us	31.916999999999998
+val	P-inc	6	q1_p99_us	44.083
+val	P-inc	6	read_deadlock_retries	0
+val	P-inc	6	view_state_bytes	14278656
+val	P-inc	6	view_state_bytes_per_key_read	2573.1944494503514
+val	N	6	c4_q1_p50_us	128.834
+val	N	6	c4_q1_p99_us	376.166
+val	N	6	checkpoint_bytes	14521440
+val	N	6	q1_p50_us	36.334
+val	N	6	q1_p99_us	173.042
+val	N	6	read_deadlock_retries	0
+val	N	6	view_state_bytes	15406136
+val	N	6	view_state_bytes_per_key_read	2776.3806091187603
+val	N'-lazy	6	c4_q1_p50_us	127.66700000000002
+val	N'-lazy	6	c4_q1_p99_us	383.292
+val	N'-lazy	6	checkpoint_bytes	6539936
+val	N'-lazy	6	q1_p50_us	37
+val	N'-lazy	6	q1_p99_us	175.875
+val	N'-lazy	6	read_deadlock_retries	0
+val	N'-lazy	6	view_state_bytes	7421152
+val	N'-lazy	6	view_state_bytes_per_key_read	1337.3854748603353
+val	P+	6	c4_q1_p50_us	144.166
+val	P+	6	c4_q1_p99_us	368.083
+val	P+	6	checkpoint_bytes	18726912
+val	P+	6	q1_p50_us	62.875
+val	P+	6	q1_p99_us	196.541
+val	P+	6	read_deadlock_retries	0
+val	P+	6	view_state_bytes	20250624
+val	P+	6	view_state_bytes_per_key_read	3649.4186339881057
+val	H3	6	c4_q1_p50_us	126.70800000000001
+val	H3	6	c4_q1_p99_us	550.208
+val	H3	6	q1_p50_us	17.291999999999998
+val	H3	6	q1_p99_us	281.75
+val	H3	6	read_deadlock_retries	0
+val	H3	6	view_state_bytes	887184
+val	H3	6	view_state_bytes_per_key_read	159.88178050099117
+val	N	7	c4_q1_p50_us	124.125
+val	N	7	c4_q1_p99_us	362.333
+val	N	7	checkpoint_bytes	14521440
+val	N	7	q1_p50_us	35.625
+val	N	7	q1_p99_us	178.25
+val	N	7	read_deadlock_retries	0
+val	N	7	view_state_bytes	15416384
+val	N	7	view_state_bytes_per_key_read	2594.9139875441847
+val	N'-lazy	7	c4_q1_p50_us	123.87499999999999
+val	N'-lazy	7	c4_q1_p99_us	368.70799999999997
+val	N'-lazy	7	checkpoint_bytes	6555904
+val	N'-lazy	7	q1_p50_us	35.834
+val	N'-lazy	7	q1_p99_us	178.166
+val	N'-lazy	7	read_deadlock_retries	0
+val	N'-lazy	7	view_state_bytes	7449944
+val	N'-lazy	7	view_state_bytes_per_key_read	1253.9882174718061
+val	P+	7	c4_q1_p50_us	145.667
+val	P+	7	c4_q1_p99_us	418.375
+val	P+	7	checkpoint_bytes	18726912
+val	P+	7	q1_p50_us	63.166
+val	P+	7	q1_p99_us	209.667
+val	P+	7	read_deadlock_retries	0
+val	P+	7	view_state_bytes	20389888
+val	P+	7	view_state_bytes_per_key_read	3432.0632890085844
+val	H3	7	c4_q1_p50_us	44.958
+val	H3	7	c4_q1_p99_us	562.25
+val	H3	7	q1_p50_us	17.125
+val	H3	7	q1_p99_us	270.709
+val	H3	7	read_deadlock_retries	0
+val	H3	7	view_state_bytes	893296
+val	H3	7	view_state_bytes_per_key_read	150.3612186500589
+val	P-inc	7	c4_q1_p50_us	37.917
+val	P-inc	7	c4_q1_p99_us	81.708
+val	P-inc	7	q1_p50_us	31.083000000000002
+val	P-inc	7	q1_p99_us	39.583999999999996
+val	P-inc	7	read_deadlock_retries	0
+val	P-inc	7	view_state_bytes	14278656
+val	P-inc	7	view_state_bytes_per_key_read	2403.409527015654
+val	N'-lazy	8	c4_q1_p50_us	121.25
+val	N'-lazy	8	c4_q1_p99_us	360.709
+val	N'-lazy	8	checkpoint_bytes	6568160
+val	N'-lazy	8	q1_p50_us	36.875
+val	N'-lazy	8	q1_p99_us	180.791
+val	N'-lazy	8	read_deadlock_retries	0
+val	N'-lazy	8	view_state_bytes	7455608
+val	N'-lazy	8	view_state_bytes_per_key_read	1184.3698173153296
+val	P+	8	c4_q1_p50_us	137.917
+val	P+	8	c4_q1_p99_us	474.08299999999997
+val	P+	8	checkpoint_bytes	18726912
+val	P+	8	q1_p50_us	63.333
+val	P+	8	q1_p99_us	216.875
+val	P+	8	read_deadlock_retries	0
+val	P+	8	view_state_bytes	20537344
+val	P+	8	view_state_bytes_per_key_read	3262.4851469420173
+val	H3	8	c4_q1_p50_us	41.833
+val	H3	8	c4_q1_p99_us	543.958
+val	H3	8	q1_p50_us	17.042
+val	H3	8	q1_p99_us	267
+val	H3	8	read_deadlock_retries	0
+val	H3	8	view_state_bytes	893040
+val	H3	8	view_state_bytes_per_key_read	141.86497220015886
+val	P-inc	8	c4_q1_p50_us	39.375
+val	P-inc	8	c4_q1_p99_us	80.708
+val	P-inc	8	q1_p50_us	31.665999999999997
+val	P-inc	8	q1_p99_us	42.917
+val	P-inc	8	read_deadlock_retries	0
+val	P-inc	8	view_state_bytes	14278656
+val	P-inc	8	view_state_bytes_per_key_read	2268.253534551231
+val	N	8	c4_q1_p50_us	122.542
+val	N	8	c4_q1_p99_us	372
+val	N	8	checkpoint_bytes	14521440
+val	N	8	q1_p50_us	37.042
+val	N	8	q1_p99_us	175.209
+val	N	8	read_deadlock_retries	0
+val	N	8	view_state_bytes	15410904
+val	N	8	view_state_bytes_per_key_read	2448.11818903892
+val	P+	9	c4_q1_p50_us	145.375
+val	P+	9	c4_q1_p99_us	411.58299999999997
+val	P+	9	checkpoint_bytes	18726912
+val	P+	9	q1_p50_us	64.04199999999999
+val	P+	9	q1_p99_us	207.125
+val	P+	9	read_deadlock_retries	0
+val	P+	9	view_state_bytes	20676608
+val	P+	9	view_state_bytes_per_key_read	3106.928324567994
+val	H3	9	c4_q1_p50_us	45.334
+val	H3	9	c4_q1_p99_us	532.625
+val	H3	9	q1_p50_us	17.166
+val	H3	9	q1_p99_us	274.25
+val	H3	9	read_deadlock_retries	0
+val	H3	9	view_state_bytes	895496
+val	H3	9	view_state_bytes_per_key_read	134.55987978963185
+val	P-inc	9	c4_q1_p50_us	38.833
+val	P-inc	9	c4_q1_p99_us	90.875
+val	P-inc	9	q1_p50_us	31.915999999999997
+val	P-inc	9	q1_p99_us	41.25
+val	P-inc	9	read_deadlock_retries	0
+val	P-inc	9	view_state_bytes	14278656
+val	P-inc	9	view_state_bytes_per_key_read	2145.5531179564236
+val	N	9	c4_q1_p50_us	125.41700000000002
+val	N	9	c4_q1_p99_us	351.125
+val	N	9	checkpoint_bytes	14521440
+val	N	9	q1_p50_us	36.833
+val	N	9	q1_p99_us	172
+val	N	9	read_deadlock_retries	0
+val	N	9	view_state_bytes	15417288
+val	N	9	view_state_bytes_per_key_read	2316.647332832457
+val	N'-lazy	9	c4_q1_p50_us	123.125
+val	N'-lazy	9	c4_q1_p99_us	364.292
+val	N'-lazy	9	checkpoint_bytes	6582848
+val	N'-lazy	9	q1_p50_us	37.458
+val	N'-lazy	9	q1_p99_us	181.708
+val	N'-lazy	9	read_deadlock_retries	0
+val	N'-lazy	9	view_state_bytes	7476680
+val	N'-lazy	9	view_state_bytes_per_key_read	1123.4680691209617
+pooled	H3	c4_q1	10000	31.167	517.25	643.458
+pooled	H3	q1	10000	17.291999999999998	250.95899999999997	382.79200000000003
+pooled	N	c4_q1	10000	47.833	355.291	486.25
+pooled	N	q1	10000	36.541999999999994	159.375	207
+pooled	N'-lazy	c4_q1	10000	47.5	355.291	492.04100000000005
+pooled	N'-lazy	q1	10000	36.958	160.542	210.709
+pooled	P+	c4_q1	10000	127.74999999999999	358.625	1964.791
+pooled	P+	q1	10000	63.584	191.209	1568.333
+pooled	P-inc	c4_q1	10000	39	87.08300000000001	373.04200000000003
+pooled	P-inc	q1	10000	31.958000000000002	41.875	316.208

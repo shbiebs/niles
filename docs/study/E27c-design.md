@@ -172,3 +172,13 @@ These are observations from smokes of the harness at `d2e642e`, in the container
    - Its view-state bytes, checkpoint bytes and base-row counts are set beside the container's histories. The metered byte totals differ between the two hosts only by the standard library's type sizes, as `results/E18-memory.md` records, and that is stated beside them.
    - Its latency stands alone; it is never compared across hosts.
 4. **Host C's order** (amending §7.1 item 7): single 10⁵, multi 10⁵, `sweep-64`, single 10⁶. That is 80 main points and 80 p99 points. Single 10⁶ stays last, because it is the stage most likely to swap (§7.2 item 4).
+
+### 7.4 The author's decisions of 2026-11-15, after Host C's points
+
+**Recorded 2026-11-15**, after the 80 Host C points (`a756ae0`) and their rendering (`results/E27c.md`, `85b3158`), and before any sweep point.
+
+1. **10⁶ is accepted as not evaluable.** §7.1 item 7's label marked 17 of the 20 single-currency 10⁶ points: swap in use grew by 0.25–81 MiB across each, reaching 146 MiB. The label stands as pre-registered, and E27c's 10⁶ verdict is *not evaluable*, a stated limit. There is no re-run and no post-hoc threshold.
+2. **The history sweep runs on Host C, not in the container** (amending §7.1 item 1 and §7.3 item 3).
+   - 1×, 4× and 16× at 10⁴ accounts, single-currency, become stages `sweep-1`, `sweep-4` and `sweep-16` of `tools/e27c-hostc.sh`, with α, seeds and shapes as `sweep-64`. That is 60 points.
+   - Every history length is then on one host, so latency compares across H as well as the counted figures.
+   - `tools/e27c-sweep.sh` is withdrawn.

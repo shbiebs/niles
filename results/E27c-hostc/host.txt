@@ -31,3 +31,27 @@ stage single-1000000 done: 2026-11-15T06:39:32Z
   load averages: { 2.99 4.06 4.24 }
   swap: total = 1024.00M  used = 145.75M  free = 878.25M  (encrypted)
   free on the home volume: 40 GiB
+start (sweep-1 sweep-4 sweep-16): 2026-11-18T17:54:36Z
+  machine: arm64, 10 CPUs, 16384 MiB
+  macOS: macOS 27.0.1 (26A434)
+  load averages: { 1.56 1.67 1.78 }
+  swap: total = 1024.00M  used = 129.75M  free = 894.25M  (encrypted)
+  free on the home volume: 39 GiB
+stage sweep-1 done: 2026-11-18T18:07:42Z
+  machine: arm64, 10 CPUs, 16384 MiB
+  macOS: macOS 27.0.1 (26A434)
+  load averages: { 3.01 2.43 2.09 }
+  swap: total = 1024.00M  used = 129.75M  free = 894.25M  (encrypted)
+  free on the home volume: 55 GiB
+stage sweep-4 done: 2026-11-18T18:46:27Z
+  machine: arm64, 10 CPUs, 16384 MiB
+  macOS: macOS 27.0.1 (26A434)
+  load averages: { 3.21 2.80 2.63 }
+  swap: total = 1024.00M  used = 129.75M  free = 894.25M  (encrypted)
+  free on the home volume: 54 GiB
+stage sweep-16 done: 2026-11-18T21:09:44Z
+  machine: arm64, 10 CPUs, 16384 MiB
+  macOS: macOS 27.0.1 (26A434)
+  load averages: { 3.82 3.75 3.30 }
+  swap: total = 1024.00M  used = 129.75M  free = 894.25M  (encrypted)
+  free on the home volume: 50 GiB
